@@ -1,18 +1,25 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
-import { GrokBotSettings } from "../components/grokBot/GrokBotSettings";
 import {
-  retainGrokBotSettingsBotId,
+  grokBotLegacySettingsRedirect,
   validateGrokBotSettingsSearch,
 } from "../components/grokBot/grokBotPresentation";
 
-function SettingsGrokBotsRoute() {
-  const { botId } = Route.useSearch();
-  return <GrokBotSettings botId={botId} />;
-}
-
+/** Grok Bots are edited under Providers; this keeps old links and bookmarks working. */
 export const Route = createFileRoute("/settings/grok-bots")({
   validateSearch: validateGrokBotSettingsSearch,
-  search: { middlewares: [retainGrokBotSettingsBotId] },
-  component: SettingsGrokBotsRoute,
+  beforeLoad: ({ search, location }) => {
+    throw redirect({
+      to: "/settings/providers",
+      search: (previous) =>
+        grokBotLegacySettingsRedirect({ previousSearch: previous, search, hash: location.hash })
+          .search,
+      hash: grokBotLegacySettingsRedirect({
+        previousSearch: {},
+        search,
+        hash: location.hash,
+      }).hash,
+      replace: true,
+    });
+  },
 });

@@ -19,6 +19,7 @@ import {
   HardDriveIcon,
   PanelsTopLeftIcon,
   KeyboardIcon,
+  LayoutGridIcon,
   Link2Icon,
   PaletteIcon,
   SearchIcon,
@@ -49,6 +50,7 @@ import {
   type SettingsSearchItem,
 } from "./settingsSearch";
 import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchItems";
+import { settingsSearchResultSearch } from "../grokBot/grokBotPresentation";
 import { validateSettingsScopeSearch } from "./settingsScope";
 
 const SnapShotIcon = createLucideIcon("snap-shot", [
@@ -84,8 +86,8 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/keybindings": KeyboardIcon,
   "/settings/snap-shot": SnapShotIcon,
   "/settings/providers": BotIcon,
+  "/settings/marketplace": LayoutGridIcon,
   "/settings/integrations": BlocksIcon,
-  "/settings/grok-bots": BotIcon,
   "/settings/scheduled-tasks": CalendarClockIcon,
   "/settings/source-control": GitBranchIcon,
   "/settings/storage": HardDriveIcon,
@@ -213,6 +215,8 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
       }
       void navigate({
         to: item.to,
+        search: (previous: Record<string, unknown>) =>
+          settingsSearchResultSearch(item.id, previous),
         hash: targetId,
         replace: true,
         hashScrollIntoView: false,

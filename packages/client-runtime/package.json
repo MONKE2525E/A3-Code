@@ -183,6 +183,22 @@
       "types": "./src/state/deviceHubAccess.ts",
       "default": "./src/state/deviceHubAccess.ts"
     },
+    "./grok-bot-voice/call-session": {
+      "types": "./src/grokBotVoice/callSession.ts",
+      "default": "./src/grokBotVoice/callSession.ts"
+    },
+    "./grok-bot-voice/protocol": {
+      "types": "./src/grokBotVoice/protocol.ts",
+      "default": "./src/grokBotVoice/protocol.ts"
+    },
+    "./state/grok-bot-avatar-engine": {
+      "types": "./src/state/grokBotAvatarEngineHttp.ts",
+      "default": "./src/state/grokBotAvatarEngineHttp.ts"
+    },
+    "./state/grok-bot-threads": {
+      "types": "./src/state/grokBotThreads.ts",
+      "default": "./src/state/grokBotThreads.ts"
+    },
     "./state/preview": {
       "types": "./src/state/preview.ts",
       "default": "./src/state/preview.ts"

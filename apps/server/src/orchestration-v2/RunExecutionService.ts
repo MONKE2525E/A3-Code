@@ -31,6 +31,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Predicate from "effect/Predicate";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -520,6 +521,11 @@ export type RunExecutionServiceV2Error = typeof RunExecutionServiceV2Error.Type;
  * SERVICE DEFINITION
  */
 export interface RunExecutionServiceV2StartRootRunInput {
+  /** Reattaches event ingestion to an existing remote turn without delivering a prompt. */
+  readonly observationOnly?: boolean;
+  /** Reconciles a saved remote send intent using the existing nonce and committed message. */
+  readonly reconcileRemoteDelivery?: boolean;
+  readonly remoteReconcileAttempt?: number;
   readonly commandId: CommandId;
   readonly appThread: OrchestrationV2AppThread;
   readonly providerSessionId: ProviderSessionId;
@@ -579,6 +585,44 @@ export const layer: Layer.Layer<
     const serverSettings = yield* ServerSettings.ServerSettingsService;
     const mcpAppModelContext = yield* McpAppModelContext.McpAppModelContext;
     const finalizationObserver = yield* RunFinalizationService.RunFinalizationObserver;
+    const nativeDeliveryKind = (error: unknown, kinds: ReadonlyArray<string>): boolean =>
+      (Predicate.isTagged(error, "GrokBotNativeRuntimeError") &&
+        Predicate.hasProperty(error, "kind") &&
+        typeof error.kind === "string" &&
+        kinds.includes(error.kind)) ||
+      (Predicate.hasProperty(error, "cause") && nativeDeliveryKind(error.cause, kinds));
+    const scheduleRemoteReconnect = Effect.fn("orchestrationV2.remote.reconnect")(function* (
+      run: OrchestrationV2Run,
+      deliveryAttempt?: number,
+    ) {
+      if (deliveryAttempt !== undefined && deliveryAttempt >= 5) {
+        yield* Effect.logWarning(
+          "Native delivery remains uncertain after bounded status retries.",
+          { runId: run.id },
+        );
+        return;
+      }
+      const now = yield* DateTime.now;
+      const effectId = yield* idAllocator.allocate.event({ threadId: run.threadId });
+      yield* eventSink.writeWithEffects({
+        events: [],
+        effects: [
+          {
+            id: `effect:remote-observation:${effectId}`,
+            commandId: CommandId.make(`command:remote-observation:${effectId}`),
+            threadId: run.threadId,
+            availableAt: DateTime.add(now, {
+              seconds: Math.min(60, 5 * 2 ** (deliveryAttempt ?? 0)),
+            }),
+            request: {
+              type: "provider-runtime.reconnect",
+              runId: run.id,
+              ...(deliveryAttempt === undefined ? {} : { reconcileAttempt: deliveryAttempt + 1 }),
+            },
+          },
+        ],
+      });
+    });
 
     const writeFinalRunEvents = (input: {
       readonly run: OrchestrationV2Run;
@@ -861,21 +905,22 @@ export const layer: Layer.Layer<
                     .responseStreamingMode,
               ),
             );
-            yield* checkpointService
-              .captureBaseline({
-                scope: input.checkpointScope,
-                ordinalWithinScope: Math.max(0, input.run.ordinal - 1),
-              })
-              .pipe(
-                Effect.catchCause((cause) =>
-                  Cause.hasInterruptsOnly(cause)
-                    ? Effect.failCause(cause)
-                    : Effect.logWarning(
-                        "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
-                        { runId: input.run.id },
-                      ),
-                ),
-              );
+            if (input.observationOnly !== true)
+              yield* checkpointService
+                .captureBaseline({
+                  scope: input.checkpointScope,
+                  ordinalWithinScope: Math.max(0, input.run.ordinal - 1),
+                })
+                .pipe(
+                  Effect.catchCause((cause) =>
+                    Cause.hasInterruptsOnly(cause)
+                      ? Effect.failCause(cause)
+                      : Effect.logWarning(
+                          "orchestration V2 checkpoint baseline capture failed; starting provider without a baseline",
+                          { runId: input.run.id },
+                        ),
+                  ),
+                );
             if (
               input.shouldStartProviderTurn !== undefined &&
               !(yield* input.shouldStartProviderTurn())
@@ -889,6 +934,7 @@ export const layer: Layer.Layer<
                 if (Cause.hasInterruptsOnly(cause)) {
                   return yield* Effect.failCause(cause);
                 }
+                if (input.observationOnly === true) return yield* Effect.failCause(cause);
                 yield* Effect.logError("orchestration V2 run preparation failed", {
                   runId: input.run.id,
                   cause,
@@ -1329,43 +1375,46 @@ export const layer: Layer.Layer<
                     cause,
                   }).pipe(
                     Effect.andThen(
+                      // Losing a local observer does not prove the remote execution failed.
                       finalized
                         ? Effect.void
-                        : Ref.get(latestProviderThread).pipe(
-                            Effect.flatMap((providerThread) =>
-                              Ref.get(latestTurnItemOrdinal).pipe(
-                                Effect.flatMap((latestItemOrdinal) =>
-                                  Ref.get(openRunOwnedSubagents).pipe(
-                                    Effect.flatMap((openSubagents) =>
-                                      writeFinalRunEvents({
-                                        run: input.run,
-                                        rootNode: input.rootNode,
-                                        checkpointScope: input.checkpointScope,
-                                        providerThread,
-                                        attempt: input.attempt,
-                                        // The failure may be the ownership
-                                        // read itself, so check in the write.
-                                        writeIfRunCurrent: {
-                                          activeAttemptId: input.attempt.id,
-                                          expectedStatus: "running",
-                                        },
-                                        openRunOwnedSubagents: openSubagents,
-                                        terminal: makeFailedTerminalEvent(
-                                          makeProviderFailure({
-                                            cause: Cause.squash(cause),
-                                            class: "unknown",
-                                          }),
-                                          latestItemOrdinal + 1,
-                                        ),
-                                        failureItemPersisted: false,
-                                        refreshAfterTurn,
-                                      }),
+                        : input.session.driver === "grok-bot"
+                          ? scheduleRemoteReconnect(input.run)
+                          : Ref.get(latestProviderThread).pipe(
+                              Effect.flatMap((providerThread) =>
+                                Ref.get(latestTurnItemOrdinal).pipe(
+                                  Effect.flatMap((latestItemOrdinal) =>
+                                    Ref.get(openRunOwnedSubagents).pipe(
+                                      Effect.flatMap((openSubagents) =>
+                                        writeFinalRunEvents({
+                                          run: input.run,
+                                          rootNode: input.rootNode,
+                                          checkpointScope: input.checkpointScope,
+                                          providerThread,
+                                          attempt: input.attempt,
+                                          // The failure may be the ownership
+                                          // read itself, so check in the write.
+                                          writeIfRunCurrent: {
+                                            activeAttemptId: input.attempt.id,
+                                            expectedStatus: "running",
+                                          },
+                                          openRunOwnedSubagents: openSubagents,
+                                          terminal: makeFailedTerminalEvent(
+                                            makeProviderFailure({
+                                              cause: Cause.squash(cause),
+                                              class: "unknown",
+                                            }),
+                                            latestItemOrdinal + 1,
+                                          ),
+                                          failureItemPersisted: false,
+                                          refreshAfterTurn,
+                                        }),
+                                      ),
                                     ),
                                   ),
                                 ),
                               ),
                             ),
-                          ),
                     ),
                     Effect.mapError(
                       (writeCause) =>
@@ -1392,6 +1441,7 @@ export const layer: Layer.Layer<
             yield* Fiber.interrupt(providerEventFiber);
             return;
           }
+          if (input.observationOnly === true && input.reconcileRemoteDelivery !== true) return;
 
           // A provider turn is a sign that the session is still alive. Keep
           // its already-issued MCP credential valid even when the agent goes
@@ -1453,55 +1503,82 @@ export const layer: Layer.Layer<
             : input.session.startTurn(turnInput);
           yield* Effect.andThen(shouldStart, startTurn).pipe(
             Effect.catchCause((cause) =>
-              Effect.logError("orchestration V2 provider turn start failed", {
-                runId: input.run.id,
-                cause,
-              }).pipe(
-                Effect.andThen(Fiber.interrupt(providerEventFiber)),
-                Effect.andThen(Ref.get(latestProviderThread)),
-                Effect.flatMap((providerThread) =>
-                  Ref.get(latestTurnItemOrdinal).pipe(
-                    Effect.flatMap((latestItemOrdinal) =>
-                      Ref.get(openRunOwnedSubagents).pipe(
-                        Effect.flatMap((openSubagents) =>
-                          writeFinalRunEvents({
-                            run: input.run,
-                            rootNode: input.rootNode,
-                            checkpointScope: input.checkpointScope,
-                            providerThread,
-                            attempt: input.attempt,
-                            // Checked in the write transaction, not by another
-                            // read that can fail like the one before the start.
-                            writeIfRunCurrent: {
-                              activeAttemptId: input.attempt.id,
-                              expectedStatus: "running",
-                            },
-                            openRunOwnedSubagents: openSubagents,
-                            terminal: makeFailedTerminalEvent(
-                              makeProviderFailure({
-                                cause: Cause.squash(cause),
-                                // A failed ownership read is not the provider's fault.
-                                class: Exit.isFailure(shouldStart) ? "unknown" : "provider_error",
-                              }),
-                              latestItemOrdinal + 1,
-                            ),
-                            failureItemPersisted: false,
-                            refreshAfterTurn,
+              input.session.driver === "grok-bot" &&
+              nativeDeliveryKind(Cause.squash(cause), ["uncertain"])
+                ? scheduleRemoteReconnect(input.run, input.remoteReconcileAttempt ?? 0).pipe(
+                    Effect.mapError(
+                      (writeCause) =>
+                        new RunExecutionStartError({
+                          commandId: input.commandId,
+                          runId: input.run.id,
+                          cause: { start: cause, write: writeCause },
+                        }),
+                    ),
+                  )
+                : input.observationOnly === true &&
+                    !nativeDeliveryKind(Cause.squash(cause), ["refused", "invalid_input"])
+                  ? Fiber.interrupt(providerEventFiber).pipe(
+                      Effect.andThen(
+                        Effect.fail(
+                          new RunExecutionStartError({
+                            commandId: input.commandId,
+                            runId: input.run.id,
+                            cause,
                           }),
                         ),
                       ),
-                    ),
-                  ),
-                ),
-                Effect.mapError(
-                  (writeCause) =>
-                    new RunExecutionStartError({
-                      commandId: input.commandId,
+                    )
+                  : Effect.logError("orchestration V2 provider turn start failed", {
                       runId: input.run.id,
-                      cause: { start: cause, write: writeCause },
-                    }),
-                ),
-              ),
+                      cause,
+                    }).pipe(
+                      Effect.andThen(Fiber.interrupt(providerEventFiber)),
+                      Effect.andThen(Ref.get(latestProviderThread)),
+                      Effect.flatMap((providerThread) =>
+                        Ref.get(latestTurnItemOrdinal).pipe(
+                          Effect.flatMap((latestItemOrdinal) =>
+                            Ref.get(openRunOwnedSubagents).pipe(
+                              Effect.flatMap((openSubagents) =>
+                                writeFinalRunEvents({
+                                  run: input.run,
+                                  rootNode: input.rootNode,
+                                  checkpointScope: input.checkpointScope,
+                                  providerThread,
+                                  attempt: input.attempt,
+                                  // Checked in the write transaction, not by another
+                                  // read that can fail like the one before the start.
+                                  writeIfRunCurrent: {
+                                    activeAttemptId: input.attempt.id,
+                                    expectedStatus: "running",
+                                  },
+                                  openRunOwnedSubagents: openSubagents,
+                                  terminal: makeFailedTerminalEvent(
+                                    makeProviderFailure({
+                                      cause: Cause.squash(cause),
+                                      // A failed ownership read is not the provider's fault.
+                                      class: Exit.isFailure(shouldStart)
+                                        ? "unknown"
+                                        : "provider_error",
+                                    }),
+                                    latestItemOrdinal + 1,
+                                  ),
+                                  failureItemPersisted: false,
+                                  refreshAfterTurn,
+                                }),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      Effect.mapError(
+                        (writeCause) =>
+                          new RunExecutionStartError({
+                            commandId: input.commandId,
+                            runId: input.run.id,
+                            cause: { start: cause, write: writeCause },
+                          }),
+                      ),
+                    ),
             ),
           );
         }),

@@ -352,6 +352,9 @@ export const layer: Layer.Layer<
                 ...(message.senderThreadId === undefined
                   ? {}
                   : { senderThreadId: message.senderThreadId }),
+                ...(message.voiceRequest === undefined
+                  ? {}
+                  : { voiceRequest: message.voiceRequest }),
               },
             })
             .pipe(

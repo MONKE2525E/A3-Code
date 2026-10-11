@@ -27,6 +27,7 @@ import { horizontalListSortingStrategy, SortableContext, useSortable } from "@dn
 import { CSS } from "@dnd-kit/utilities";
 import {
   Smartphone,
+  Monitor,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -142,6 +143,8 @@ interface RightPanelTabsProps {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
+  onAddComputer?: (() => void) | undefined;
+  computerAvailable?: boolean | undefined;
   onAddDevice: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
@@ -340,6 +343,8 @@ function RightPanelEmptyState(props: {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
+  onAddComputer?: (() => void) | undefined;
+  computerAvailable?: boolean | undefined;
   onAddDevice: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
@@ -353,6 +358,18 @@ function RightPanelEmptyState(props: {
   const [highlight, setHighlight] = useState(-1);
 
   const actions = [
+    ...(props.computerAvailable && props.onAddComputer
+      ? [
+          {
+            label: "Computer",
+            icon: Monitor,
+            shortcut: "C",
+            available: true,
+            disabledReason: "",
+            onClick: props.onAddComputer,
+          },
+        ]
+      : []),
     {
       label: "Browser",
       icon: Globe2,
@@ -618,6 +635,8 @@ function surfaceTitle(
       return `#${surface.number}`;
     case "pull-requests":
       return "Pull requests";
+    case "grok-computer":
+      return "Computer";
     case "device":
       return surface.title ?? surface.target?.name ?? "Device";
     case "preview": {
@@ -701,6 +720,8 @@ function SurfaceIcon({
       );
     case "pull-requests":
       return <PullRequestGlyph.link className="size-3 shrink-0" />;
+    case "grok-computer":
+      return <Monitor className="size-3 shrink-0" />;
     case "device":
       return surface.target?.platform === "ios" ? (
         <AppleIcon className="size-3 shrink-0" />
@@ -935,6 +956,18 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
   }, []);
 
   const addSurfaceActions = [
+    ...(props.computerAvailable && props.onAddComputer
+      ? [
+          {
+            label: "Computer",
+            icon: Monitor,
+            shortcut: "C",
+            available: true,
+            disabledReason: "",
+            onClick: props.onAddComputer,
+          },
+        ]
+      : []),
     {
       label: "Browser",
       icon: Globe2,
@@ -1482,6 +1515,8 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddFiles={props.onAddFiles}
             onAddPullRequest={props.onAddPullRequest}
             onAddPullRequests={props.onAddPullRequests}
+            onAddComputer={props.onAddComputer}
+            computerAvailable={props.computerAvailable}
             onAddDevice={props.onAddDevice}
             browserAvailable={props.browserAvailable}
             terminalAvailable={props.terminalAvailable}

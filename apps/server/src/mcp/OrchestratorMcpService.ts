@@ -88,6 +88,7 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as ServerSettings from "../serverSettings.ts";
 import {
   clientRuntimeModeCeiling,
+  matchesRemoteRun,
   type McpInvocationScope,
   type McpThreadInvocationScope,
   requireThreadScope,
@@ -1009,6 +1010,7 @@ const make = Effect.gen(function* () {
         } as const;
       }
       const parent = yield* loadProjection(scope.thread.threadId);
+      if (scope.thread.remoteRun !== undefined) yield* assertLiveCaller(scope, parent);
       return {
         parent,
         limits: {
@@ -1024,6 +1026,7 @@ const make = Effect.gen(function* () {
       yield* requireCapability(scope);
       const threadScope = yield* requireThreadScope(scope, operation);
       const parent = yield* loadProjection(threadScope.thread.threadId);
+      if (threadScope.thread.remoteRun !== undefined) yield* assertLiveCaller(threadScope, parent);
       return { scope: threadScope, parent } as const;
     });
 
@@ -1095,7 +1098,8 @@ const make = Effect.gen(function* () {
     const activeRun = ThreadManagementService.latestActiveRun(parent);
     return parent.thread.archivedAt !== null ||
       activeRun === undefined ||
-      activeRun.providerInstanceId !== scope.thread?.providerInstanceId
+      activeRun.providerInstanceId !== scope.thread?.providerInstanceId ||
+      !matchesRemoteRun(scope.thread, activeRun)
       ? Effect.fail(
           failure("parent_not_active", "The calling provider no longer owns an active thread run."),
         )
@@ -1966,6 +1970,10 @@ const make = Effect.gen(function* () {
             "Delegated tasks require an active run owned by this MCP provider session.",
           );
         }
+        if (input.projectId !== undefined) {
+          yield* assertLiveCallerForOtherProject(scope, parent, input.projectId);
+          yield* requireProject(input.projectId);
+        }
         const providers = yield* loadProviders;
         // Computed before resolving the target so a retry of an already
         // accepted delegation can be recognized: dispatching under the same
@@ -2005,6 +2013,7 @@ const make = Effect.gen(function* () {
             parentThreadId: scope.thread.threadId,
             parentRunId: parentRun.id,
             parentNodeId: parentRun.rootNodeId,
+            ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
             task: taskPrompt(input),
             ...(input.title === undefined ? {} : { title: input.title }),
             modelSelection: target.modelSelection,

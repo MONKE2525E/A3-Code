@@ -2,9 +2,11 @@ import { SourceControlProviderKind } from "@t3tools/contracts";
 import * as Stream from "effect/Stream";
 import {
   EventId,
+  DEFAULT_SERVER_SETTINGS,
   MessageId,
   ProjectId,
   ProviderInstanceId,
+  ProviderDriverKind,
   PullRequestOperationError,
   RunId,
   ThreadId,
@@ -19,6 +21,7 @@ import {
   type ThreadPullRequestKey,
   type ThreadPullRequestLink,
   type ThreadPullRequestSnapshot,
+  type ServerSettings as ContractServerSettings,
 } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
@@ -36,6 +39,7 @@ import { PullRequestProviderError } from "@t3tools/source-control-core/server/Pu
 import * as GitManager from "../git/GitManager.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as ServerActivation from "../serverActivation.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as PullRequestSyncReactor from "./PullRequestSyncReactor.ts";
@@ -43,12 +47,23 @@ import type { PullRequestTestThread } from "./testkit/pullRequestFixtures.ts";
 
 const NOW = "2026-08-28T12:00:00.000Z";
 const PROJECT_ID = ProjectId.make("sync-project");
+const BOT_INSTANCE_ID = ProviderInstanceId.make("persistent-bot");
+const BOT_SETTINGS = {
+  ...DEFAULT_SERVER_SETTINGS,
+  sidebarAutoSettleOnMerge: false,
+  sidebarAutoSettleAfterDays: null,
+  providerInstances: {
+    ...DEFAULT_SERVER_SETTINGS.providerInstances,
+    [BOT_INSTANCE_ID]: { driver: ProviderDriverKind.make("grok-bot"), enabled: false },
+  },
+};
 
 type SyncCommand = Extract<
   OrchestrationCommand,
   { readonly type: "thread.pull-request-link.sync" }
 >;
 type LinkCommand = Extract<OrchestrationCommand, { readonly type: "thread.pull-request.link" }>;
+type UnlinkCommand = Extract<OrchestrationCommand, { readonly type: "thread.pull-request.unlink" }>;
 
 const testCrypto = Crypto.make({
   randomBytes: (size) => new Uint8Array(size).fill(1),
@@ -69,7 +84,10 @@ function makeProject(id: ProjectId = PROJECT_ID): OrchestrationProjectShell {
 
 function makeThread(
   id: string,
-  overrides: Partial<PullRequestTestThread> = {},
+  overrides: Partial<PullRequestTestThread> & {
+    readonly pinnedAt?: string;
+    readonly autoSettleDisabledAt?: string;
+  } = {},
 ): PullRequestTestThread {
   return {
     id: ThreadId.make(id),
@@ -164,6 +182,7 @@ function makeSummary(
 }
 
 interface HarnessOptions {
+  readonly settings?: ContractServerSettings;
   readonly invalidate?: PullRequestService.PullRequestService["Service"]["invalidate"];
   readonly snapshot: TestShellSnapshot;
   readonly summary?: (
@@ -181,10 +200,12 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: 
   const shellSnapshotReads = yield* Ref.make(0);
   const syncCommands = yield* Ref.make<ReadonlyArray<SyncCommand>>([]);
   const linkCommands = yield* Ref.make<ReadonlyArray<LinkCommand>>([]);
+  const unlinkCommands = yield* Ref.make<ReadonlyArray<UnlinkCommand>>([]);
   const summaryCalls = yield* Ref.make<ReadonlyArray<PullRequestRef>>([]);
   const stackCalls = yield* Ref.make<ReadonlyArray<PullRequestRef>>([]);
   const domainEvents = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
   const stateChanges = yield* Queue.unbounded<ThreadPullRequestKey>();
+  const merges = yield* Queue.unbounded<PullRequestService.PullRequestMergeEvent>();
 
   const summary: PullRequestService.PullRequestService["Service"]["summary"] = (
     input,
@@ -214,6 +235,11 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: 
         Effect.as({ sequence: 1, storedEvents: [] }),
       );
     }
+    if (command.type === "thread.pull-request.unlink") {
+      return Ref.update(unlinkCommands, (recorded) => [...recorded, command]).pipe(
+        Effect.as({ sequence: 1, storedEvents: [] }),
+      );
+    }
     return Effect.die(new Error(`Unexpected command: ${command.type}`));
   };
 
@@ -223,6 +249,7 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: 
       stack,
       invalidate: options.invalidate ?? (() => Effect.void),
       subscribeStateChanges: Effect.succeed(Stream.fromQueue(stateChanges)),
+      subscribeMerges: Effect.succeed(Stream.fromQueue(merges)),
     }),
     Layer.mock(GitManager.GitManager)({
       subscribePullRequestStateChanges: Effect.succeed(Stream.empty),
@@ -243,6 +270,7 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: 
               .map((thread) => ({
                 id: thread.id,
                 projectId: thread.projectId,
+                providerInstanceId: thread.modelSelection.instanceId,
                 lineage: {
                   parentThreadId: null,
                   relationshipToParent: null,
@@ -265,6 +293,9 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: 
     }),
     Layer.succeed(ServerActivation.ServerActivation, Deferred.await(activation)),
     Layer.succeed(Crypto.Crypto, testCrypto),
+    Layer.mock(ServerSettings.ServerSettingsService)({
+      getSettings: Effect.succeed(options.settings ?? DEFAULT_SERVER_SETTINGS),
+    }),
   );
 
   return {
@@ -274,10 +305,12 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: 
     shellSnapshotReads,
     syncCommands,
     linkCommands,
+    unlinkCommands,
     summaryCalls,
     stackCalls,
     domainEvents,
     stateChanges,
+    merges,
     layer: PullRequestSyncReactor.layer.pipe(Layer.provide(layerDependencies)),
   };
 });
@@ -387,6 +420,172 @@ function applySync(
 }
 
 describe("PullRequestSyncReactor", () => {
+  it.effect("unlinks only merged native bot PRs even when automatic settlement is disabled", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* makeHarness({
+          settings: BOT_SETTINGS,
+          snapshot: makeSnapshot([
+            makeThread("bot", {
+              modelSelection: { instanceId: BOT_INSTANCE_ID, model: "grok" },
+              pullRequests: [makeLink(42), makeLink(43), makeLink(44), makeLink(45)],
+            }),
+            makeThread("ordinary", { pullRequests: [makeLink(42)] }),
+            makeThread("pinned-bot", {
+              modelSelection: { instanceId: BOT_INSTANCE_ID, model: "grok" },
+              pinnedAt: NOW,
+              autoSettleDisabledAt: NOW,
+              pullRequests: [makeLink(42)],
+            }),
+            makeThread("settled-bot", {
+              modelSelection: { instanceId: BOT_INSTANCE_ID, model: "grok" },
+              settledOverride: "settled",
+              settledAt: NOW,
+              pullRequests: [makeLink(42)],
+            }),
+          ]),
+          summary: (input) =>
+            input.number === 44
+              ? Effect.fail(
+                  new PullRequestOperationError({
+                    operation: "summary",
+                    detail: "Host unavailable",
+                    cause: new Error("host unavailable"),
+                  }),
+                )
+              : Effect.succeed(
+                  makeSummary(input, {
+                    state: input.number === 42 ? "merged" : input.number === 45 ? "closed" : "open",
+                    stack: null,
+                  }),
+                ),
+          stack: () => Effect.die("a confirmed bot merge must not depend on a stack read"),
+        });
+        yield* Effect.gen(function* () {
+          yield* startAndSweep(fixture);
+          assert.deepStrictEqual(
+            (yield* Ref.get(fixture.unlinkCommands)).map((command) => [
+              command.threadId,
+              command.number,
+            ]),
+            [
+              ["bot", 42],
+              ["pinned-bot", 42],
+              ["settled-bot", 42],
+            ],
+          );
+          const syncs = yield* Ref.get(fixture.syncCommands);
+          assert.isTrue(
+            syncs.some(
+              (command) => command.threadId === "ordinary" && command.snapshot.state === "merged",
+            ),
+          );
+          assert.isTrue(
+            syncs.some((command) => command.threadId === "bot" && command.number === 43),
+          );
+          assert.isFalse(syncs.some((command) => command.number === 44));
+          assert.isTrue(
+            syncs.some((command) => command.number === 45 && command.snapshot.state === "closed"),
+          );
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("removes previously confirmed merged bot links without a host read", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* makeHarness({
+          settings: BOT_SETTINGS,
+          snapshot: makeSnapshot([
+            makeThread("bot", {
+              modelSelection: { instanceId: BOT_INSTANCE_ID, model: "grok" },
+              pullRequests: [makeLink(42, { state: "merged" })],
+            }),
+          ]),
+          summary: () => Effect.die("merged bot links require no host read"),
+        });
+        yield* Effect.gen(function* () {
+          yield* startAndSweep(fixture);
+          assert.strictEqual((yield* Ref.get(fixture.unlinkCommands)).length, 1);
+          assert.deepStrictEqual(yield* Ref.get(fixture.summaryCalls), []);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("unlinks confirmed bot summary merges even when stack lookup is unavailable", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* makeHarness({
+          settings: BOT_SETTINGS,
+          snapshot: makeSnapshot([
+            makeThread("bot", {
+              modelSelection: { instanceId: BOT_INSTANCE_ID, model: "grok" },
+              pullRequests: [makeLink(42)],
+            }),
+          ]),
+          summary: (input) => Effect.succeed(makeSummary(input, { state: "merged" })),
+          stack: () => Effect.die("stack unavailable"),
+        });
+        yield* Effect.gen(function* () {
+          yield* startAndSweep(fixture);
+          assert.strictEqual((yield* Ref.get(fixture.unlinkCommands)).length, 1);
+          assert.deepStrictEqual(yield* Ref.get(fixture.stackCalls), []);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect(
+    "unlinks a confirmed merge action while retaining unrelated bot PRs and ordinary threads",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* makeHarness({
+            settings: BOT_SETTINGS,
+            snapshot: makeSnapshot([
+              makeThread("bot", {
+                modelSelection: { instanceId: BOT_INSTANCE_ID, model: "grok" },
+                pullRequests: [
+                  makeLink(42, { state: "open" }),
+                  makeLink(43, { state: "open" }),
+                  makeLink(
+                    42,
+                    { state: "open" },
+                    { host: "gitlab.com", repository: "another/repository" },
+                  ),
+                ],
+              }),
+              makeThread("ordinary", { pullRequests: [makeLink(42, { state: "open" })] }),
+            ]),
+          });
+          yield* Effect.gen(function* () {
+            const reactor = yield* startAndSweep(fixture);
+            yield* Ref.set(fixture.summaryCalls, []);
+            yield* Queue.offer(fixture.merges, {
+              projectId: PROJECT_ID,
+              host: "github.com",
+              repository: "OWNER/REPOSITORY",
+              number: 42,
+              mergedAt: NOW,
+            });
+            yield* Queue.take(fixture.snapshotReads);
+            yield* reactor.drain;
+            assert.deepStrictEqual(
+              (yield* Ref.get(fixture.unlinkCommands)).map((command) => [
+                command.threadId,
+                command.host,
+                command.repository,
+                command.number,
+              ]),
+              [["bot", "github.com", "owner/repository", 42]],
+            );
+            assert.deepStrictEqual(yield* Ref.get(fixture.summaryCalls), []);
+          }).pipe(Effect.provide(fixture.layer));
+        }),
+      ),
+  );
   it.effect("retries a failed stack read after the summary becomes terminal", () =>
     Effect.scoped(
       Effect.gen(function* () {

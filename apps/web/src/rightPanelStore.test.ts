@@ -914,6 +914,19 @@ describe("rightPanelStore", () => {
     expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("device");
   });
 
+  it("the computer toggle closes its open panel and reopens it", () => {
+    useRightPanelStore.getState().toggle(refA, "grok-computer");
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe(
+      "grok-computer",
+    );
+    useRightPanelStore.getState().toggle(refA, "grok-computer");
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBeNull();
+    useRightPanelStore.getState().toggle(refA, "grok-computer");
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe(
+      "grok-computer",
+    );
+  });
+
   it("removeThread clears persisted state", () => {
     useRightPanelStore.getState().open(refA, "device");
     useRightPanelStore.getState().removeThread(refA);

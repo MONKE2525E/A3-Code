@@ -3,10 +3,16 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { GrokBotConversation, type EnvironmentId, type GrokBot } from "@t3tools/contracts";
+import {
+  GrokBotConversation,
+  splitGrokBotAgentStamp,
+  type EnvironmentId,
+  type GrokBot,
+  type GrokBotWorkflowReferences,
+} from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { ArrowUpIcon, InfoIcon, SettingsIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { ComposerSurface } from "~/components/chat/ComposerSurface";
@@ -20,36 +26,78 @@ import {
 } from "~/components/ui/empty";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { Spinner } from "~/components/ui/spinner";
-import { useProjects } from "~/state/entities";
-import { grokBotsReadQuery, grokBotsSend } from "~/state/grokBots";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
+import {
+  grokBotsListQuery,
+  grokBotsReadQuery,
+  grokBotsSend,
+  refreshGrokBotConversation,
+} from "~/state/grokBots";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
 
 import { GrokBotAvatar } from "./GrokBotAvatar";
-import { getGrokBotActivity, setGrokBotActivity, useGrokBotActivity } from "./grokBotActivity";
+import { GROK_BOT_AVATAR_COLORS } from "./grokBotAvatarShapes";
+import {
+  GROK_BOT_SETTLE_LINGER_MS,
+  getGrokBotActivity,
+  setGrokBotActivity,
+  useGrokBotActivity,
+} from "./grokBotActivity";
+import {
+  grokBotErrorReason,
+  grokBotUserMessageIds,
+  groupGrokBotPeerCounts,
+  groupGrokBotTimeline,
+  isGrokBotReplyAfterSend,
+  isGrokBotSendDelivered,
+  type GrokBotPeer,
+  type GrokBotSentMessage,
+  type GrokBotTimelineItem,
+} from "./grokBotConversation";
 import { GrokBotLimitations } from "./GrokBotLimitations";
+import { GrokBotVoiceCallMarkerLabel } from "./GrokBotVoiceCallMarkerLabel";
+import { isNativeConnectorAuthLink } from "./grokBotConnectorAuthLink";
+import { GrokBotConnectorAuthAction } from "./GrokBotConnectorAuthAction";
 import { GrokBotProfileEditor } from "./GrokBotProfileEditor";
+import { GrokBotReactions } from "./GrokBotReactions";
+import { GrokBotWorkflowReferenceChips } from "./GrokBotWorkflowReferenceChips";
 import {
   grokBotFailureMessage,
   grokBotSettingsDestinationSearch,
   grokBotSurfaceKey,
+  resolveGrokBotAvatarColor,
 } from "./grokBotPresentation";
 
-const FINISHED_REACTION_MS = 2800;
-const CELEBRATE_REACTION_MS = 3600;
-const FAILED_REACTION_MS = 3200;
 /** Longest a sent message waits on the bot before it goes back to rest. */
 const THINKING_TIMEOUT_MS = 90_000;
 
+type GrokBotMessages = (typeof GrokBotConversation.Type)["messages"];
+type GrokBotMessage = GrokBotMessages[number];
+
+/** An accepted send shown in the list until the polled transcript contains it. */
+interface OutgoingMessage extends GrokBotSentMessage {
+  readonly id: number;
+  readonly surfaceKey: string;
+}
+
+type SendOutcome =
+  | { readonly status: "accepted" }
+  | { readonly status: "uncertain" }
+  | { readonly status: "cancelled" }
+  | { readonly status: "failed"; readonly message: string };
+
+/** `readOnly` shows the transcript without a composer, for legacy history that must not receive sends. */
 export function GrokBotConversationView({
   environmentId,
   botId,
+  readOnly = false,
 }: {
   readonly environmentId: EnvironmentId;
   readonly botId: string;
+  readonly readOnly?: boolean;
 }) {
   const conversation = useEnvironmentQuery(grokBotsReadQuery({ environmentId, input: { botId } }));
-  const projects = useProjects().filter((project) => project.environmentId === environmentId);
   const [profileOpen, setProfileOpen] = useState(false);
   const bot = conversation.data?.bot ?? null;
   const messages = conversation.data?.messages ?? [];
@@ -57,8 +105,21 @@ export function GrokBotConversationView({
   const loading = conversation.isPending && conversation.data === null;
   const streaming = messages.at(-1)?.streaming === true;
   const wasStreaming = useRef(false);
-  const linkedPullRequests = bot?.pullRequests.length ?? null;
-  const previousPullRequests = useRef(linkedPullRequests);
+  const lastMessage = messages.at(-1);
+  const lastMessageId = lastMessage?.id;
+  // Any settled bot turn answers a waiting message, including reaction-only turns.
+  const botSettled = lastMessage?.role === "assistant" && lastMessage.streaming !== true;
+  const [outgoing, setOutgoing] = useState<readonly OutgoingMessage[]>([]);
+  const outgoingSequence = useRef(0);
+  const sendMessage = useAtomCommand(grokBotsSend, { reportFailure: false });
+  /** Set while a send waits for its reply; cleared when a newer message settles or the send fails. */
+  const replyAwaiting = useRef<{ readonly afterMessageId: string | undefined } | null>(null);
+
+  // Opening a chat re-reads it and the roster right away, so a profile edit made elsewhere
+  // shows here without waiting for the poll.
+  useEffect(() => {
+    refreshGrokBotConversation(appAtomRegistry, environmentId, botId);
+  }, [botId, environmentId]);
 
   // The bot rests unless something is happening, so each phase of a chat sets
   // the activity the avatar plays; one-shot reactions clear themselves.
@@ -70,18 +131,26 @@ export function GrokBotConversationView({
     if (streaming) {
       setGrokBotActivity(surfaceKey, "streaming");
     } else if (wasStreaming.current) {
-      setGrokBotActivity(surfaceKey, "finished", FINISHED_REACTION_MS);
+      setGrokBotActivity(surfaceKey, "finished", GROK_BOT_SETTLE_LINGER_MS);
     }
     wasStreaming.current = streaming;
   }, [streaming, surfaceKey]);
-  // A merged pull request drops off the bot's list.
+  // A reply answers the send only when it is a message that arrived after the
+  // send; the transcript's last settled message from before the send does not count.
   useEffect(() => {
-    const previous = previousPullRequests.current;
-    previousPullRequests.current = linkedPullRequests;
-    if (previous !== null && linkedPullRequests !== null && linkedPullRequests < previous) {
-      setGrokBotActivity(surfaceKey, "celebrate", CELEBRATE_REACTION_MS);
+    const awaiting = replyAwaiting.current;
+    if (
+      awaiting !== null &&
+      isGrokBotReplyAfterSend({
+        afterMessageId: awaiting.afterMessageId,
+        lastMessageId,
+        lastMessageSettled: botSettled,
+      })
+    ) {
+      replyAwaiting.current = null;
+      setGrokBotActivity(surfaceKey, "finished", GROK_BOT_SETTLE_LINGER_MS);
     }
-  }, [linkedPullRequests, surfaceKey]);
+  }, [botSettled, lastMessageId, surfaceKey]);
   // Leaving the chat ends what only this view could observe; a pending
   // "thinking" survives so the sidebar keeps showing the bot at work.
   useEffect(
@@ -91,6 +160,38 @@ export function GrokBotConversationView({
     },
     [surfaceKey],
   );
+
+  const send = async (sent: GrokBotSentMessage): Promise<SendOutcome> => {
+    const id = ++outgoingSequence.current;
+    setOutgoing((items) => [...items, { ...sent, id, surfaceKey }]);
+    setGrokBotActivity(surfaceKey, "sending");
+    replyAwaiting.current = { afterMessageId: lastMessageId };
+    const result = await sendMessage({
+      environmentId,
+      input: { botId, message: sent.text },
+    });
+    if (result._tag === "Success") {
+      // A fast reply may already have settled the wait; then "thinking" would be stale.
+      if (replyAwaiting.current !== null) {
+        setGrokBotActivity(surfaceKey, "thinking", THINKING_TIMEOUT_MS);
+      }
+      return { status: "accepted" };
+    }
+    replyAwaiting.current = null;
+    setOutgoing((items) => items.filter((item) => item.id !== id));
+    if (isAtomCommandInterrupted(result)) {
+      setGrokBotActivity(surfaceKey, null);
+      return { status: "cancelled" };
+    }
+    const error = squashAtomCommandFailure(result);
+    // The send may have landed, so the composer keeps the draft and the transcript decides.
+    if (grokBotErrorReason(error) === "delivery_unknown") {
+      setGrokBotActivity(surfaceKey, null);
+      return { status: "uncertain" };
+    }
+    setGrokBotActivity(surfaceKey, "failed", GROK_BOT_SETTLE_LINGER_MS);
+    return { status: "failed", message: grokBotFailureMessage(error) };
+  };
 
   if (loading) {
     return (
@@ -128,6 +229,10 @@ export function GrokBotConversationView({
     );
   }
 
+  const pending = outgoing.filter(
+    (item) => item.surfaceKey === surfaceKey && !isGrokBotSendDelivered(messages, item),
+  );
+
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1">
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -144,9 +249,18 @@ export function GrokBotConversationView({
           key={`messages:${surfaceKey}`}
           bot={bot}
           messages={messages}
+          pending={pending}
           environmentId={environmentId}
         />
-        <GrokBotComposer key={`composer:${surfaceKey}`} environmentId={environmentId} bot={bot} />
+        {readOnly ? null : (
+          <GrokBotComposer
+            key={`composer:${surfaceKey}`}
+            environmentId={environmentId}
+            bot={bot}
+            messages={messages}
+            onSend={send}
+          />
+        )}
       </section>
       {profileOpen ? (
         <aside className="min-h-0 w-[22rem] shrink-0 overflow-y-auto border-l border-border/60 px-4 py-5 max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-20 max-lg:bg-background">
@@ -154,7 +268,6 @@ export function GrokBotConversationView({
             key={`profile:${surfaceKey}`}
             environmentId={environmentId}
             bot={bot}
-            projects={projects}
           />
           <GrokBotLimitations className="mt-6" />
         </aside>
@@ -191,7 +304,7 @@ function GrokBotConversationHeader({
         aria-label="Bot settings"
         onClick={() =>
           void navigate({
-            to: "/settings/grok-bots",
+            to: "/settings/providers",
             search: grokBotSettingsDestinationSearch({
               environmentId,
               botId: bot.id,
@@ -218,18 +331,23 @@ function GrokBotConversationHeader({
 function GrokBotMessageList({
   bot,
   messages,
+  pending,
   environmentId,
 }: {
   readonly bot: GrokBot;
-  readonly messages: (typeof GrokBotConversation.Type)["messages"];
+  readonly messages: GrokBotMessages;
+  readonly pending: readonly OutgoingMessage[];
   readonly environmentId: EnvironmentId;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
+  const roster = useEnvironmentQuery(grokBotsListQuery({ environmentId, input: {} })).data ?? [];
+  const timeline = useMemo(() => groupGrokBotTimeline(messages, bot.id), [messages, bot.id]);
+  const peerCounts = useMemo(() => groupGrokBotPeerCounts(messages, bot.id), [messages, bot.id]);
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
-  }, [messages.at(-1)?.id, messages.at(-1)?.text, messages.at(-1)?.streaming]);
+  }, [messages.at(-1)?.id, messages.at(-1)?.text, messages.at(-1)?.streaming, pending.length]);
 
-  if (messages.length === 0) {
+  if (messages.length === 0 && pending.length === 0) {
     return (
       <Empty className="flex-1" size="default">
         <EmptyHeader>
@@ -246,18 +364,62 @@ function GrokBotMessageList({
   return (
     <ScrollArea className="min-h-0 flex-1" scrollFade>
       <ol className="mx-auto flex w-full max-w-(--chat-content-max-width) flex-col gap-6 px-4 py-6">
-        {messages.map((message, index) =>
-          message.role === "user" ? (
-            <li key={message.id} className="flex justify-end">
-              <div className="max-w-[80%] rounded-2xl bg-message p-3 text-message-foreground">
-                <p className="whitespace-pre-wrap text-sm leading-relaxed [overflow-wrap:anywhere]">
-                  {message.text}
-                </p>
-              </div>
-            </li>
-          ) : (
+        {peerCounts.length > 0 ? (
+          <li className="flex flex-wrap gap-2">
+            {peerCounts.map((peer) => (
+              <GrokBotPeerChip
+                key={peer.key}
+                peer={peer.peer}
+                count={peer.count}
+                environmentId={environmentId}
+              />
+            ))}
+          </li>
+        ) : null}
+        {timeline.map((item, index) => {
+          if (item.kind === "peer") {
+            return (
+              <GrokBotPeerGroup
+                key={`peer:${item.messages[0]?.id}`}
+                item={item}
+                roster={roster}
+                environmentId={environmentId}
+              />
+            );
+          }
+          const { message } = item;
+          if (message.voiceCall !== undefined) {
+            return <GrokBotVoiceCallRow key={message.id} marker={message.voiceCall} />;
+          }
+          if (message.sender.kind === "user") {
+            const stamp = splitGrokBotAgentStamp(message.text);
+            return (
+              <li key={message.id} className="flex flex-col items-end gap-1">
+                {stamp.fromAgent ? (
+                  <p
+                    className="me-1 text-2xs text-muted-foreground/70"
+                    data-user-message-attribution="agent"
+                  >
+                    Sent by another agent
+                  </p>
+                ) : null}
+                <GrokBotUserBubble
+                  text={stamp.text}
+                  large={message.reactionOnly === true}
+                  references={message.grokBotWorkflowReferences}
+                />
+                {message.reactionOnly ? null : <GrokBotReactions reactions={message.reactions} />}
+              </li>
+            );
+          }
+          const previous = timeline[index - 1];
+          const continuesBot =
+            previous?.kind === "message" &&
+            previous.message.sender.kind !== "user" &&
+            previous.message.voiceCall === undefined;
+          return (
             <li key={message.id} className="flex min-w-0 gap-3">
-              {messages[index - 1]?.role === "assistant" ? (
+              {continuesBot ? (
                 <span className="w-6 shrink-0" />
               ) : (
                 <GrokBotAvatar
@@ -268,59 +430,218 @@ function GrokBotMessageList({
                 />
               )}
               <div className="min-w-0 flex-1">
-                <ChatMarkdown
-                  text={message.text}
-                  cwd={undefined}
-                  environmentId={environmentId}
-                  isStreaming={message.streaming}
-                />
+                <GrokBotMessageBody message={message} environmentId={environmentId} />
               </div>
             </li>
-          ),
-        )}
+          );
+        })}
+        {pending.map((item) => (
+          <li key={`pending:${item.id}`} className="flex justify-end opacity-70">
+            <GrokBotUserBubble text={item.text} />
+          </li>
+        ))}
         <div ref={endRef} />
       </ol>
     </ScrollArea>
   );
 }
 
+/** A voice call in the transcript: one quiet line, with its duration only when native recorded one. */
+function GrokBotVoiceCallRow({
+  marker,
+}: {
+  readonly marker: NonNullable<GrokBotMessage["voiceCall"]>;
+}) {
+  return (
+    <li
+      className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground"
+      data-voice-call-id={marker.callId}
+    >
+      <GrokBotVoiceCallMarkerLabel marker={marker} />
+    </li>
+  );
+}
+
+function GrokBotMessageBody({
+  message,
+  environmentId,
+}: {
+  readonly message: GrokBotMessage;
+  readonly environmentId: EnvironmentId;
+}) {
+  return message.reactionOnly ? (
+    <p className="text-2xl leading-none">{message.text.trim()}</p>
+  ) : (
+    <>
+      <ChatMarkdown
+        text={message.text}
+        cwd={undefined}
+        environmentId={environmentId}
+        isStreaming={message.streaming}
+        renderLinkOverride={({ href }) =>
+          message.sender.kind !== "user" && isNativeConnectorAuthLink(href) ? (
+            <GrokBotConnectorAuthAction environmentId={environmentId} />
+          ) : undefined
+        }
+      />
+      <GrokBotReactions reactions={message.reactions} className="mt-1" />
+    </>
+  );
+}
+
+/** Messages exchanged with another bot, under one header per run from the same peer. */
+function GrokBotPeerGroup({
+  item,
+  roster,
+  environmentId,
+}: {
+  readonly item: Extract<GrokBotTimelineItem, { kind: "peer" }>;
+  readonly roster: readonly GrokBot[];
+  readonly environmentId: EnvironmentId;
+}) {
+  const name = peerName(item.peer);
+  const avatar = peerAvatar(item.peer, roster);
+  const tint = `color-mix(in srgb, ${GROK_BOT_AVATAR_COLORS[resolveGrokBotAvatarColor(avatar.avatarColor, avatar.id)]} 14%, transparent)`;
+  return (
+    <li className="flex min-w-0 flex-col gap-2">
+      <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+        <GrokBotAvatar bot={avatar} size="xs" />
+        <span className="truncate">
+          {item.direction === "from" ? `Message from ${name}` : `Message to ${name}`}
+        </span>
+      </div>
+      {item.messages.map((message) => (
+        <div
+          key={message.id}
+          className="ml-8 min-w-0 max-w-[80%] rounded-2xl p-3"
+          style={{ backgroundColor: tint }}
+        >
+          <GrokBotMessageBody message={message} environmentId={environmentId} />
+        </div>
+      ))}
+    </li>
+  );
+}
+
+/** Summarizes the bot-to-bot messages with one peer; a bot peer opens its own conversation. */
+function GrokBotPeerChip({
+  peer,
+  count,
+  environmentId,
+}: {
+  readonly peer: GrokBotPeer;
+  readonly count: number;
+  readonly environmentId: EnvironmentId;
+}) {
+  const navigate = useNavigate();
+  const label = `${count} ${count === 1 ? "message" : "messages"} with ${peerName(peer)}`;
+  if (peer.kind === "unknown") {
+    return <span className="px-2 py-1 text-xs text-muted-foreground">{label}</span>;
+  }
+  return (
+    <Button
+      size="xs"
+      variant="outline"
+      onClick={() =>
+        void navigate({
+          to: "/grok-bots/$botId",
+          params: { botId: peer.id },
+          search: { environmentId },
+        })
+      }
+    >
+      {label}
+    </Button>
+  );
+}
+
+function peerName(peer: GrokBotPeer): string {
+  return peer.kind === "bot" ? peer.name : peer.label;
+}
+
+/** A peer missing from the roster keeps its wire name, and its avatar follows that name. */
+function peerAvatar(
+  peer: GrokBotPeer,
+  roster: readonly GrokBot[],
+): Pick<GrokBot, "id" | "name" | "avatarShape" | "avatarColor"> {
+  const known = peer.kind === "bot" ? roster.find((bot) => bot.id === peer.id) : undefined;
+  if (known !== undefined) return known;
+  const name = peerName(peer);
+  return { id: name, name, avatarShape: "", avatarColor: "" };
+}
+
+function GrokBotUserBubble({
+  text,
+  large = false,
+  references,
+}: {
+  readonly text: string;
+  readonly large?: boolean;
+  readonly references?: GrokBotWorkflowReferences | undefined;
+}) {
+  return (
+    <div className="max-w-[80%] rounded-2xl bg-message p-3 text-message-foreground">
+      {references ? <GrokBotWorkflowReferenceChips references={references} /> : null}
+      {large ? (
+        <p className="text-2xl leading-none">{text.trim()}</p>
+      ) : (
+        <p className="whitespace-pre-wrap text-sm leading-relaxed [overflow-wrap:anywhere]">
+          {text}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function GrokBotComposer({
   environmentId,
   bot,
+  messages,
+  onSend,
 }: {
   readonly environmentId: EnvironmentId;
   readonly bot: GrokBot;
+  readonly messages: GrokBotMessages;
+  readonly onSend: (sent: GrokBotSentMessage) => Promise<SendOutcome>;
 }) {
   const canSend = useAtomValue(grokBotsSend.permissionAtom(environmentId));
-  const sendMessage = useAtomCommand(grokBotsSend, { reportFailure: false });
   const identity = grokBotSurfaceKey(environmentId, bot.id);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [uncertain, setUncertain] = useState<GrokBotSentMessage | null>(null);
   const disabled = !canSend || sending;
+
+  // An uncertain send resolves when the transcript shows it; until then the draft waits for the user.
+  useEffect(() => {
+    if (uncertain === null || !isGrokBotSendDelivered(messages, uncertain)) return;
+    setUncertain(null);
+    setDraft((current) => (current.trim() === uncertain.text ? "" : current));
+    setGrokBotActivity(identity, "thinking", THINKING_TIMEOUT_MS);
+  }, [identity, messages, uncertain]);
 
   const submit = async () => {
     const message = draft.trim();
     if (message.length === 0 || disabled) return;
     setSending(true);
     setError(null);
-    setGrokBotActivity(identity, "sending");
-    const result = await sendMessage({
-      environmentId,
-      input: { botId: bot.id, message },
-    });
+    setUncertain(null);
+    const sent = { text: message, baselineUserIds: grokBotUserMessageIds(messages) };
+    const outcome = await onSend(sent);
     setSending(false);
-    if (result._tag === "Failure") {
-      if (isAtomCommandInterrupted(result)) {
-        setGrokBotActivity(identity, null);
+    switch (outcome.status) {
+      case "accepted":
+        setDraft("");
         return;
-      }
-      setGrokBotActivity(identity, "failed", FAILED_REACTION_MS);
-      setError(grokBotFailureMessage(squashAtomCommandFailure(result)));
-      return;
+      case "uncertain":
+        setUncertain(sent);
+        return;
+      case "failed":
+        setError(outcome.message);
+        return;
+      case "cancelled":
+        return;
     }
-    setGrokBotActivity(identity, "thinking", THINKING_TIMEOUT_MS);
-    setDraft("");
   };
 
   return (
@@ -360,6 +681,14 @@ function GrokBotComposer({
                 {error ? (
                   <p className="min-w-0 flex-1 truncate text-xs text-destructive-foreground">
                     {error}
+                  </p>
+                ) : null}
+                {uncertain ? (
+                  <p
+                    role="status"
+                    className="min-w-0 flex-1 truncate text-xs text-muted-foreground"
+                  >
+                    Delivery is uncertain. Checking the conversation...
                   </p>
                 ) : null}
                 <button

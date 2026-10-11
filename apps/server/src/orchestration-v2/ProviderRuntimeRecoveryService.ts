@@ -14,6 +14,7 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as EffectOutbox from "./EffectOutbox.ts";
@@ -21,6 +22,8 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as GrokBotManagedStateStore from "../grokBot/GrokBotManagedStateStore.ts";
+import * as GrokBotThreadService from "../grokBot/GrokBotThreadService.ts";
 import { restartContinuationRun } from "./RestartContinuation.ts";
 import {
   endOrphanedNativeSubagent,
@@ -179,19 +182,134 @@ function latestStartedRun(
   );
 }
 
+/** Reconciliation may still cancel a local provider in a thread that also owns a cloud bot. */
+function processBoundProjection(
+  projection: ProjectionStore.ProjectionRuntimeRecoveryState,
+  remoteRuns: readonly OrchestrationV2ThreadProjection["runs"][number][],
+): ProjectionStore.ProjectionRuntimeRecoveryState {
+  if (remoteRuns.length === 0) return projection;
+  const runIds = new Set(remoteRuns.map((run) => run.id));
+  const providerThreadIds = new Set(remoteRuns.map((run) => run.providerThreadId));
+  const attemptIds = new Set(remoteRuns.map((run) => run.activeAttemptId));
+  const remoteThreads = projection.providerThreads.filter((thread) =>
+    providerThreadIds.has(thread.id),
+  );
+  const sessionIds = new Set(remoteThreads.map((thread) => thread.providerSessionId));
+  const nodeIds = new Set(
+    projection.nodes
+      .filter(
+        (node) =>
+          (node.runId !== null && runIds.has(node.runId)) ||
+          remoteRuns.some(
+            (run) => run.rootNodeId === node.rootNodeId || run.rootNodeId === node.id,
+          ) ||
+          remoteThreads.some((thread) => thread.ownerNodeId === node.id),
+      )
+      .map((node) => node.id),
+  );
+  return {
+    ...projection,
+    runs: projection.runs.filter((run) => !runIds.has(run.id)),
+    attempts: projection.attempts.filter((attempt) => !attemptIds.has(attempt.id)),
+    providerThreads: projection.providerThreads.filter(
+      (thread) => !providerThreadIds.has(thread.id),
+    ),
+    providerSessions: projection.providerSessions.filter((session) => !sessionIds.has(session.id)),
+    providerTurns: projection.providerTurns.filter(
+      (turn) => !providerThreadIds.has(turn.providerThreadId) && !attemptIds.has(turn.runAttemptId),
+    ),
+    nodes: projection.nodes.filter((node) => !nodeIds.has(node.id)),
+    subagents: projection.subagents.filter(
+      (subagent) =>
+        !nodeIds.has(subagent.id) && (subagent.runId === null || !runIds.has(subagent.runId)),
+    ),
+    messages: projection.messages.filter(
+      (message) => message.runId === null || !runIds.has(message.runId),
+    ),
+    turnItems: projection.turnItems.filter(
+      (item) =>
+        (item.runId === null || !runIds.has(item.runId)) &&
+        (item.nodeId === null || !nodeIds.has(item.nodeId)) &&
+        !providerThreadIds.has(item.providerThreadId ?? null),
+    ),
+    runtimeRequests: projection.runtimeRequests.filter(
+      (request) =>
+        !nodeIds.has(request.nodeId) &&
+        (request.responseCapability.type !== "live" ||
+          !sessionIds.has(request.responseCapability.providerSessionId) ||
+          // Runless cards (Grok Bot native approvals) bind live capability to
+          // an adapter instance that restart always replaces, so they expire
+          // even when the cloud run on that session reconnects.
+          request.providerTurnId == null),
+    ),
+  };
+}
+
 export const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const eventSink = yield* EventSink.EventSinkV2;
   const ids = yield* IdAllocator.IdAllocatorV2;
   const outbox = yield* EffectOutbox.EffectOutboxV2;
+  const managedBots = yield* Effect.serviceOption(
+    GrokBotManagedStateStore.GrokBotManagedStateStore,
+  );
+  const recoverableRemoteRuns = Effect.fn("ProviderRuntimeRecoveryService.remoteRuns")(function* (
+    projection: ProjectionStore.ProjectionRuntimeRecoveryState,
+  ) {
+    const surviving: Array<OrchestrationV2ThreadProjection["runs"][number]> = [];
+    if (Option.isNone(managedBots)) return surviving;
+    for (const run of nonterminalRuns(projection)) {
+      if (run.activeAttemptId == null || run.providerThreadId == null) continue;
+      const providerThread = projection.providerThreads.find(
+        (thread) => thread.id === run.providerThreadId,
+      );
+      if (providerThread?.driver !== "grok-bot") continue;
+      const stored = yield* managedBots.value
+        .lookupTurn({ runId: run.id, attemptId: run.activeAttemptId })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderRuntimeRecoveryError({
+                operation: "read-projections",
+                threadId: projection.thread.id,
+                cause,
+              }),
+          ),
+        );
+      if (stored === undefined || stored.state === "settled") continue;
+      const identity = stored.identity;
+      const nativeId = [identity.native.binding, identity.native.botId, identity.native.sessionId]
+        .map(encodeURIComponent)
+        .join("/");
+      if (
+        identity.runId !== run.id ||
+        identity.attemptId !== run.activeAttemptId ||
+        identity.native.threadId !== projection.thread.id ||
+        identity.native.providerInstanceId !== run.providerInstanceId ||
+        identity.providerThreadId !== providerThread.id ||
+        identity.rootNodeId !== run.rootNodeId ||
+        providerThread.appThreadId !== projection.thread.id ||
+        providerThread.providerInstanceId !== run.providerInstanceId ||
+        providerThread.nativeThreadRef?.driver !== "grok-bot" ||
+        providerThread.nativeThreadRef.strength !== "strong" ||
+        providerThread.nativeThreadRef?.nativeId !== nativeId
+      )
+        continue;
+      // Account changes may prevent reconnecting, but they do not stop the previous account's cloud work.
+      surviving.push(run);
+    }
+    return surviving;
+  });
   const reconcileProjection = Effect.fn("ProviderRuntimeRecoveryService.reconcileProjection")(
     function* (
-      projection: ProjectionStore.ProjectionRuntimeRecoveryState,
+      originalProjection: ProjectionStore.ProjectionRuntimeRecoveryState,
       trigger: "startup" | "shutdown",
       continueAfterRestart: boolean,
     ) {
       const now = yield* DateTime.now;
+      const remoteRuns = yield* recoverableRemoteRuns(originalProjection);
+      const projection = processBoundProjection(originalProjection, remoteRuns);
       const runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
       for (const run of nonterminalRuns(projection)) {
         if (run.status === "waiting") {
@@ -314,6 +432,48 @@ export const make = Effect.gen(function* () {
             },
             resolvedAt: now,
           },
+        });
+      }
+      const expiredRequestIds = new Set(requests.map((request) => request.id));
+      const expiredNodeIds = new Set(requests.map((request) => request.nodeId));
+      const requestProviderInstanceId = projection.thread.providerInstanceId;
+      for (const node of projection.nodes ?? []) {
+        if (
+          !expiredNodeIds.has(node.id) ||
+          node.runId !== null ||
+          !isNonterminalNodeStatus(node.status)
+        )
+          continue;
+        events.push({
+          id: yield* allocateEventId(),
+          type: "node.updated",
+          threadId: projection.thread.id,
+          nodeId: node.id,
+          ...(requestProviderInstanceId === undefined
+            ? {}
+            : { providerInstanceId: requestProviderInstanceId }),
+          occurredAt: now,
+          payload: { ...node, status: "cancelled", completedAt: now },
+        });
+      }
+      for (const item of projection.turnItems ?? []) {
+        if (
+          item.runId !== null ||
+          (item.type !== "approval_request" && item.type !== "user_input_request") ||
+          !expiredRequestIds.has(item.requestId) ||
+          !isNonterminalTurnItemStatus(item.status)
+        )
+          continue;
+        events.push({
+          id: yield* allocateEventId(),
+          type: "turn-item.updated",
+          threadId: projection.thread.id,
+          ...(item.nodeId === null || item.nodeId === undefined ? {} : { nodeId: item.nodeId }),
+          ...(requestProviderInstanceId === undefined
+            ? {}
+            : { providerInstanceId: requestProviderInstanceId }),
+          occurredAt: now,
+          payload: cancelledItem(item, now),
         });
       }
       for (const run of runs) {
@@ -573,11 +733,34 @@ export const make = Effect.gen(function* () {
             },
           ]
         : [];
+      if (trigger === "startup") {
+        for (const run of remoteRuns)
+          effects.push({
+            id: `effect:remote-reconnect:${run.id}:${run.activeAttemptId}:${DateTime.formatIso(now)}`,
+            commandId,
+            threadId: originalProjection.thread.id,
+            request: { type: "provider-runtime.reconnect", runId: run.id },
+          });
+      }
       const stoppedSessions = projection.providerSessions.filter(
         (candidate) => candidate.status !== "stopped" && candidate.status !== "error",
       ).length;
       let retiredEffects: number;
       if (events.length === 0) {
+        // A reconnect does not change cloud run state. Command receipts require
+        // an event sequence, so persist effects through the effects-only sink.
+        if (effects.length > 0) {
+          yield* eventSink.writeWithEffects({ commandId, events, effects }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderRuntimeRecoveryError({
+                  operation: "reconcile",
+                  threadId: projection.thread.id,
+                  cause,
+                }),
+            ),
+          );
+        }
         const retiredEffectIds = yield* outbox
           .cancelUnsettled({
             threadId: projection.thread.id,
@@ -691,7 +874,11 @@ export const make = Effect.gen(function* () {
     const threadIds = yield* projections.getRecoveryThreadIds("runtime");
     for (const threadId of threadIds) {
       yield* Effect.gen(function* () {
-        const projection = yield* projections.getRuntimeRecoveryProjection(threadId);
+        const originalProjection = yield* projections.getRuntimeRecoveryProjection(threadId);
+        const projection = processBoundProjection(
+          originalProjection,
+          yield* recoverableRemoteRuns(originalProjection),
+        );
         if (
           !resolveProjectSettings(enabled, projection.thread.projectId).settings
             .continueThreadsAfterServerUpdate
@@ -726,7 +913,18 @@ export const make = Effect.gen(function* () {
   );
 
   const recover = Effect.gen(function* () {
-    return (yield* reconcile("startup")) satisfies ProviderRuntimeRecoverySummary;
+    const summary = (yield* reconcile("startup")) satisfies ProviderRuntimeRecoverySummary;
+    const observers = yield* Effect.serviceOption(GrokBotThreadService.GrokBotThreadService);
+    if (Option.isSome(observers)) {
+      yield* observers.value.observeAll.pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Failed to attach native Grok Bot observation after recovery", {
+            cause,
+          }),
+        ),
+      );
+    }
+    return summary;
   });
 
   return ProviderRuntimeRecoveryService.of({ reconcile, prepareForShutdown, recover });

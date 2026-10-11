@@ -1218,6 +1218,123 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
 );
 
 it.layer(layerTest)("delegated tasks across a server restart", (it) => {
+  it.effect("returns a cross-project child's restart result to its Scratch parent", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projects = yield* ProjectService.ProjectService;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("grok-bot:restart-parent");
+      const scratchProjectId = ProjectId.make("project:restart-scratch");
+      const destinationProjectId = ProjectId.make("project:restart-destination");
+      const runId = RunId.make("run:cross-project-parent");
+      const rootNodeId = NodeId.make("node:cross-project-parent-root");
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId: scratchProjectId,
+        runId,
+        rootNodeId,
+        taskId: NodeId.make("node:cross-project-parent-settled"),
+        deliveryState: "delivered",
+        now,
+      });
+      yield* projects.create({
+        commandId: CommandId.make("command:restart-destination:create"),
+        projectId: destinationProjectId,
+        title: "Destination project",
+        workspaceRoot: "/workspace/restart-destination",
+      });
+      const child = yield* seedRestartCancelledChild({
+        parentThreadId: threadId,
+        projectId: destinationProjectId,
+        parentRunId: runId,
+        rootNodeId,
+        name: "cross-project-restart-child",
+        completionWake: "always",
+        continuationPending: true,
+        now,
+      });
+      yield* orchestrator.recoverDelegatedTasks;
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+          (task) => task.id === child.taskId,
+        )?.status,
+        "running",
+      );
+      const continuationMessageId = MessageId.make("message:cross-project-restart-continuation");
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "agent",
+        creationSource: "server",
+        commandId: CommandId.make("command:cross-project-restart-continuation"),
+        threadId: child.childThreadId,
+        restartContinuationOfRunId: child.childRunId,
+        messageId: continuationMessageId,
+        text: "Continue where you left off.",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+      });
+      const resumed = yield* orchestrator.getThreadProjection(child.childThreadId);
+      const continuation = resumed.runs.find((run) => run.userMessageId === continuationMessageId)!;
+      assert.equal(resumed.thread.projectId, destinationProjectId);
+      assert.isNull(resumed.thread.worktreePath);
+      assert.equal(resumed.thread.lineage.parentThreadId, threadId);
+      assert.equal(continuation.restartContinuationOfRunId, child.childRunId);
+      yield* eventSink.write({
+        commandId: reconcileCommandId("cross-project-restart-completed"),
+        events: [
+          {
+            id: EventId.make("event:cross-project-restart-result"),
+            type: "message.updated",
+            threadId: child.childThreadId,
+            runId: continuation.id,
+            occurredAt: now,
+            payload: {
+              id: MessageId.make("message:cross-project-restart-result"),
+              threadId: child.childThreadId,
+              runId: continuation.id,
+              nodeId: null,
+              role: "assistant",
+              text: "Finished in the destination after restart.",
+              attachments: [],
+              streaming: false,
+              createdBy: "agent",
+              creationSource: "server",
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+          {
+            id: EventId.make("event:cross-project-restart-completed"),
+            type: "run.updated",
+            threadId: child.childThreadId,
+            runId: continuation.id,
+            occurredAt: now,
+            payload: { ...continuation, status: "completed", startedAt: now, completedAt: now },
+          },
+        ],
+      });
+      yield* orchestrator.recoverDelegatedTasks;
+      const parent = yield* orchestrator.getThreadProjection(threadId);
+      const task = parent.subagents.find((task) => task.id === child.taskId)!;
+      assert.equal(parent.thread.projectId, scratchProjectId);
+      assert.equal(task.result, "Finished in the destination after restart.");
+      assert.equal(task.completionDelivery?.state, "claimed");
+      assert.isTrue(
+        parent.contextTransfers.some(
+          (transfer) =>
+            transfer.type === "subagent_result" &&
+            transfer.sourceThreadId === child.childThreadId &&
+            transfer.targetThreadId === threadId,
+        ),
+      );
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(child.childThreadId)).thread.projectId,
+        destinationProjectId,
+      );
+    }),
+  );
+
   it.effect("holds a restart-cancelled child for its continuation's result", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

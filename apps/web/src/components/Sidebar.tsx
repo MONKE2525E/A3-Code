@@ -280,6 +280,12 @@ import {
 import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { GrokBotSidebarDropdown } from "./grokBot/GrokBotSidebarDropdown";
+import { GrokBotSearchResultRow } from "./grokBot/GrokBotSearchResultRow";
+import { grokBotSearchHitsFromMatches } from "./grokBot/grokBotSearchHits";
+import { useSelectedGrokBotEnvironmentId } from "./grokBot/useGrokBotEnvironment";
+import { grokBotsListQuery } from "../state/grokBots";
+import type { GrokBotSearchHit } from "./CommandPalette.logic";
+import { useActiveEnvironmentId } from "../state/entities";
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
@@ -2992,9 +2998,34 @@ export default function Sidebar() {
       ),
     [searchableThreads, threadSearchQuery, threadSearchMatchByKey],
   );
-  const threadSearchResultOrderKey = threadSearchResults
-    .map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)))
-    .join("\0");
+  // Bot conversations are not sidebar rows, so their content hits come from the same
+  // global search and render after the thread results. Name the roster from the selected
+  // Grok Bot environment, falling back to the active one, as the command palette does.
+  const selectedGrokBotEnvironmentId = useSelectedGrokBotEnvironmentId();
+  const activeEnvironmentId = useActiveEnvironmentId();
+  const grokBotRosterEnvironmentId = selectedGrokBotEnvironmentId ?? activeEnvironmentId;
+  const grokBotRoster = useEnvironmentQuery(
+    isSearchingThreads && grokBotRosterEnvironmentId !== null
+      ? grokBotsListQuery({ environmentId: grokBotRosterEnvironmentId, input: {} })
+      : null,
+  );
+  const grokBotSearchHits = useMemo(
+    () =>
+      grokBotSearchHitsFromMatches({
+        matches: threadSearch.matches,
+        shells: threads,
+        rosterEnvironmentId: grokBotRosterEnvironmentId,
+        roster: grokBotRoster.data ?? [],
+      }),
+    [grokBotRoster.data, grokBotRosterEnvironmentId, threadSearch.matches, threads],
+  );
+  const searchResultCount = threadSearchResults.length + grokBotSearchHits.length;
+  const threadSearchResultOrderKey = [
+    ...threadSearchResults.map((thread) =>
+      scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+    ),
+    ...grokBotSearchHits.map((hit) => `grok-bot:${hit.environmentId}:${hit.bot.id}`),
+  ].join("\0");
 
   useEffect(() => {
     setActiveSearchResultIndex(0);
@@ -3282,6 +3313,18 @@ export default function Sidebar() {
     },
     [clearThreadSearch, navigateToThread],
   );
+  const selectGrokBotSearchHit = useCallback(
+    (hit: GrokBotSearchHit) => {
+      clearThreadSearch();
+      if (isMobile) setOpenMobile(false);
+      void router.navigate({
+        to: "/grok-bots/$botId",
+        params: { botId: hit.bot.id },
+        search: { environmentId: hit.environmentId },
+      });
+    },
+    [clearThreadSearch, isMobile, router, setOpenMobile],
+  );
   const handleThreadSearchKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLInputElement>) => {
       // IME composition (Japanese/Chinese input) uses the same keys; committing
@@ -3293,29 +3336,36 @@ export default function Sidebar() {
         clearThreadSearch();
         return;
       }
-      if (threadSearchResults.length === 0) return;
+      if (searchResultCount === 0) return;
       if (event.key === "ArrowDown") {
         event.preventDefault();
-        setActiveSearchResultIndex((index) => (index + 1) % threadSearchResults.length);
+        setActiveSearchResultIndex((index) => (index + 1) % searchResultCount);
         return;
       }
       if (event.key === "ArrowUp") {
         event.preventDefault();
-        setActiveSearchResultIndex(
-          (index) => (index - 1 + threadSearchResults.length) % threadSearchResults.length,
-        );
+        setActiveSearchResultIndex((index) => (index - 1 + searchResultCount) % searchResultCount);
         return;
       }
       if (event.key === "Enter") {
         event.preventDefault();
-        const result = threadSearchResults[activeSearchResultIndex];
-        if (result) selectThreadSearchResult(result);
+        // Thread results come first; bot results follow in the same index space.
+        const thread = threadSearchResults[activeSearchResultIndex];
+        if (thread) {
+          selectThreadSearchResult(thread);
+          return;
+        }
+        const hit = grokBotSearchHits[activeSearchResultIndex - threadSearchResults.length];
+        if (hit) selectGrokBotSearchHit(hit);
       }
     },
     [
       activeSearchResultIndex,
       clearThreadSearch,
+      grokBotSearchHits,
       isSearchingThreads,
+      searchResultCount,
+      selectGrokBotSearchHit,
       selectThreadSearchResult,
       threadSearchResults,
     ],
@@ -5061,7 +5111,7 @@ export default function Sidebar() {
         className="min-h-full"
         fixedHeader={
           <>
-            <SidebarGroup className="z-[1]">
+            <SidebarGroup className="z-[1] -mb-2">
               <SidebarThreadHeader
                 searchFieldRef={headerSearchRef}
                 hasProjects={projectGroups.length > 0}
@@ -5212,18 +5262,18 @@ export default function Sidebar() {
                 }}
                 onSearchKeyDown={handleThreadSearchKeyDown}
                 isSearching={isSearchingThreads}
-                searchResultCount={threadSearchResults.length}
+                searchResultCount={searchResultCount}
                 activeSearchResultIndex={activeSearchResultIndex}
                 onClearSearch={clearThreadSearch}
               />
             </SidebarGroup>
-            <GrokBotSidebarDropdown />
           </>
         }
       >
+        <GrokBotSidebarDropdown />
         <SidebarGroup className="flex-1" role="presentation">
           {isSearchingThreads ? (
-            threadSearchResults.length > 0 ? (
+            searchResultCount > 0 ? (
               <TooltipProvider
                 key="sidebar-thread-search-tooltips-150"
                 delay={150}
@@ -5276,6 +5326,20 @@ export default function Sidebar() {
                         onHighlight={() => setActiveSearchResultIndex(index)}
                         onSelect={() => selectThreadSearchResult(thread)}
                         onFileDropThreads={handleThreadFileDrop}
+                      />
+                    );
+                  })}
+                  {grokBotSearchHits.map((hit, hitIndex) => {
+                    const index = threadSearchResults.length + hitIndex;
+                    return (
+                      <GrokBotSearchResultRow
+                        key={`grok-bot:${hit.environmentId}:${hit.bot.id}`}
+                        hit={hit}
+                        isHighlighted={activeSearchResultIndex === index}
+                        resultId={`sidebar-thread-search-result-${index}`}
+                        searchQuery={threadSearchQuery}
+                        onHighlight={() => setActiveSearchResultIndex(index)}
+                        onSelect={() => selectGrokBotSearchHit(hit)}
                       />
                     );
                   })}

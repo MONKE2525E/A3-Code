@@ -874,6 +874,43 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("javascript:");
     expect(markup).not.toContain("globalThis.__t3Xss");
   });
+  it("replaces native connector sign-in links only in assistant text of a Grok Bot thread", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const signIn =
+      "https://auth.example.test/authorize?client_id=synthetic&redirect_uri=https%3A%2F%2Fwww.cursor.com%2Fagents%2Fmcp%2Foauth%2Fcallback&state=synthetic.tgd";
+    const text = `Sign in with [Linear](${signIn}) or read [docs](https://example.test/docs).`;
+    const render = (
+      entry: ReturnType<typeof buildAssistantTimelineEntry>,
+      isGrokBotThread: boolean,
+    ) =>
+      renderToStaticMarkup(
+        <MessagesTimeline
+          {...buildProps()}
+          isGrokBotThread={isGrokBotThread}
+          timelineEntries={[entry]}
+        />,
+      );
+
+    const botMarkup = render(buildAssistantTimelineEntry(text), true);
+    expect(botMarkup).toContain("Connect in Settings");
+    expect(botMarkup).not.toContain("auth.example.test");
+    expect(botMarkup).toContain('href="https://example.test/docs"');
+
+    const providerMarkup = render(buildAssistantTimelineEntry(text), false);
+    expect(providerMarkup).not.toContain("Connect in Settings");
+    expect(providerMarkup).toContain(`href="${signIn.replaceAll("&", "&amp;")}"`);
+
+    const userMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        isGrokBotThread
+        timelineEntries={[buildUserTimelineEntry(text)]}
+      />,
+    );
+    expect(userMarkup).not.toContain("Connect in Settings");
+    expect(userMarkup).toContain(`href="${signIn.replaceAll("&", "&amp;")}"`);
+  });
+
   it("renders progressive history controls ahead of the bounded timeline", () => {
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -1248,6 +1285,64 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("<a ");
   });
 
+  it("offers a bot reply's attachments for download only in the bot's own thread", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("requestAnimationFrame", () => 0);
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    // File rows draw a Pierre icon, which mounts its sprite into the document when missing.
+    vi.stubGlobal("document", { ...document, getElementById: () => ({}) });
+    // Render the download trigger's own button so its handler can be invoked without a DOM event.
+    activityTestState.subagentTooltips = true;
+    const onFileDownload = vi.fn();
+    const baseEntry = buildAssistantTimelineEntry("");
+    const attachment = {
+      type: "file" as const,
+      id: "attachment-bot-report",
+      name: "bot-report.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: 42,
+    };
+    const entry = { ...baseEntry, message: { ...baseEntry.message, attachments: [attachment] } };
+    const findDownloads = (renderer: ReactTestRenderer) =>
+      renderer.root.findAll((node) => node.props["aria-label"] === "Download bot-report.pdf");
+
+    let other: ReactTestRenderer | undefined;
+    let bot: ReactTestRenderer | undefined;
+    try {
+      await act(() => {
+        other = create(
+          <MessagesTimeline
+            {...buildProps()}
+            routeThreadKey="environment-local:thread-1"
+            onFileDownload={onFileDownload}
+            timelineEntries={[entry]}
+          />,
+        );
+      });
+      expect(findDownloads(other!)).toHaveLength(0);
+      await act(() => other?.unmount());
+
+      await act(() => {
+        bot = create(
+          <MessagesTimeline
+            {...buildProps()}
+            routeThreadKey="environment-local:grok-bot:bot-1"
+            onFileDownload={onFileDownload}
+            timelineEntries={[entry]}
+          />,
+        );
+      });
+      const [download] = findDownloads(bot!);
+      expect(download).toBeDefined();
+      // An attachment-only reply has no text to fall back to, so it must not claim to be empty.
+      expect(JSON.stringify(bot!.toJSON())).not.toContain("(empty response)");
+      await act(() => download!.props.onClick());
+      expect(onFileDownload).toHaveBeenCalledWith(attachment);
+    } finally {
+      await act(() => bot?.unmount());
+    }
+  });
+
   it("does not download an optimistic file before the server supplies its attachment ID", () => {
     const entry = {
       ...buildUserTimelineEntry("Read the report."),
@@ -1449,6 +1544,38 @@ describe("MessagesTimeline", () => {
     expect(agentMarkup).toContain('data-user-message-attribution="agent"');
     expect(agentMarkup).toContain("Sent by another agent");
     expect(userMarkup).not.toContain("Sent by another agent");
+  });
+
+  it("shows a voice request as a marker without its internal prompt", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const entry = buildUserTimelineEntry("Fix the login bug");
+    const voiceMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            ...entry,
+            message: {
+              ...entry.message,
+              text: "[From a voice call]\nFix the login bug",
+              createdBy: "agent",
+              creationSource: "mcp",
+              voiceRequest: true,
+            },
+          },
+        ]}
+      />,
+    );
+    const userMarkup = renderToStaticMarkup(
+      <MessagesTimeline {...buildProps()} timelineEntries={[entry]} />,
+    );
+
+    expect(voiceMarkup).toContain("Requested during voice call");
+    expect(voiceMarkup).toContain('data-user-message-attribution="voice"');
+    expect(voiceMarkup).not.toContain("From a voice call");
+    expect(voiceMarkup).not.toContain("Fix the login bug");
+    expect(voiceMarkup).not.toContain("Sent by another agent");
+    expect(userMarkup).toContain("Fix the login bug");
   });
 
   it("keeps a subagent parent-thread link at the top of an empty timeline", async () => {

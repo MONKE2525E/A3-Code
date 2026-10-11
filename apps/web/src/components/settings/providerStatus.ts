@@ -74,10 +74,14 @@ export function getProviderSummary(provider: ServerProvider | undefined) {
     };
   }
   if (provider.auth.status === "authenticated") {
-    const authLabel = provider.auth.label ?? provider.auth.type;
+    const grokBot = provider.driver === "grok-bot";
+    const authLabel = grokBot
+      ? (provider.auth.label ?? null)
+      : (provider.auth.label ?? provider.auth.type);
     return {
       headline: authLabel ? `Authenticated · ${authLabel}` : "Authenticated",
-      detail: provider.message ?? null,
+      // Ready Grok Bot still ships a protocol note in `message`; the card should show the plan.
+      detail: grokBot && provider.status === "ready" ? null : (provider.message ?? null),
     };
   }
   return {

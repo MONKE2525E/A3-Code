@@ -275,6 +275,10 @@ export function autoSettlementSettingsKey(
   return JSON.stringify([
     settings.sidebarAutoSettleOnMerge,
     settings.sidebarAutoSettleAfterDays,
+    Object.entries(settings.providerInstances)
+      .filter(([, instance]) => instance.driver === "grok-bot")
+      .map(([id]) => id)
+      .sort(),
     // Only entries that touch settlement, in a stable order, so a project
     // override on an unrelated key does not queue a sweep. JSON drops
     // undefined, so inherit (absent) and never (null) need distinct marks.
@@ -328,12 +332,22 @@ export const make = Effect.gen(function* () {
     // the merged pull request: most threads carry no link and settle from
     // their branch lookup, which would otherwise wait for the next minute's
     // sweep on a possibly stale cached answer.
-    const candidates = threads.filter((thread) => isAutoSettlementCandidate(thread, nowMs));
+    const candidates = threads.filter(
+      (thread) =>
+        settings.providerInstances[thread.providerInstanceId]?.driver !== "grok-bot" &&
+        isAutoSettlementCandidate(thread, nowMs),
+    );
 
     const settleThread = Effect.fn("ThreadSettlementServiceV2.settleThread")(
       function* (thread: (typeof candidates)[number], pullRequest: SettlementPullRequest | null) {
+        const environmentSettings = yield* settingsService.getSettings;
+        if (
+          environmentSettings.providerInstances[thread.providerInstanceId]?.driver === "grok-bot"
+        ) {
+          return null;
+        }
         const currentSettings = resolveProjectSettings(
-          yield* settingsService.getSettings,
+          environmentSettings,
           thread.projectId,
         ).settings;
         const decisionNow = yield* DateTime.now;

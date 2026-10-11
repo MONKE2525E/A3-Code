@@ -11,6 +11,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   RunId,
+  RunAttemptId,
   ThreadId,
   type OrchestrationV2ThreadProjection,
   type ServerProvider,
@@ -18,6 +19,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 
 import {
@@ -878,6 +880,113 @@ describe("OrchestratorMcpService provider resolution", () => {
     providerThreads: [],
     turnItems: [],
   } as unknown as OrchestrationV2ThreadProjection;
+
+  it.effect("refuses cloud calls from an earlier parent run or attempt", () =>
+    Effect.gen(function* () {
+      const attemptId = RunAttemptId.make("attempt:remote-current");
+      const projection = parentProjection([]);
+      const current = {
+        ...projection,
+        thread: { ...projection.thread, archivedAt: null },
+        runs: projection.runs.map((run) => ({ ...run, activeAttemptId: attemptId })),
+      };
+      let dispatched = 0;
+      const dependencies = Layer.mergeAll(
+        NodeServices.layer,
+        ServerSettings.layerTest(),
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: () => Effect.succeed(current),
+          dispatch: () =>
+            Effect.sync(() => {
+              dispatched++;
+              return {} as never;
+            }),
+        }),
+        providerRegistryLayer([]),
+        adapterRegistryLayer([]),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const remoteScope = (runId: RunId, activeAttemptId: RunAttemptId): McpInvocationScope => ({
+          ...scope,
+          thread: { ...scope.thread!, remoteRun: { runId, attemptId: activeAttemptId } },
+        });
+        const currentScope = remoteScope(parentRunId, attemptId);
+        const capabilities = yield* service.capabilities(currentScope);
+        assert.isTrue(capabilities.features.appOwnedSubagents);
+        for (const stale of [
+          remoteScope(RunId.make("run:previous"), attemptId),
+          remoteScope(parentRunId, RunAttemptId.make("attempt:previous")),
+        ]) {
+          const error = yield* service
+            .delegateTask(stale, {
+              task: "Inspect the code.",
+              projectId: ProjectId.make("project:destination"),
+              mode: "async",
+              clientRequestId: "remote-delegate",
+            })
+            .pipe(Effect.flip);
+          assert.equal(error.code, "parent_not_active");
+          const readError = yield* service.capabilities(stale).pipe(Effect.flip);
+          assert.equal(readError.code, "parent_not_active");
+        }
+        assert.equal(dispatched, 0);
+      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))));
+    }),
+  );
+
+  it.effect("rejects delegated destination writes without a live caller or project", () =>
+    Effect.gen(function* () {
+      let archived = false;
+      let projectReads = 0;
+      const dependencies = Layer.mergeAll(
+        NodeServices.layer,
+        ServerSettings.layerTest(),
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: () => {
+            const projection = parentProjection([]);
+            return Effect.succeed({
+              ...projection,
+              thread: {
+                ...projection.thread,
+                archivedAt: archived ? DateTime.makeUnsafe("2026-10-10T00:00:00Z") : null,
+              },
+            });
+          },
+          dispatch: () => Effect.die("Rejected destination must not dispatch"),
+        }),
+        providerRegistryLayer([]),
+        adapterRegistryLayer([]),
+        Layer.mock(ProjectService.ProjectService)({
+          getById: () =>
+            Effect.sync(() => {
+              projectReads++;
+              return Option.none();
+            }),
+        }),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const input = { task: "Inspect the API.", projectId: ProjectId.make("project:missing") };
+        const missing = yield* service.delegateTask(scope, input).pipe(Effect.flip);
+        assert.equal(missing.code, "invalid_request");
+        assert.equal(projectReads, 1);
+        archived = true;
+        const stale = yield* service.delegateTask(scope, input).pipe(Effect.flip);
+        assert.equal(stale.code, "parent_not_active");
+        assert.equal(projectReads, 1);
+        const outside = yield* service
+          .delegateTask({ ...scope, thread: undefined }, input)
+          .pipe(Effect.flip);
+        assert.equal(outside.code, "thread_credential_required");
+      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))));
+    }),
+  );
 
   it.effect(
     "advertises orchestration capability from registered adapters rather than a driver allowlist",

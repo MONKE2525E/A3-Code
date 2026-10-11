@@ -56,6 +56,7 @@ import { CodexOrchestratorReplayHarness } from "../orchestration-v2/Adapters/Cod
 import { threadShellFromProjection } from "../orchestration-v2/ProjectionStore.ts";
 import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
+import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -516,6 +517,352 @@ const layerUnusedScheduledTaskStub = Layer.succeed(
 );
 
 describe("orchestrator MCP toolkit", () => {
+  it.live("delegates into a destination project while retaining task ownership", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const destinationProjectId = ProjectId.make("project:mcp-destination");
+        const cwd = yield* checkpointWorkspace("mcp-destination-project");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const registry = ProviderAdapterRegistry.layerFromAdapters([
+          makeDeterministicAdapter({
+            instanceId: codexInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            capabilities: CodexProviderCapabilitiesV2,
+            capturedTurns,
+            shouldComplete: (turn) => turn.threadId !== parentThreadId,
+            response: () => delegatedResult,
+          }),
+        ]);
+        const database = SqlitePersistence.layerMemory;
+        const runtime = ProviderReplayHarness.layerWithRegistry(
+          { name: "mcp-destination-project", runtimePolicyOverride: { cwd } },
+          registry,
+          { databaseLayer: database, runEffectWorker: false },
+        );
+        const orchestration = Layer.merge(
+          runtime,
+          ThreadManagementService.layer.pipe(
+            Layer.provide(runtime),
+            Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(database))),
+            Layer.provide(ServerSettings.layerTest()),
+          ),
+        );
+        const layerTest = McpHttpServer.layerOrchestratorToolkit.pipe(
+          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provideMerge(orchestration),
+          Layer.provide(registry),
+          Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(
+            ProviderRegistryMock.layer([
+              makeProviderSnapshot({
+                instanceId: codexInstanceId,
+                driver: ProviderDriverKind.make("codex"),
+                model: codexModel,
+                optionDescriptors: [
+                  {
+                    id: "reasoning",
+                    label: "Reasoning effort",
+                    type: "select",
+                    options: [
+                      { id: "high", label: "High" },
+                      { id: "low", label: "Low" },
+                    ],
+                  },
+                ],
+              }),
+            ]),
+          ),
+          Layer.provide(layerUnusedScheduledTaskStub),
+          Layer.provide(
+            Layer.mock(ProjectService.ProjectService)({
+              getById: (id) =>
+                Effect.succeed(
+                  id === projectId || id === destinationProjectId
+                    ? Option.some({
+                        id,
+                        title: id,
+                        workspaceRoot: `${cwd}/${id}`,
+                        defaultModelSelection: codexSelection,
+                        scripts: [],
+                        createdAt: IsoDateTime.make("2026-10-11T00:00:00Z"),
+                        updatedAt: IsoDateTime.make("2026-10-11T00:00:00Z"),
+                        deletedAt: null,
+                      })
+                    : Option.none(),
+                ),
+            }),
+          ),
+          Layer.provideMerge(
+            SecretRequests.layer.pipe(
+              Layer.provide(layerMemorySecretStore),
+              Layer.provide(orchestration),
+            ),
+          ),
+          Layer.provide(NodeServices.layer),
+        );
+
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const sink = yield* EventSink.EventSinkV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const server = yield* McpServer.McpServer;
+          const now = yield* DateTime.now;
+          const timestamp = IsoDateTime.make(DateTime.formatIso(now));
+          for (const id of [projectId, destinationProjectId]) {
+            const commandId = CommandId.make(`command:destination-project:create:${id}`);
+            yield* sink.commitProjectCommand({
+              commandId,
+              projectId: id,
+              commandType: "project.create",
+              acceptedAt: now,
+              event: {
+                eventId: EventId.make(`event:destination-project:create:${id}`),
+                aggregateKind: "project",
+                aggregateId: id,
+                occurredAt: timestamp,
+                commandId,
+                causationEventId: null,
+                correlationId: null,
+                metadata: {},
+                type: "project.created",
+                payload: {
+                  projectId: id,
+                  title: id,
+                  workspaceRoot: `${cwd}/${id}`,
+                  defaultModelSelection: codexSelection,
+                  scripts: [],
+                  createdAt: timestamp,
+                  updatedAt: timestamp,
+                },
+              },
+            });
+          }
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:destination-parent:create"),
+            threadId: parentThreadId,
+            projectId,
+            title: "Destination parent",
+            modelSelection: codexSelection,
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            branch: "parent-branch",
+            worktreePath: cwd,
+          });
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make("command:destination-parent:start"),
+            threadId: parentThreadId,
+            messageId: MessageId.make("message:destination-parent"),
+            text: parentPrompt,
+            attachments: [],
+            modelSelection: codexSelection,
+            dispatchMode: { type: "start_immediately" },
+          });
+          yield* worker.drain();
+          const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+          const parentRun = parent.runs[0]!;
+          const parentWithPullRequest = {
+            ...parent.thread,
+            branchPullRequest: {
+              projectId,
+              repository: "test/repo",
+              number: 1,
+              url: "https://example.com/test/repo/pull/1",
+            },
+          };
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("event:destination-parent:branch-pr"),
+                type: "thread.metadata-updated",
+                threadId: parentThreadId,
+                providerInstanceId: codexInstanceId,
+                occurredAt: now,
+                payload: parentWithPullRequest,
+              },
+            ],
+          });
+          const invocation: McpInvocationContext.McpInvocationScope = {
+            environmentId: EnvironmentId.make("environment:mcp-destination"),
+            requestNamespace: "mcp-destination-parent",
+            thread: {
+              threadId: parentThreadId,
+              providerSessionId: "mcp-destination-parent",
+              providerInstanceId: codexInstanceId,
+            },
+            client: undefined,
+            capabilities: new Set(["orchestration"]),
+            issuedAt: 1,
+          };
+          const invoke = (name: string, args: Record<string, unknown>) =>
+            server
+              .callTool({ name, arguments: args })
+              .pipe(
+                Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+                Effect.provideService(McpSchema.McpServerClient, client),
+              );
+          const args = {
+            task: delegatedPrompt,
+            projectId: destinationProjectId,
+            target: {
+              providerInstanceId: codexInstanceId,
+              model: codexModel,
+              options: { reasoning: "high" },
+            },
+            clientRequestId: "destination-child",
+            mode: "async",
+          };
+          const denied = yield* invoke("delegate_task", { ...args, runtimeMode: "full-access" });
+          expect(declaredFailure(denied)?.code).toBe("runtime_mode_escalation_denied");
+          const invalidOptions = yield* invoke("delegate_task", {
+            ...args,
+            target: { ...args.target, options: { reasoning: "unsupported" } },
+          });
+          expect(declaredFailure(invalidOptions)?.code).toBe("invalid_request");
+
+          const first = yield* invoke("delegate_task", args);
+          const task = yield* decodeDelegateTaskResult(first.structuredContent).pipe(Effect.orDie);
+          const retry = yield* invoke("delegate_task", args);
+          const retried = yield* decodeDelegateTaskResult(retry.structuredContent).pipe(
+            Effect.orDie,
+          );
+          expect(retried.taskId).toBe(task.taskId);
+          expect(retried.childThreadId).toBe(task.childThreadId);
+          const changedDestination = yield* invoke("delegate_task", { ...args, projectId });
+          const originalTask = yield* decodeDelegateTaskResult(
+            changedDestination.structuredContent,
+          ).pipe(Effect.orDie);
+          expect(originalTask.taskId).toBe(task.taskId);
+          expect(originalTask.childThreadId).toBe(task.childThreadId);
+          const child = yield* orchestrator.getThreadProjection(task.childThreadId);
+          expect(child.thread).toMatchObject({
+            projectId: destinationProjectId,
+            branch: null,
+            worktreePath: null,
+            branchPullRequest: null,
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            modelSelection: { ...codexSelection, options: [{ id: "reasoning", value: "high" }] },
+            lineage: {
+              parentThreadId,
+              relationshipToParent: "subagent",
+              rootThreadId: parent.thread.lineage.rootThreadId,
+            },
+          });
+          expect(
+            child.contextTransfers.some(
+              (transfer) =>
+                transfer.type === "subagent_spawn" &&
+                transfer.sourceThreadId === parentThreadId &&
+                transfer.targetRunId === task.childRunId,
+            ),
+          ).toBe(true);
+          expect((yield* orchestrator.getThreadProjection(parentThreadId)).subagents).toHaveLength(
+            1,
+          );
+
+          for (const explicit of [false, true]) {
+            const call = yield* invoke("delegate_task", {
+              task: delegatedPrompt,
+              clientRequestId: `inherited-child:${explicit}`,
+              ...(explicit ? { projectId } : {}),
+            });
+            const inherited = yield* decodeDelegateTaskResult(call.structuredContent).pipe(
+              Effect.orDie,
+            );
+            expect(
+              (yield* orchestrator.getThreadProjection(inherited.childThreadId)).thread,
+            ).toMatchObject({
+              projectId,
+              branch: "parent-branch",
+              worktreePath: cwd,
+              branchPullRequest: parentWithPullRequest.branchPullRequest,
+            });
+          }
+          for (const id of [ProjectId.make("project:missing"), destinationProjectId]) {
+            if (id === destinationProjectId) {
+              const commandId = CommandId.make("command:destination-project:delete");
+              yield* sink.commitProjectCommand({
+                commandId,
+                projectId: id,
+                commandType: "project.delete",
+                acceptedAt: now,
+                event: {
+                  eventId: EventId.make("event:destination-project:delete"),
+                  aggregateKind: "project",
+                  aggregateId: id,
+                  occurredAt: timestamp,
+                  commandId,
+                  causationEventId: null,
+                  correlationId: null,
+                  metadata: {},
+                  type: "project.deleted",
+                  payload: { projectId: id, deletedAt: timestamp },
+                },
+              });
+            }
+            const failed = yield* orchestrator
+              .dispatch({
+                type: "delegated_task.request",
+                createdBy: "agent",
+                creationSource: "mcp",
+                commandId: CommandId.make(`command:destination-rejected:${id}`),
+                parentThreadId,
+                parentRunId: parentRun.id,
+                parentNodeId: parentRun.rootNodeId!,
+                projectId: id,
+                task: delegatedPrompt,
+                modelSelection: codexSelection,
+                runtimeMode: "approval-required",
+                interactionMode: "default",
+              })
+              .pipe(Effect.flip);
+            expect(failed._tag).toBe("OrchestratorDispatchError");
+          }
+          yield* worker.drain();
+          yield* orchestrator
+            .streamStoredEventsFrom({ threadId: parentThreadId, afterSequence: 0 })
+            .pipe(
+              Stream.filter(
+                (stored) =>
+                  stored.event.type === "context-transfer.created" &&
+                  stored.event.payload.type === "subagent_result" &&
+                  stored.event.payload.sourceThreadId === task.childThreadId,
+              ),
+              Stream.runHead,
+            );
+          const statusCall = yield* invoke("task_status", { taskId: task.taskId });
+          const status = yield* decodeDelegateTaskResult(statusCall.structuredContent).pipe(
+            Effect.orDie,
+          );
+          expect(status).toMatchObject({
+            status: "completed",
+            summary: delegatedResult,
+            childRunId: task.childRunId,
+          });
+          const cancelCall = yield* invoke("task_cancel", {
+            taskId: task.taskId,
+            clientRequestId: "cancel-destination-child",
+          });
+          const cancelled = yield* decodeTaskCancelResult(cancelCall.structuredContent).pipe(
+            Effect.orDie,
+          );
+          expect(cancelled.status).toBe("completed");
+          expect(
+            (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+              (candidate) => candidate.id === task.taskId,
+            )?.completionDelivery?.state,
+          ).toBe("disposed");
+        }).pipe(Effect.provide(layerTest));
+      }),
+    ),
+  );
+
   it.live(
     "delegates cross-provider tasks, polls and cancels children, and creates ordinary threads",
     () =>

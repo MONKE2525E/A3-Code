@@ -153,10 +153,16 @@ function matchesCommandShortcut(
 }
 
 export function resolveShortcutCommand(
-  event: ShortcutEventLike,
+  event: ShortcutEventLike & { readonly target?: EventTarget | null },
   keybindings: ResolvedKeybindingsConfig,
   options?: ShortcutMatchOptions,
 ): KeybindingCommand | null {
+  if (
+    typeof Element !== "undefined" &&
+    event.target instanceof Element &&
+    event.target.closest("[data-grok-bot-computer]")
+  )
+    return null;
   const platform = resolvePlatform(options);
   const context = resolveContext(options);
 

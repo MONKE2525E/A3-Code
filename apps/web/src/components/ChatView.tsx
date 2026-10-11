@@ -1,3 +1,6 @@
+import { GrokBotComputerPanel } from "./grokBot/GrokBotComputerPanel";
+import { GrokBotSecureInputPanel } from "./grokBot/GrokBotSecureInputPanel";
+import { GROK_BOT_MAIN_SESSION_ID, grokBotSecretChatTarget } from "./grokBot/grokBotSecretRequest";
 import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
@@ -84,6 +87,7 @@ import {
   resolveProjectProviderInstanceEnabled,
   RuntimeMode,
   TerminalOpenInput,
+  isGrokBotBackingThread,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
 import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
@@ -197,9 +201,12 @@ import {
   deriveActivePlanState,
   deriveActiveWorkStartedAt,
   deriveCanInterruptRunningThread,
+  deriveGrokBotAwaitingCompletion,
+  deriveGrokBotAwaitingInput,
   findLatestProposedPlan,
   hasActionableProposedPlan,
   isLatestRunSettled,
+  resolveGrokBotSendDispatchMode,
 } from "../session-logic";
 import { type LegendListRef } from "@legendapp/list/react";
 import {
@@ -302,7 +309,9 @@ import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
 import {
   AlarmClockIcon,
   CheckCircle2Icon,
+  HourglassIcon,
   MessageCircleIcon,
+  MessageCircleQuestionIcon,
   PaperclipIcon,
   ChevronDownIcon,
   DownloadIcon,
@@ -332,6 +341,7 @@ import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
   NO_PROVIDER_MODEL_SELECTION,
+  omitGrokBotProviderEntries,
   shouldShowInstanceBadge,
   sortProviderInstanceEntries,
 } from "../providerInstances";
@@ -405,6 +415,7 @@ import { useEnvironmentDisconnectDelay } from "../hooks/useEnvironmentDisconnect
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { useEnvironmentQuery } from "../state/query";
+import { grokBotsReadQuery, grokBotsSecretPendingQuery } from "../state/grokBots";
 import { useEnvironmentScope } from "~/state/session";
 import {
   environmentServerConfigsAtom,
@@ -771,6 +782,8 @@ const SECRET_REQUEST_SELECTOR = '[data-v2-item-type="secret_request"]';
  */
 function shouldRedirectInputToComposer(event: Event): boolean {
   if (event.defaultPrevented) return false;
+  // noVNC focuses a canvas; its keys belong to the remote computer.
+  if (eventPathContainsSelector(event, "[data-grok-bot-computer]")) return false;
   // Near a pending secret request, input is meant for its private field: it
   // must never land in the composer draft, which is persisted and sent.
   if (eventPathContainsSelector(event, SECRET_REQUEST_SELECTOR)) return false;
@@ -3239,17 +3252,19 @@ export default function ChatView(props: ChatViewProps) {
     versionMismatchThreadContinuation,
     versionMismatchServerLabel,
   ]);
-  const providerInstanceEntries = useMemo(
-    () =>
-      sortProviderInstanceEntries(
-        applyProviderInstanceSettings(
-          deriveProviderInstanceEntries(providerStatuses),
-          settings,
-          activeProject?.id ?? null,
-        ),
+  const providerInstanceEntries = useMemo(() => {
+    const entries = sortProviderInstanceEntries(
+      applyProviderInstanceSettings(
+        deriveProviderInstanceEntries(providerStatuses),
+        settings,
+        activeProject?.id ?? null,
       ),
-    [providerStatuses, settings, activeProject?.id],
-  );
+    );
+    // Grok Bot instances appear only in their own bot thread; ordinary threads never pick one.
+    return activeThreadId !== null && isGrokBotBackingThread({ id: activeThreadId })
+      ? entries
+      : omitGrokBotProviderEntries(entries);
+  }, [activeThreadId, providerStatuses, settings, activeProject?.id]);
   const { selectedProviderEntry, requestedDriverKind } = useMemo(
     () =>
       resolveComposerProviderSelection({
@@ -3274,6 +3289,7 @@ export default function ChatView(props: ChatViewProps) {
     ],
   );
   const selectedProvider = selectedProviderEntry?.driverKind ?? requestedDriverKind;
+  const isGrokBotThread = activeThreadId !== null && isGrokBotBackingThread({ id: activeThreadId });
   const activeProviderInstanceId = selectedProviderEntry?.instanceId ?? null;
   const activeProviderStatus = selectedProviderEntry?.snapshot ?? null;
   const { enabled: interactionModeEnabled, interactionMode } = resolveComposerInteractionMode({
@@ -3623,6 +3639,12 @@ export default function ChatView(props: ChatViewProps) {
     isConnecting ||
     isCompacting ||
     runlessWorkStartedAt !== null;
+  // A Grok Bot run blocked on a question shows "Awaiting input" rather than Thinking.
+  const isAwaitingGrokBotInput = deriveGrokBotAwaitingInput({
+    isGrokBotThread,
+    phase,
+    hasPendingInput: activePendingApproval !== null || activePendingUserInput !== null,
+  });
   const activeContextWindow = useMemo(
     () =>
       deriveLatestContextWindowSnapshot(
@@ -3662,6 +3684,54 @@ export default function ChatView(props: ChatViewProps) {
   const activeWorkStartedAt =
     deriveActiveWorkStartedAt(activeActivityRun, activeRuntime, localDispatchStartedAt) ??
     runlessWorkStartedAt;
+  // Subscribes only for a Grok Bot thread; the read is shared with the bot's conversation view.
+  const grokBotNativeActivity = useEnvironmentQuery(
+    isGrokBotThread && activeThread
+      ? grokBotsReadQuery({
+          environmentId: activeThread.environmentId,
+          input: { botId: activeThread.modelSelection.model },
+        })
+      : null,
+  ).data?.runtimeActivity;
+  // Secret questions the bot asks in its main chat. Only the open canonical bot thread polls.
+  const grokBotSecretTarget = grokBotSecretChatTarget({
+    thread: activeThread ?? null,
+    canOperate: canOperateThread,
+    loading: threadDetailLoading,
+  });
+  const grokBotSecretQuery = useEnvironmentQuery(
+    grokBotSecretTarget === null
+      ? null
+      : grokBotsSecretPendingQuery({
+          environmentId: grokBotSecretTarget.environmentId,
+          input: { botId: grokBotSecretTarget.botId, sessionId: GROK_BOT_MAIN_SESSION_ID },
+        }),
+  );
+  const grokBotSecretRequests = grokBotSecretQuery.data?.requests ?? [];
+  // The managed run stays unsettled until its own events say so. A fresh native idle
+  // reading after the run started means the bot has stopped, so the timeline stops
+  // showing Thinking and the status line says what we are waiting on.
+  const isAwaitingGrokBotCompletion = deriveGrokBotAwaitingCompletion({
+    isGrokBotThread,
+    phase,
+    hasPendingInput: activePendingApproval !== null || activePendingUserInput !== null,
+    runStartedAtMs: activeWorkStartedAt === null ? null : Date.parse(activeWorkStartedAt),
+    nowMs: Date.now(),
+    nativeActivity: grokBotNativeActivity,
+  });
+  // A native reading goes stale on its own clock. The roster poll re-renders only when its data
+  // changes, so a quiet idle bot would otherwise keep the completion label past its freshness.
+  const [, recheckGrokBotFreshness] = useState(0);
+  const grokBotStaleAtMs = grokBotNativeActivity?.staleAtMs;
+  useEffect(() => {
+    if (!isGrokBotThread || grokBotStaleAtMs === undefined) return;
+    // One extra millisecond keeps the timer from firing just before the reading goes stale.
+    const timeout = window.setTimeout(
+      () => recheckGrokBotFreshness((tick) => tick + 1),
+      Math.max(0, grokBotStaleAtMs - Date.now()) + 1,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [grokBotStaleAtMs, isGrokBotThread]);
   // Server-side workspace preparation: unlike the local-dispatch flag this
   // survives reloads and shows on remote viewers of the same thread.
   const activeRunPreparing = activeActivityRun?.status === "preparing";
@@ -4292,24 +4362,31 @@ export default function ChatView(props: ChatViewProps) {
           providerSubagentModels,
           reportedModelSelection,
         );
-  const mountComposerContextStrip = shouldShowComposerContextStrip({
-    isDraftHeroState,
-    persistInActiveThreads: settings.persistComposerContextStrip,
-    hasActiveProject: activeProject !== null && !showProviderSubagentBar,
-    isGitRepo,
-    showEnvironmentIndicator: showComposerEnvironmentIndicator,
-    hostsRestingComposerControls: routeKind === "server",
-  });
-  const showComposerContextStrip = shouldShowComposerContextStrip({
-    isDraftHeroState,
-    persistInActiveThreads: settings.persistComposerContextStrip,
-    hasActiveProject: activeProject !== null && !showProviderSubagentBar,
-    isGitRepo,
-    showEnvironmentIndicator: showComposerEnvironmentIndicator,
-    hostsRestingComposerControls: routeKind === "server" && restingComposerControlsVisible,
-  });
+  const mountComposerContextStrip =
+    !isGrokBotThread &&
+    shouldShowComposerContextStrip({
+      isDraftHeroState,
+      persistInActiveThreads: settings.persistComposerContextStrip,
+      hasActiveProject: activeProject !== null && !showProviderSubagentBar,
+      isGitRepo,
+      showEnvironmentIndicator: showComposerEnvironmentIndicator,
+      hostsRestingComposerControls: routeKind === "server",
+    });
+  const showComposerContextStrip =
+    !isGrokBotThread &&
+    shouldShowComposerContextStrip({
+      isDraftHeroState,
+      persistInActiveThreads: settings.persistComposerContextStrip,
+      hasActiveProject: activeProject !== null && !showProviderSubagentBar,
+      isGitRepo,
+      showEnvironmentIndicator: showComposerEnvironmentIndicator,
+      hostsRestingComposerControls: routeKind === "server" && restingComposerControlsVisible,
+    });
   const mountComposerModelStrip =
-    routeKind === "server" && !mountComposerContextStrip && !showProviderSubagentBar;
+    !isGrokBotThread &&
+    routeKind === "server" &&
+    !mountComposerContextStrip &&
+    !showProviderSubagentBar;
   const showComposerModelStrip = mountComposerModelStrip && restingComposerControlsVisible;
   const terminalShortcutLabelOptions = useMemo(
     () => ({
@@ -7700,6 +7777,10 @@ export default function ChatView(props: ChatViewProps) {
         actionLabel="Dismiss"
         onAction={acknowledgeActiveThreadWoke}
       />
+    ) : isAwaitingGrokBotInput ? (
+      <ThreadStatusLine icon={<MessageCircleQuestionIcon />} label="Awaiting input" />
+    ) : isAwaitingGrokBotCompletion ? (
+      <ThreadStatusLine icon={<HourglassIcon />} label="Waiting for GrokBot completion" />
     ) : null;
   }, [
     acknowledgeActiveThreadWoke,
@@ -7711,6 +7792,8 @@ export default function ChatView(props: ChatViewProps) {
     canOperateThread,
     handleUnsettleActiveThread,
     handleUnsnoozeActiveThread,
+    isAwaitingGrokBotCompletion,
+    isAwaitingGrokBotInput,
     isUnsettling,
     isUnsnoozing,
     nowMinute,
@@ -8022,6 +8105,7 @@ export default function ChatView(props: ChatViewProps) {
 
   useEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
+      if (eventPathContainsSelector(event, "[data-grok-bot-computer]")) return;
       if (preventRepeatedTerminalCloseShortcut(event, keybindings)) {
         event.stopPropagation();
         return;
@@ -9331,11 +9415,18 @@ export default function ChatView(props: ChatViewProps) {
       resumeCompactionTokens !== null &&
       !keepFullHistory &&
       messageTextForSend.toLowerCase() !== "/compact";
-    const turnDispatchMode = compactBeforeSend || sendQueuesBehindSetup ? "queue" : dispatchMode;
+    // Once setup finishes, a GrokBot send restarts an active run or starts an idle turn.
+    const sendDispatchMode = resolveGrokBotSendDispatchMode({
+      isGrokBotThread,
+      phase,
+      dispatchMode,
+    });
+    const turnDispatchMode =
+      compactBeforeSend || sendQueuesBehindSetup ? "queue" : sendDispatchMode;
     const shouldQueueBehindActiveRun =
       compactBeforeSend ||
       sendQueuesBehindSetup ||
-      (phase === "running" && dispatchMode === "queue");
+      (phase === "running" && sendDispatchMode === "queue");
     const outgoingMessageText = formatOutgoingPrompt({
       provider: ctxSelectedProvider,
       model: ctxSelectedModel,
@@ -9843,7 +9934,7 @@ export default function ChatView(props: ChatViewProps) {
         streaming: false,
         ...(shouldQueueBehindActiveRun
           ? { inputIntent: "queued_turn" as const }
-          : phase === "running" && dispatchMode === "steer"
+          : phase === "running" && sendDispatchMode === "steer"
             ? { inputIntent: "steer" as const }
             : {}),
       },
@@ -11127,6 +11218,12 @@ export default function ChatView(props: ChatViewProps) {
       />
     ) : renderedRightPanelSurface?.kind === "pull-requests" && activeThreadRef ? (
       <ThreadPullRequestsPanel threadRef={activeThreadRef} />
+    ) : renderedRightPanelSurface?.kind === "grok-computer" && isGrokBotThread ? (
+      <GrokBotComputerPanel
+        key={`${activeThread.environmentId}:${activeThread.modelSelection.model}`}
+        environmentId={activeThread.environmentId}
+        botId={activeThread.modelSelection.model}
+      />
     ) : renderedRightPanelSurface?.kind === "device" ? (
       <Suspense fallback={null}>
         <DevicePanel
@@ -11382,6 +11479,12 @@ export default function ChatView(props: ChatViewProps) {
             parentThreadLink={parentThreadLink}
             onOpenThread={onOpenRelatedThread}
             rightPanelOpen={inlineRightPanelOwnsTitleBar}
+            grokBotId={isGrokBotThread ? activeThread.modelSelection.model : null}
+            computerOpen={activeRightPanelKind === "grok-computer"}
+            onToggleComputer={() => {
+              if (activeThreadRef === null) return;
+              useRightPanelStore.getState().toggle(activeThreadRef, "grok-computer");
+            }}
             onNewThreadInProject={handleNewThreadInActiveProject}
             {...(activeDraftLogicalProjectKey
               ? { onOpenProjectSettings: handleOpenDraftProjectSettings }
@@ -11459,7 +11562,12 @@ export default function ChatView(props: ChatViewProps) {
                       ...(activeProject ? { onRunShellCommand: runShellCommand } : {}),
                     }
                   : {})}
-                isWorking={!paintOnlyDisplayedTimeline && isWorking}
+                isWorking={
+                  !paintOnlyDisplayedTimeline &&
+                  isWorking &&
+                  !isAwaitingGrokBotInput &&
+                  !isAwaitingGrokBotCompletion
+                }
                 runlessWorkActive={runlessWorkStartedAt !== null}
                 activeTurnInProgress={
                   !paintOnlyDisplayedTimeline && (isWorking || !latestRunSettled)
@@ -11498,6 +11606,7 @@ export default function ChatView(props: ChatViewProps) {
                 activeThreadEnvironmentId={
                   displayedThreadRef?.environmentId ?? activeThread.environmentId
                 }
+                isGrokBotThread={!paintOnlyDisplayedTimeline && isGrokBotThread}
                 routeThreadKey={displayedTimelineKey}
                 displayThreadKey={displayedTimelineKey}
                 onOpenTurnDiff={paintOnlyDisplayedTimeline ? noopHeldTurnDiff : onOpenTurnDiff}
@@ -11613,6 +11722,14 @@ export default function ChatView(props: ChatViewProps) {
                       </div>
                     </div>
                   ) : null}
+                  {grokBotSecretTarget === null ? null : (
+                    <GrokBotSecureInputPanel
+                      key={`secure:${activeThreadId}`}
+                      environmentId={grokBotSecretTarget.environmentId}
+                      botId={grokBotSecretTarget.botId}
+                      requests={grokBotSecretRequests}
+                    />
+                  )}
                   <div
                     ref={draftHeroTransition.composerAnchorRef}
                     className="relative z-10"
@@ -11623,7 +11740,9 @@ export default function ChatView(props: ChatViewProps) {
                     }
                   >
                     <ComposerSurface.Shell
-                      contextStrip={showComposerContextStrip || showComposerModelStrip}
+                      contextStrip={
+                        !isGrokBotThread && (showComposerContextStrip || showComposerModelStrip)
+                      }
                     >
                       <ComposerSurface.Host
                         inert={isSavingQueuedEdit}
@@ -11712,7 +11831,7 @@ export default function ChatView(props: ChatViewProps) {
                               }
                               isPreparingWorktree={isPreparingWorktree && !sendQueuesBehindSetup}
                               queuedRunsControl={
-                                isServerThread && activeThread ? (
+                                isServerThread && activeThread && !isGrokBotThread ? (
                                   <QueuedRunsControl
                                     ref={queuedRunsControlRef}
                                     steerShortcutLabel={shortcutLabelForCommand(
@@ -12038,6 +12157,8 @@ export default function ChatView(props: ChatViewProps) {
           onAddFiles={addFilesSurface}
           onAddPullRequest={addPullRequestSurface}
           onAddPullRequests={addPullRequestsSurface}
+          onAddComputer={() => useRightPanelStore.getState().open(activeThreadRef, "grok-computer")}
+          computerAvailable={isGrokBotThread}
           onAddDevice={addDeviceSurface}
           browserAvailable={canOperatePreview && browserAvailable}
           terminalAvailable={activeProject !== null && canOperateTerminal}
@@ -12097,6 +12218,10 @@ export default function ChatView(props: ChatViewProps) {
             onAddFiles={addFilesSurface}
             onAddPullRequest={addPullRequestSurface}
             onAddPullRequests={addPullRequestsSurface}
+            onAddComputer={() =>
+              useRightPanelStore.getState().open(activeThreadRef, "grok-computer")
+            }
+            computerAvailable={isGrokBotThread}
             onAddDevice={addDeviceSurface}
             browserAvailable={canOperatePreview && browserAvailable}
             terminalAvailable={activeProject !== null && canOperateTerminal}

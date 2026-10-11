@@ -68,6 +68,7 @@ import {
   COMPOSER_DRAFT_STORAGE_KEY,
   clearComposerDraftsEnvironment,
   composerDraftHasUserContent,
+  composerTargetKey,
   beginBackgroundDraftSubmissionByRef,
   clearBackgroundDraftSubmissionByRef,
   finalizePromotedDraftThreadByRef,
@@ -3565,5 +3566,67 @@ describe("composerDraftStore attachment references", () => {
     expect(merged.draftsByThreadKey[threadKeyFor(threadId, TEST_ENVIRONMENT_ID)]?.prompt).toBe(
       prompt,
     );
+  });
+});
+
+describe("composerDraftStore grok-bot native thread isolation", () => {
+  const botThreadId = ThreadId.make("grok-bot:9f2c7a1b");
+  const localBotRef = scopeThreadRef(TEST_ENVIRONMENT_ID, botThreadId);
+  const remoteBotRef = scopeThreadRef(OTHER_TEST_ENVIRONMENT_ID, botThreadId);
+
+  beforeEach(resetComposerDraftStore);
+  afterEach(resetComposerDraftStore);
+
+  it("keeps files and images on the destination grok-bot thread across environments", () => {
+    const store = useComposerDraftStore.getState();
+    const originalRevokeObjectUrl = URL.revokeObjectURL;
+    const revokeSpy = vi.fn<(url: string) => void>();
+    URL.revokeObjectURL = revokeSpy;
+
+    try {
+      expect(composerTargetKey(localBotRef)).toBe(`${TEST_ENVIRONMENT_ID}:${botThreadId}`);
+      expect(composerTargetKey(remoteBotRef)).toBe(`${OTHER_TEST_ENVIRONMENT_ID}:${botThreadId}`);
+
+      store.addFiles(localBotRef, [makeFile("bot-file-local")]);
+      store.addImages(localBotRef, [
+        makeImage({ id: "bot-img-local", previewUrl: "blob:bot-local" }),
+      ]);
+      store.setPrompt(localBotRef, "local bot draft");
+      store.setFileUpload(localBotRef, "bot-file-local", TEST_ENVIRONMENT_ID, "pending-bot-local");
+      store.addFiles(remoteBotRef, [makeFile("bot-file-remote")]);
+      store.setPrompt(remoteBotRef, "remote bot draft");
+      store.setFileUpload(
+        remoteBotRef,
+        "bot-file-remote",
+        OTHER_TEST_ENVIRONMENT_ID,
+        "pending-bot-remote",
+      );
+
+      const localDraft = store.getComposerDraft(localBotRef);
+      const remoteDraft = store.getComposerDraft(remoteBotRef);
+      expect(localDraft?.files.map((file) => file.id)).toEqual(["bot-file-local"]);
+      expect(localDraft?.files[0]?.uploadEnvironmentId).toBe(TEST_ENVIRONMENT_ID);
+      expect(localDraft?.images.map((image) => image.id)).toEqual(["bot-img-local"]);
+      expect(remoteDraft?.files.map((file) => file.id)).toEqual(["bot-file-remote"]);
+      expect(remoteDraft?.files[0]?.uploadEnvironmentId).toBe(OTHER_TEST_ENVIRONMENT_ID);
+      expect(remoteDraft?.images).toEqual([]);
+      expect(composerDraftHasUserContent(localDraft)).toBe(true);
+      expect(composerDraftHasUserContent(remoteDraft)).toBe(true);
+
+      clearComposerDraftsEnvironment(TEST_ENVIRONMENT_ID);
+
+      const next = useComposerDraftStore.getState();
+      expect(next.getComposerDraft(localBotRef)).toBeNull();
+      expect(next.getComposerDraft(remoteBotRef)?.prompt).toBe("remote bot draft");
+      expect(next.getComposerDraft(remoteBotRef)?.files.map((file) => file.id)).toEqual([
+        "bot-file-remote",
+      ]);
+      expect(next.getComposerDraft(remoteBotRef)?.files[0]?.uploadEnvironmentId).toBe(
+        OTHER_TEST_ENVIRONMENT_ID,
+      );
+      expect(revokeSpy).toHaveBeenCalledWith("blob:bot-local");
+    } finally {
+      URL.revokeObjectURL = originalRevokeObjectUrl;
+    }
   });
 });

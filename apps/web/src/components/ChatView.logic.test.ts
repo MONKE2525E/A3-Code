@@ -1852,6 +1852,12 @@ describe("shouldRefocusComposerOnWindowFocus", () => {
     expect(shouldRefocusComposerOnWindowFocus(element("BUTTON", { within: "dialog" }))).toBe(false);
     expect(shouldRefocusComposerOnWindowFocus(element("BUTTON", { within: "-popup" }))).toBe(false);
   });
+
+  it("leaves the remote computer canvas focused", () => {
+    expect(
+      shouldRefocusComposerOnWindowFocus(element("CANVAS", { within: "data-grok-bot-computer" })),
+    ).toBe(false);
+  });
 });
 
 describe("checkout Git memory", () => {

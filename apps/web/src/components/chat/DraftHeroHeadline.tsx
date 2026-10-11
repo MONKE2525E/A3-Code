@@ -14,6 +14,7 @@ import { useNewThreadHandler } from "~/hooks/useHandleNewThread";
 import { useScratchProject } from "~/hooks/useScratchProject";
 import { useClientSettings } from "~/hooks/useSettings";
 import { hasExplicitComposerModelSelection } from "~/lib/chatThreadActions";
+import { omitGrokBotModelSelection } from "~/providerInstances";
 import {
   deriveLogicalProjectKeyFromSettings,
   selectProjectGroupingSettings,
@@ -234,13 +235,17 @@ export function DraftHeroHeadline({
     );
     if (!hasExplicitComposerModelSelection(currentDraft)) {
       applyStickyState(draftId);
-      const environmentSettings = environments.find(
+      const environmentConfig = environments.find(
         (environment) => environment.environmentId === project.environmentId,
-      )?.serverConfig?.settings;
-      const defaultModelSelection = environmentSettings
-        ? resolveProjectSettings(environmentSettings, project.id, project).settings
-            .defaultModelSelection
-        : project.defaultModelSelection;
+      )?.serverConfig;
+      const environmentSettings = environmentConfig?.settings;
+      const defaultModelSelection = omitGrokBotModelSelection(
+        environmentSettings
+          ? (resolveProjectSettings(environmentSettings, project.id, project).settings
+              .defaultModelSelection ?? null)
+          : (project.defaultModelSelection ?? null),
+        environmentConfig?.providers ?? [],
+      );
       if (defaultModelSelection) {
         setModelSelection(draftId, defaultModelSelection, {
           replaceOptions: true,

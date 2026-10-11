@@ -41,6 +41,7 @@ import { getCustomModelOptionsByInstance } from "../../modelSelection";
 import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
+  omitGrokBotProviderEntries,
   sortProviderInstanceEntries,
 } from "../../providerInstances";
 import { usePrimaryCloudLinkState } from "../../cloud/primaryCloudLinkState";
@@ -59,6 +60,9 @@ import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { WorktreeBaseBranchPicker } from "../WorktreeBaseBranchPicker";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
+import { GrokBotNativeRoutines } from "../grokBot/GrokBotNativeRoutines";
+import { resolveGrokBotSelectedEnvironment } from "../grokBot/grokBotPresentation";
+import { useSelectedGrokBotEnvironmentId } from "../grokBot/useGrokBotEnvironment";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import { readEnvironmentScope } from "~/state/session";
 import { useSettingsScope } from "./SettingsScopeContext";
@@ -251,6 +255,17 @@ export function ScheduledTasksSettings(target: {
   const canCreate = useAtomValue(
     serverEnvironment.upsertScheduledTask.permissionAtom(defaultEnvironment?.environmentId ?? null),
   );
+  // Grok Bot routines are account-wide, so a project or checkout scope would only hide them wrongly.
+  const grokBotEnvironment = resolveGrokBotSelectedEnvironment({
+    selectedEnvironmentId: useSelectedGrokBotEnvironmentId(),
+    connectedEnvironmentIds: connectedEnvironments.map((entry) => entry.environmentId),
+  });
+  const nativeRoutinesEnvironmentId =
+    grokBotEnvironment.kind === "environment" &&
+    (scope.kind === "all" || scope.kind === "environment") &&
+    scope.environmentIds.includes(grokBotEnvironment.environmentId)
+      ? grokBotEnvironment.environmentId
+      : null;
   return (
     <SettingsPageContainer>
       <SettingsSection
@@ -301,6 +316,9 @@ export function ScheduledTasksSettings(target: {
                 onEdit={openForEdit}
               />
             ))}
+            {nativeRoutinesEnvironmentId ? (
+              <GrokBotNativeRoutines environmentId={nativeRoutinesEnvironmentId} />
+            ) : null}
           </div>
         )}
       </SettingsSection>
@@ -824,11 +842,13 @@ function ScheduledTaskEditorDialog({
   // project's effective enablement, not just the machine's.
   const instanceEntries = useMemo(
     () =>
-      sortProviderInstanceEntries(
-        applyProviderInstanceSettings(
-          deriveProviderInstanceEntries(providers),
-          settings,
-          selectedProject?.id ?? null,
+      omitGrokBotProviderEntries(
+        sortProviderInstanceEntries(
+          applyProviderInstanceSettings(
+            deriveProviderInstanceEntries(providers),
+            settings,
+            selectedProject?.id ?? null,
+          ),
         ),
       ),
     [providers, settings, selectedProject?.id],

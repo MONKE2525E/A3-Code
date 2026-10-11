@@ -62,6 +62,29 @@ const linkedPullRequest = {
   url: "https://github.com/pingdotgg/t3code/pull/42",
 };
 
+describe("Grok Bot work threads stay out of thread lists", () => {
+  const threads = [
+    makeThread({ id: ThreadId.make("ordinary"), title: "Ordinary" }),
+    makeThread({ id: ThreadId.make("grok-bot:9f2c"), title: "Bot work" }),
+  ];
+
+  it("omits them from the list layout and the reorderable active section", () => {
+    expect(
+      buildThreadListV2Items({
+        threads,
+        environmentId: null,
+        searchQuery: "",
+        now: NOW,
+      }).items.map((item) => item.thread.id),
+    ).toEqual(["ordinary"]);
+    expect(
+      getThreadListV2OrderedSection({ threads, section: "active", now: NOW }).map(
+        (thread) => thread.id,
+      ),
+    ).toEqual(["ordinary"]);
+  });
+});
+
 describe("resolveThreadListV2SnoozeMenuSelection", () => {
   it("accepts a displayed evening preset while its wake time is still future", () => {
     const menuOpenedAt = new Date(2026, 4, 8, 16, 59, 30);

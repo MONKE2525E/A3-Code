@@ -4,6 +4,9 @@ import {
   type ProviderSkillSourceKind,
 } from "@t3tools/client-runtime/providerSkills";
 import {
+  type EnvironmentId,
+  type GrokBotComposerBot,
+  type GrokBotComposerConnector,
   type ProjectEntry,
   type ProviderDriverKind,
   type PullRequestContextMetadata,
@@ -29,6 +32,8 @@ import { Command, CommandGroup, CommandItem, CommandList } from "../ui/command";
 import { PierreEntryIcon } from "./PierreEntryIcon";
 import { ComposerBanner } from "./ComposerBanner";
 import { resolvePullRequestState } from "../pullRequest/pullRequestPresentation";
+import { GrokBotAvatar } from "../grokBot/GrokBotAvatar";
+import { GrokBotConnectorIcon } from "../grokBot/GrokBotConnectorIcon";
 
 export type ComposerCommandItem =
   | {
@@ -75,15 +80,33 @@ export type ComposerCommandItem =
       thread: ScopedThreadRef;
       label: string;
       description: string;
+    }
+  | {
+      id: string;
+      type: "grok-bot";
+      bot: GrokBotComposerBot;
+      label: string;
+      description: string;
+    }
+  | {
+      id: string;
+      type: "grok-connector";
+      connector: GrokBotComposerConnector;
+      logoUrl: string | null;
+      label: string;
+      description: string;
     };
 
 export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
   listId: string;
+  environmentId?: EnvironmentId;
   items: ComposerCommandItem[];
   resolvedTheme: "light" | "dark";
   isLoading: boolean;
   triggerKind: ComposerTriggerKind | null;
   emptyStateText?: string;
+  loadingStateText?: string;
+  listAriaLabel?: string;
   activeItemId: string | null;
   onHighlightedItemChange: (itemId: string | null) => void;
   onSelect: (item: ComposerCommandItem) => void;
@@ -116,7 +139,10 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
         {props.items.length > 0 ? (
           <CommandList
             id={props.listId}
-            aria-label={props.triggerKind ? LISTBOX_LABEL_BY_TRIGGER[props.triggerKind] : undefined}
+            aria-label={
+              props.listAriaLabel ??
+              (props.triggerKind ? LISTBOX_LABEL_BY_TRIGGER[props.triggerKind] : undefined)
+            }
             className="max-h-72 min-h-0 scroll-pb-6"
           >
             <CommandGroup>
@@ -125,6 +151,7 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
                   key={item.id}
                   optionId={composerSuggestionOptionId(props.listId, item.id)}
                   item={item}
+                  {...(props.environmentId ? { environmentId: props.environmentId } : {})}
                   triggerKind={props.triggerKind}
                   resolvedTheme={props.resolvedTheme}
                   isActive={props.activeItemId === item.id}
@@ -138,11 +165,12 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
           <div className="px-5 pt-3.5 pb-7">
             <p className="text-secondary-label text-xs">
               {props.isLoading
-                ? props.triggerKind === "skill"
-                  ? "Searching workspace skills..."
-                  : props.triggerKind === "pull-request"
-                    ? "Finding pull request..."
-                    : "Searching workspace files..."
+                ? (props.loadingStateText ??
+                  (props.triggerKind === "skill"
+                    ? "Searching workspace skills..."
+                    : props.triggerKind === "pull-request"
+                      ? "Finding pull request..."
+                      : "Searching workspace files..."))
                 : (props.emptyStateText ??
                   (props.triggerKind === "skill"
                     ? "No skills found. Try / to browse provider commands."
@@ -159,6 +187,7 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
 
 const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
   optionId: string;
+  environmentId?: EnvironmentId;
   item: ComposerCommandItem;
   triggerKind: ComposerTriggerKind | null;
   resolvedTheme: "light" | "dark";
@@ -199,6 +228,21 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
       ) : null}
       {props.item.type === "thread" ? (
         <MessagesSquareIcon aria-hidden="true" className="size-4 shrink-0 text-secondary-label" />
+      ) : null}
+      {props.item.type === "grok-bot" ? (
+        <GrokBotAvatar
+          bot={{
+            ...props.item.bot,
+            avatarShape: props.item.bot.avatarShape ?? "",
+            avatarColor: props.item.bot.avatarColor ?? "",
+          }}
+          size="sm"
+          restingPose="upright"
+          {...(props.environmentId ? { environmentId: props.environmentId } : {})}
+        />
+      ) : null}
+      {props.item.type === "grok-connector" ? (
+        <GrokBotConnectorIcon logoUrl={props.item.logoUrl} />
       ) : null}
       {pullRequestPresentation ? (
         <pullRequestPresentation.Icon

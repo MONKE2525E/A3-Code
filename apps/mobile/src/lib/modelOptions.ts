@@ -217,6 +217,10 @@ export function resolveSelectableModelSelection(
   );
   const driver =
     provider?.driver ?? config.settings?.providerInstances[selection.instanceId]?.driver;
+  // Grok Bot instances serve bot threads only; a stale bot selection never becomes a new task's provider.
+  if (driver === "grok-bot") {
+    return null;
+  }
   if (driver === "antigravity") {
     return isProjectDisabledOverride(config, selection.instanceId, projectId) ? null : selection;
   }
@@ -283,6 +287,7 @@ export function buildModelOptions(
       !isProviderEnabledForProject(config, provider, projectId) ||
       !provider.installed ||
       provider.auth.status === "unauthenticated" ||
+      provider.driver === "grok-bot" ||
       (provider.driver === "antigravity" && provider.availability === "unavailable")
     ) {
       continue;

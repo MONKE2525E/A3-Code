@@ -1,4 +1,4 @@
-/** Grok Bot's avatar vocabulary: 25 bodies and 11 colors. The engine draws them. */
+/** Every body the engine can draw. Bots keep any of these; other shape names fall back by bot id. */
 export const GROK_BOT_AVATAR_KINDS = [
   "blob",
   "pebble",
@@ -25,8 +25,59 @@ export const GROK_BOT_AVATAR_KINDS = [
   "heart",
   "house",
   "star",
-] as const;
+] as const satisfies readonly string[];
 export type GrokBotAvatarKind = (typeof GROK_BOT_AVATAR_KINDS)[number];
+
+/** The shape grid in the Grok Bot character editor, five per row. */
+export const GROK_BOT_PICKER_SHAPES = [
+  "blob",
+  "cloud",
+  "square",
+  "sparkle",
+  "clover",
+  "heart",
+  "flower",
+  "teardrop",
+  "tablet",
+  "wedge",
+  "house",
+  "star",
+  "hex",
+] as const satisfies readonly GrokBotAvatarKind[];
+
+/** The shapes `gbot bots create` accepts. Keep in step with the server's CLI_CREATE_SHAPES. */
+export const GROK_BOT_CREATE_SHAPES = [
+  "blob",
+  "pebble",
+  "bean",
+  "egg",
+  "squircle",
+  "tablet",
+  "capsule",
+  "cylinder",
+  "hex",
+  "gem",
+  "crystal",
+  "wedge",
+  "shield",
+  "dome",
+  "arch",
+  "cloud",
+  "teardrop",
+  "leaf",
+] as const satisfies readonly GrokBotAvatarKind[];
+
+/** Bots with an unknown shape name get one of these, chosen by bot id. */
+export const GROK_BOT_UNKNOWN_SHAPE_KINDS = [
+  "blob",
+  "pebble",
+  "squircle",
+  "tablet",
+  "wedge",
+  "hex",
+  "cloud",
+  "teardrop",
+] as const satisfies readonly GrokBotAvatarKind[];
 
 export const GROK_BOT_AVATAR_COLORS = {
   black: "#000000",
@@ -41,23 +92,9 @@ export const GROK_BOT_AVATAR_COLORS = {
   magenta: "#ff309b",
   gray: "#777777",
 } as const;
+export type GrokBotAvatarColor = keyof typeof GROK_BOT_AVATAR_COLORS;
 
-/** Legacy and informal names that roster data may still use. */
-export const GROK_BOT_AVATAR_KIND_ALIASES: Readonly<Record<string, GrokBotAvatarKind>> = {
-  circle: "blob",
-  round: "blob",
-  oval: "blob",
-  triangle: "wedge",
-  pyramid: "wedge",
-  cone: "wedge",
-  puff: "cloud",
-  diamond: "gem",
-  rhombus: "gem",
-};
-
-export const GROK_BOT_AVATAR_COLOR_ALIASES: Readonly<Record<string, string>> = {
-  purple: GROK_BOT_AVATAR_COLORS.violet,
-  pink: GROK_BOT_AVATAR_COLORS.magenta,
-  grey: GROK_BOT_AVATAR_COLORS.gray,
-  teal: GROK_BOT_AVATAR_COLORS.cyan,
-};
+/** Colors an unknown color name can resolve to; black is reserved for explicit choice. */
+export const GROK_BOT_FALLBACK_COLORS = (
+  Object.keys(GROK_BOT_AVATAR_COLORS) as GrokBotAvatarColor[]
+).filter((color) => color !== "black");

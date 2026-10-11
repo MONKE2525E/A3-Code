@@ -94,6 +94,24 @@ export const loadCaller = Effect.fn("mcp.loadCaller")(function* () {
       message: "The calling thread was not found.",
     });
   }
+  if (scope.thread.remoteRun !== undefined) {
+    const projection = yield* threads
+      .getProjectThreadRecords({ projectId: caller.projectId, threadId: caller.id }, ["runs"], {
+        runIds: [scope.thread.remoteRun.runId],
+      })
+      .pipe(Effect.mapError(unavailable));
+    const activeRun = ThreadManagement.latestActiveRun(projection);
+    if (
+      caller.archivedAt !== null ||
+      caller.activeRunId !== scope.thread.remoteRun.runId ||
+      !McpInvocationContext.matchesRemoteRun(scope.thread, activeRun)
+    ) {
+      return yield* new OrchestratorMcpFailure({
+        code: "parent_not_active",
+        message: "The calling provider no longer owns this thread run attempt.",
+      });
+    }
+  }
   return {
     scope,
     threads,

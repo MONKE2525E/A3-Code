@@ -5,6 +5,7 @@ import type {
   ResolvedKeybindingsConfig,
   ThreadId,
 } from "@t3tools/contracts";
+import { isGrokBotBackingThread } from "@t3tools/contracts";
 
 import type { DraftId } from "../../composerDraftStore";
 import { useT3ProjectFileScripts } from "../../hooks/useT3ProjectFileScripts";
@@ -20,6 +21,7 @@ import { ThreadDetailsCard } from "./ThreadDetailsCard";
 import { OpenInPicker } from "./OpenInPicker";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 import { ThreadAutomationsPanel } from "./ThreadAutomationsPanel";
+import { ThreadGrokBotRoutinesPanel } from "./ThreadGrokBotRoutinesPanel";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 
 export interface ThreadDetailsPanelProps extends Pick<
@@ -174,6 +176,15 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
 
           {density === "full" && !props.draftId ? (
             <ThreadAutomationsPanel environmentId={props.environmentId} threadId={props.threadId} />
+          ) : null}
+
+          {density === "full" &&
+          !props.draftId &&
+          isGrokBotBackingThread({ id: props.threadId }) ? (
+            <ThreadGrokBotRoutinesPanel
+              environmentId={props.environmentId}
+              threadId={props.threadId}
+            />
           ) : null}
 
           {density === "full" && !props.draftId ? (

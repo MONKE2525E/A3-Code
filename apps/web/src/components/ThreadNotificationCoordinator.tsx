@@ -2,10 +2,13 @@ import { presentThreadShell } from "@t3tools/client-runtime/state/models";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import type { EnvironmentId, OrchestrationV2ThreadShell, ThreadId } from "@t3tools/contracts";
+import { isGrokBotBackingThread } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import {
   CircleAlertIcon,
   CircleCheckIcon,
+  MessageCircleIcon,
   MessageCircleQuestionIcon,
   ShieldQuestionIcon,
 } from "lucide-react";
@@ -14,6 +17,8 @@ import { useCallback, useEffect, useRef } from "react";
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import { useEnvironmentIds } from "../state/environments";
 import { environmentShell } from "../state/shell";
+import { grokBotsListQuery } from "../state/grokBots";
+import { useEnvironmentQuery } from "../state/query";
 import {
   hasDesktopNotifications,
   hasNotificationSound,
@@ -22,6 +27,7 @@ import {
   unlockNotificationAudio,
 } from "../threadNotifications";
 import { resolveSidebarThreadStatus } from "./Sidebar.logic";
+import { useSelectedGrokBotEnvironmentId } from "./grokBot/useGrokBotEnvironment";
 import { toastManager } from "./ui/toast";
 
 export function ThreadNotificationCoordinator() {
@@ -92,6 +98,8 @@ interface NotificationState {
   readonly raw: OrchestrationV2ThreadShell;
   readonly attention: string | null;
   readonly completion: number | null;
+  readonly messageAt: number;
+  readonly messageIds: ReadonlySet<string>;
 }
 
 function EnvironmentNotifications({
@@ -106,14 +114,22 @@ function EnvironmentNotifications({
   // stable, so this only rescans when a thread actually changed.
   const threads =
     shell.status === "live" && Option.isSome(shell.snapshot) ? shell.snapshot.value.threads : null;
+  const botRoster = useEnvironmentQuery(
+    threads?.some(isGrokBotBackingThread) ? grokBotsListQuery({ environmentId, input: {} }) : null,
+  ).data;
   const mode = useClientSettings((settings) => settings.notificationMode);
   const inAppNotificationsEnabled = useClientSettings(
     (settings) => settings.inAppNotificationsEnabled,
   );
   const navigate = useNavigate();
-  const { environmentId: activeEnvironmentId, threadId: activeThreadId } = useParams({
+  const {
+    environmentId: activeEnvironmentId,
+    threadId: activeThreadId,
+    botId: activeBotId,
+  } = useParams({
     strict: false,
   });
+  const selectedBotEnvironmentId = useSelectedGrokBotEnvironmentId();
   const previous = useRef(new Map<ThreadId, NotificationState>());
 
   useEffect(() => {
@@ -145,44 +161,103 @@ function EnvironmentNotifications({
         Number.isFinite(completedAt)
           ? completedAt
           : (prior?.completion ?? null);
-      next.set(thread.id, { raw: rawThread, attention, completion });
+      const nativeBot = isGrokBotBackingThread(rawThread);
+      const message = nativeBot ? rawThread.latestVisibleMessage : null;
+      const messageAt =
+        message === null ? null : DateTime.toEpochMillis(message.createdAt ?? message.updatedAt);
+      // Native history arrives after shell hydration. Its original timestamp
+      // keeps old imports and edited messages from becoming new-message alerts.
+      const watermark =
+        prior?.messageAt ?? Math.max(Date.now(), DateTime.toEpochMillis(rawThread.updatedAt));
+      const messageIds = prior?.messageIds ?? new Set<string>();
+      const newMessage =
+        message?.role === "assistant" &&
+        messageAt !== null &&
+        messageAt >= watermark &&
+        !messageIds.has(message.id);
+      next.set(thread.id, {
+        raw: rawThread,
+        attention,
+        completion,
+        messageAt: newMessage ? messageAt : watermark,
+        messageIds: newMessage
+          ? new Set(messageAt === watermark ? [...messageIds, message.id] : [message.id])
+          : messageIds,
+      });
       if (!prior || thread.archivedAt !== null) continue;
       const kind =
         attention && attention !== prior.attention
           ? "input"
-          : completion !== null && (prior.completion === null || completion > prior.completion)
-            ? "completion"
-            : null;
+          : newMessage
+            ? "message"
+            : !nativeBot &&
+                completion !== null &&
+                (prior.completion === null || completion > prior.completion)
+              ? "completion"
+              : null;
       if (!kind) continue;
+      if (
+        kind === "message" &&
+        botRoster?.find((bot) => bot.id === thread.modelSelection.model)?.notificationEnabled !==
+          true
+      )
+        continue;
+      const foreground = document.visibilityState === "visible" && document.hasFocus();
+      const activeThread =
+        (activeEnvironmentId === environmentId && activeThreadId === thread.id) ||
+        (nativeBot &&
+          selectedBotEnvironmentId === environmentId &&
+          activeBotId === thread.modelSelection.model);
+      if (kind === "message" && foreground && activeThread) continue;
+      const openThread = () => {
+        void navigate(
+          nativeBot
+            ? {
+                to: "/grok-bots/$botId",
+                params: { botId: thread.modelSelection.model },
+                search: { environmentId },
+              }
+            : {
+                to: "/$environmentId/$threadId",
+                params: { environmentId, threadId: thread.id },
+              },
+        );
+      };
       const title =
-        kind === "completion"
-          ? "Thread completed"
-          : status === "approval"
-            ? "Approval needed"
-            : status === "limited"
-              ? "Usage limit reached"
-              : status === "failed"
-                ? "Thread failed"
-                : "Input needed";
+        kind === "message"
+          ? "New message"
+          : kind === "completion"
+            ? "Thread completed"
+            : status === "approval"
+              ? "Approval needed"
+              : status === "limited"
+                ? "Usage limit reached"
+                : status === "failed"
+                  ? "Thread failed"
+                  : "Input needed";
       if (hasNotificationSound(mode)) {
-        void playNotificationSound(kind, () =>
+        void playNotificationSound(kind === "message" ? "completion" : kind, () =>
           hasNotificationSound(getClientSettings().notificationMode),
         );
       }
-      if (
-        inAppNotificationsEnabled &&
-        document.visibilityState === "visible" &&
-        document.hasFocus() &&
-        (activeEnvironmentId !== environmentId || activeThreadId !== thread.id)
-      ) {
+      if (inAppNotificationsEnabled && foreground && !activeThread) {
         const toastId = toastManager.add({
-          type: kind === "completion" ? "success" : status === "failed" ? "error" : "warning",
+          type:
+            kind === "message"
+              ? "info"
+              : kind === "completion"
+                ? "success"
+                : status === "failed"
+                  ? "error"
+                  : "warning",
           title,
           description: thread.title,
           data: {
             hideCopyButton: true,
             leadingIcon:
-              kind === "completion" ? (
+              kind === "message" ? (
+                <MessageCircleIcon aria-hidden className="size-4 text-info-foreground" />
+              ) : kind === "completion" ? (
                 <CircleCheckIcon aria-hidden className="size-4 text-success-foreground" />
               ) : status === "approval" ? (
                 <ShieldQuestionIcon aria-hidden className="size-4 text-warning-foreground" />
@@ -193,13 +268,10 @@ function EnvironmentNotifications({
               ),
           },
           actionProps: {
-            children: "Open thread",
+            children: nativeBot ? "Open chat" : "Open thread",
             onClick: () => {
               toastManager.close(toastId);
-              void navigate({
-                to: "/$environmentId/$threadId",
-                params: { environmentId, threadId: thread.id },
-              });
+              openThread();
             },
           },
         });
@@ -222,10 +294,7 @@ function EnvironmentNotifications({
         notification.addEventListener("click", () => {
           notification.close();
           window.focus();
-          void navigate({
-            to: "/$environmentId/$threadId",
-            params: { environmentId, threadId: thread.id },
-          });
+          openThread();
         });
       } catch {
         // Some browsers expose Notification but reject desktop presentation.
@@ -235,6 +304,9 @@ function EnvironmentNotifications({
   }, [
     activeEnvironmentId,
     activeThreadId,
+    botRoster,
+    activeBotId,
+    selectedBotEnvironmentId,
     environmentId,
     inAppNotificationsEnabled,
     mode,

@@ -21,8 +21,8 @@ export type SettingsPath =
   | "/settings/keybindings"
   | "/settings/snap-shot"
   | "/settings/providers"
+  | "/settings/marketplace"
   | "/settings/integrations"
-  | "/settings/grok-bots"
   | "/settings/scheduled-tasks"
   | "/settings/source-control"
   | "/settings/storage"
@@ -101,8 +101,8 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/keybindings": "Keybindings",
   "/settings/snap-shot": "SnapShots",
   "/settings/providers": "Providers",
+  "/settings/marketplace": "Marketplace",
   "/settings/integrations": "Integrations",
-  "/settings/grok-bots": "Grok Bots",
   "/settings/scheduled-tasks": "Scheduled Tasks",
   "/settings/source-control": "Source Control",
   "/settings/storage": "Storage",
@@ -1007,20 +1007,33 @@ export const SETTINGS_SEARCH_ITEMS = [
   {
     id: "grok-bots",
     title: "Grok Bots",
-    to: "/settings/grok-bots",
+    to: "/settings/providers",
+    targetId: "grok-bots-bridge",
     searchTerms: ["grok bot assistants featured pin hide chat"],
   },
   {
     id: "grok-bots-bridge",
     title: "Grok Bot connection",
-    to: "/settings/grok-bots",
+    to: "/settings/providers",
     searchTerms: ["setup install bridge sign in refresh session connect"],
   },
   {
     id: "grok-bots-editor",
     title: "Bot profile",
-    to: "/settings/grok-bots",
-    searchTerms: ["name label description notifications pin feature hide pull request github"],
+    to: "/settings/providers",
+    searchTerms: ["name label description notifications pin feature hide"],
+  },
+  {
+    id: "grok-bots-computer",
+    title: "Grok Bot computer",
+    to: "/settings/providers",
+    searchTerms: ["cloud computer update reset restore snapshot upgrade schedule"],
+  },
+  {
+    id: "grok-bots-marketplace",
+    title: "Grok Bot Marketplace",
+    to: "/settings/marketplace",
+    searchTerms: ["templates import bots browse featured creators categories"],
   },
   {
     id: "archive",
@@ -1044,8 +1057,8 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   // environment at any selection. Neither needs a particular scope to render.
   "/settings/keybindings": null,
   "/settings/providers": null,
+  "/settings/marketplace": null,
   "/settings/integrations": null,
-  "/settings/grok-bots": "environment",
   "/settings/source-control": "environment-defaults",
   "/settings/storage": "project-defaults",
   "/settings/connections": "connections",

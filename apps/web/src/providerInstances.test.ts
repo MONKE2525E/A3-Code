@@ -7,6 +7,7 @@ import {
   getDefaultProviderInstanceModel,
   isProviderInstancePickerReady,
   isProviderInstancePickerVisible,
+  omitGrokBotModelSelection,
   resolveDefaultProviderModelSelection,
   resolveProviderCatalogAvailability,
   resolveSelectableProviderInstance,
@@ -639,6 +640,64 @@ describe("resolveDefaultProviderModelSelection", () => {
         null,
       ),
     ).toBeNull();
+  });
+
+  it("never falls back to a ready Grok Bot instance for a stale bot selection", () => {
+    const providers = [
+      provider({
+        provider: ProviderDriverKind.make("grok-bot"),
+        instanceId: "grok-bot",
+        models: [model("bot-poteto", false, true)],
+      }),
+      provider({
+        provider: ProviderDriverKind.make("codex"),
+        instanceId: "codex",
+        models: [model("gpt-5.6", false, true)],
+      }),
+    ];
+
+    expect(
+      resolveDefaultProviderModelSelection(providers, {
+        instanceId: ProviderInstanceId.make("grok-bot"),
+        model: "bot-poteto",
+      }),
+    ).toEqual({ instanceId: "codex", model: "gpt-5.6" });
+    expect(resolveDefaultProviderModelSelection(providers, null)).toEqual({
+      instanceId: "codex",
+      model: "gpt-5.6",
+    });
+  });
+
+  it("returns no default when the only ready provider is a Grok Bot instance", () => {
+    expect(
+      resolveDefaultProviderModelSelection(
+        [
+          provider({
+            provider: ProviderDriverKind.make("grok-bot"),
+            instanceId: "grok-bot",
+          }),
+        ],
+        null,
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("omitGrokBotModelSelection", () => {
+  it("drops a Grok Bot selection and keeps an ordinary Grok CLI selection", () => {
+    const providers = [
+      provider({ provider: ProviderDriverKind.make("grok-bot"), instanceId: "grok-bot" }),
+      provider({ provider: ProviderDriverKind.make("grok"), instanceId: "grok" }),
+    ];
+
+    expect(
+      omitGrokBotModelSelection(
+        { instanceId: ProviderInstanceId.make("grok-bot"), model: "bot-poteto" },
+        providers,
+      ),
+    ).toBeNull();
+    const grokCli = { instanceId: ProviderInstanceId.make("grok"), model: "grok-4" };
+    expect(omitGrokBotModelSelection(grokCli, providers)).toBe(grokCli);
   });
 });
 

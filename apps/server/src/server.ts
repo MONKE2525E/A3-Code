@@ -1,3 +1,8 @@
+import * as GrokBotComputerService from "./grokBot/GrokBotComputerService.ts";
+import * as GrokBotSecretService from "./grokBot/GrokBotSecretService.ts";
+import * as GrokBotVoiceBackendLive from "./grokBot/voice/GrokBotVoiceBackendLive.ts";
+import * as GrokBotVoiceT3Bridge from "./grokBot/voiceRouting/GrokBotVoiceT3Bridge.ts";
+import * as GrokBotVoiceService from "./grokBot/voice/GrokBotVoiceService.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Clock from "effect/Clock";
@@ -61,6 +66,9 @@ import * as ProviderInstanceRegistryHydration from "./provider/ProviderInstanceR
 import * as ProjectSettingsOverrideSweep from "./provider/ProjectSettingsOverrideSweep.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
+import * as McpToolActivity from "./mcp/McpToolActivity.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as ThreadCommandExecutor from "./orchestration-v2/ThreadCommandExecutor.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
@@ -73,6 +81,19 @@ import * as ServerBrowserStream from "./preview/ServerBrowserStream.ts";
 import * as PreviewBrowser from "./preview/PreviewBrowser.ts";
 import * as ProcessRunner from "./processRunner.ts";
 import * as GrokBotService from "./grokBot/GrokBotService.ts";
+import * as GrokBotNativeService from "./grokBot/GrokBotNativeService.ts";
+import * as GrokBotNativeRuntimeService from "./grokBot/GrokBotNativeRuntimeService.ts";
+import * as GrokBotManagedBindingLive from "./grokBot/GrokBotManagedBindingLive.ts";
+import * as GrokBotTurnCompletion from "./grokBot/GrokBotTurnCompletion.ts";
+import * as ManagedEndpointAddress from "./cloud/ManagedEndpointAddress.ts";
+import * as GrokBotManagedStateStore from "./grokBot/GrokBotManagedStateStore.ts";
+import * as GrokBotMcpAuthority from "./grokBot/GrokBotMcpAuthority.ts";
+import * as McpRemoteCredentialStore from "./mcp/McpRemoteCredentialStore.ts";
+import * as GrokBotOrchestratorService from "./grokBot/GrokBotOrchestratorService.ts";
+import * as GrokBotThreadService from "./grokBot/GrokBotThreadService.ts";
+import * as GrokBotRoutineService from "./grokBot/GrokBotRoutineService.ts";
+import * as GrokBotMarketplaceService from "./grokBot/GrokBotMarketplaceService.ts";
+import * as GrokBotComposerResourceService from "./grokBot/GrokBotComposerResourceService.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
@@ -133,6 +154,7 @@ import {
   RELAY_URL_SECRET,
 } from "./cloud/config.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+import * as GrokBotAvatarEngine from "./grokBot/GrokBotAvatarEngine.ts";
 import * as CloudHttp from "./cloud/http.ts";
 import * as CloudLink from "./cloud/CloudLink.ts";
 import { pendingServiceUpdateExists } from "./cloud/updateHandoff.ts";
@@ -549,7 +571,9 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
 );
 
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
-  GrokBotService.layer.pipe(
+  GrokBotOrchestratorService.layer.pipe(
+    Layer.provideMerge(GrokBotService.layer),
+    Layer.provide(GrokBotNativeService.layer),
     Layer.provide(layerPullRequestService),
     Layer.provide(ProcessRunner.layer),
   ),
@@ -620,7 +644,28 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   ),
 );
 
+const layerGrokBotNativeRuntime = GrokBotNativeRuntimeService.layer.pipe(
+  Layer.provideMerge(GrokBotNativeService.layer.pipe(Layer.provide(ProcessRunner.layer))),
+);
+const layerGrokBotManagedState = GrokBotManagedStateStore.layer.pipe(
+  Layer.provide(layerPersistence),
+);
+const layerGrokBotMcpAuthority = GrokBotMcpAuthority.layer.pipe(
+  Layer.provide(layerGrokBotNativeRuntime),
+  Layer.provide(layerGrokBotManagedState),
+  Layer.provide(ProjectionStoreV2.layer.pipe(Layer.provide(layerPersistence))),
+);
+const layerGrokBotManagedBinding = GrokBotManagedBindingLive.layer.pipe(
+  Layer.provide(layerGrokBotNativeRuntime),
+  Layer.provide(layerGrokBotManagedState),
+  Layer.provide(ProjectionStoreV2.layer.pipe(Layer.provide(layerPersistence))),
+  Layer.provide(ManagedEndpointAddress.layer.pipe(Layer.provide(ServerSecretStore.layer))),
+  Layer.provide(layerServerSettings),
+);
+
 const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
+  Layer.provideMerge(layerGrokBotManagedBinding),
+  Layer.provideMerge(layerGrokBotNativeRuntime),
   Layer.provideMerge(layerPtyAdapter),
   // Search, prepare, status inspection, and turn launch share one registry
   // cache so every client and provider instance sees the same prepared agents.
@@ -674,7 +719,18 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
   ),
 );
 
-const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
+const layerRuntimeDependencies = GrokBotThreadService.layer.pipe(
+  Layer.provide(ProjectionStoreV2.layer),
+  Layer.provideMerge(layerRuntimeCoreDependencies),
+  Layer.provideMerge(GrokBotComputerService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime))),
+  Layer.provideMerge(GrokBotSecretService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime))),
+  Layer.provideMerge(GrokBotRoutineService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime))),
+  Layer.provideMerge(
+    GrokBotMarketplaceService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime)),
+  ),
+  Layer.provideMerge(
+    GrokBotComposerResourceService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime)),
+  ),
   // Misc.
   // Usage reads provider history through the ProviderHost, which needs the
   // background policy below it.
@@ -688,6 +744,14 @@ const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
   Layer.provideMerge(DirectEndpoints.layer),
   Layer.provideMerge(ServerLifecycleEvents.layer),
   Layer.provide(NetService.layer),
+);
+
+// The voice service routes execution through the T3 bridge, which needs the bot thread service,
+// so it sits on top of the runtime dependencies instead of beneath them.
+const layerGrokBotVoice = GrokBotVoiceService.layer.pipe(
+  Layer.provide(GrokBotVoiceBackendLive.layer),
+  Layer.provide(layerGrokBotNativeRuntime),
+  Layer.provide(GrokBotVoiceT3Bridge.layer),
 );
 
 const layerCommandReadiness = HttpRouter.middleware(
@@ -708,6 +772,9 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provide(PullRequestHttp.layer),
       Layer.provide(ProjectHttp.layer),
       Layer.provide(ServerHttp.layerServerEnvironmentHttpApi),
+      Layer.provide(
+        ServerHttp.layerGrokBotAvatarEngineRoute.pipe(Layer.provide(GrokBotAvatarEngine.layer)),
+      ),
       Layer.provide(WebhookRoute.layer.pipe(Layer.provide(RelayDeliveryProof.layer))),
       Layer.provide(AuthHttp.layerAuthenticatedAuth),
     ),
@@ -725,6 +792,28 @@ const layerMakeRoutes = Layer.mergeAll(
   // orchestrator uses, so MCP capability reporting can never drift from
   // what dispatch can actually serve.
   McpHttpServer.layer.pipe(
+    Layer.provide(
+      McpToolActivity.layer.pipe(
+        Layer.provide(layerGrokBotManagedState),
+        Layer.provide(layerGrokBotMcpAuthority),
+        Layer.provide(ProjectionStoreV2.layer),
+        Layer.provide(ThreadCommandExecutor.layer),
+        Layer.provide(
+          ProviderEventIngestor.layer.pipe(
+            Layer.provide(RuntimeLayer.layerEventSink),
+            Layer.provide(ProjectionStoreV2.layer),
+            Layer.provide(IdAllocator.layer),
+            Layer.provide(ThreadCommandExecutor.layer),
+          ),
+        ),
+      ),
+    ),
+    Layer.provide(
+      GrokBotTurnCompletion.layer.pipe(
+        Layer.provide(layerGrokBotManagedState),
+        Layer.provide(layerGrokBotMcpAuthority),
+      ),
+    ),
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),
@@ -1085,7 +1174,10 @@ const layerMakeServer = Layer.unwrap(
         ],
         { concurrency: "unbounded" },
       ).pipe(Effect.asVoid),
-    }).pipe(Layer.provideMerge(layerRuntimeDependencies), Layer.provide(layerLauncher));
+    }).pipe(
+      Layer.provideMerge(layerGrokBotVoice.pipe(Layer.provideMerge(layerRuntimeDependencies))),
+      Layer.provide(layerLauncher),
+    );
 
     const layerRoutes = HttpRouter.serve(layerMakeRoutes.pipe(Layer.provide(layerLauncher)), {
       disableLogger: !config.logWebSocketEvents,
@@ -1110,6 +1202,8 @@ const layerMakeServer = Layer.unwrap(
       Layer.provideMerge(
         McpSessionRegistry.layer.pipe(
           Layer.provide(ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer))),
+          Layer.provide(McpRemoteCredentialStore.layer.pipe(Layer.provide(layerPersistence))),
+          Layer.provide(layerGrokBotMcpAuthority),
         ),
       ),
       Layer.provide(layerActivation),

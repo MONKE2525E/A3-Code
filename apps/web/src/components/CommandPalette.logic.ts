@@ -3,6 +3,7 @@ import type { CommandPaletteLinkedThreads } from "../commandPaletteBus";
 import {
   type EnvironmentId,
   type FilesystemBrowseEntry,
+  type GrokBot,
   type KeybindingCommand,
   THREAD_JUMP_KEYBINDING_COMMANDS,
 } from "@t3tools/contracts";
@@ -37,6 +38,44 @@ export function buildLinkedThreadActionItems(
     icon: input.icon,
     run: () => input.runThread({ environmentId: input.environmentId, id: thread.id }),
   }));
+}
+
+/** A global search hit that the caller resolved to a bot conversation. */
+export interface GrokBotSearchHit {
+  readonly environmentId: EnvironmentId;
+  readonly bot: Pick<GrokBot, "id" | "name" | "avatarShape" | "avatarColor">;
+  readonly source: "user" | "assistant";
+  readonly snippet: string;
+}
+
+/**
+ * Bot conversations stay out of the thread list, so search is their only palette path. Each bot
+ * appears once, opens its own conversation, and never lands in the project-less thread rows.
+ */
+export function buildGrokBotSearchItems(input: {
+  readonly hits: ReadonlyArray<GrokBotSearchHit>;
+  readonly query: string;
+  readonly icon: (hit: GrokBotSearchHit) => ReactNode;
+  readonly run: (hit: GrokBotSearchHit) => Promise<void>;
+}): CommandPaletteActionItem[] {
+  const seen = new Set<string>();
+  const items: CommandPaletteActionItem[] = [];
+  for (const hit of input.hits) {
+    const key = `${hit.environmentId}:${hit.bot.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push({
+      kind: "action",
+      value: `grok-bot:${key}`,
+      title: hit.bot.name,
+      description: "Grok Bot conversation",
+      searchTerms: [input.query, hit.bot.name, hit.snippet],
+      threadContentMatch: { source: hit.source, snippet: hit.snippet, query: input.query },
+      icon: input.icon(hit),
+      run: () => input.run(hit),
+    });
+  }
+  return items;
 }
 
 export function browseInputEndPaddingClass(input: {

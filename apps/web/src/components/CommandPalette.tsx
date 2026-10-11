@@ -1,6 +1,8 @@
 "use client";
 
 import { threadPullRequestLinkMode } from "@t3tools/client-runtime/thread-pull-request-compatibility";
+import { settingsSearchResultSearch } from "./grokBot/grokBotPresentation";
+import { isGrokBotBackingThread } from "@t3tools/client-runtime/state/grok-bot-threads";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -125,8 +127,18 @@ import { useScratchProject } from "../hooks/useScratchProject";
 import { useNewProject } from "../hooks/useNewProject";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
-import { useProjects, useServerConfigs, useThreadShells, waitForProject } from "../state/entities";
+import {
+  useActiveEnvironmentId,
+  useProjects,
+  useServerConfigs,
+  useThreadShells,
+  waitForProject,
+} from "../state/entities";
 import { useThreadSearch } from "../state/queries";
+import { grokBotsListQuery } from "../state/grokBots";
+import { GrokBotAvatar } from "./grokBot/GrokBotAvatar";
+import { grokBotSearchHitsFromMatches } from "./grokBot/grokBotSearchHits";
+import { useSelectedGrokBotEnvironmentId } from "./grokBot/useGrokBotEnvironment";
 import { resolveThreadActionProjectRef, startNewThreadFromContext } from "../lib/chatThreadActions";
 import {
   appendBrowsePathSegment,
@@ -173,6 +185,7 @@ import {
   buildRootGroups,
   buildThreadActionItems,
   buildLinkedThreadActionItems,
+  buildGrokBotSearchItems,
   buildCommandPaletteRows,
   enumerateCommandPaletteItems,
   findHighlightedCommandPaletteItem,
@@ -689,7 +702,12 @@ function OpenCommandPaletteDialog(props: {
     }
   }, [activeThreadReferenceCopyTarget]);
   const projectOrder = useUiStateStore((store) => store.projectOrder);
-  const threads = useThreadShells();
+  const shellThreads = useThreadShells();
+  // Grok Bot work threads stay out of palette lists; the bot dropdown reaches them.
+  const threads = useMemo(
+    () => shellThreads.filter((thread) => !isGrokBotBackingThread(thread)),
+    [shellThreads],
+  );
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const {
     theme,
@@ -760,6 +778,44 @@ function OpenCommandPaletteDialog(props: {
       ),
     [threadSearch.matches],
   );
+  // Bot conversations are excluded from `threads`, so global search is the only palette route to them.
+  // The roster names bots in the Grok Bot environment, falling back to the open one until a Grok Bot route
+  // selects one. Other environments fall back to a generic name.
+  const selectedGrokBotEnvironmentId = useSelectedGrokBotEnvironmentId();
+  const activeEnvironmentId = useActiveEnvironmentId();
+  const rosterEnvironmentId = selectedGrokBotEnvironmentId ?? activeEnvironmentId;
+  const grokBotRoster = useEnvironmentQuery(
+    rosterEnvironmentId === null
+      ? null
+      : grokBotsListQuery({ environmentId: rosterEnvironmentId, input: {} }),
+  );
+  const grokBotSearchItems = useMemo(() => {
+    const hits = grokBotSearchHitsFromMatches({
+      matches: threadSearch.matches,
+      shells: shellThreads,
+      rosterEnvironmentId,
+      roster: grokBotRoster.data ?? [],
+    });
+    return buildGrokBotSearchItems({
+      hits,
+      query: threadSearch.query,
+      icon: (hit) => <GrokBotAvatar bot={hit.bot} size="xs" environmentId={hit.environmentId} />,
+      run: async (hit) => {
+        await navigate({
+          to: "/grok-bots/$botId",
+          params: { botId: hit.bot.id },
+          search: { environmentId: hit.environmentId },
+        });
+      },
+    });
+  }, [
+    grokBotRoster.data,
+    navigate,
+    rosterEnvironmentId,
+    shellThreads,
+    threadSearch.matches,
+    threadSearch.query,
+  ]);
   const [browseGeneration, setBrowseGeneration] = useState(0);
   const browseNavigationRef = useRef<ReturnType<typeof createBrowseNavigationCoordinator> | null>(
     null,
@@ -2238,6 +2294,8 @@ function OpenCommandPaletteDialog(props: {
     run: async () => {
       await navigate({
         to: item.to,
+        search: (previous: Record<string, unknown>) =>
+          settingsSearchResultSearch(item.id, previous),
         hash: item.targetId ?? item.id,
         replace: pathname === item.to,
         hashScrollIntoView: false,
@@ -2279,7 +2337,7 @@ function OpenCommandPaletteDialog(props: {
               });
             },
           })
-        : allThreadItems,
+        : [...allThreadItems, ...grokBotSearchItems],
   });
 
   const handleAddProjectForEnvironment = useCallback(

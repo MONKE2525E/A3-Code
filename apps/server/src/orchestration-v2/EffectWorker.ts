@@ -108,6 +108,25 @@ export const layerExecutor: Layer.Layer<
       execute: (effect, options) => {
         const willRetry = options?.willRetry ?? false;
         switch (effect.request.type) {
+          case "provider-runtime.reconnect":
+            return providerTurnStart
+              .reconnect({
+                threadId: effect.threadId,
+                runId: effect.request.runId,
+                ...(effect.request.reconcileAttempt === undefined
+                  ? {}
+                  : { reconcileAttempt: effect.request.reconcileAttempt }),
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
           case "provider-runtime.continue": {
             const sourceRunId = effect.request.sourceRunId;
             return continueRestartedRun({ threadId: effect.threadId, sourceRunId }).pipe(
@@ -291,6 +310,9 @@ export const layerExecutor: Layer.Layer<
                         ...(message.senderThreadId === undefined
                           ? {}
                           : { senderThreadId: message.senderThreadId }),
+                        ...(message.voiceRequest === undefined
+                          ? {}
+                          : { voiceRequest: message.voiceRequest }),
                       })
                       .pipe(
                         // The turn that just completed leaves no further retry
@@ -573,7 +595,6 @@ export const layerWithOptions = (
       const executor = yield* OrchestrationEffectExecutorV2;
       const workerId = options.workerId ?? `orchestration-v2:${process.pid}`;
       const leaseDurationMs = Math.max(1, options.leaseDurationMs ?? 30_000);
-      const maxAttempts = Math.max(1, options.maxAttempts ?? 5);
       const wasCancelled = (effectId: string) =>
         outbox.get(effectId).pipe(
           Effect.map(
@@ -682,6 +703,9 @@ export const layerWithOptions = (
             return false;
           }
           const effect = claimed.value;
+          // Observer recovery must outlast tunnel confirmation during host startup.
+          const reconnect = effect.request.type === "provider-runtime.reconnect";
+          const maxAttempts = Math.max(1, options.maxAttempts ?? (reconnect ? 7 : 5));
           // Arm the process-local cancellation signal before re-reading durable
           // state. A cancellation that commits after the row read has begun can
           // then still win the execution race instead of falling into the gap
@@ -762,7 +786,10 @@ export const layerWithOptions = (
                     effectId: effect.id,
                     workerId,
                     error,
-                    delayMs: Math.min(30_000, 100 * 2 ** Math.max(0, effect.attemptCount - 1)),
+                    delayMs: Math.min(
+                      30_000,
+                      (reconnect ? 1_000 : 100) * 2 ** Math.max(0, effect.attemptCount - 1),
+                    ),
                   })
                   .pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
           if (!updated) {

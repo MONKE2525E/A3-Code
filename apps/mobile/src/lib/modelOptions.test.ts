@@ -320,6 +320,45 @@ describe("mobile model options", () => {
     expect(resolveSelectableModelSelection(null, disabled, null)).toBe(disabled);
   });
 
+  it("keeps Grok Bot instances out of new-task defaults and pickers", () => {
+    const config = {
+      providers: [
+        {
+          instanceId: "grok-bot",
+          driver: "grok-bot",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          models: [{ slug: "bot-poteto", name: "Poteto", isDefault: true, capabilities: null }],
+        },
+        {
+          instanceId: "codex",
+          driver: "codex",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          models: [
+            { slug: "gpt-5.6-sol", name: "GPT-5.6 Sol", isDefault: true, capabilities: null },
+          ],
+        },
+      ],
+    } as unknown as ServerConfig;
+    const staleBot = { instanceId: ProviderInstanceId.make("grok-bot"), model: "bot-poteto" };
+
+    expect(resolveDefaultableModelSelection(config, staleBot, null)).toBeNull();
+    // The new-task flow resolves its fallback before building options, so the bot never reaches here.
+    const modelOptions = buildModelOptions(config, null, undefined, null);
+    expect(modelOptions.map((option) => option.key)).toEqual(["codex:gpt-5.6-sol"]);
+    expect(
+      resolveNewTaskModelSelection({
+        draftSelection: null,
+        projectDefaultSelection: resolveDefaultableModelSelection(config, staleBot, null),
+        stickySelection: resolveDefaultableModelSelection(config, staleBot, null),
+        modelOptions,
+      }),
+    ).toEqual({ instanceId: "codex", model: "gpt-5.6-sol" });
+  });
+
   describe("Antigravity selections", () => {
     const selection = {
       instanceId: ProviderInstanceId.make("google_work"),

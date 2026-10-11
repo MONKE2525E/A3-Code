@@ -1,8 +1,15 @@
 import { useSyncExternalStore } from "react";
 
+/** Reaction lengths from the Grok Bot app, in milliseconds. */
+/** A settled turn keeps its finished or failed pose this long before the bot rests. */
+export const GROK_BOT_SETTLE_LINGER_MS = 8000;
+export const GROK_BOT_SPAWN_MS = 2000;
+/** Happy and celebrate poses, and the spin-and-bounce after a look change. */
+export const GROK_BOT_HAPPY_MS = 2200;
+
 /**
  * What a bot is doing right now, as the avatar engine's named states. A bot
- * with no activity rests in its still pose; it only moves while one is set.
+ * with no activity rests; it only moves while one is set.
  */
 export type GrokBotActivity =
   | "loading"
@@ -11,8 +18,17 @@ export type GrokBotActivity =
   | "streaming"
   | "finished"
   | "failed"
+  | "blocked"
+  | "spawning"
+  | "happy"
   | "celebrate"
-  | "notifying";
+  | "notifying"
+  | "working"
+  | "reading"
+  | "searching"
+  | "writing"
+  | "coding"
+  | "running";
 
 const activities = new Map<string, GrokBotActivity>();
 const timers = new Map<string, ReturnType<typeof setTimeout>>();

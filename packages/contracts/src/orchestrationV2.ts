@@ -1,3 +1,8 @@
+import {
+  GrokBotVoiceCallId,
+  GrokBotVoiceCallMarker,
+  GrokBotWorkflowReferences,
+} from "./grokBot.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -76,6 +81,11 @@ import { ThreadTokenUsageSnapshot } from "./providerRuntime.ts";
 export const OrchestrationV2Actor = Schema.Literals(["user", "agent", "system"]);
 export type OrchestrationV2Actor = typeof OrchestrationV2Actor.Type;
 
+/** Persistent Grok Bot conversations live outside the ordinary thread navigation. */
+export function isGrokBotBackingThread(thread: { readonly id: string }): boolean {
+  return thread.id.startsWith("grok-bot:");
+}
+
 export const OrchestrationV2CreationSource = Schema.Literals([
   "web",
   "mobile",
@@ -87,6 +97,13 @@ export type OrchestrationV2CreationSource = typeof OrchestrationV2CreationSource
 
 export const OrchestrationV2ThreadHistoryOrigin = Schema.Literals(["native", "v1_import"]);
 export type OrchestrationV2ThreadHistoryOrigin = typeof OrchestrationV2ThreadHistoryOrigin.Type;
+
+/**
+ * Set on a message a Grok Bot voice call asked T3 to run. Additive on purpose: an older client
+ * ignores an unknown optional field but rejects an unknown `creationSource` literal. The text
+ * stays stored for execution; clients show a marker instead of it.
+ */
+const OrchestrationV2VoiceRequestField = Schema.optional(Schema.Literal(true));
 
 const OrchestrationV2CreationFields = {
   createdBy: OrchestrationV2Actor,
@@ -1123,7 +1140,12 @@ export const OrchestrationV2RuntimeRequest = Schema.Struct({
   status: Schema.Literals(["pending", "resolved", "expired", "cancelled"]),
   responseCapability: Schema.Union([
     Schema.Struct({ type: Schema.Literal("live"), providerSessionId: ProviderSessionId }),
-    Schema.Struct({ type: Schema.Literal("message") }),
+    // A live session here can still receive a native dismissal, and a choice answer when the
+    // question has a matching option. Other answers are sent as a chat message.
+    Schema.Struct({
+      type: Schema.Literal("message"),
+      providerSessionId: Schema.optional(ProviderSessionId),
+    }),
     Schema.Struct({ type: Schema.Literal("not_resumable"), reason: Schema.String }),
   ]),
   createdAt: Schema.DateTimeUtc,
@@ -1201,12 +1223,26 @@ export const OrchestrationV2Notification = Schema.Struct({
 });
 export type OrchestrationV2Notification = typeof OrchestrationV2Notification.Type;
 
+const GrokBotMessagePeer = Schema.Struct({
+  botId: TrimmedNonEmptyString.check(Schema.isMaxLength(1024)),
+  name: Schema.String.check(Schema.isMaxLength(1024)),
+  direction: Schema.Literals(["from", "to"]),
+  kind: Schema.optional(Schema.Literals(["bot", "agent", "cloud-agent"])),
+});
+
 export const OrchestrationV2ConversationMessage = Schema.Struct({
+  grokBotPeer: Schema.optional(GrokBotMessagePeer),
+  grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
+  /** A voice call row; its text is empty and native's summary arrives as the next message. */
+  grokBotVoiceCall: Schema.optionalKey(GrokBotVoiceCallMarker),
+  /** The call a summary belongs to; set only on native's `voice:<callId>` summaries. */
+  grokBotVoiceCallId: Schema.optionalKey(GrokBotVoiceCallId),
   notification: Schema.optional(OrchestrationV2Notification),
   ...OrchestrationV2CreationFields,
   scheduledTaskId: Schema.optional(ScheduledTaskId),
   // The sending agent's thread in this environment, separate from the receiving thread.
   senderThreadId: Schema.optional(ThreadId),
+  voiceRequest: OrchestrationV2VoiceRequestField,
   id: MessageId,
   threadId: ThreadId,
   runId: Schema.NullOr(RunId),
@@ -1470,9 +1506,12 @@ export const OrchestrationV2TurnItem = Schema.Union([
     ...OrchestrationV2TurnItemBaseFields,
     ...OrchestrationV2CreationFields,
     type: Schema.Literal("user_message"),
+    grokBotPeer: Schema.optional(GrokBotMessagePeer),
+    grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
     messageId: MessageId,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
     senderThreadId: Schema.optional(ThreadId),
+    voiceRequest: OrchestrationV2VoiceRequestField,
     inputIntent: OrchestrationV2UserMessageInputIntent,
     text: Schema.String,
     context: Schema.optional(OrchestrationMessageContext),
@@ -1481,6 +1520,10 @@ export const OrchestrationV2TurnItem = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("assistant_message"),
+    grokBotPeer: Schema.optional(GrokBotMessagePeer),
+    grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
+    grokBotVoiceCall: Schema.optionalKey(GrokBotVoiceCallMarker),
+    grokBotVoiceCallId: Schema.optionalKey(GrokBotVoiceCallId),
     messageId: MessageId,
     text: Schema.String,
     attachments: Schema.optional(Schema.Array(ChatAttachment)),
@@ -1916,6 +1959,7 @@ export type OrchestrationV2PendingRuntimeRequestSummary =
   typeof OrchestrationV2PendingRuntimeRequestSummary.Type;
 
 export const OrchestrationV2LatestVisibleMessageSummary = Schema.Struct({
+  createdAt: Schema.optional(Schema.DateTimeUtc),
   id: MessageId,
   role: OrchestrationV2ConversationMessage.fields.role,
   text: Schema.String,
@@ -2249,9 +2293,12 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     ...OrchestrationV2TurnItemJsonBaseFields,
     ...OrchestrationV2CreationFields,
     type: Schema.Literal("user_message"),
+    grokBotPeer: Schema.optional(GrokBotMessagePeer),
+    grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
     messageId: MessageId,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
     senderThreadId: Schema.optional(ThreadId),
+    voiceRequest: OrchestrationV2VoiceRequestField,
     inputIntent: OrchestrationV2UserMessageInputIntent,
     text: Schema.String,
     context: Schema.optional(OrchestrationMessageContext),
@@ -2260,6 +2307,10 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("assistant_message"),
+    grokBotPeer: Schema.optional(GrokBotMessagePeer),
+    grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
+    grokBotVoiceCall: Schema.optionalKey(GrokBotVoiceCallMarker),
+    grokBotVoiceCallId: Schema.optionalKey(GrokBotVoiceCallId),
     messageId: MessageId,
     text: Schema.String,
     attachments: Schema.optional(Schema.Array(ChatAttachment)),
@@ -2494,6 +2545,7 @@ export type OrchestrationV2PendingRuntimeRequestSummaryJson =
 export const OrchestrationV2LatestVisibleMessageSummaryJson =
   OrchestrationV2LatestVisibleMessageSummary.mapFields((fields) => ({
     ...fields,
+    createdAt: Schema.optional(Schema.DateTimeUtcFromString),
     updatedAt: Schema.DateTimeUtcFromString,
   }));
 export type OrchestrationV2LatestVisibleMessageSummaryJson =
@@ -2932,6 +2984,7 @@ export const OrchestrationV2Command = Schema.Union([
     ...OrchestrationV2CreationFields,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
     senderThreadId: Schema.optional(ThreadId),
+    voiceRequest: OrchestrationV2VoiceRequestField,
     commandId: CommandId,
     threadId: ThreadId,
     messageId: MessageId,
@@ -3105,6 +3158,7 @@ export const OrchestrationV2Command = Schema.Union([
     parentThreadId: ThreadId,
     parentRunId: RunId,
     parentNodeId: NodeId,
+    projectId: Schema.optional(ProjectId),
     task: TrimmedNonEmptyString,
     title: Schema.optional(TrimmedNonEmptyString),
     modelSelection: ModelSelection,
@@ -3160,6 +3214,13 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
  * send them.
  */
 const OrchestrationV2InternalCommand = Schema.Union([
+  /** Moves an idle canonical bot conversation to its environment's No project storage. */
+  Schema.Struct({
+    type: Schema.Literal("grok-bot.thread.rebind"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    projectId: ProjectId,
+  }),
   /**
    * Records what a pull request watch saw, and wakes the agent in the same transaction when
    * `wake` is set. Rejected once the watch started at `startedAt` has ended, and a wake is

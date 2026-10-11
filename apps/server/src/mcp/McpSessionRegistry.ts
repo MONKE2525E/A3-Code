@@ -4,17 +4,22 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 import { HttpServer } from "effect/http";
 import * as NetAddress from "effect/net/NetAddress";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as McpRemoteRunValidator from "./McpRemoteRunValidator.ts";
+import * as McpRemoteCredentialStore from "./McpRemoteCredentialStore.ts";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 
 export interface McpCredentialRequest {
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
+  readonly remoteRun?: McpInvocationContext.McpThreadCaller["remoteRun"];
   /**
    * When false, the credential is minted without the "preview" capability so
    * the user's choice to withhold agent browser access holds everywhere the
@@ -86,6 +91,10 @@ const bytesToHex = (bytes: Uint8Array): string =>
 
 const tokenFromBytes = (bytes: Uint8Array): string => Buffer.from(bytes).toString("base64url");
 
+const encodeRemoteRunIdentity = Schema.encodeEffect(
+  Schema.fromJsonString(Schema.Tuple([Schema.String, Schema.String, Schema.String, Schema.String])),
+);
+
 // A wildcard bind is reachable on loopback, which is where the provider
 // subprocesses run; anything else is announced as the address it bound.
 const getHttpMcpEndpointHost = (address: NetAddress.IpAddress): string =>
@@ -100,6 +109,10 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const environmentId = yield* environment.getEnvironmentId;
   const httpServer = yield* HttpServer.HttpServer;
+  const remoteValidator = yield* Effect.serviceOption(McpRemoteRunValidator.McpRemoteRunValidator);
+  const remoteStore = yield* Effect.serviceOption(
+    McpRemoteCredentialStore.McpRemoteCredentialStore,
+  );
   const state = yield* SynchronizedRef.make<RegistryState>({ records: new Map() });
   const currentTimeMillis = options.now ? Effect.sync(options.now) : Clock.currentTimeMillis;
   const livenessWindowMs = options.livenessWindowMs ?? DEFAULT_LIVENESS_WINDOW_MS;
@@ -127,14 +140,26 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       const providerSessionId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
       const rawToken = yield* crypto.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);
       const tokenHash = yield* hashToken(rawToken);
+      const requestNamespace =
+        request.remoteRun === undefined
+          ? providerSessionId
+          : `remote-run:${yield* hashToken(
+              yield* encodeRemoteRunIdentity([
+                request.threadId,
+                request.providerInstanceId,
+                request.remoteRun.runId,
+                request.remoteRun.attemptId,
+              ]).pipe(Effect.orDie),
+            )}`;
       const browserToolsAvailable = request.browserToolsAvailable ?? true;
       const scope: McpInvocationContext.McpThreadInvocationScope = {
         environmentId,
-        requestNamespace: providerSessionId,
+        requestNamespace,
         thread: {
           threadId: ThreadId.make(request.threadId),
           providerSessionId,
           providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
+          ...(request.remoteRun === undefined ? {} : { remoteRun: request.remoteRun }),
         },
         client: undefined,
         capabilities: new Set<McpInvocationContext.McpCapability>([
@@ -145,6 +170,12 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         ]),
         issuedAt,
       };
+      if (request.remoteRun !== undefined && Option.isSome(remoteStore)) {
+        yield* remoteStore.value.pruneDead(issuedAt - livenessWindowMs).pipe(Effect.orDie);
+        yield* remoteStore.value
+          .save({ tokenHash, scope, lastAliveAt: issuedAt })
+          .pipe(Effect.orDie);
+      }
       yield* SynchronizedRef.update(state, ({ records }) => {
         const next = new Map(pruneDead(records, issuedAt));
         next.set(tokenHash, { tokenHash, scope, lastAliveAt: issuedAt });
@@ -170,20 +201,41 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       if (rawToken.length === 0) return undefined;
       const tokenHash = yield* hashToken(rawToken);
       const timestamp = yield* currentTimeMillis;
-      return yield* SynchronizedRef.modify(state, ({ records }) => {
-        const current = pruneDead(records, timestamp);
-        const record = current.get(tokenHash);
-        if (!record) return [undefined, { records: current }] as const;
-        const next = new Map(current);
-        next.set(tokenHash, { ...record, lastAliveAt: timestamp });
-        return [record.scope, { records: next }] as const;
-      });
+      return yield* SynchronizedRef.modifyEffect(state, ({ records }) =>
+        Effect.gen(function* () {
+          const current = pruneDead(records, timestamp);
+          const record =
+            current.get(tokenHash) ??
+            (Option.isSome(remoteStore)
+              ? yield* remoteStore.value.lookup(tokenHash).pipe(Effect.orDie)
+              : undefined);
+          if (!record) return [undefined, { records: current }] as const;
+          const scope = record.scope;
+          if (
+            scope.environmentId !== environmentId ||
+            timestamp - record.lastAliveAt > livenessWindowMs ||
+            (scope.thread.remoteRun !== undefined &&
+              (Option.isNone(remoteValidator) || !(yield* remoteValidator.value.validate(scope))))
+          ) {
+            return [undefined, { records: current }] as const;
+          }
+          if (scope.thread.remoteRun !== undefined && Option.isSome(remoteStore)) {
+            yield* remoteStore.value.touch(tokenHash, timestamp).pipe(Effect.orDie);
+          }
+          const next = new Map(current);
+          next.set(tokenHash, { ...record, lastAliveAt: timestamp });
+          return [record.scope, { records: next }] as const;
+        }),
+      );
     },
   );
 
   const touch: McpSessionRegistryShape["touch"] = Effect.fn("McpSessionRegistry.touch")(
     function* (threadId) {
       const timestamp = yield* currentTimeMillis;
+      if (Option.isSome(remoteStore)) {
+        yield* remoteStore.value.touchThread(threadId, timestamp).pipe(Effect.orDie);
+      }
       yield* SynchronizedRef.update(state, ({ records }) => {
         const current = pruneDead(records, timestamp);
         const next = new Map(current);
@@ -208,13 +260,22 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     touch,
     revokeProviderSession: Effect.fn("McpSessionRegistry.revokeProviderSession")(
       function* (providerSessionId) {
+        if (Option.isSome(remoteStore)) {
+          yield* remoteStore.value.revokeSession(providerSessionId).pipe(Effect.orDie);
+        }
         yield* revokeWhere((record) => record.scope.thread.providerSessionId === providerSessionId);
       },
     ),
     revokeThread: Effect.fn("McpSessionRegistry.revokeThread")(function* (threadId) {
+      if (Option.isSome(remoteStore)) {
+        yield* remoteStore.value.revokeThread(threadId).pipe(Effect.orDie);
+      }
       yield* revokeWhere((record) => record.scope.thread.threadId === threadId);
     }),
-    revokeAll: SynchronizedRef.set(state, { records: new Map() }),
+    revokeAll: (Option.isSome(remoteStore)
+      ? remoteStore.value.revokeAll.pipe(Effect.orDie)
+      : Effect.void
+    ).pipe(Effect.andThen(SynchronizedRef.set(state, { records: new Map() }))),
   });
 });
 

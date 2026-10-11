@@ -196,6 +196,106 @@ it.effect("rejects expired runtime requests before invoking the live adapter", (
   }).pipe(Effect.provide(layerTest));
 });
 
+it.effect("executes native cleanup for session-bound message questions", () => {
+  const threadId = ThreadId.make("thread-native-message-question");
+  const providerSessionId = ProviderSessionId.make("native-question-session");
+  const requestId = RuntimeRequestId.make("native-message-question");
+  const respondToRuntimeRequest = vi.fn(
+    (_input: ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput) => Effect.void,
+  );
+  const request = {
+    ...resolvedRuntimeRequest(requestId, providerSessionId),
+    kind: "user_input" as const,
+    responseCapability: { type: "message" as const, providerSessionId },
+  };
+  const layerTest = layerRuntimeRequestTest(projectionWithRuntimeRequest(request), () =>
+    Effect.succeed(Option.some({ respondToRuntimeRequest } as never)),
+  );
+  return Effect.gen(function* () {
+    const service = yield* RuntimeRequestService.RuntimeRequestServiceV2;
+    yield* service.respond({ threadId, providerSessionId, requestId, decision: "cancel" });
+    assert.deepEqual(respondToRuntimeRequest.mock.calls[0]?.[0], { requestId, decision: "cancel" });
+  }).pipe(Effect.provide(layerTest));
+});
+
+it.effect("does not execute native cleanup for an unbound message question", () => {
+  const threadId = ThreadId.make("thread-unbound-message-question");
+  const providerSessionId = ProviderSessionId.make("unbound-question-session");
+  const requestId = RuntimeRequestId.make("unbound-message-question");
+  const getSession = vi.fn(() => Effect.succeed(Option.none()));
+  const request = {
+    ...resolvedRuntimeRequest(requestId, providerSessionId),
+    kind: "user_input" as const,
+    responseCapability: { type: "message" as const },
+  };
+  return Effect.gen(function* () {
+    const service = yield* RuntimeRequestService.RuntimeRequestServiceV2;
+    const error = yield* service
+      .respond({ threadId, providerSessionId, requestId, decision: "cancel" })
+      .pipe(Effect.flip);
+    assert.equal(error.reason, "request-not-resumable");
+    assert.equal(getSession.mock.calls.length, 0);
+  }).pipe(
+    Effect.provide(layerRuntimeRequestTest(projectionWithRuntimeRequest(request), getSession)),
+  );
+});
+
+it.effect("runs a native single choice while the bound question is still pending", () => {
+  const threadId = ThreadId.make("thread-pending-native-question");
+  const providerSessionId = ProviderSessionId.make("pending-native-question-session");
+  const requestId = RuntimeRequestId.make("pending-native-question");
+  const respondToRuntimeRequest = vi.fn(
+    (_input: ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput) => Effect.void,
+  );
+  const request = {
+    ...resolvedRuntimeRequest(requestId, providerSessionId),
+    status: "pending" as const,
+    resolvedAt: null,
+    kind: "user_input" as const,
+    responseCapability: { type: "message" as const, providerSessionId },
+  };
+  const layerTest = layerRuntimeRequestTest(projectionWithRuntimeRequest(request), () =>
+    Effect.succeed(Option.some({ respondToRuntimeRequest } as never)),
+  );
+  return Effect.gen(function* () {
+    const service = yield* RuntimeRequestService.RuntimeRequestServiceV2;
+    yield* service.respond({
+      threadId,
+      providerSessionId,
+      requestId,
+      answers: { color: "blue" },
+    });
+    assert.deepEqual(respondToRuntimeRequest.mock.calls[0]?.[0], {
+      requestId,
+      answers: { color: "blue" },
+    });
+  }).pipe(Effect.provide(layerTest));
+});
+
+it.effect("never runs native calls for a pending question that is not bound to the session", () => {
+  const threadId = ThreadId.make("thread-pending-unbound-question");
+  const providerSessionId = ProviderSessionId.make("pending-unbound-question-session");
+  const requestId = RuntimeRequestId.make("pending-unbound-question");
+  const getSession = vi.fn(() => Effect.succeed(Option.none()));
+  const request = {
+    ...resolvedRuntimeRequest(requestId, providerSessionId),
+    status: "pending" as const,
+    resolvedAt: null,
+    kind: "user_input" as const,
+    responseCapability: { type: "message" as const },
+  };
+  return Effect.gen(function* () {
+    const service = yield* RuntimeRequestService.RuntimeRequestServiceV2;
+    const error = yield* service
+      .respond({ threadId, providerSessionId, requestId, decision: "cancel" })
+      .pipe(Effect.flip);
+    assert.equal(error.reason, "request-not-ready");
+    assert.equal(getSession.mock.calls.length, 0);
+  }).pipe(
+    Effect.provide(layerRuntimeRequestTest(projectionWithRuntimeRequest(request), getSession)),
+  );
+});
+
 it.effect("classifies runtime request response validation failures", () => {
   const threadId = ThreadId.make("thread-runtime-request-validation");
   const providerSessionId = ProviderSessionId.make("provider-session-runtime-request-validation");

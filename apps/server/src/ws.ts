@@ -1,3 +1,6 @@
+import * as GrokBotComputerService from "./grokBot/GrokBotComputerService.ts";
+import * as GrokBotSecretService from "./grokBot/GrokBotSecretService.ts";
+import * as GrokBotVoiceService from "./grokBot/voice/GrokBotVoiceService.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
@@ -226,6 +229,11 @@ import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import * as GrokBotService from "./grokBot/GrokBotService.ts";
 import * as PullRequestReviewGuideService from "./pullRequest/PullRequestReviewGuideService.ts";
+import * as GrokBotOrchestratorService from "./grokBot/GrokBotOrchestratorService.ts";
+import * as GrokBotThreadService from "./grokBot/GrokBotThreadService.ts";
+import * as GrokBotRoutineService from "./grokBot/GrokBotRoutineService.ts";
+import * as GrokBotMarketplaceService from "./grokBot/GrokBotMarketplaceService.ts";
+import * as GrokBotComposerResourceService from "./grokBot/GrokBotComposerResourceService.ts";
 import { listLinkedPullRequestThreads } from "./pullRequest/linkedThreads.ts";
 import { pullRequestSyncKey } from "./pullRequest/pullRequestSyncKey.ts";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -543,6 +551,320 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
+const MainWsRpcGroup = ServerWsRpcGroup.omit(
+  WS_METHODS.grokBotsStatus,
+  WS_METHODS.grokBotsSetup,
+  WS_METHODS.grokBotsList,
+  WS_METHODS.grokBotsRead,
+  WS_METHODS.grokBotsSend,
+  WS_METHODS.grokBotsCreate,
+  WS_METHODS.grokBotsUpdate,
+  WS_METHODS.grokBotsLink,
+  WS_METHODS.grokBotsDelete,
+  WS_METHODS.grokBotsOrchestratorConfig,
+  WS_METHODS.grokBotsOpenThread,
+  WS_METHODS.grokBotsTeachRead,
+  WS_METHODS.grokBotsTeachStart,
+  WS_METHODS.grokBotsTeachStop,
+  WS_METHODS.grokBotsComputerRead,
+  WS_METHODS.grokBotsComputerStart,
+  WS_METHODS.grokBotsComputerRecreate,
+  WS_METHODS.grokBotsComputerReset,
+  WS_METHODS.grokBotsComputerUpgradeSchedule,
+  WS_METHODS.grokBotsSecretPending,
+  WS_METHODS.grokBotsSecretSubmit,
+  WS_METHODS.grokBotsSecretDismiss,
+  WS_METHODS.grokBotsVoiceStart,
+  WS_METHODS.grokBotsVoiceRefresh,
+  WS_METHODS.grokBotsVoiceTool,
+  WS_METHODS.grokBotsVoiceConnected,
+  WS_METHODS.grokBotsVoiceEnd,
+  WS_METHODS.grokBotsListRoutines,
+  WS_METHODS.grokBotsListComposerResources,
+  WS_METHODS.grokBotsSetRoutineEnabled,
+  WS_METHODS.grokBotsDeleteRoutine,
+  WS_METHODS.grokBotsListMarketplace,
+  WS_METHODS.grokBotsListMarketplacePlugins,
+  WS_METHODS.grokBotsListInstalledMarketplacePlugins,
+  WS_METHODS.grokBotsPluginConnections,
+  WS_METHODS.grokBotsPluginAuthenticate,
+  WS_METHODS.grokBotsPluginCompleteAuth,
+  WS_METHODS.grokBotsInstallMarketplacePlugin,
+  WS_METHODS.grokBotsUninstallMarketplacePlugin,
+  WS_METHODS.grokBotsGetMarketplaceTemplate,
+  WS_METHODS.grokBotsImportMarketplaceTemplate,
+);
+const layerGrokExtensionsRpc = Layer.mergeAll(
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsStatus,
+    Effect.map(GrokBotService.GrokBotService, (service) => () => service.status),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsSetup,
+    Effect.map(GrokBotService.GrokBotService, (service) => () => service.setup),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsList,
+    Effect.map(GrokBotService.GrokBotService, (service) => () => service.list),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsRead,
+    Effect.map(GrokBotService.GrokBotService, (service) => (input) => service.read(input.botId)),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsSend,
+    Effect.map(GrokBotService.GrokBotService, (service) => (input) => service.send(input)),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsCreate,
+    Effect.map(GrokBotService.GrokBotService, (service) => (input) => service.create(input)),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsUpdate,
+    Effect.map(GrokBotService.GrokBotService, (service) => (input) => service.update(input)),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsLink,
+    Effect.map(GrokBotService.GrokBotService, (service) => (input) => service.link(input)),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsDelete,
+    Effect.map(
+      GrokBotThreadService.GrokBotThreadService,
+      (service) => (input) => service.deleteBot(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsOrchestratorConfig,
+    Effect.map(
+      GrokBotOrchestratorService.GrokBotOrchestratorService,
+      (service) => (input) => service.inspect(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsOpenThread,
+    Effect.map(
+      GrokBotThreadService.GrokBotThreadService,
+      (service) => (input) => service.open(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsListRoutines,
+    Effect.map(
+      GrokBotRoutineService.GrokBotRoutineService,
+      (service) => (input) => service.list(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsListComposerResources,
+    Effect.map(
+      GrokBotComposerResourceService.GrokBotComposerResourceService,
+      (service) => (input) => service.list(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsSetRoutineEnabled,
+    Effect.map(
+      GrokBotRoutineService.GrokBotRoutineService,
+      (service) => (input) => service.setEnabled(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsDeleteRoutine,
+    Effect.map(
+      GrokBotRoutineService.GrokBotRoutineService,
+      (service) => (input) => service.delete(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsListMarketplace,
+    Effect.map(
+      GrokBotMarketplaceService.GrokBotMarketplaceService,
+      (service) => (input) => service.list(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsListMarketplacePlugins,
+    Effect.map(
+      GrokBotMarketplaceService.GrokBotMarketplaceService,
+      (service) => (input) => service.plugins(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsListInstalledMarketplacePlugins,
+    Effect.map(
+      GrokBotMarketplaceService.GrokBotMarketplaceService,
+      (service) => (input) => service.installedPlugins(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsPluginConnections,
+    Effect.map(
+      GrokBotMarketplaceService.GrokBotMarketplaceService,
+      (service) => (input) => service.connections(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsPluginAuthenticate,
+    Effect.map(
+      GrokBotMarketplaceService.GrokBotMarketplaceService,
+      (service) => (input) => service.authenticate(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsPluginCompleteAuth,
+    Effect.map(
+      GrokBotMarketplaceService.GrokBotMarketplaceService,
+      (service) => (input) => service.completeAuth(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsInstallMarketplacePlugin,
+    Effect.map(
+      GrokBotMarketplaceService.GrokBotMarketplaceService,
+      (service) => (input) => service.installPlugin(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsUninstallMarketplacePlugin,
+    Effect.map(
+      GrokBotMarketplaceService.GrokBotMarketplaceService,
+      (service) => (input) => service.uninstallPlugin(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsGetMarketplaceTemplate,
+    Effect.map(
+      GrokBotMarketplaceService.GrokBotMarketplaceService,
+      (service) => (input) => service.template(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsImportMarketplaceTemplate,
+    Effect.map(
+      GrokBotMarketplaceService.GrokBotMarketplaceService,
+      (service) => (input) => service.importTemplate(input),
+    ),
+  ),
+
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsTeachRead,
+    Effect.map(
+      GrokBotComputerService.GrokBotComputerService,
+      (service) => (input) => service.readTeaching(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsTeachStart,
+    Effect.map(
+      GrokBotComputerService.GrokBotComputerService,
+      (service) => (input) => service.startTeaching(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsTeachStop,
+    Effect.map(
+      GrokBotComputerService.GrokBotComputerService,
+      (service) => (input) => service.stopTeaching(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsComputerRead,
+    Effect.map(
+      GrokBotComputerService.GrokBotComputerService,
+      (service) => (input) => service.read(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsComputerStart,
+    Effect.map(
+      GrokBotComputerService.GrokBotComputerService,
+      (service) => (input) => service.start(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsComputerRecreate,
+    Effect.map(
+      GrokBotComputerService.GrokBotComputerService,
+      (service) => (input) => service.recreate(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsComputerReset,
+    Effect.map(
+      GrokBotComputerService.GrokBotComputerService,
+      (service) => (input) => service.reset(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsComputerUpgradeSchedule,
+    Effect.map(
+      GrokBotComputerService.GrokBotComputerService,
+      (service) => () => service.upgradeSchedule(),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsSecretPending,
+    Effect.map(
+      GrokBotSecretService.GrokBotSecretService,
+      (service) => (input) => service.pending(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsSecretSubmit,
+    Effect.map(
+      GrokBotSecretService.GrokBotSecretService,
+      (service) => (input) => service.submit(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsSecretDismiss,
+    Effect.map(
+      GrokBotSecretService.GrokBotSecretService,
+      (service) => (input) => service.dismiss(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsVoiceStart,
+    Effect.map(
+      GrokBotVoiceService.GrokBotVoiceService,
+      (service) => (input) => service.start(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsVoiceRefresh,
+    Effect.map(
+      GrokBotVoiceService.GrokBotVoiceService,
+      (service) => (input) => service.refresh(input.callId),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsVoiceTool,
+    Effect.map(
+      GrokBotVoiceService.GrokBotVoiceService,
+      (service) => (input) =>
+        // The RPC middleware has already required this scope, so reaching the handler means it was granted.
+        service.tool(
+          input,
+          RpcAuthorization.requiredScopeForRpcMethod(WS_METHODS.grokBotsVoiceTool) ===
+            AuthOrchestrationOperateScope
+            ? "operate"
+            : "read",
+        ),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsVoiceConnected,
+    Effect.map(
+      GrokBotVoiceService.GrokBotVoiceService,
+      (service) => (input) => service.connected(input.callId),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsVoiceEnd,
+    Effect.map(GrokBotVoiceService.GrokBotVoiceService, (service) => (input) => service.end(input)),
+  ),
+);
 // When a resuming client's cursor is more than this many events behind the
 // current head, skip the per-event catch-up replay and send a fresh shell
 // snapshot instead. Replaying each intervening event costs a shell refetch;
@@ -1190,7 +1512,7 @@ const layerWsRpc = (
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
 ) =>
-  ServerWsRpcGroup.toLayer(
+  MainWsRpcGroup.toLayer(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
       const sql = yield* SqlClient.SqlClient;
@@ -1228,7 +1550,6 @@ const layerWsRpc = (
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
       const secretRequests = yield* SecretRequests.SecretRequests;
       const pullRequests = yield* PullRequestService.PullRequestService;
-      const grokBots = yield* GrokBotService.GrokBotService;
       const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
       const pullRequestSync = yield* PullRequestSyncReactor.PullRequestSyncReactor;
       const deviceService = yield* DeviceService.DeviceService;
@@ -1819,7 +2140,7 @@ const layerWsRpc = (
         return result;
       });
 
-      const handlers = ServerWsRpcGroup.of({
+      const handlers = MainWsRpcGroup.of({
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
             "orchestration_v2.command_id": command.commandId,
@@ -2477,13 +2798,6 @@ const layerWsRpc = (
               ),
           ),
         [WS_METHODS.pullRequestsList]: (input) => pullRequests.list(input),
-        [WS_METHODS.grokBotsStatus]: () => grokBots.status,
-        [WS_METHODS.grokBotsSetup]: () => grokBots.setup,
-        [WS_METHODS.grokBotsList]: () => grokBots.list,
-        [WS_METHODS.grokBotsRead]: (input) => grokBots.read(input.botId),
-        [WS_METHODS.grokBotsSend]: (input) => grokBots.send(input),
-        [WS_METHODS.grokBotsUpdate]: (input) => grokBots.update(input),
-        [WS_METHODS.grokBotsLink]: (input) => grokBots.link(input),
         [WS_METHODS.pullRequestsListStats]: (input) => pullRequests.listStats(input),
         [WS_METHODS.pullRequestsRoutingIdentity]: (input) => pullRequests.routingIdentity(input),
         [WS_METHODS.pullRequestsRouting]: (input) => pullRequests.routing(input),
@@ -3145,7 +3459,7 @@ const layerWsRpc = (
       });
       return handlers;
     }),
-  );
+  ).pipe(Layer.merge(layerGrokExtensionsRpc));
 
 // A defect in a handler's effect fails only its own request. RpcServer's default
 // sends a socket-level Defect frame instead, and the client ends every pending

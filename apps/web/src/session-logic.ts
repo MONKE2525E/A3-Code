@@ -1,6 +1,7 @@
 import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
 import {
   type AssetResource,
+  type GrokBotRuntimeActivity,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2PlanArtifact,
   type OrchestrationV2ProjectedTurnItem,
@@ -15,6 +16,7 @@ import {
   type ThreadId,
   type TurnItemId,
 } from "@t3tools/contracts";
+import type { ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
 import {
   classifyToolActivity,
@@ -654,6 +656,16 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
     }
     if (item.type === "user_message" || item.type === "assistant_message") {
       const message: ChatMessage = {
+        ...(item.grokBotPeer === undefined ? {} : { grokBotPeer: item.grokBotPeer }),
+        ...(item.grokBotWorkflowReferences === undefined
+          ? {}
+          : { grokBotWorkflowReferences: item.grokBotWorkflowReferences }),
+        ...(item.type === "assistant_message" && item.grokBotVoiceCall !== undefined
+          ? { grokBotVoiceCall: item.grokBotVoiceCall }
+          : {}),
+        ...(item.type === "assistant_message" && item.grokBotVoiceCallId !== undefined
+          ? { grokBotVoiceCallId: item.grokBotVoiceCallId }
+          : {}),
         id: item.messageId,
         role: item.type === "user_message" ? "user" : "assistant",
         text: item.text,
@@ -673,6 +685,7 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
               createdBy: item.createdBy,
               creationSource: item.creationSource,
               ...(item.senderThreadId !== undefined ? { senderThreadId: item.senderThreadId } : {}),
+              ...(item.voiceRequest !== undefined ? { voiceRequest: item.voiceRequest } : {}),
               ...(item.scheduledTaskId !== undefined
                 ? { scheduledTaskId: item.scheduledTaskId }
                 : {}),
@@ -1076,6 +1089,57 @@ export function derivePhase(runtime: ThreadRuntimeSummary | null): SessionPhase 
     return "connecting";
   if (runtime.status === "running" || runtime.status === "waiting") return "running";
   return "ready";
+}
+
+/**
+ * A Grok Bot run blocked on the user's answer or approval is awaiting input, not
+ * thinking. Its phase stays "running", so Stop and interrupt keep working.
+ */
+export function deriveGrokBotAwaitingInput(input: {
+  readonly isGrokBotThread: boolean;
+  readonly phase: SessionPhase;
+  readonly hasPendingInput: boolean;
+}): boolean {
+  return input.isGrokBotThread && input.phase === "running" && input.hasPendingInput;
+}
+
+/**
+ * A Grok Bot managed run whose native app is confirmed idle is waiting for the
+ * run to settle, not thinking. Only a fresh native reading observed at or after
+ * the run started counts; transcript-derived or pre-run idle does not. The run
+ * stays unsettled, so Stop and the run state are unchanged.
+ */
+export function deriveGrokBotAwaitingCompletion(input: {
+  readonly isGrokBotThread: boolean;
+  readonly phase: SessionPhase;
+  readonly hasPendingInput: boolean;
+  readonly runStartedAtMs: number | null;
+  readonly nowMs: number;
+  readonly nativeActivity: typeof GrokBotRuntimeActivity.Type | null | undefined;
+}): boolean {
+  const activity = input.nativeActivity;
+  if (!input.isGrokBotThread || input.phase !== "running" || input.hasPendingInput) return false;
+  if (activity === null || activity === undefined) return false;
+  if (activity.source !== "native") return false;
+  if (activity.isRunning !== false || activity.isComposingMessage !== false) return false;
+  if (activity.currentActivity !== undefined || activity.awaitingUserResponse !== null) {
+    return false;
+  }
+  if (activity.staleAtMs !== undefined && activity.staleAtMs <= input.nowMs) return false;
+  return input.runStartedAtMs !== null && activity.observedAtMs >= input.runStartedAtMs;
+}
+
+/**
+ * A Grok Bot follow-up sent while its run is in flight restarts that run: the native
+ * app cannot steer an active turn, and queueing would wait on a settlement that may
+ * never arrive. An idle send keeps the caller's dispatch mode.
+ */
+export function resolveGrokBotSendDispatchMode(input: {
+  readonly isGrokBotThread: boolean;
+  readonly phase: SessionPhase;
+  readonly dispatchMode: ComposerDispatchMode;
+}): ComposerDispatchMode {
+  return input.isGrokBotThread && input.phase === "running" ? "restart" : input.dispatchMode;
 }
 
 /**

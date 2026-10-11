@@ -47,6 +47,7 @@ import {
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS,
+  isGrokBotBackingThread,
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import {
@@ -194,6 +195,7 @@ import {
 import { useComposerPathSearch } from "../../lib/composerPathSearchState";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import {
+  COMPOSER_RESTING_ACTIONS_INSET_PX,
   getRestingComposerImagePreviewCounts,
   resolveRestingComposerControlsLayout,
   shouldAnimateComposerRestingTransition,
@@ -261,6 +263,7 @@ import {
 import { useEnvironmentQuery } from "~/state/query";
 import { useDebouncedValue } from "~/state/queries";
 import { ProviderModelPicker } from "./ProviderModelPicker";
+import { GROK_BOT_DRIVER_KIND } from "./ProviderInstanceIcon";
 import { resolveModelPickerSelectedModel } from "./ModelPickerContent";
 import {
   type ComposerCommandItem,
@@ -411,6 +414,13 @@ function SnapShotAttachmentFrame({
   );
 }
 
+/**
+ * Remove buttons on attachment thumbnails. They reveal on hover (hover-capable pointers only) or
+ * when keyboard focus lands anywhere in the attachment, and stay visible on coarse-pointer touch
+ * devices, which have no hover. Hidden buttons keep their size and tab stop.
+ */
+const ATTACHMENT_REMOVE_REVEAL_CLASS =
+  "opacity-0 transition-opacity pointer-coarse:opacity-100 [@media(hover:none)]:opacity-100 group-any-hover/attachment:opacity-100 group-has-[:focus-visible]/attachment:opacity-100";
 const COMPOSER_PULL_REQUEST_LIST_LIMIT = 99;
 const COMPOSER_PULL_REQUEST_RESULT_LIMIT = 12;
 const EMPTY_PULL_REQUEST_LIST_TARGETS: ReadonlyArray<EnvironmentQueryTarget<PullRequestListInput>> =
@@ -1091,6 +1101,7 @@ import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
   NO_PROVIDER_MODEL_SELECTION,
+  omitGrokBotProviderEntries,
   sortProviderInstanceEntries,
   type ProviderInstanceEntry,
 } from "../../providerInstances";
@@ -1129,6 +1140,19 @@ import {
   resolveProviderSlashCommandsForCwd,
 } from "@t3tools/client-runtime/providerSkills";
 import { searchProviderSkills } from "../../providerSkillSearch";
+import {
+  grokBotComposerAtReplacement,
+  grokBotConnectorLabel,
+  grokBotConnectorLogoUrls,
+  grokBotSkillToProviderSkill,
+  mentionableGrokBotComposerBots,
+  searchGrokBotComposerBots,
+  searchGrokBotComposerConnectors,
+} from "../../lib/grokBotComposerDiscovery";
+import {
+  grokBotsComposerResourcesQuery,
+  grokBotsMarketplacePluginsQuery,
+} from "../../state/grokBots";
 import { useDelayedStatus } from "../../hooks/useDelayedStatus";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { usePanelAnimationSettings } from "../../panelAnimations";
@@ -1241,6 +1265,7 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
   runtimeModeOptions: ReadonlyArray<RuntimeModeOption>;
+  hideRuntimeMode?: boolean;
   size?: "sm" | "xs";
   hidden?: boolean;
   onToggleInteractionMode: () => void;
@@ -1295,6 +1320,10 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
       </Tooltip>
     </>
   ) : null;
+
+  if (props.hideRuntimeMode) {
+    return interactionModeToggle;
+  }
 
   return (
     <>
@@ -1369,7 +1398,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   } | null;
   isRunning: boolean;
   canInterrupt: boolean;
-  followUpBehavior: "queue" | "steer";
+  /** `null` for GrokBot threads: sends go straight through, so there is no queue/steer mode. */
+  followUpBehavior: "queue" | "steer" | null;
   alternateShortcutLabel: string | null;
   showPlanFollowUpPrompt: boolean;
   promptHasText: boolean;
@@ -2132,17 +2162,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Instance-aware projection of the wire provider list. One entry per
   // configured instance (default built-in + any custom `providerInstances.*`),
   // sorted default-first per driver kind for a stable picker order.
-  const providerInstanceEntries = useMemo<ReadonlyArray<ProviderInstanceEntry>>(
-    () =>
-      sortProviderInstanceEntries(
-        applyProviderInstanceSettings(
-          deriveProviderInstanceEntries(providerStatuses),
-          settings,
-          activeProjectId,
-        ),
+  // Grok Bot instances appear only in their own bot thread; ordinary threads never pick one.
+  const providerInstanceEntries = useMemo<ReadonlyArray<ProviderInstanceEntry>>(() => {
+    const entries = sortProviderInstanceEntries(
+      applyProviderInstanceSettings(
+        deriveProviderInstanceEntries(providerStatuses),
+        settings,
+        activeProjectId,
       ),
-    [providerStatuses, settings, activeProjectId],
-  );
+    );
+    return activeThreadId !== null && isGrokBotBackingThread({ id: activeThreadId })
+      ? entries
+      : omitGrokBotProviderEntries(entries);
+  }, [activeThreadId, providerStatuses, settings, activeProjectId]);
   const selectedProviderByThreadId = composerDraft.activeProvider ?? null;
   const {
     selectedProviderEntry,
@@ -2200,6 +2232,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     supportedRuntimeModes && supportedRuntimeModes.length > 0
       ? runtimeModeOptions.filter((option) => supportedRuntimeModes.includes(option.mode))
       : runtimeModeOptions;
+  const hideRuntimeMode =
+    selectedProvider === GROK_BOT_DRIVER_KIND && compatibleRuntimeModeOptions.length <= 1;
   // Older threads can contain a mode their current provider no longer offers.
   // Display the provider's first supported mode, which is also its safe legacy
   // fallback, without mutating persisted state until the user makes a choice.
@@ -2218,6 +2252,32 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     projectModelSelection: activeProjectDefaultModelSelection,
     settings,
   });
+  // Only a bot's own thread gets the GrokBot composer; other threads on the same provider stay normal.
+  const isGrokBotComposer =
+    selectedProvider === GROK_BOT_DRIVER_KIND &&
+    activeThreadId !== null &&
+    isGrokBotBackingThread({ id: activeThreadId });
+  // The thread is bound to its bot by modelSelection; the picker's selection can fall back to
+  // another bot or an empty slug when the bot is missing from the provider's model list.
+  const grokBotId = isGrokBotComposer
+    ? (activeThreadModelSelection?.model ?? selectedModel)
+    : selectedModel;
+  const grokBotComposerResources = useEnvironmentQuery(
+    isGrokBotComposer && grokBotId
+      ? grokBotsComposerResourcesQuery({
+          environmentId,
+          input: { botId: grokBotId },
+        })
+      : null,
+  );
+  // Connector icons come from the public catalog, which only grok-bot composers read.
+  const grokBotPluginCatalog = useEnvironmentQuery(
+    isGrokBotComposer ? grokBotsMarketplacePluginsQuery({ environmentId, input: {} }) : null,
+  );
+  const grokBotConnectorLogos = useMemo(
+    () => grokBotConnectorLogoUrls(grokBotPluginCatalog.data?.plugins ?? []),
+    [grokBotPluginCatalog.data],
+  );
   const providerSendBlockReason = getAntigravitySendBlockReason(
     selectedProviderEntry?.snapshot,
     selectedModel,
@@ -2238,8 +2298,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Memoized so the composer menu memo below can cache between renders.
   const selectedProviderSkills = useMemo(
     () =>
-      selectedProviderStatus ? resolveProviderSkillsForCwd(selectedProviderStatus, gitCwd) : [],
-    [gitCwd, selectedProviderStatus],
+      isGrokBotComposer
+        ? (grokBotComposerResources.data?.skills ?? []).map(grokBotSkillToProviderSkill)
+        : selectedProviderStatus
+          ? resolveProviderSkillsForCwd(selectedProviderStatus, gitCwd)
+          : [],
+    [gitCwd, grokBotComposerResources.data, isGrokBotComposer, selectedProviderStatus],
   );
   const selectedProviderSlashCommands = useMemo(
     () =>
@@ -2469,7 +2533,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     null,
   );
   const [composerMenuAnchor, setComposerMenuAnchor] = useState<HTMLDivElement | null>(null);
-  const hasWrappedPrompt = useComposerMultilinePrompt(composerMenuAnchor);
+  // The resting footer floats over the prompt row, so the row reserves its measured width. Wide actions
+  // like the compact-before-send chip vary too much for a fixed inset.
+  const [restingActionsElement, setRestingActionsElement] = useState<HTMLDivElement | null>(null);
+  const [restingActionsWidth, setRestingActionsWidth] = useState<number | null>(null);
+  // The GrokBot compact row keeps its actions' width reserved even when expanded, so wrapping is judged
+  // against that same budget. Otherwise a prompt between the two widths would flip between layouts.
+  const grokBotReservedWidth =
+    isGrokBotComposer && !isMobileViewport && restingActionsWidth !== null
+      ? restingActionsWidth + COMPOSER_RESTING_ACTIONS_INSET_PX
+      : 0;
+  const hasWrappedPrompt = useComposerMultilinePrompt(composerMenuAnchor, grokBotReservedWidth);
   const hasMultilinePrompt = prompt.includes("\n") || hasWrappedPrompt;
   const [isStashMenuOpen, setIsStashMenuOpen] = useState(false);
   const [isTasksDrawerOpen, setIsTasksDrawerOpen] = useState(false);
@@ -2686,6 +2760,31 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerMenuItems = useMemo<ComposerCommandItem[]>(() => {
     if (!composerTrigger) return [];
     if (composerTrigger.kind === "path") {
+      if (isGrokBotComposer) {
+        return [
+          ...searchGrokBotComposerBots(
+            mentionableGrokBotComposerBots(grokBotComposerResources.data, grokBotId),
+            composerTrigger.query,
+          ).map((bot) => ({
+            id: `grok-bot:${bot.id}`,
+            type: "grok-bot" as const,
+            bot,
+            label: bot.name,
+            description: "Bot",
+          })),
+          ...searchGrokBotComposerConnectors(
+            grokBotComposerResources.data?.connectors ?? [],
+            composerTrigger.query,
+          ).map((connector) => ({
+            id: `grok-connector:${connector.pluginId}`,
+            type: "grok-connector" as const,
+            connector,
+            label: grokBotConnectorLabel(connector),
+            description: connector.description ?? "Connector",
+            logoUrl: grokBotConnectorLogos.get(connector.pluginId) ?? null,
+          })),
+        ];
+      }
       // Threads only surface for a typed query so `@` alone stays a file picker. A title match
       // is far more specific than a fuzzy path hit, so the few threads lead the list.
       return [
@@ -2852,6 +2951,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedProviderStatus,
     settings.showSkillsInSlashMenu,
     workspaceEntries.entries,
+    isGrokBotComposer,
+    grokBotComposerResources.data,
+    grokBotConnectorLogos,
+    grokBotId,
   ]);
 
   const composerMenuOpen = Boolean(composerTrigger);
@@ -2924,7 +3027,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   ]);
 
   const isComposerMenuLoading =
-    (composerTriggerKind === "path" && pathTriggerQuery.length > 0 && workspaceEntries.isPending) ||
+    (isGrokBotComposer &&
+      (composerTriggerKind === "path" || composerTriggerKind === "skill") &&
+      grokBotComposerResources.isPending) ||
+    (composerTriggerKind === "path" &&
+      !isGrokBotComposer &&
+      pathTriggerQuery.length > 0 &&
+      workspaceEntries.isPending) ||
     (composerTriggerKind === "pull-request" &&
       pullRequestProjectId !== null &&
       pullRequestRepository !== null &&
@@ -2933,6 +3042,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         pullRequestTriggerNumber !== debouncedPullRequestNumber ||
         exactPullRequestLookup.isPending));
   const composerMenuEmptyState = useMemo(() => {
+    if (isGrokBotComposer && (composerTriggerKind === "skill" || composerTriggerKind === "path")) {
+      if (grokBotComposerResources.error !== null) return grokBotComposerResources.error;
+      return composerTriggerKind === "skill"
+        ? "No native Grok Bot skills found."
+        : "No matching bots or connectors.";
+    }
     if (composerTriggerKind === "skill") {
       return "No skills found. Try / to browse provider commands.";
     }
@@ -2956,6 +3071,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   }, [
     composerTrigger,
     composerTriggerKind,
+    grokBotComposerResources.error,
+    isGrokBotComposer,
     pullRequestLookup.data?.errors,
     pullRequestLookup.error,
     pullRequestProjectId,
@@ -4017,6 +4134,42 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       });
       const { snapshot, trigger } = resolveActiveComposerTrigger();
       if (!trigger) return;
+      if (item.type === "grok-bot") {
+        const replacement = grokBotComposerAtReplacement(item.bot.name);
+        const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
+          snapshot.value,
+          trigger.rangeEnd,
+          replacement,
+        );
+        const applied = applyPromptReplacement(
+          trigger.rangeStart,
+          replacementRangeEnd,
+          replacement,
+          { expectedText: snapshot.value.slice(trigger.rangeStart, replacementRangeEnd) },
+        );
+        if (applied) {
+          setComposerHighlightedItemId(null);
+        }
+        return;
+      }
+      if (item.type === "grok-connector") {
+        const replacement = grokBotComposerAtReplacement(grokBotConnectorLabel(item.connector));
+        const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
+          snapshot.value,
+          trigger.rangeEnd,
+          replacement,
+        );
+        const applied = applyPromptReplacement(
+          trigger.rangeStart,
+          replacementRangeEnd,
+          replacement,
+          { expectedText: snapshot.value.slice(trigger.rangeStart, replacementRangeEnd) },
+        );
+        if (applied) {
+          setComposerHighlightedItemId(null);
+        }
+        return;
+      }
       if (item.type === "path") {
         const replacement = `${serializeComposerFileLink(item.path)} `;
         const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
@@ -5239,12 +5392,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     hasMultilinePrompt,
     timelineOverflows,
   });
-  const expandedComposerImages = isComposerResting
+  // Grok Bot threads stay on the compact pill while the prompt is a single line or empty: attach/send
+  // overlay the prompt row. Once it has a newline or wraps, it uses the ordinary expanded composer
+  // (full width, normal leading, controls below), minus the model chip. Bot questions keep the pill
+  // too, so an answer box does not grow past the normal composer.
+  const grokBotComposerCompact =
+    isGrokBotComposer && !isMobileViewport && !isComposerApprovalState && !hasMultilinePrompt;
+  const composerActionsOverlay = isComposerResting || grokBotComposerCompact;
+  const expandedComposerImages = composerActionsOverlay
     ? standaloneComposerImages.filter((image) => pendingSnapShotIdSet.has(image.id))
     : standaloneComposerImages;
   // Keep collapsed controls inside the input when workspace context is hidden.
-  const composerControlsCollapsed = isComposerResting || isComposerCollapsedMobile;
-  const showInlineRestingControls = composerControlsCollapsed && restingControlsHost === null;
+  const composerControlsCollapsed =
+    isComposerResting || isComposerCollapsedMobile || grokBotComposerCompact;
+  const showInlineRestingControls =
+    composerControlsCollapsed && restingControlsHost === null && !grokBotComposerCompact;
   const composerControlsVisibleInStrip =
     composerControlsCollapsed && restingControlsHost !== null && restingControlsVisible;
   const composerControlsHidden = composerControlsCollapsed && !restingControlsVisible;
@@ -5255,18 +5417,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onRestingControlsVisibilityChange(composerControlsVisibleInStrip);
   }, [composerControlsVisibleInStrip, onRestingControlsVisibilityChange]);
   useLayoutEffect(() => {
-    onRestingChange(isComposerResting);
-  }, [isComposerResting, onRestingChange]);
-  // The resting footer floats over the prompt row, so the row reserves its
-  // measured width. Wide actions like the compact-before-send chip vary too much for a fixed inset.
-  const [restingActionsElement, setRestingActionsElement] = useState<HTMLDivElement | null>(null);
-  const [restingActionsWidth, setRestingActionsWidth] = useState<number | null>(null);
+    onRestingChange(composerActionsOverlay);
+  }, [composerActionsOverlay, onRestingChange]);
   useLayoutEffect(() => {
-    if (!isComposerResting || !restingActionsElement) return;
+    if (!composerActionsOverlay || !restingActionsElement) return;
     const measure = () => setRestingActionsWidth(restingActionsElement.offsetWidth);
     measure();
     return observeResize(restingActionsElement, measure);
-  }, [isComposerResting, restingActionsElement]);
+  }, [composerActionsOverlay, restingActionsElement]);
   const restingImagePreviewCounts = getRestingComposerImagePreviewCounts(
     standaloneComposerImages.length,
   );
@@ -5281,40 +5439,52 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         className="flex shrink-0 items-center gap-1 ps-1"
       >
         {restingComposerImages.map((image) => (
-          <button
-            key={image.id}
-            type="button"
-            className="relative size-7 shrink-0 cursor-zoom-in overflow-hidden rounded-md border border-border/70 bg-muted/60"
-            aria-label={`Preview ${image.name}`}
-            onPointerDown={(event) => event.preventDefault()}
-            onClick={() => {
-              const preview = buildExpandedImagePreview(composerImages, image.id);
-              if (preview) onExpandImage(preview);
-            }}
-          >
-            {image.previewUrl ? (
-              <ComposerImageThumbnail
-                file={image.file}
-                alt=""
-                className="size-full object-cover"
-                fallback={
-                  <PierreEntryIcon
-                    pathValue={image.name}
-                    kind="file"
-                    theme={resolvedTheme}
-                    className="m-auto size-3.5"
-                  />
-                }
-              />
-            ) : (
-              <PierreEntryIcon
-                pathValue={image.name}
-                kind="file"
-                theme={resolvedTheme}
-                className="m-auto size-3.5"
-              />
-            )}
-          </button>
+          <div key={image.id} className="group/attachment relative shrink-0">
+            <button
+              type="button"
+              className="relative size-7 cursor-zoom-in overflow-hidden rounded-md border border-border/70 bg-muted/60"
+              aria-label={`Preview ${image.name}`}
+              onPointerDown={(event) => event.preventDefault()}
+              onClick={() => {
+                const preview = buildExpandedImagePreview(composerImages, image.id);
+                if (preview) onExpandImage(preview);
+              }}
+            >
+              {image.previewUrl ? (
+                <ComposerImageThumbnail
+                  file={image.file}
+                  alt=""
+                  className="size-full object-cover"
+                  fallback={
+                    <PierreEntryIcon
+                      pathValue={image.name}
+                      kind="file"
+                      theme={resolvedTheme}
+                      className="m-auto size-3.5"
+                    />
+                  }
+                />
+              ) : (
+                <PierreEntryIcon
+                  pathValue={image.name}
+                  kind="file"
+                  theme={resolvedTheme}
+                  className="m-auto size-3.5"
+                />
+              )}
+            </button>
+            <span className={cn("absolute right-0.5 top-0.5 flex", ATTACHMENT_REMOVE_REVEAL_CLASS)}>
+              <Button
+                variant="media-close"
+                size="icon-micro"
+                aria-label={`Remove ${image.name}`}
+                onPointerDown={(event) => event.preventDefault()}
+                onClick={() => removeComposerImage(image.id)}
+              >
+                <XIcon />
+              </Button>
+            </span>
+          </div>
         ))}
         {restingImagePreviewCounts.overflowCount > 0 ? (
           <button
@@ -5341,7 +5511,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     usePanelAnimationSettings();
   const composerMainSurfaceRef = useComposerRestingTransition(
     composerControlsCollapsed,
-    isComposerResting,
+    composerActionsOverlay,
     restingComposerControlsRef,
     onComposerOverlayHeightChange,
     panelAnimationsActive,
@@ -5493,6 +5663,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           interactionMode={interactionMode}
           runtimeMode={compatibleRuntimeMode}
           runtimeModeOptions={compatibleRuntimeModeOptions}
+          hideRuntimeMode={hideRuntimeMode}
           size={composerControlsCollapsed ? "xs" : "sm"}
           hidden={composerControlsHidden || restingHiddenBlockCount > 0}
           onToggleInteractionMode={toggleInteractionMode}
@@ -5530,95 +5701,98 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           data-resting-controls-separator="true"
         />
       ) : null}
-      <ProviderModelPicker
-        environmentId={environmentId}
-        compact={false}
-        isComposerOwned
-        disabled={providerCatalogPending || isSendBusy}
-        {...(routeKind === "draft" && supportsMultipleModels
-          ? {
-              ...(multipleModelSelections !== null
-                ? { selectedModels: multipleModelSelections }
-                : {}),
-              onToggleModel: (instanceId: ProviderInstanceId, model: string) => {
-                const current = multipleModelSelections ?? [selectedModelSelection];
-                const matchesModel = (selection: ModelSelection) => {
-                  if (selection.instanceId !== instanceId) return false;
-                  const entry = providerInstanceEntries.find(
-                    (entry) => entry.instanceId === selection.instanceId,
-                  );
-                  const resolvedModel = resolveModelPickerSelectedModel({
-                    driverKind: entry?.driverKind,
-                    model: selection.model,
-                    options: modelOptionsByInstance.get(selection.instanceId) ?? [],
-                  });
-                  return (resolvedModel?.slug ?? selection.model) === model;
-                };
-                const exists = current.some(matchesModel);
-                const next = exists
-                  ? current.filter((selection) => !matchesModel(selection))
-                  : [...current, createModelSelection(instanceId, model)];
-                if (next.length > 1) {
-                  setMultipleModelSelections(next);
-                } else {
-                  setMultipleModelSelections(null);
-                  const remaining = next[0] ?? selectedModelSelection;
-                  onProviderModelSelect(remaining.instanceId, remaining.model, {
-                    focusComposer: false,
-                  });
-                }
-              },
-            }
-          : {})}
-        activeInstanceId={
-          providerCatalogPending
-            ? (activeThreadModelSelection?.instanceId ?? selectedInstanceId)
-            : selectedInstanceId
-        }
-        model={
-          providerCatalogPending
-            ? (activeThreadModelSelection?.model ?? selectedModelForPickerWithCustomFallback)
-            : selectedModelForPickerWithCustomFallback
-        }
-        lockedProvider={lockedProvider}
-        lockedContinuationGroupKey={lockedContinuationGroupKey}
-        instanceEntries={providerInstanceEntries}
-        keybindings={keybindings}
-        modelOptionsByInstance={modelOptionsByInstance}
-        size={composerControlsCollapsed ? "xs" : "sm"}
-        triggerClassName={
-          composerControlsCollapsed
-            ? cn(
-                "min-w-13 shrink text-xs!",
-                !showInlineRestingControls &&
-                  "@max-[640px]/composer-surface:[&_[data-chat-provider-model-picker-label]]:w-0 @max-[640px]/composer-surface:[&_[data-chat-provider-model-picker-label]]:flex-none",
-              )
-            : "-ms-2.5 min-w-13"
-        }
-        terminalOpen={terminalOpen}
-        open={isComposerModelPickerOpen}
-        instanceIndicatorBackground={
-          composerControlsCollapsed
-            ? "color-mix(in srgb, var(--chat-composer-glass-surface) var(--glass-opacity), transparent)"
-            : "var(--contrast-input)"
-        }
-        {...(composerProviderState.modelPickerIconClassName || composerControlsCollapsed
-          ? {
-              activeProviderIconClassName: cn(
-                composerProviderState.modelPickerIconClassName,
-                composerControlsCollapsed &&
-                  "fill-muted-foreground/70! text-muted-foreground/70! [&_path]:fill-muted-foreground/70! [&_rect]:fill-muted-foreground/70! [&_[data-icon-detail]]:fill-transparent!",
-              ),
-            }
-          : {})}
-        onOpenChange={setIsComposerModelPickerOpen}
-        getModelDisabledReason={getModelDisabledReason}
-        onInstanceModelChange={(instanceId, model) => {
-          setMultipleModelSelections(null);
-          onProviderModelSelect(instanceId, model);
-        }}
-        onOpenProviderSetup={onOpenProviderSetup}
-      />
+      {isGrokBotComposer ? null : (
+        <ProviderModelPicker
+          environmentId={environmentId}
+          compact={false}
+          staticIdentity={false}
+          isComposerOwned
+          disabled={providerCatalogPending || isSendBusy}
+          {...(routeKind === "draft" && supportsMultipleModels
+            ? {
+                ...(multipleModelSelections !== null
+                  ? { selectedModels: multipleModelSelections }
+                  : {}),
+                onToggleModel: (instanceId: ProviderInstanceId, model: string) => {
+                  const current = multipleModelSelections ?? [selectedModelSelection];
+                  const matchesModel = (selection: ModelSelection) => {
+                    if (selection.instanceId !== instanceId) return false;
+                    const entry = providerInstanceEntries.find(
+                      (entry) => entry.instanceId === selection.instanceId,
+                    );
+                    const resolvedModel = resolveModelPickerSelectedModel({
+                      driverKind: entry?.driverKind,
+                      model: selection.model,
+                      options: modelOptionsByInstance.get(selection.instanceId) ?? [],
+                    });
+                    return (resolvedModel?.slug ?? selection.model) === model;
+                  };
+                  const exists = current.some(matchesModel);
+                  const next = exists
+                    ? current.filter((selection) => !matchesModel(selection))
+                    : [...current, createModelSelection(instanceId, model)];
+                  if (next.length > 1) {
+                    setMultipleModelSelections(next);
+                  } else {
+                    setMultipleModelSelections(null);
+                    const remaining = next[0] ?? selectedModelSelection;
+                    onProviderModelSelect(remaining.instanceId, remaining.model, {
+                      focusComposer: false,
+                    });
+                  }
+                },
+              }
+            : {})}
+          activeInstanceId={
+            providerCatalogPending
+              ? (activeThreadModelSelection?.instanceId ?? selectedInstanceId)
+              : selectedInstanceId
+          }
+          model={
+            providerCatalogPending
+              ? (activeThreadModelSelection?.model ?? selectedModelForPickerWithCustomFallback)
+              : selectedModelForPickerWithCustomFallback
+          }
+          lockedProvider={lockedProvider}
+          lockedContinuationGroupKey={lockedContinuationGroupKey}
+          instanceEntries={providerInstanceEntries}
+          keybindings={keybindings}
+          modelOptionsByInstance={modelOptionsByInstance}
+          size={composerControlsCollapsed ? "xs" : "sm"}
+          triggerClassName={
+            composerControlsCollapsed
+              ? cn(
+                  "min-w-13 shrink text-xs!",
+                  !showInlineRestingControls &&
+                    "@max-[640px]/composer-surface:[&_[data-chat-provider-model-picker-label]]:w-0 @max-[640px]/composer-surface:[&_[data-chat-provider-model-picker-label]]:flex-none",
+                )
+              : "-ms-2.5 min-w-13"
+          }
+          terminalOpen={terminalOpen}
+          open={isComposerModelPickerOpen}
+          instanceIndicatorBackground={
+            composerControlsCollapsed
+              ? "color-mix(in srgb, var(--chat-composer-glass-surface) var(--glass-opacity), transparent)"
+              : "var(--contrast-input)"
+          }
+          {...(composerProviderState.modelPickerIconClassName || composerControlsCollapsed
+            ? {
+                activeProviderIconClassName: cn(
+                  composerProviderState.modelPickerIconClassName,
+                  composerControlsCollapsed &&
+                    "fill-muted-foreground/70! text-muted-foreground/70! [&_path]:fill-muted-foreground/70! [&_rect]:fill-muted-foreground/70! [&_[data-icon-detail]]:fill-transparent!",
+                ),
+              }
+            : {})}
+          onOpenChange={setIsComposerModelPickerOpen}
+          getModelDisabledReason={getModelDisabledReason}
+          onInstanceModelChange={(instanceId, model) => {
+            setMultipleModelSelections(null);
+            onProviderModelSelect(instanceId, model);
+          }}
+          onOpenProviderSetup={onOpenProviderSetup}
+        />
+      )}
 
       <>
         {restingBlockDefs.map((def, index) => {
@@ -5656,6 +5830,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             interactionMode={interactionMode}
             runtimeMode={compatibleRuntimeMode}
             runtimeModeOptions={compatibleRuntimeModeOptions}
+            hideRuntimeMode={hideRuntimeMode}
             size={composerControlsCollapsed ? "xs" : "sm"}
             hidden={composerControlsHidden || hiddenRestingBlockIds.length === 0}
             showInteractionModeToggle={planModeUiEnabled && hiddenRestingBlockIds.includes("mode")}
@@ -5738,6 +5913,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         },
       });
       if (command !== "composer.stash") return;
+      if (event.target instanceof Element && event.target.closest("[data-grok-bot-computer]"))
+        return;
       // Always claim the shortcut so the browser save dialog never opens,
       // even when the composer is in a state that can't stash.
       event.preventDefault();
@@ -6678,7 +6855,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         if (isInteractive) return;
 
         setIsComposerScrollCollapsed(false);
-        if (isComposerResting && !target.closest('[data-testid="composer-editor"]')) {
+        if (composerActionsOverlay && !target.closest('[data-testid="composer-editor"]')) {
           // Clicking resting-surface padding would otherwise blur the editor.
           // Treat that padding like the editor without stealing native caret
           // placement from text.
@@ -7027,7 +7204,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 "pt-3.5 sm:pt-4",
                 isComposerApprovalState && "pb-3 sm:pb-4",
                 isComposerCollapsedMobile && "hidden",
-                isComposerResting && "py-2 sm:py-2",
+                composerActionsOverlay && "py-2 sm:py-2",
               )}
             >
               {isStashMenuOpen && !composerMenuOpen && !isComposerApprovalState && (
@@ -7053,7 +7230,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   ? isComposerMenuLoading
                     ? composerTriggerKind === "pull-request"
                       ? "Finding pull request..."
-                      : "Searching workspace files..."
+                      : isGrokBotComposer
+                        ? composerTriggerKind === "skill"
+                          ? "Loading Grok Bot skills..."
+                          : "Loading bots and connectors..."
+                        : "Searching workspace files..."
                     : composerMenuEmptyState
                   : ""}
               </div>
@@ -7061,11 +7242,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 <ComposerCommandMenuLayer anchor={composerMenuAnchor}>
                   <ComposerCommandMenu
                     listId={composerSuggestionListId}
+                    environmentId={environmentId}
                     items={composerMenuItems}
                     resolvedTheme={resolvedTheme}
                     isLoading={isComposerMenuLoading}
                     triggerKind={composerTriggerKind}
                     emptyStateText={composerMenuEmptyState}
+                    {...(isGrokBotComposer && composerTriggerKind === "skill"
+                      ? {
+                          listAriaLabel: "Grok Bot skills",
+                          loadingStateText: "Loading Grok Bot skills...",
+                        }
+                      : isGrokBotComposer && composerTriggerKind === "path"
+                        ? {
+                            listAriaLabel: "Bots and connectors",
+                            loadingStateText: "Loading bots and connectors...",
+                          }
+                        : {})}
                     activeItemId={activeComposerMenuItem?.id ?? null}
                     onHighlightedItemChange={onComposerMenuItemHighlighted}
                     onSelect={onSelectComposerItem}
@@ -7082,7 +7275,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     {editingQueuedAttachments.map(({ attachment, url }) => (
                       <div
                         key={attachment.id}
-                        className="relative h-16 w-16 overflow-hidden rounded-lg border border-border/80 bg-background"
+                        className="group/attachment relative h-16 w-16 overflow-hidden rounded-lg border border-border/80 bg-background"
                       >
                         {attachment.type === "image" && url ? (
                           <img
@@ -7095,15 +7288,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                             {attachment.name}
                           </div>
                         )}
-                        <Button
-                          variant="media-close"
-                          size="icon-xs"
-                          className="absolute right-1 top-1"
-                          onClick={() => onRemoveEditingQueuedAttachment(attachment.id)}
-                          aria-label={`Remove ${attachment.name}`}
+                        <span
+                          className={cn(
+                            "absolute right-1 top-1 flex",
+                            ATTACHMENT_REMOVE_REVEAL_CLASS,
+                          )}
                         >
-                          <XIcon />
-                        </Button>
+                          <Button
+                            variant="media-close"
+                            size="icon-micro"
+                            onClick={() => onRemoveEditingQueuedAttachment(attachment.id)}
+                            aria-label={`Remove ${attachment.name}`}
+                          >
+                            <XIcon />
+                          </Button>
+                        </span>
                       </div>
                     ))}
                   </div>
@@ -7247,13 +7446,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                             <span
                               className={cn(
                                 "absolute right-1 top-1 flex",
-                                image.source?.kind === "snap-shot" &&
-                                  "opacity-0 transition-opacity pointer-coarse:opacity-100 group-hover/attachment:opacity-100 group-focus-within/attachment:opacity-100",
+                                ATTACHMENT_REMOVE_REVEAL_CLASS,
                               )}
                             >
                               <Button
                                 variant="media-close"
-                                size="icon-xs"
+                                size="icon-micro"
                                 onClick={() => removeComposerImage(image.id)}
                                 aria-label={`Remove ${image.name}`}
                               >
@@ -7289,7 +7487,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       return (
                         <div
                           key={file.id}
-                          className="relative h-16 w-16 shrink-0 snap-start overflow-hidden rounded-lg border border-border/80 bg-black"
+                          className="group/attachment relative h-16 w-16 shrink-0 snap-start overflow-hidden rounded-lg border border-border/80 bg-black"
                         >
                           <button
                             type="button"
@@ -7343,15 +7541,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                               <TooltipPopup side="top">{upload.reason}</TooltipPopup>
                             </Tooltip>
                           )}
-                          <Button
-                            variant="media-close"
-                            size="icon-xs"
-                            className="absolute right-1 top-1"
-                            onClick={() => removeComposerFileFromDraft(file.id)}
-                            aria-label={`Remove ${file.name}`}
+                          <span
+                            className={cn(
+                              "absolute right-1 top-1 flex",
+                              ATTACHMENT_REMOVE_REVEAL_CLASS,
+                            )}
                           >
-                            <XIcon />
-                          </Button>
+                            <Button
+                              variant="media-close"
+                              size="icon-micro"
+                              onClick={() => removeComposerFileFromDraft(file.id)}
+                              aria-label={`Remove ${file.name}`}
+                            >
+                              <XIcon />
+                            </Button>
+                          </span>
                         </div>
                       );
                     })}
@@ -7437,10 +7641,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 )}
 
               <div
-                className={cn("relative", isComposerResting && "flex min-w-0 items-center gap-1")}
+                className={cn(
+                  "relative",
+                  composerActionsOverlay && "flex min-w-0 items-center gap-1",
+                )}
                 style={
-                  isComposerResting && restingActionsWidth !== null
-                    ? { paddingRight: `calc(${restingActionsWidth}px + 1rem)` }
+                  composerActionsOverlay && restingActionsWidth !== null
+                    ? { paddingRight: restingActionsWidth + COMPOSER_RESTING_ACTIONS_INSET_PX }
                     : undefined
                 }
               >
@@ -7481,7 +7688,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     </DialogPopup>
                   </Dialog>
                 ) : null}
-                <ComposerContextActionsContext value={composerContextActions}>
+                <ComposerContextActionsContext
+                  value={{
+                    ...composerContextActions,
+                    grokBotResources: grokBotComposerResources.data,
+                    grokBotConnectorLogoUrls: grokBotConnectorLogos,
+                  }}
+                >
                   <ComposerPromptEditor
                     ariaLabel="Message"
                     suggestionListId={composerSuggestionListId}
@@ -7511,15 +7724,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     buildContextClipboardFragment={buildContextClipboardFragment}
                     importContextFragment={importContextFragment}
                     skills={selectedProviderSkills}
-                    containerClassName={cn(isComposerResting && "min-w-0 flex-1")}
+                    containerClassName={cn(composerActionsOverlay && "min-w-0 flex-1")}
                     className={cn(
                       showMobilePendingAnswerActions && "max-sm:pb-12",
-                      isComposerResting &&
-                        "my-0 max-h-8 min-h-8 overflow-hidden py-0 whitespace-pre! leading-8",
+                      grokBotComposerCompact
+                        ? "my-0 min-h-8 max-h-52 overflow-y-auto leading-6"
+                        : isComposerResting &&
+                            "my-0 max-h-8 min-h-8 overflow-hidden py-0 whitespace-pre! leading-8",
                       isComposerApprovalState && "min-h-10",
                     )}
                     placeholderClassName={cn(
-                      isComposerResting &&
+                      composerActionsOverlay &&
                         "flex items-center overflow-hidden whitespace-nowrap leading-8",
                     )}
                     onChange={onPromptChange}
@@ -7545,7 +7760,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                                 ? "Enable a provider in Settings to send a message"
                                 : phase === "disconnected"
                                   ? DISCONNECTED_COMPOSER_PLACEHOLDER
-                                  : "Ask anything, @tag files/folders, $use skills, or / for commands"
+                                  : isGrokBotComposer
+                                    ? "Ask anything, @mention bots/connectors, $use skills, or / for commands"
+                                    : "Ask anything, @tag files/folders, $use skills, or / for commands"
                     }
                     disabled={
                       isConnecting ||
@@ -7556,7 +7773,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     }
                   />
                 </ComposerContextActionsContext>
-                {isComposerResting ? collapsedComposerImagePreviews : null}
+                {composerActionsOverlay ? collapsedComposerImagePreviews : null}
                 {showMobilePendingAnswerActions ? (
                   <div
                     data-chat-composer-mobile-pending-actions="true"
@@ -7604,9 +7821,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   pendingUserInputs.length > 0 && "pt-2",
                   isComposerFooterCompact ? "gap-1.5" : "gap-2 sm:gap-0",
                   showMobilePendingAnswerActions && "hidden sm:flex",
-                  isComposerResting &&
+                  composerActionsOverlay &&
                     "absolute right-px z-10 h-12 w-auto gap-0 py-0 sm:gap-0 sm:py-0",
-                  isComposerResting &&
+                  composerActionsOverlay &&
                     (showInlineRestingControls ? "bottom-[calc(2rem+1px)]" : "bottom-px"),
                 )}
               >
@@ -7616,7 +7833,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   data-chat-composer-footer-controls="true"
                   className={cn(
                     "relative -m-1 -ms-3.5 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-1 ps-3.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
-                    isComposerResting && "hidden",
+                    composerActionsOverlay && "hidden",
                   )}
                 >
                   {composerControlsCollapsed ? null : composerControls}
@@ -7670,7 +7887,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     </>
                   ) : null}
                   <ComposerFooterPrimaryActions
-                    compact={isComposerResting || isComposerPrimaryActionsCompact}
+                    compact={composerActionsOverlay || isComposerPrimaryActionsCompact}
                     canOperateThread={canOperateThread}
                     activeContextWindow={
                       settings.contextWindowMeterEnabled ? activeContextWindow : null
@@ -7680,7 +7897,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     pendingAction={pendingPrimaryAction}
                     isRunning={phase === "running"}
                     canInterrupt={canInterrupt}
-                    followUpBehavior={settings.followUpBehavior}
+                    followUpBehavior={isGrokBotComposer ? null : settings.followUpBehavior}
                     alternateShortcutLabel={shortcutLabelForCommand(
                       keybindings,
                       "composer.sendAlternate",
@@ -7707,7 +7924,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     isPreparingWorktree={isPreparingWorktree}
                     hasSendableContent={composerSendState.hasSendableContent}
                     canResume={showResumeAction}
-                    preserveComposerFocusOnPointerDown={isMobileViewport || isComposerResting}
+                    preserveComposerFocusOnPointerDown={isMobileViewport || composerActionsOverlay}
                     isEditingQueuedMessage={isEditingQueuedMessage}
                     onSubmitMessage={handleSubmitMessage}
                     onResume={onResume}

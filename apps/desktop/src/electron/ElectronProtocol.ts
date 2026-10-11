@@ -74,6 +74,8 @@ export function makeDesktopContentSecurityPolicy(input: DesktopProtocolRegistrat
     : undefined;
   const scriptSources = [
     "'self'",
+    // Locally installed avatar modules are fetched with environment credentials.
+    "blob:",
     "'unsafe-inline'",
     "'wasm-unsafe-eval'",
     ...(clerkOrigin ? [clerkOrigin] : []),

@@ -335,9 +335,10 @@ function isLocalProjectedRow(
  * `run_interrupt_request` in `turnItems`. Keep every small request item from the
  * full projection even when it sits outside the recent visible window, so a
  * later history page that introduces the matching result still has the request
- * available for live attempt/run reducers.
+ * available for live attempt/run reducers. Pending approvals and questions also
+ * need their display data even when their native card predates the visible window.
  */
-function retainedInterruptRequestTurnItems(
+function retainedControlRequestTurnItems(
   projection: OrchestrationV2ThreadProjection,
   visible: ReadonlyArray<OrchestrationV2ProjectedTurnItem>,
 ): OrchestrationV2TurnItem[] {
@@ -349,8 +350,19 @@ function retainedInterruptRequestTurnItems(
   }
 
   const retained: OrchestrationV2TurnItem[] = [];
+  const pendingRequestIds = new Set(
+    projection.runtimeRequests
+      .filter((request) => request.status === "pending")
+      .map((request) => request.id),
+  );
   for (const item of projection.turnItems) {
-    if (item.type !== "run_interrupt_request") {
+    if (
+      item.type !== "run_interrupt_request" &&
+      !(
+        (item.type === "approval_request" || item.type === "user_input_request") &&
+        pendingRequestIds.has(item.requestId)
+      )
+    ) {
       continue;
     }
     // Already covered by local turnItems for the visible window.
@@ -471,17 +483,13 @@ export function buildBoundedThreadProjection(input: {
   };
   const latestLocalTurnOrdinal = computeLatestLocalTurnOrdinal(input.projection.turnItems);
 
-  // Reserve bytes for small interrupt-request dependencies that may sit outside
-  // the recent window but are required for visibility of results inside it.
+  // Reserve bytes for request dependencies outside the recent timeline window.
   const dependencyReserve = (() => {
-    // Upper bound: all request items in the full projection. Window selection
+    // Upper bound: all retained request items in the full projection. Window selection
     // uses this reserve so the final contribution stays under the cap.
     let reserve = 0;
-    for (const item of controlProjection.turnItems) {
-      if (item.type === "run_interrupt_request") {
-        reserve += bytesOfJson(item);
-      }
-    }
+    for (const item of retainedControlRequestTurnItems(controlProjection, []))
+      reserve += bytesOfJson(item);
     return reserve;
   })();
   const controlBytes = bytesOfJson({
@@ -509,10 +517,7 @@ export function buildBoundedThreadProjection(input: {
   });
   const visibleTurnItems = renumberPositions(window.items);
   const windowTurnItems = localTurnItemsForVisibleWindow(controlProjection, visibleTurnItems);
-  const dependencyTurnItems = retainedInterruptRequestTurnItems(
-    controlProjection,
-    visibleTurnItems,
-  );
+  const dependencyTurnItems = retainedControlRequestTurnItems(controlProjection, visibleTurnItems);
   const turnItemById = new Map<string, OrchestrationV2TurnItem>();
   for (const item of windowTurnItems) {
     turnItemById.set(String(item.id), item);

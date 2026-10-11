@@ -45,8 +45,10 @@ import {
   failEnvironmentScopeRequired,
   failEnvironmentAuthInvalid,
   failEnvironmentInternal,
+  failEnvironmentNotFound,
 } from "./auth/http.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
+import * as GrokBotAvatarEngine from "./grokBot/GrokBotAvatarEngine.ts";
 import { WEBHOOK_ROUTE_PREFIX } from "./scheduledTasks/ScheduledTaskService.ts";
 import { browserApiCorsAllowedHeaders, browserApiCorsAllowedMethods } from "./httpCors.ts";
 
@@ -462,6 +464,65 @@ export const layerAssetRoute = HttpRouter.add(
     ).pipe(
       Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 })),
     );
+  }),
+);
+
+const GROK_BOT_AVATAR_ENGINE_PATH = "/api/grok-bot/avatar-engine";
+const avatarEngineFailureResponse = {
+  GrokBotAvatarEngineMissingError: () =>
+    failEnvironmentNotFound("grok_bot_avatar_engine_not_found"),
+  GrokBotAvatarEngineReadError: (error: GrokBotAvatarEngine.GrokBotAvatarEngineReadError) =>
+    failEnvironmentInternal("grok_bot_avatar_engine_unavailable", error),
+};
+
+export const layerGrokBotAvatarEngineRoute = HttpApiBuilder.group(
+  EnvironmentHttpApi,
+  "grokBotAvatarEngine",
+  Effect.fnUntraced(function* (handlers) {
+    const engine = yield* GrokBotAvatarEngine.GrokBotAvatarEngine;
+    return handlers
+      .handleRaw(
+        "metadata",
+        Effect.fnUntraced(function* () {
+          yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
+          const asset = yield* engine.read();
+          return yield* HttpServerResponse.json(
+            {
+              apiVersion: 1,
+              version: asset.version,
+              sha256: asset.sha256,
+              modulePath: `${GROK_BOT_AVATAR_ENGINE_PATH}/${asset.sha256}.mjs`,
+            },
+            { headers: { "cache-control": "private, no-store" } },
+          ).pipe(
+            Effect.catchTags({
+              HttpBodyError: (error) =>
+                failEnvironmentInternal("grok_bot_avatar_engine_unavailable", error),
+            }),
+          );
+        }, Effect.catchTags(avatarEngineFailureResponse)),
+      )
+      .handleRaw(
+        "module",
+        Effect.fnUntraced(function* () {
+          yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const url = HttpServerRequest.toURL(request);
+          const suffix = Option.isSome(url)
+            ? url.value.pathname.slice(GROK_BOT_AVATAR_ENGINE_PATH.length + 1)
+            : "";
+          if (!/^[a-f0-9]{64}\.mjs$/.test(suffix)) return HttpServerResponse.empty({ status: 404 });
+          const asset = yield* engine.read(suffix.slice(0, -4));
+          return HttpServerResponse.text(asset.source, {
+            contentType: "text/javascript",
+            headers: {
+              "cache-control": "private, max-age=3600",
+              "x-content-type-options": "nosniff",
+              etag: `"${asset.sha256}"`,
+            },
+          });
+        }, Effect.catchTags(avatarEngineFailureResponse)),
+      );
   }),
 );
 

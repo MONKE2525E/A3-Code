@@ -20,7 +20,7 @@ import {
   type TimelineEntry,
 } from "../../session-logic";
 import { makeStreamingTimelineFixture } from "../../test-fixtures";
-import type { TurnDiffSummary } from "../../types";
+import type { ChatMessage, TurnDiffSummary } from "../../types";
 import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId, MessageId, RunId } from "@t3tools/contracts";
 import { serializeAssistantCitation } from "@t3tools/shared/assistantCitations";
@@ -1397,6 +1397,325 @@ describe("deriveMessagesTimelineRows", () => {
     expect(
       expandedRows.find((row) => row.kind === "turn-fold" && row.expanded === true),
     ).toBeDefined();
+  });
+
+  it("keeps a bot's intermediate attachment reply visible inside a folded turn", () => {
+    const imageAttachments = ["a", "b", "c", "d"].map((letter) => ({
+      type: "image" as const,
+      id: `attachment-${letter}`,
+      name: `${letter}.png`,
+      mimeType: "image/png",
+      sizeBytes: 1,
+      previewUrl: "data:image/png;base64,iVBORw0KGgo=",
+    }));
+    const timelineEntries = [
+      {
+        id: "user-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:00Z",
+        message: {
+          id: "user-1" as never,
+          role: "user" as const,
+          text: "Send me the four pieces",
+          runId: null,
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+          streaming: false,
+        },
+      },
+      {
+        id: "assistant-text-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:03Z",
+        message: {
+          id: "assistant-text" as never,
+          role: "assistant" as const,
+          text: "Looking them up.",
+          runId: "turn-1" as never,
+          createdAt: "2026-01-01T00:00:03Z",
+          updatedAt: "2026-01-01T00:00:04Z",
+          streaming: false,
+        },
+      },
+      {
+        id: "assistant-images-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:08Z",
+        message: {
+          id: "assistant-images" as never,
+          role: "assistant" as const,
+          text: "Here are your four pieces",
+          runId: "turn-1" as never,
+          createdAt: "2026-01-01T00:00:08Z",
+          updatedAt: "2026-01-01T00:00:09Z",
+          streaming: false,
+          attachments: imageAttachments,
+        },
+      },
+      {
+        id: "work-entry-1",
+        kind: "work" as const,
+        createdAt: "2026-01-01T00:00:10Z",
+        entry: {
+          id: "work-1",
+          createdAt: "2026-01-01T00:00:10Z",
+          runId: "turn-1" as never,
+          label: "Ran command",
+          tone: "tool" as const,
+        },
+      },
+      {
+        id: "assistant-final-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:20Z",
+        message: {
+          id: "assistant-final" as never,
+          role: "assistant" as const,
+          text: "Done",
+          runId: "turn-1" as never,
+          createdAt: "2026-01-01T00:00:20Z",
+          updatedAt: "2026-01-01T00:00:22Z",
+          streaming: false,
+        },
+      },
+    ];
+    const input = {
+      timelineEntries,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    };
+
+    const ordinaryRows = deriveMessagesTimelineRows(input);
+    expect(ordinaryRows.map((row) => row.id)).toEqual([
+      "user-entry",
+      "turn-fold:turn-1",
+      "assistant-final-entry",
+    ]);
+
+    const botRows = deriveMessagesTimelineRows({ ...input, keepAssistantAttachmentsVisible: true });
+    // Only the file-carrying reply escapes the fold; the text-only step and the work still fold.
+    expect(botRows.map((row) => row.id)).toEqual([
+      "user-entry",
+      "turn-fold:turn-1",
+      "assistant-images-entry",
+      "assistant-final-entry",
+    ]);
+    const foldRow = botRows.find(
+      (row): row is Extract<(typeof botRows)[number], { kind: "turn-fold" }> =>
+        row.kind === "turn-fold",
+    );
+    expect(foldRow?.expanded).toBe(false);
+
+    const expandedBotRows = deriveMessagesTimelineRows({
+      ...input,
+      keepAssistantAttachmentsVisible: true,
+      expandedRunIds: new Set(["turn-1" as never]),
+    });
+    expect(expandedBotRows.map((row) => row.id)).toEqual([
+      "user-entry",
+      "turn-fold:turn-1",
+      "assistant-text-entry",
+      "assistant-images-entry",
+      "work-entry-1",
+      "assistant-final-entry",
+    ]);
+  });
+
+  it("keeps a bot's native voice summaries visible when the call marker follows them", () => {
+    const voiceCall = { callId: "call-1", durationMs: 12006, ending: "hung-up" };
+    const timelineEntries = [
+      {
+        id: "user-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:00Z",
+        message: {
+          id: "user-1" as never,
+          role: "user" as const,
+          text: "Call me",
+          runId: null,
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+          streaming: false,
+        },
+      },
+      {
+        id: "summary-first-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:05Z",
+        message: {
+          id: "summary-first" as never,
+          role: "assistant" as const,
+          text: "We agreed on the rollout.",
+          runId: null,
+          createdAt: "2026-01-01T00:00:05Z",
+          updatedAt: "2026-01-01T00:00:05Z",
+          streaming: false,
+          grokBotVoiceCallId: "call-1",
+        },
+      },
+      {
+        id: "summary-last-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:06Z",
+        message: {
+          id: "summary-last" as never,
+          role: "assistant" as const,
+          text: "Next step is the staging deploy.",
+          runId: null,
+          createdAt: "2026-01-01T00:00:06Z",
+          updatedAt: "2026-01-01T00:00:06Z",
+          streaming: false,
+          grokBotVoiceCallId: "call-1",
+        },
+      },
+      {
+        id: "voice-marker-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:07Z",
+        message: {
+          id: "voice-marker" as never,
+          role: "assistant" as const,
+          text: "",
+          runId: null,
+          createdAt: "2026-01-01T00:00:07Z",
+          updatedAt: "2026-01-01T00:00:07Z",
+          streaming: false,
+          grokBotVoiceCall: voiceCall,
+        },
+      },
+    ];
+
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+
+    // The marker was imported last, but it belongs before the summaries its call produced.
+    expect(rows.map((row) => row.id)).toEqual([
+      "user-entry",
+      "voice-marker-entry",
+      "summary-first-entry",
+      "summary-last-entry",
+    ]);
+    // The marker is not the response's final text, so the metadata row stays with the summary.
+    const metaById = new Map(
+      rows.flatMap((row) =>
+        row.kind === "message" ? [[row.id, row.showAssistantMeta] as const] : [],
+      ),
+    );
+    expect(metaById.get("summary-last-entry")).toBe(true);
+    expect(metaById.get("voice-marker-entry")).toBe(false);
+  });
+
+  describe("voice call marker order", () => {
+    const at = (second: number) => `2026-01-01T00:00:${String(second).padStart(2, "0")}Z`;
+    const messageEntry = (
+      id: string,
+      second: number,
+      message: Partial<ChatMessage> & { role: "user" | "assistant" },
+    ) => ({
+      id: `${id}-entry`,
+      kind: "message" as const,
+      createdAt: at(second),
+      message: {
+        id: id as never,
+        text: "",
+        runId: null,
+        createdAt: at(second),
+        updatedAt: at(second),
+        streaming: false,
+        ...message,
+      },
+    });
+    const marker = (id: string, second: number, callId: string) =>
+      messageEntry(id, second, {
+        role: "assistant",
+        grokBotVoiceCall: { callId, durationMs: 1000, ending: "completed" },
+      });
+    const summary = (id: string, second: number, callId: string | undefined) =>
+      messageEntry(id, second, {
+        role: "assistant",
+        text: `${id} text`,
+        ...(callId === undefined ? {} : { grokBotVoiceCallId: callId }),
+      });
+    const orderOf = (timelineEntries: ReturnType<typeof messageEntry>[]) =>
+      deriveMessagesTimelineRows({
+        timelineEntries,
+        isWorking: false,
+        activeTurnStartedAt: null,
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+      }).map((row) => row.id);
+
+    it("moves a late marker before the summaries linked to its call", () => {
+      expect(
+        orderOf([
+          messageEntry("user", 0, { role: "user", text: "Call me" }),
+          summary("summary-a", 5, "call-1"),
+          marker("marker-1", 6, "call-1"),
+        ]),
+      ).toEqual(["user-entry", "marker-1-entry", "summary-a-entry"]);
+    });
+
+    it("places each marker before its own call's summary when calls interleave", () => {
+      expect(
+        orderOf([
+          summary("summary-a", 1, "call-a"),
+          summary("summary-b", 2, "call-b"),
+          marker("marker-b", 3, "call-b"),
+          marker("marker-a", 4, "call-a"),
+        ]),
+      ).toEqual(["marker-a-entry", "summary-a-entry", "marker-b-entry", "summary-b-entry"]);
+    });
+
+    it("leaves an unrelated assistant message where native put it", () => {
+      expect(
+        orderOf([
+          summary("summary-a", 1, "call-1"),
+          summary("unrelated", 2, undefined),
+          marker("marker-1", 3, "call-1"),
+        ]),
+      ).toEqual(["marker-1-entry", "summary-a-entry", "unrelated-entry"]);
+    });
+
+    it("keeps a marker with no linked summary in place", () => {
+      expect(
+        orderOf([
+          summary("unrelated", 1, undefined),
+          marker("marker-1", 2, "call-1"),
+          summary("summary-other", 3, "call-2"),
+        ]),
+      ).toEqual(["unrelated-entry", "marker-1-entry", "summary-other-entry"]);
+    });
+
+    it("leaves a marker that already precedes its summary unchanged", () => {
+      expect(orderOf([marker("marker-1", 1, "call-1"), summary("summary-a", 2, "call-1")])).toEqual(
+        ["marker-1-entry", "summary-a-entry"],
+      );
+    });
+
+    it("keeps a post-call summary and the reply after it visible outside any fold", () => {
+      expect(
+        orderOf([
+          messageEntry("in-call-user", 0, { role: "user", text: "Call me" }),
+          marker("marker-1", 1, "call-1"),
+          messageEntry("call-ended", 2, { role: "user", text: "The call ended." }),
+          summary("summary-a", 3, "call-1"),
+          summary("followup", 4, undefined),
+        ]),
+      ).toEqual([
+        "in-call-user-entry",
+        "marker-1-entry",
+        "call-ended-entry",
+        "summary-a-entry",
+        "followup-entry",
+      ]);
+    });
   });
 
   it.each([1, 2, 3])("folds %i completed activities after the terminal response", (count) => {

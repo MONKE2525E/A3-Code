@@ -5,6 +5,9 @@ import {
   OrchestratorMcpFailure,
   PreviewAutomationUnavailableError,
   type ProviderInstanceId,
+  type RunId,
+  type RunAttemptId,
+  type OrchestrationV2Run,
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -25,7 +28,22 @@ export interface McpThreadCaller {
   readonly threadId: ThreadId;
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;
+  /** Cloud runtimes can outlive the host session; their authority belongs to one attempt. */
+  readonly remoteRun?: {
+    readonly runId: RunId;
+    readonly attemptId: RunAttemptId;
+  };
 }
+
+/** A rotated cloud credential must never inherit authority from a later run or retry. */
+export const matchesRemoteRun = (
+  caller: McpThreadCaller | undefined,
+  activeRun: Pick<OrchestrationV2Run, "id" | "activeAttemptId" | "providerInstanceId"> | undefined,
+): boolean =>
+  caller?.remoteRun === undefined ||
+  (activeRun?.id === caller.remoteRun.runId &&
+    activeRun.activeAttemptId === caller.remoteRun.attemptId &&
+    activeRun.providerInstanceId === caller.providerInstanceId);
 
 /** An agent T3 Code did not launch, signed in through MCP OAuth. */
 export interface McpClientCaller {

@@ -17,6 +17,8 @@ import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL, APP_VERSION } from "../branding";
 import { resolveServerBackedAppDisplayName } from "../branding.logic";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
+import { GrokBotVoiceCallDock } from "../components/grokBot/GrokBotVoiceCallDock";
+import { GrokBotVoiceCallProvider } from "../components/grokBot/GrokBotVoiceCallProvider";
 import { CommandPalette } from "../components/CommandPalette";
 import { CustomSnoozeDialogHost } from "../components/CustomSnoozeDialog";
 import { ConfirmDialogHost } from "../components/ConfirmDialogHost";
@@ -202,12 +204,16 @@ function RootRouteView() {
     );
   }
 
+  // The voice call lives above the outlet so navigating between threads and settings keeps it alive.
   const appShell = (
-    <CommandPalette>
-      <AppSidebarLayout>
-        <Outlet />
-      </AppSidebarLayout>
-    </CommandPalette>
+    <GrokBotVoiceCallProvider>
+      <CommandPalette>
+        <AppSidebarLayout>
+          <Outlet />
+        </AppSidebarLayout>
+      </CommandPalette>
+      <GrokBotVoiceCallDock />
+    </GrokBotVoiceCallProvider>
   );
 
   // FirstRunGate holds back everything below it — including EventRouter,

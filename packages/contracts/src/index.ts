@@ -66,3 +66,11 @@ export * from "./worktreeSetup.ts";
 export * from "./secretRequest.ts";
 export * from "./clientRpcPermissions.ts";
 export * from "./grokBot.ts";
+export * from "./grokBotOrchestrator.ts";
+export * from "./grokBotRoutines.ts";
+export * from "./grokBotComposerResources.ts";
+export * from "./grokBotMarketplace.ts";
+
+export * from "./grokBotComputer.ts";
+export * from "./grokBotSecret.ts";
+export * from "./grokBotVoice.ts";

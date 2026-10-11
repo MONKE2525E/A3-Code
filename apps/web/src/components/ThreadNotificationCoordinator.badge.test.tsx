@@ -22,6 +22,9 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 vi.mock("./ui/toast", () => ({ toastManager: { add: state.toast } }));
 vi.mock("../state/shell", () => ({ environmentShell: { stateValueAtom: (id: string) => id } }));
+vi.mock("./grokBot/useGrokBotEnvironment", () => ({ useSelectedGrokBotEnvironmentId: () => null }));
+vi.mock("../state/grokBots", () => ({ grokBotsListQuery: vi.fn() }));
+vi.mock("../state/query", () => ({ useEnvironmentQuery: () => ({ data: undefined }) }));
 vi.mock("../state/environments", () => ({
   useEnvironmentIds: () => state.environmentIds,
 }));

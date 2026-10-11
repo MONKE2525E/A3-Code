@@ -1,5 +1,6 @@
 import {
   NodeId,
+  ProviderDriverKind,
   ProviderSessionId,
   RuntimeRequestId,
   TurnItemId,
@@ -132,6 +133,39 @@ describe("pending v2 questions", () => {
       ),
     };
     expect(derivePendingThreadRequests(live).userInputs[0]?.dismissible).toBe(false);
+  });
+
+  it("dismisses live questions only for the Grok Bot native widget", () => {
+    const live = (driver: ProviderDriverKind | null) => ({
+      ...projection,
+      runtimeRequests: projection.runtimeRequests.map((request) => ({
+        ...request,
+        responseCapability: {
+          type: "live" as const,
+          providerSessionId: ProviderSessionId.make("live-session"),
+        },
+      })),
+      turnItems: projection.turnItems.map((item) =>
+        item.type === "user_input_request"
+          ? {
+              ...item,
+              responseMode: undefined,
+              nativeItemRef:
+                driver === null
+                  ? null
+                  : { driver, nativeId: "widget/1", strength: "strong" as const },
+            }
+          : item,
+      ),
+    });
+    expect(
+      derivePendingThreadRequests(live(ProviderDriverKind.make("grok-bot"))).userInputs[0]
+        ?.dismissible,
+    ).toBe(true);
+    expect(
+      derivePendingThreadRequests(live(ProviderDriverKind.make("codex"))).userInputs[0]
+        ?.dismissible,
+    ).toBe(false);
   });
 
   it("removes answered requests from the composer while retaining their answers in projection data", () => {

@@ -543,10 +543,12 @@ export function SettingsPageContainer({
   children,
   className,
   width = "readable",
+  showScope = true,
 }: {
   children: ReactNode;
   className?: string;
   width?: WorkspacePageWidth;
+  showScope?: boolean;
 }) {
   const navigate = useNavigate();
   const hash = useLocation({ select: (location) => location.hash });
@@ -555,7 +557,9 @@ export function SettingsPageContainer({
   });
   const targetId = hash.replace(/^#/, "") || null;
   const clearTargetHash = useCallback(() => {
+    // Only the handled hash goes; the rest of the search (provider, bot, instance) is selection.
     void navigate({
+      search: true,
       hash: "",
       replace: true,
       resetScroll: false,
@@ -575,7 +579,7 @@ export function SettingsPageContainer({
         data-settings-page-scroll
       >
         <WorkspacePageContainer width={width} className={cn("gap-8", className)}>
-          <SettingsScopeSentence />
+          {showScope ? <SettingsScopeSentence /> : null}
           {children}
         </WorkspacePageContainer>
       </div>

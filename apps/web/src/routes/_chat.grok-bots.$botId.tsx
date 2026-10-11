@@ -1,20 +1,18 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute } from "@tanstack/react-router";
 
-import { GrokBotConversationView } from "../components/grokBot/GrokBotConversationView";
 import {
-  grokBotSettingsDestinationSearch,
-  grokBotSurfaceKey,
   resolveGrokBotSelectedEnvironment,
   validateGrokBotConversationSearch,
 } from "../components/grokBot/grokBotPresentation";
+import { GrokBotConversationView } from "../components/grokBot/GrokBotConversationView";
+import { GrokBotNativeEntry } from "../components/grokBot/GrokBotNativeEntry";
 import { useSelectedGrokBotEnvironmentId } from "../components/grokBot/useGrokBotEnvironment";
-import { Button } from "../components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/ui/empty";
 import { useConnectedEnvironmentIds } from "../state/environments";
 
 function GrokBotConversationRoute() {
   const { botId } = Route.useParams();
-  const navigate = useNavigate();
+  const { view } = Route.useSearch();
   const selectedEnvironmentId = useSelectedGrokBotEnvironmentId();
   const connectedEnvironmentIds = useConnectedEnvironmentIds();
   const resolved = resolveGrokBotSelectedEnvironment({
@@ -31,40 +29,19 @@ function GrokBotConversationRoute() {
       </Empty>
     );
   }
-  if (resolved.kind === "disconnected") {
+  if (view === "history" && resolved.kind === "environment") {
     return (
-      <Empty size="hero">
-        <EmptyHeader>
-          <EmptyTitle>Reconnect this environment</EmptyTitle>
-          <EmptyDescription>
-            This Grok Bot chat stays with the selected environment. Reconnect it or choose a
-            connected one.
-          </EmptyDescription>
-        </EmptyHeader>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() =>
-            void navigate({
-              to: "/settings/grok-bots",
-              search: grokBotSettingsDestinationSearch({
-                environmentId: resolved.environmentId,
-                botId,
-              }),
-              hash: "grok-bots-bridge",
-            })
-          }
-        >
-          Open settings
-        </Button>
-      </Empty>
+      <GrokBotConversationView environmentId={resolved.environmentId} botId={botId} readOnly />
     );
   }
+  // Keyed by environment and bot so a previous bot's or environment's open request or failure never carries over.
+  // A disconnected selected environment still reaches the cached lookup; the entry asks to reconnect only when none resolves.
   return (
-    <GrokBotConversationView
-      key={grokBotSurfaceKey(resolved.environmentId, botId)}
+    <GrokBotNativeEntry
+      key={`${resolved.environmentId}:${botId}`}
       environmentId={resolved.environmentId}
       botId={botId}
+      connected={resolved.kind === "environment"}
     />
   );
 }

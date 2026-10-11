@@ -59,13 +59,36 @@ const setup = Effect.gen(function* () {
 });
 
 describe("command permissions", () => {
+  it.effect("reads native provider status without authorizing setup", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        registry.set(sessions(env), AsyncResult.success(grant(false)));
+        const command = createCommandPermissions(runtime, WS_METHODS.grokBotsOrchestratorConfig);
+        yield* command.authorize(registry, env, {});
+        yield* command.authorize(registry, env, { action: "status" });
+        expect(
+          (yield* command.authorize(registry, env, { action: "setup" }).pipe(Effect.flip))._tag,
+        ).toBe("EnvironmentAuthorizationError");
+        expect(registry.get(command.permissionAtom(env))).toBe(false);
+      }),
+    ),
+  );
   it.effect("uses the destination grant for bot messaging and settings", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const registry = yield* setup;
         registry.set(sessions(env), AsyncResult.success(grant(true)));
         registry.set(sessions(other), AsyncResult.success(grant(false)));
-        for (const method of [WS_METHODS.grokBotsSend, WS_METHODS.grokBotsLink]) {
+        for (const method of [
+          WS_METHODS.grokBotsSend,
+          WS_METHODS.grokBotsLink,
+          WS_METHODS.grokBotsTeachRead,
+          WS_METHODS.grokBotsTeachStart,
+          WS_METHODS.grokBotsTeachStop,
+          WS_METHODS.grokBotsComputerRead,
+          WS_METHODS.grokBotsComputerStart,
+        ]) {
           const command = createCommandPermissions(runtime, method);
           expect(registry.get(command.permissionAtom(env))).toBe(true);
           yield* command.authorize(registry, env);
@@ -73,7 +96,18 @@ describe("command permissions", () => {
             "EnvironmentAuthorizationError",
           );
         }
-        for (const method of [WS_METHODS.grokBotsSetup, WS_METHODS.grokBotsUpdate]) {
+        for (const method of [
+          WS_METHODS.grokBotsSetup,
+          WS_METHODS.grokBotsCreate,
+          WS_METHODS.grokBotsUpdate,
+          WS_METHODS.grokBotsDelete,
+          WS_METHODS.grokBotsImportMarketplaceTemplate,
+          WS_METHODS.grokBotsPluginAuthenticate,
+          WS_METHODS.grokBotsPluginCompleteAuth,
+          WS_METHODS.grokBotsInstallMarketplacePlugin,
+          WS_METHODS.grokBotsUninstallMarketplacePlugin,
+          WS_METHODS.grokBotsOrchestratorConfig,
+        ]) {
           const command = createCommandPermissions(runtime, method);
           expect(registry.get(command.permissionAtom(env))).toBe(false);
           expect((yield* command.authorize(registry, env).pipe(Effect.flip))._tag).toBe(

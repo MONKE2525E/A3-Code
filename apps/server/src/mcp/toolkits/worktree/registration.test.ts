@@ -35,9 +35,15 @@ import * as McpSessionRegistry from "../../McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as PreviewBrowser from "../../../preview/PreviewBrowser.ts";
 import * as GrokBotService from "../../../grokBot/GrokBotService.ts";
+import * as GrokBotOrchestratorService from "../../../grokBot/GrokBotOrchestratorService.ts";
+import * as GrokBotThreadService from "../../../grokBot/GrokBotThreadService.ts";
+import * as GrokBotTurnCompletion from "../../../grokBot/GrokBotTurnCompletion.ts";
 
 const layerStubServices = Layer.mergeAll(
   Layer.mock(GrokBotService.GrokBotService)({}),
+  Layer.mock(GrokBotOrchestratorService.GrokBotOrchestratorService)({}),
+  Layer.mock(GrokBotThreadService.GrokBotThreadService)({}),
+  Layer.mock(GrokBotTurnCompletion.GrokBotTurnCompletion)({}),
   Layer.mock(Orchestrator.OrchestratorV2)({}),
   Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
   Layer.mock(DeviceService.DeviceService)({}),
@@ -145,6 +151,11 @@ it.effect("production mcp layer lists worktree tools over http", () =>
       // than replacing them.
       expect(toolNames).toContain("preview_status");
       expect(toolNames).toContain("delegate_task");
+      expect(toolNames).toContain("grok_bot_orchestrator_config");
+      expect(
+        tools.find((tool) => tool.name === "grok_bot_orchestrator_config")?.annotations
+          ?.readOnlyHint,
+      ).toBe(true);
 
       // The handoff tool mutates thread state, reaches the network (origin
       // fetch), and runs project setup scripts, so its MCP hints must not

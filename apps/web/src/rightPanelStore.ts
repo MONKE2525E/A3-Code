@@ -27,6 +27,7 @@ const RIGHT_PANEL_KINDS = [
   "file",
   "preview",
   "device",
+  "grok-computer",
   "terminal",
   "pull-request",
   "pull-requests",
@@ -41,6 +42,7 @@ export interface DeviceTabTarget {
 }
 
 export type RightPanelSurface =
+  | { id: "grok-computer"; kind: "grok-computer" }
   | { id: `browser:${string}`; kind: "preview"; resourceId: string }
   | { id: "browser:new"; kind: "preview"; resourceId: null }
   | { id: "device" | `device:${string}`; kind: "device"; target?: DeviceTabTarget; title?: string }
@@ -223,6 +225,8 @@ const singletonSurface = (
       return { id: "files", kind };
     case "pull-requests":
       return { id: "pull-requests", kind };
+    case "grok-computer":
+      return { id: "grok-computer", kind };
     case "device":
       return { id: "device", kind };
   }

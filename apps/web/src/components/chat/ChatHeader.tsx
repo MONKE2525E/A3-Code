@@ -1,6 +1,7 @@
 import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
+  type GrokBot,
   type ThreadId,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -9,7 +10,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, MonitorIcon } from "lucide-react";
 import {
   memo,
   useCallback,
@@ -21,6 +22,9 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { isTrailingDoubleClick } from "../Sidebar.logic";
+import { GrokBotThreadHeading } from "../grokBot/GrokBotThreadHeading";
+import { GrokBotVoiceControl } from "../grokBot/GrokBotVoiceControl";
+import { Toggle } from "../ui/toggle";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import { useThreadActionMenu } from "~/hooks/useThreadActionMenu";
@@ -52,6 +56,10 @@ interface ChatHeaderProps {
   rightPanelOpen: boolean;
   onNewThreadInProject: () => void;
   onOpenProjectSettings?: (() => void) | undefined;
+  /** Set for canonical Grok Bot threads, which show the bot instead of a project. */
+  grokBotId: GrokBot["id"] | null;
+  computerOpen: boolean;
+  onToggleComputer: () => void;
 }
 
 /**
@@ -86,6 +94,9 @@ export const ChatHeader = memo(function ChatHeader({
   rightPanelOpen,
   onNewThreadInProject,
   onOpenProjectSettings,
+  grokBotId,
+  computerOpen,
+  onToggleComputer,
 }: ChatHeaderProps) {
   const activeProjectName = activeProject?.title;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
@@ -310,10 +321,10 @@ export const ChatHeader = memo(function ChatHeader({
         ariaLabel="Thread breadcrumb"
         className="flex-1 overflow-clip [overflow-clip-margin:2px]"
       >
-        {/* The project always leads the header: knowing which project a
-            thread lives in is priority zero, and the thread title alone
-            doesn't answer it. */}
-        {activeProject ? (
+        {/* Project threads lead the header with their project: knowing which
+            project a thread lives in is priority zero, and the thread title
+            alone doesn't answer it. Bot threads show the bot's identity instead. */}
+        {activeProject && grokBotId === null ? (
           <>
             <WorkspaceBreadcrumbItem className="shrink">
               <Tooltip>
@@ -397,6 +408,14 @@ export const ChatHeader = memo(function ChatHeader({
               onFocus={(event) => event.currentTarget.select()}
               onKeyDown={handleRenameKeyDown}
             />
+          ) : grokBotId !== null ? (
+            <h2 className="min-w-0 flex-1">
+              <GrokBotThreadHeading
+                environmentId={activeThreadEnvironmentId}
+                botId={grokBotId}
+                fallbackTitle={activeThreadTitle}
+              />
+            </h2>
           ) : isServerThread ? (
             <Tooltip>
               <TooltipTrigger
@@ -436,6 +455,32 @@ export const ChatHeader = memo(function ChatHeader({
           )}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
+      {grokBotId !== null ? (
+        <>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Toggle
+                  aria-label="Computer"
+                  className="relative shrink-0 [-webkit-app-region:no-drag]"
+                  pressed={computerOpen}
+                  variant="ghost"
+                  size="sm"
+                  onClick={onToggleComputer}
+                />
+              }
+            >
+              <MonitorIcon className="size-4" />
+            </TooltipTrigger>
+            <TooltipPopup side="bottom">Computer</TooltipPopup>
+          </Tooltip>
+          <GrokBotVoiceControl
+            environmentId={activeThreadEnvironmentId}
+            botId={grokBotId}
+            fallbackTitle={activeThreadTitle}
+          />
+        </>
+      ) : null}
     </div>
   );
 });

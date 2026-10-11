@@ -126,6 +126,9 @@ import {
   resolveRemoteOperateAccess,
   resolveSelectedProviderEnvironmentId,
 } from "./ProviderSettingsPanel.logic";
+import { GROK_BOT_DRIVER_KIND } from "../chat/ProviderInstanceIcon";
+import { isGrokBotProviderSelected } from "../grokBot/grokBotPresentation";
+import { GrokBotProviderEditor } from "../grokBot/GrokBotSettings";
 
 function modelListChanges(current: ReadonlyArray<string>, next: ReadonlyArray<string>) {
   const currentSet = new Set(current);
@@ -280,6 +283,12 @@ function EnvironmentUnavailablePlaceholder({
 interface ProviderSettingsTarget {
   readonly environmentId?: EnvironmentId;
   readonly instanceId?: ProviderInstanceId;
+  /** The Grok Bot being edited when the Grok Bot provider is selected. */
+  readonly botId?: string;
+  /** The persistent `provider` query value naming the selected provider kind. */
+  readonly provider?: string;
+  /** Called when the user picks a provider row, so the URL can follow the selection. */
+  readonly onSelectInstance?: (instanceId: ProviderInstanceId, isGrokBot: boolean) => void;
   readonly scoped?: boolean;
   readonly environmentIds?: readonly EnvironmentId[];
   /**
@@ -292,10 +301,7 @@ interface ProviderSettingsTarget {
 export function ProviderSettingsPanel(target: ProviderSettingsTarget) {
   return (
     <SettingsPageContainer className="@container/providers gap-8">
-      <ProviderSettingsPanelContent
-        key={`${target.environmentId ?? ""}:${target.instanceId ?? ""}`}
-        {...target}
-      />
+      <ProviderSettingsPanelContent key={target.environmentId ?? ""} {...target} />
     </SettingsPageContainer>
   );
 }
@@ -459,6 +465,9 @@ function ProviderSettingsPanelContent(target: ProviderSettingsTarget) {
               : undefined
           }
           projectIds={target.projectIds ?? []}
+          botId={target.botId}
+          provider={target.provider}
+          onSelectInstance={target.onSelectInstance}
         />
       ) : null}
     </>
@@ -470,11 +479,19 @@ function SelectedEnvironmentProviderSettings({
   deviceTabs,
   targetInstanceId,
   projectIds,
+  botId: grokBotId,
+  provider: grokBotIntent,
+  onSelectInstance,
 }: {
   readonly environment: EnvironmentPresentation;
   readonly deviceTabs?: ReactNode;
   readonly targetInstanceId?: ProviderInstanceId | undefined;
   readonly projectIds: readonly ProjectId[];
+  readonly botId?: string | undefined;
+  readonly provider?: string | undefined;
+  readonly onSelectInstance?:
+    | ((instanceId: ProviderInstanceId, isGrokBot: boolean) => void)
+    | undefined;
 }) {
   return (
     <RemoteSessionGatedProviderSettings
@@ -482,6 +499,9 @@ function SelectedEnvironmentProviderSettings({
       deviceTabs={deviceTabs}
       targetInstanceId={targetInstanceId}
       projectIds={projectIds}
+      botId={grokBotId}
+      provider={grokBotIntent}
+      onSelectInstance={onSelectInstance}
     />
   );
 }
@@ -491,11 +511,19 @@ function RemoteSessionGatedProviderSettings({
   deviceTabs,
   targetInstanceId,
   projectIds,
+  botId: grokBotId,
+  provider: grokBotIntent,
+  onSelectInstance,
 }: {
   readonly environment: EnvironmentPresentation;
   readonly deviceTabs?: ReactNode;
   readonly targetInstanceId?: ProviderInstanceId | undefined;
   readonly projectIds: readonly ProjectId[];
+  readonly botId?: string | undefined;
+  readonly provider?: string | undefined;
+  readonly onSelectInstance?:
+    | ((instanceId: ProviderInstanceId, isGrokBot: boolean) => void)
+    | undefined;
 }) {
   const sessionState = useEnvironmentSessionState(environment.environmentId);
   const operateAccess = resolveRemoteOperateAccess({
@@ -510,6 +538,9 @@ function RemoteSessionGatedProviderSettings({
       deviceTabs={deviceTabs}
       targetInstanceId={targetInstanceId}
       projectIds={projectIds}
+      botId={grokBotId}
+      provider={grokBotIntent}
+      onSelectInstance={onSelectInstance}
     />
   );
 }
@@ -520,12 +551,20 @@ function AccessGatedProviderSettings({
   deviceTabs,
   targetInstanceId,
   projectIds,
+  botId: grokBotId,
+  provider: grokBotIntent,
+  onSelectInstance,
 }: {
   readonly environment: EnvironmentPresentation;
   readonly operateAccess: ProviderOperateAccess;
   readonly deviceTabs?: ReactNode;
   readonly targetInstanceId?: ProviderInstanceId | undefined;
   readonly projectIds: readonly ProjectId[];
+  readonly botId?: string | undefined;
+  readonly provider?: string | undefined;
+  readonly onSelectInstance?:
+    | ((instanceId: ProviderInstanceId, isGrokBot: boolean) => void)
+    | undefined;
 }) {
   const access = classifyProviderEnvironmentAccess({
     connectionPhase: environment.connection.phase,
@@ -549,6 +588,9 @@ function AccessGatedProviderSettings({
       deviceTabs={deviceTabs}
       targetInstanceId={targetInstanceId}
       projectIds={projectIds}
+      botId={grokBotId}
+      provider={grokBotIntent}
+      onSelectInstance={onSelectInstance}
     />
   );
 }
@@ -560,6 +602,9 @@ export function EnvironmentProviderSettings({
   deviceTabs,
   targetInstanceId,
   projectIds = [],
+  botId: grokBotId,
+  provider: grokBotIntent,
+  onSelectInstance,
 }: {
   readonly environmentId: EnvironmentId;
   readonly environmentLabel: string;
@@ -567,6 +612,11 @@ export function EnvironmentProviderSettings({
   readonly targetInstanceId?: ProviderInstanceId | undefined;
   /** The project's checkouts on this environment, if a project is in scope. */
   readonly projectIds?: readonly ProjectId[];
+  readonly botId?: string | undefined;
+  readonly provider?: string | undefined;
+  readonly onSelectInstance?:
+    | ((instanceId: ProviderInstanceId, isGrokBot: boolean) => void)
+    | undefined;
   /**
    * Grey out and freeze every write control when this session's credential
    * lacks `providers:manage` on the environment. Selecting providers
@@ -606,9 +656,19 @@ export function EnvironmentProviderSettings({
   });
   const [isRefreshingProviders, setIsRefreshingProviders] = useState(false);
   const [isAddInstanceDialogOpen, setIsAddInstanceDialogOpen] = useState(false);
-  const [selectedInstanceId, setSelectedInstanceId] = useState<ProviderInstanceId | null>(
-    targetInstanceId ?? null,
+  const searchTargetId = useSettingsSearchTargetId();
+  const [localSelectedInstanceId, setLocalSelectedInstanceId] = useState<ProviderInstanceId | null>(
+    null,
   );
+  // The URL owns the selection once it names an instance, so a deep link wins.
+  const selectedInstanceId = targetInstanceId ?? localSelectedInstanceId;
+  const setSelectedInstanceId = (instanceId: ProviderInstanceId) => {
+    setLocalSelectedInstanceId(instanceId);
+    onSelectInstance?.(
+      instanceId,
+      settings.providerInstances?.[instanceId]?.driver === GROK_BOT_DRIVER_KIND,
+    );
+  };
   const [updatingProviderInstanceIds, setUpdatingProviderInstanceIds] = useState<
     ReadonlySet<ProviderInstanceId>
   >(() => new Set());
@@ -824,7 +884,22 @@ export function EnvironmentProviderSettings({
     targetInstanceId !== undefined &&
     selectedInstanceId === targetInstanceId &&
     !rows.some((row) => row.instanceId === targetInstanceId);
+  // A bot link or Grok Bot search result names no instance, so it selects the Grok Bot provider.
+  const wantsGrokBot =
+    targetInstanceId === undefined &&
+    isGrokBotProviderSelected({
+      instanceId: undefined,
+      instanceDriver: undefined,
+      botId: grokBotId,
+      provider: grokBotIntent,
+      searchTargetId,
+      grokBotDriver: GROK_BOT_DRIVER_KIND,
+    });
+  const grokBotRow = wantsGrokBot
+    ? rows.find((row) => row.driver === GROK_BOT_DRIVER_KIND)
+    : undefined;
   const selectedRow =
+    grokBotRow ??
     rows.find((row) => row.instanceId === selectedInstanceId) ??
     (targetInstanceMissing ? null : (rows[0] ?? null));
 
@@ -955,6 +1030,16 @@ export function EnvironmentProviderSettings({
             onChange: (next: boolean) => writeProjectOverride(next),
             onReset: () => writeProjectOverride(undefined),
           };
+
+    if (mode === "editor" && row.driver === GROK_BOT_DRIVER_KIND) {
+      return (
+        <GrokBotProviderEditor
+          key={`${environmentId}:${row.instanceId}`}
+          environmentId={environmentId}
+          botId={grokBotId}
+        />
+      );
+    }
 
     return (
       <ProviderInstanceCard

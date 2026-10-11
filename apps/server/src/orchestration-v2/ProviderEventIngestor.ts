@@ -320,6 +320,32 @@ export const layer: Layer.Layer<
     const agentScope = yield* AgentScope;
     const completedTurnAnalytics = new Set<string>();
 
+    const ownsActiveNativeQuestion = Effect.fnUntraced(function* (
+      threadId: ThreadId,
+      request: { readonly providerTurnId: ProviderTurnId | null },
+      providerInstanceId: ProviderInstanceId,
+    ) {
+      if (request.providerTurnId === null) return false;
+      const records = yield* projections.getThreadRecords(threadId, ["runs", "providerTurns"]);
+      const turn = records.providerTurns.find(
+        (candidate) => candidate.id === request.providerTurnId,
+      );
+      const latest = records.runs.reduce<(typeof records.runs)[number] | undefined>(
+        (current, run) => (current === undefined || run.ordinal > current.ordinal ? run : current),
+        undefined,
+      );
+      return (
+        turn !== undefined &&
+        latest !== undefined &&
+        latest.providerInstanceId === providerInstanceId &&
+        latest.activeAttemptId === turn.runAttemptId &&
+        latest.rootNodeId === turn.nodeId &&
+        latest.providerThreadId === turn.providerThreadId &&
+        ["starting", "running", "waiting"].includes(latest.status) &&
+        ["pending", "running"].includes(turn.status)
+      );
+    });
+
     const makeDomainEvent = (
       input: ProviderEventIngestInput,
       payloadInput: {
@@ -610,6 +636,33 @@ export const layer: Layer.Layer<
               }),
             ];
           case "node.updated":
+            if (
+              input.event.driver === "grok-bot" &&
+              input.event.node.status === "waiting" &&
+              input.event.node.runtimeRequestId !== null &&
+              input.event.node.nativeItemRef?.driver === "grok-bot" &&
+              input.event.node.nativeItemRef.strength === "strong"
+            ) {
+              const existing = yield* projections.getRuntimeRequest(
+                input.event.node.threadId,
+                input.event.node.runtimeRequestId,
+              );
+              if (existing !== undefined && existing.status !== "pending") {
+                const recoverOwnedQuestion =
+                  existing.kind === "user_input" &&
+                  existing.status === "cancelled" &&
+                  existing.answers === undefined &&
+                  existing.decision === undefined &&
+                  input.event.node.nativeItemRef.nativeId === existing.nativeRequestRef?.nativeId &&
+                  input.event.node.nativeItemRef.nativeId?.startsWith("widget/") === true &&
+                  (yield* ownsActiveNativeQuestion(
+                    input.event.node.threadId,
+                    input.event.node,
+                    input.providerInstanceId,
+                  ));
+                if (!recoverOwnedQuestion) return [];
+              }
+            }
             return [
               yield* makeDomainEvent(input, {
                 type: "node.updated",
@@ -640,6 +693,28 @@ export const layer: Layer.Layer<
               }),
             ];
           case "turn_item.updated":
+            if (
+              input.event.driver === "grok-bot" &&
+              (input.event.turnItem.type === "user_input_request" ||
+                input.event.turnItem.type === "approval_request") &&
+              input.event.turnItem.nativeItemRef?.driver === "grok-bot" &&
+              input.event.turnItem.nativeItemRef.strength === "strong"
+            ) {
+              const existing = yield* projections.getRuntimeRequest(
+                input.event.turnItem.threadId,
+                input.event.turnItem.requestId,
+              );
+              if (
+                existing !== undefined &&
+                existing.status !== "pending" &&
+                (input.event.turnItem.status === "waiting" ||
+                  (input.event.turnItem.type === "user_input_request" &&
+                    input.event.turnItem.questionAnswer === undefined &&
+                    existing.kind === "user_input" &&
+                    existing.answers !== undefined))
+              )
+                return [];
+            }
             return [
               yield* makeDomainEvent(input, {
                 type: "turn-item.updated",
@@ -649,8 +724,118 @@ export const layer: Layer.Layer<
                 nodeId: input.event.turnItem.nodeId,
               }),
             ];
-          case "runtime_request.updated":
+          case "runtime_request.updated": {
+            const request = input.event.runtimeRequest;
+            const threadId = input.event.threadId ?? input.threadId;
+            const isGrokNativeRequest =
+              input.event.driver === "grok-bot" &&
+              request.nativeRequestRef?.driver === "grok-bot" &&
+              request.nativeRequestRef.strength === "strong";
+            const existing = isGrokNativeRequest
+              ? yield* projections.getRuntimeRequest(threadId, request.id)
+              : undefined;
+            const recoverOwnedQuestion =
+              isGrokNativeRequest &&
+              request.kind === "user_input" &&
+              request.status === "pending" &&
+              existing?.status === "cancelled" &&
+              existing.answers === undefined &&
+              existing.decision === undefined &&
+              request.nativeRequestRef?.nativeId === existing.nativeRequestRef?.nativeId &&
+              request.nativeRequestRef?.nativeId?.startsWith("widget/") === true &&
+              (yield* ownsActiveNativeQuestion(threadId, request, input.providerInstanceId));
+            // An obsolete pending replay cannot retire the newer card that superseded it.
+            // A latest terminal snapshot still reconciles duplicates before retaining its answer.
+            if (
+              request.status === "pending" &&
+              existing !== undefined &&
+              existing.status !== "pending" &&
+              !recoverOwnedQuestion
+            )
+              return [];
+            const events: OrchestrationV2DomainEvent[] = [];
+            if (
+              isGrokNativeRequest &&
+              request.kind === "user_input" &&
+              request.nativeRequestRef?.nativeId?.startsWith("widget/")
+            ) {
+              // Native displays one current widget. Older observation sessions allocated random
+              // ids, including message capabilities without a bound session; reconcile those
+              // proven native widgets when the current card is observed again.
+              const records = yield* projections.getThreadRecords(threadId, ["runtimeRequests"]);
+              const candidates = records.runtimeRequests.filter(
+                (candidate) =>
+                  candidate.id !== request.id &&
+                  candidate.kind === "user_input" &&
+                  candidate.status === "pending" &&
+                  candidate.nativeRequestRef?.driver === "grok-bot" &&
+                  candidate.nativeRequestRef.strength === "strong" &&
+                  candidate.nativeRequestRef.nativeId?.startsWith("widget/"),
+              );
+              // A chunked replay can report an older runless widget before the current
+              // managed card. It cannot supersede that card's exact active turn authority.
+              const older = yield* Effect.filter(candidates, (candidate) =>
+                request.providerTurnId === null
+                  ? ownsActiveNativeQuestion(threadId, candidate, input.providerInstanceId).pipe(
+                      Effect.map((owned) => !owned),
+                    )
+                  : Effect.succeed(true),
+              );
+              const requestIds = new Set(older.map((candidate) => candidate.id));
+              if (older.length > 0) {
+                const artifacts = yield* projections.getThreadRecords(
+                  threadId,
+                  ["nodes", "turnItems"],
+                  {
+                    turnItemTypes: ["user_input_request"],
+                    turnItemStatuses: ["waiting", "running"],
+                  },
+                );
+                const now = yield* DateTime.now;
+                for (const candidate of older)
+                  events.push(
+                    yield* makeDomainEvent(input, {
+                      type: "runtime-request.updated",
+                      threadId,
+                      nodeId: candidate.nodeId,
+                      payload: { ...candidate, status: "cancelled", resolvedAt: now },
+                    }),
+                  );
+                for (const node of artifacts.nodes)
+                  if (
+                    node.runtimeRequestId !== null &&
+                    requestIds.has(node.runtimeRequestId) &&
+                    (node.status === "waiting" || node.status === "running")
+                  )
+                    events.push(
+                      yield* makeDomainEvent(input, {
+                        type: "node.updated",
+                        threadId,
+                        nodeId: node.id,
+                        runId: node.runId,
+                        payload: { ...node, status: "cancelled", completedAt: now },
+                      }),
+                    );
+                for (const item of artifacts.turnItems)
+                  if (item.type === "user_input_request" && requestIds.has(item.requestId))
+                    events.push(
+                      yield* makeDomainEvent(input, {
+                        type: "turn-item.updated",
+                        threadId,
+                        nodeId: item.nodeId,
+                        runId: item.runId,
+                        payload: { ...item, status: "cancelled", completedAt: now, updatedAt: now },
+                      }),
+                    );
+              }
+            }
+            if (isGrokNativeRequest) {
+              // A native snapshot must not reopen a closed card or erase a recorded chat answer.
+              if (existing !== undefined && existing.status !== "pending" && !recoverOwnedQuestion)
+                return events;
+            }
             return [
+              ...events,
               yield* makeDomainEvent(input, {
                 type: "runtime-request.updated",
                 ...(input.event.threadId === undefined ? {} : { threadId: input.event.threadId }),
@@ -658,6 +843,7 @@ export const layer: Layer.Layer<
                 nodeId: input.event.runtimeRequest.nodeId,
               }),
             ];
+          }
           case "plan.updated": {
             const occurredAt = yield* DateTime.now;
             const plan = input.event.plan;

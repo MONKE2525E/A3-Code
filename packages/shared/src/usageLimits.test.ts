@@ -218,6 +218,43 @@ describe("pools", () => {
     expect(accounts[0]?.limits.windows[0]?.usedPercent).toBe(55);
   });
 
+  it("counts the same native Grok Bot account/team once across environments", () => {
+    const bot = provider({
+      driver: ProviderDriverKind.make("grok-bot"),
+      instanceId: ProviderInstanceId.make("grok-bot"),
+      usageLimits: {
+        checkedAt,
+        credentialFingerprint: "a".repeat(64),
+        windows: [{ ...weekly, usedPercent: 15 }],
+      },
+    });
+    const input = new Map([
+      [EnvironmentId.make("env-a"), { ...laptop, serverConfig: { providers: [bot] } }],
+      [
+        EnvironmentId.make("env-b"),
+        {
+          entry: { target: { label: "Desktop" } },
+          serverConfig: {
+            providers: [{ ...bot, instanceId: ProviderInstanceId.make("other-install") }],
+          },
+        },
+      ],
+    ]);
+    const accounts = collectLimitAccounts(input);
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0]?.environments).toHaveLength(2);
+    expect(collectLimitPools(accounts, now)[0]?.windows[0]?.members).toHaveLength(1);
+    input.set(EnvironmentId.make("env-b"), {
+      entry: { target: { label: "Desktop" } },
+      serverConfig: {
+        providers: [
+          { ...bot, usageLimits: { ...bot.usageLimits!, credentialFingerprint: "b".repeat(64) } },
+        ],
+      },
+    });
+    expect(collectLimitAccounts(input)).toHaveLength(2);
+  });
+
   it("merges OpenCode Go limits from machines with the same API key", () => {
     const go = provider({
       driver: ProviderDriverKind.make("opencode"),

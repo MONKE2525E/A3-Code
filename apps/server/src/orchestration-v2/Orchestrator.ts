@@ -20,6 +20,7 @@ import {
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type ChatAttachment,
   CommandId,
+  isGrokBotBackingThread,
   isProviderNativeSubagentThread,
   MessageId,
   type NodeId,
@@ -51,10 +52,12 @@ import {
   type OrchestrationV2TurnItem,
   latestProviderTurnForAttempt,
   orchestrationV2RunWorkStartedAt,
+  type ProviderApprovalDecision,
   ProviderInstanceId,
   ProviderInteractionMode,
   resolveProviderInstanceEnabled,
   type ProviderSessionId,
+  type ProviderUserInputAnswers,
   RunId,
   RuntimeMode,
   ThreadLinkedPullRequest,
@@ -374,6 +377,32 @@ export class OrchestratorV2 extends Context.Service<OrchestratorV2, Orchestrator
   "t3/orchestration-v2/Orchestrator/OrchestratorV2",
 ) {}
 
+/**
+ * Grok native cards accept single string answers, including custom text. Other providers retain
+ * their option-only routing; unsupported multi-select answers use the existing chat path.
+ * Must stay in step with the adapter's widget choice check.
+ */
+function nativeChoiceAnswers(
+  item: OrchestrationV2TurnItem | undefined,
+  answers: ProviderUserInputAnswers | undefined,
+): ProviderUserInputAnswers | undefined {
+  if (item?.type !== "user_input_request" || answers === undefined) return undefined;
+  const question = item.questions.length === 1 ? item.questions[0] : undefined;
+  const picked = question === undefined ? undefined : answers[question.id];
+  if (question === undefined || question.multiSelect === true || typeof picked !== "string") {
+    return undefined;
+  }
+  if (
+    item.nativeItemRef?.driver === "grok-bot" &&
+    item.nativeItemRef.nativeId?.startsWith("widget/")
+  ) {
+    return picked.trim().length > 0 ? answers : undefined;
+  }
+  return question.options.some((option) => (option.value ?? option.label) === picked)
+    ? answers
+    : undefined;
+}
+
 function nextRunOrdinal(projection: Pick<OrchestrationV2ThreadProjection, "runs">): number {
   return projection.runs.length + 1;
 }
@@ -434,6 +463,7 @@ const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLin
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
     case "thread.create":
+    case "grok-bot.thread.rebind":
     case "thread.archive":
     case "thread.unarchive":
     case "thread.delete":
@@ -1682,6 +1712,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(queuedMessage.senderThreadId === undefined
             ? {}
             : { senderThreadId: queuedMessage.senderThreadId }),
+          ...(queuedMessage.voiceRequest === undefined
+            ? {}
+            : { voiceRequest: queuedMessage.voiceRequest }),
         }),
         inputIntent: "queued_turn",
         startedAt: now,
@@ -3807,6 +3840,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly creationSource: OrchestrationV2ConversationMessage["creationSource"];
     readonly scheduledTaskId?: OrchestrationV2ConversationMessage["scheduledTaskId"];
     readonly senderThreadId?: OrchestrationV2ConversationMessage["senderThreadId"];
+    readonly voiceRequest?: OrchestrationV2ConversationMessage["voiceRequest"];
     readonly delegatedCompletion?: OrchestrationV2ConversationMessage["delegatedCompletion"];
     readonly forceRestart: boolean;
   }) =>
@@ -3878,9 +3912,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       const providerSessionId = providerThread.providerSessionId;
-      const providerTurn = input.projection.providerTurns.find(
-        (candidate) =>
-          candidate.runAttemptId === targetRun.activeAttemptId && candidate.status === "running",
+      // Grok has no turn-start event: an accepted native turn remains pending until explicit
+      // completion. A follow-up can interrupt/restart that exact attempt, never mark it done.
+      const providerTurn = latestProviderTurnForAttempt(
+        input.projection.providerTurns.filter(
+          (candidate) =>
+            candidate.nodeId === rootNodeId &&
+            candidate.providerThreadId === providerThread.id &&
+            (candidate.status === "running" ||
+              (providerThread.driver === "grok-bot" && candidate.status === "pending")),
+        ),
+        targetRun.activeAttemptId,
       );
       if (providerTurn === undefined) {
         return yield* new OrchestratorDispatchError({
@@ -3961,6 +4003,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ? {}
               : { scheduledTaskId: input.scheduledTaskId }),
             ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
+            ...(input.voiceRequest === undefined ? {} : { voiceRequest: input.voiceRequest }),
             id: input.messageId,
             threadId: input.command.threadId,
             runId: messageInput.runId,
@@ -3980,6 +4023,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ? {}
               : { scheduledTaskId: input.scheduledTaskId }),
             ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
+            ...(input.voiceRequest === undefined ? {} : { voiceRequest: input.voiceRequest }),
             id: idAllocator.derive.userTurnItem({ messageId: input.messageId }),
             threadId: input.command.threadId,
             runId: messageInput.runId,
@@ -4702,6 +4746,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         command.dispatchMode,
         command.deliveryIntent,
       );
+      const targetRunId =
+        dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active"
+          ? dispatchMode.targetRunId
+          : undefined;
+      const grokTarget =
+        dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active"
+          ? projection.runs.find((run) => run.id === targetRunId)
+          : command.deliveryIntent === "auto"
+            ? projection.runs.findLast((run) => run.status === "running")
+            : undefined;
+      if (
+        grokTarget?.status === "running" &&
+        projection.providerThreads.some(
+          (thread) => thread.id === grokTarget.providerThreadId && thread.driver === "grok-bot",
+        ) &&
+        (dispatchMode.type === "steer_active" || command.deliveryIntent === "auto")
+      ) {
+        dispatchMode = { type: "restart_active", targetRunId: grokTarget.id };
+      }
       if (dispatchMode.type === "steer_active") {
         const targetRunId = dispatchMode.targetRunId;
         const target = projection.runs.find((run) => run.id === targetRunId);
@@ -4896,6 +4959,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(command.senderThreadId === undefined
             ? {}
             : { senderThreadId: command.senderThreadId }),
+          ...(command.voiceRequest === undefined ? {} : { voiceRequest: command.voiceRequest }),
           forceRestart: dispatchMode.type === "restart_active",
         });
         return;
@@ -5095,6 +5159,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(command.senderThreadId === undefined
             ? {}
             : { senderThreadId: command.senderThreadId }),
+          ...(command.voiceRequest === undefined ? {} : { voiceRequest: command.voiceRequest }),
           id: command.messageId,
           threadId: command.threadId,
           runId,
@@ -5439,6 +5504,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(command.senderThreadId === undefined
             ? {}
             : { senderThreadId: command.senderThreadId }),
+          ...(command.voiceRequest === undefined ? {} : { voiceRequest: command.voiceRequest }),
           id: command.messageId,
           threadId: command.threadId,
           runId,
@@ -5462,6 +5528,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(command.senderThreadId === undefined
             ? {}
             : { senderThreadId: command.senderThreadId }),
+          ...(command.voiceRequest === undefined ? {} : { voiceRequest: command.voiceRequest }),
           id: idAllocator.derive.userTurnItem({ messageId: command.messageId }),
           threadId: command.threadId,
           runId,
@@ -6131,6 +6198,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ? {}
           : { scheduledTaskId: command.scheduledTaskId }),
         ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
+        ...(command.voiceRequest === undefined ? {} : { voiceRequest: command.voiceRequest }),
         id: command.messageId,
         threadId: command.threadId,
         runId,
@@ -6152,6 +6220,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ? {}
           : { scheduledTaskId: command.scheduledTaskId }),
         ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
+        ...(command.voiceRequest === undefined ? {} : { voiceRequest: command.voiceRequest }),
         id: idAllocator.derive.userTurnItem({ messageId: command.messageId }),
         threadId: command.threadId,
         runId,
@@ -6601,6 +6670,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
 
+      const projectId = command.projectId ?? parentProjection.thread.projectId;
+      if (command.projectId !== undefined) {
+        const project = yield* projects.get(projectId).pipe(mapDispatchError(command));
+        if (Option.isNone(project) || project.value.deletedAt !== null) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "The delegated task destination project is unavailable.",
+          });
+        }
+      }
+
       const targetAdapter = yield* providerAdapters.get(command.modelSelection.instanceId).pipe(
         Effect.mapError(
           (cause) =>
@@ -6644,6 +6725,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           createdBy: command.createdBy,
           creationSource: command.creationSource,
         }),
+        ...(projectId === parentProjection.thread.projectId
+          ? {}
+          : { projectId, branch: null, worktreePath: null, branchPullRequest: null }),
         runtimeMode: command.runtimeMode,
         interactionMode: command.interactionMode,
       };
@@ -7342,6 +7426,66 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
 
+      const cancelled = command.decision === "decline" || command.decision === "cancel";
+      const nativeSessionId =
+        runtimeRequest.responseCapability.type === "message"
+          ? runtimeRequest.responseCapability.providerSessionId
+          : undefined;
+      // Only the native runtime can clear or answer its own card. A native call leaves the
+      // request pending: the adapter emits the settled events after native confirms, so a
+      // refused call leaves the question available and nothing is resolved locally.
+      const queueNative = (native: {
+        readonly decision?: ProviderApprovalDecision;
+        readonly answers?: ProviderUserInputAnswers;
+      }) =>
+        nativeSessionId === undefined
+          ? Effect.void
+          : Ref.update(effects, (existing) => [
+              ...existing,
+              {
+                id: `effect:${command.commandId}:runtime-request.respond:${command.requestId}`,
+                commandId: command.commandId,
+                threadId: command.threadId,
+                request: {
+                  type: "runtime-request.respond",
+                  providerSessionId: nativeSessionId,
+                  requestId: command.requestId,
+                  ...native,
+                },
+              } satisfies PendingOrchestrationEffectV2,
+            ]);
+      if (nativeSessionId !== undefined) {
+        const nativeAnswers = cancelled
+          ? undefined
+          : nativeChoiceAnswers(context.item, command.answers);
+        const nativeCall = cancelled
+          ? { decision: "cancel" as const }
+          : nativeAnswers === undefined
+            ? undefined
+            : { answers: nativeAnswers };
+        if (nativeCall !== undefined) {
+          // The request stays pending, so this event records no state change. A command must
+          // record an event to commit its effect, and the queued native call is the real work.
+          yield* emit(
+            events,
+            command,
+          )({
+            type: "runtime-request.updated",
+            threadId: command.threadId,
+            nodeId: runtimeRequest.nodeId,
+            ...(providerSession === undefined
+              ? {}
+              : {
+                  driver: providerSession.driver,
+                  providerInstanceId: providerSession.providerInstanceId,
+                }),
+            occurredAt: yield* DateTime.now,
+            payload: runtimeRequest,
+          });
+          return yield* queueNative(nativeCall);
+        }
+      }
+
       const now = yield* DateTime.now;
       const resolvedRequest = {
         ...runtimeRequest,
@@ -7352,10 +7496,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       };
       const emitEvent = emit(events, command);
       const requestNode = context.node;
-      const resolvedNodeStatus =
-        command.decision === "decline" || command.decision === "cancel"
-          ? ("cancelled" as const)
-          : ("completed" as const);
+      const resolvedNodeStatus = cancelled ? ("cancelled" as const) : ("completed" as const);
       yield* emitEvent({
         type: "runtime-request.updated",
         threadId: command.threadId,
@@ -7429,7 +7570,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       if (runtimeRequest.responseCapability.type === "message") {
-        if (resolvedNodeStatus === "cancelled") return;
+        // An unbound dismissal has no native card to clear; only the local resolution applies.
+        if (cancelled) return;
         if (approvalTurnItem?.type !== "user_input_request") {
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
@@ -7440,7 +7582,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const replies: string[] = [];
         for (const question of approvalTurnItem.questions) {
           const answer = command.answers?.[question.id];
-          if (typeof answer !== "string" || answer.trim().length === 0) {
+          // Multi-select answers arrive as a list of the selected option values.
+          const values = (Array.isArray(answer) ? answer : [answer]).flatMap((value) =>
+            typeof value === "string" && value.trim().length > 0 ? [value.trim()] : [],
+          );
+          if (values.length === 0) {
             if (question.required === false) continue;
             return yield* new OrchestratorDispatchError({
               commandId: command.commandId,
@@ -7448,7 +7594,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               cause: "Answer each question before sending.",
             });
           }
-          replies.push(`${question.question}\n${answer.trim()}`);
+          replies.push(`${question.question}\n${values.join(", ")}`);
         }
         if (replies.length === 0) {
           return yield* new OrchestratorDispatchError({
@@ -7491,7 +7637,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }
         }
         // The resolution and normal message dispatch share one event transaction.
-        return yield* dispatchMessage(
+        yield* dispatchMessage(
           {
             type: "message.dispatch",
             commandId: command.commandId,
@@ -7506,6 +7652,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           events,
           effects,
         );
+        // The chat message above already answered the question. The native cleanup carries the
+        // same answers, which the adapter clears silently instead of reporting a second resolution.
+        return yield* queueNative({ answers: command.answers ?? {} });
       }
       if (providerSessionId === null) return;
       yield* Ref.update(effects, (existing) => [
@@ -7543,7 +7692,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: "This question has already been answered.",
         });
       }
-      if (request.kind !== "user_input" || request.responseCapability.type !== "message") {
+      if (
+        request.kind !== "user_input" ||
+        (request.responseCapability.type !== "message" &&
+          request.responseCapability.type !== "live")
+      ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
@@ -7699,6 +7852,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(queuedMessage.senderThreadId === undefined
           ? {}
           : { senderThreadId: queuedMessage.senderThreadId }),
+        ...(queuedMessage.voiceRequest === undefined
+          ? {}
+          : { voiceRequest: queuedMessage.voiceRequest }),
         forceRestart: false,
       });
     });
@@ -9117,6 +9273,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Run ${command.runId} is not interruptible.`,
         });
       }
+      // A cloud send without a committed provider turn has no target for a native stop.
+      if (
+        providerThread.driver === "grok-bot" &&
+        providerTurn === undefined &&
+        run.status !== "preparing"
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause:
+            "The Grok Bot turn has no confirmed native target yet. Reconnect before stopping its cloud session.",
+        });
+      }
       const now = yield* DateTime.now;
       const completionMessage = projection.messages.find(
         (candidate) => candidate.id === run.userMessageId,
@@ -9369,6 +9538,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ),
             );
       if (Option.isNone(sessionOption)) {
+        if (providerThread.driver === "grok-bot")
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause:
+              "The Grok Bot observer is disconnected. Reconnect before stopping its cloud session.",
+          });
         yield* emitEvent({
           type: "turn-item.updated",
           threadId: command.threadId,
@@ -10615,6 +10791,43 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.create":
         yield* dispatchThreadCreate(command, events);
         break;
+      case "grok-bot.thread.rebind": {
+        const projection = yield* projectionStore
+          .getThreadRecords(command.threadId, ["runs"])
+          .pipe(mapDispatchError(command));
+        const project = yield* projects.get(command.projectId).pipe(mapDispatchError(command));
+        if (
+          !isGrokBotBackingThread(projection.thread) ||
+          projection.thread.deletedAt !== null ||
+          Option.isNone(project) ||
+          project.value.deletedAt !== null ||
+          projection.runs.some((run) => isBlockingRun(run) || run.status === "queued")
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Only an idle canonical Grok Bot conversation can change its storage project.",
+          });
+        }
+        const now = yield* DateTime.now;
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.threadId,
+          providerInstanceId: projection.thread.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            ...projection.thread,
+            projectId: command.projectId,
+            branch: null,
+            worktreePath: null,
+            updatedAt: now,
+          },
+        });
+        break;
+      }
       case "thread.visit":
         yield* dispatchThreadVisit(command, events);
         break;

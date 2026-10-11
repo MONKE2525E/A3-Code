@@ -88,4 +88,49 @@ describe("resolveUserMessagePresentation", () => {
       });
     }
   });
+
+  it("hides the internal prompt of a voice request behind the voice marker", () => {
+    const prompt = "Project: p1 (pass it as projectId to delegate_task).\nFix the login bug";
+    expect(
+      resolveUserMessagePresentation({
+        role: "user",
+        createdBy: "agent",
+        creationSource: "mcp",
+        voiceRequest: true,
+        text: prompt,
+      }),
+    ).toEqual({ text: "", attribution: "voice", scheduledTaskId: undefined });
+  });
+
+  it("recognizes the exact legacy voice bridge shape and nothing looser", () => {
+    const legacy = "[From a voice call]\nFix the login bug";
+    expect(
+      resolveUserMessagePresentation({
+        role: "user",
+        createdBy: "agent",
+        creationSource: "mcp",
+        text: legacy,
+      }),
+    ).toMatchObject({ text: "", attribution: "voice" });
+    for (const message of [
+      { role: "user", createdBy: "user" as const, creationSource: "web" as const, text: legacy },
+      {
+        role: "user",
+        createdBy: "agent" as const,
+        creationSource: "mcp" as const,
+        text: `Quote:\n${legacy}`,
+      },
+      {
+        role: "user",
+        createdBy: "agent" as const,
+        creationSource: "mcp" as const,
+        text: "[From a voice call] typed",
+      },
+    ]) {
+      expect(resolveUserMessagePresentation(message)).toMatchObject({
+        text: message.text,
+        attribution: message.createdBy === "agent" ? "agent" : null,
+      });
+    }
+  });
 });

@@ -94,6 +94,17 @@ const UNFINISHED_RUN_STATUSES: ReadonlySet<OrchestrationV2Run["status"]> = new S
   "running",
   "waiting",
 ]);
+/**
+ * A waiting question or approval is live state, not history. It can sit behind
+ * a partial window's watermark, and it can arrive before its runtime request,
+ * so the runtime request cannot be the thing that keeps it visible.
+ */
+function isLiveControlTurnItem(item: OrchestrationV2TurnItem): boolean {
+  return (
+    (item.type === "approval_request" || item.type === "user_input_request") &&
+    item.status === "waiting"
+  );
+}
 
 function shouldDropMissingPartialTurnItem(
   projection: OrchestrationV2ThreadProjection,
@@ -101,6 +112,9 @@ function shouldDropMissingPartialTurnItem(
   latestLocalTurnOrdinal: number | null | undefined,
 ): boolean {
   if (projection.visibleTurnItems.some((row) => row.sourceItemId === item.id)) {
+    return false;
+  }
+  if (isLiveControlTurnItem(item)) {
     return false;
   }
   if (item.runId === null) {

@@ -6,12 +6,14 @@ import {
   EnvironmentId,
   type ModelSelection,
   type OrchestrationV2AppThread,
+  type OrchestrationV2ConversationMessage,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   type Project,
   ProjectId,
+  RunId,
   ProviderDriverKind,
   ProviderInstanceId,
   type ProviderSessionId,
@@ -42,6 +44,7 @@ import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import { grokBotMessageTurnItem } from "./Adapters/GrokBotSettlementProjection.ts";
 import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -193,10 +196,11 @@ function makeProviderSession(input: {
   readonly providerSessionId: ProviderSessionId;
   readonly now: DateTime.Utc;
   readonly capabilities?: OrchestrationV2ProviderCapabilities;
+  readonly driver?: ProviderDriverKind;
 }): OrchestrationV2ProviderSession {
   return {
     id: input.providerSessionId,
-    driver: CODEX_DRIVER,
+    driver: input.driver ?? CODEX_DRIVER,
     providerInstanceId: modelSelection.instanceId,
     status: "ready",
     cwd: process.cwd(),
@@ -307,6 +311,7 @@ function unimplemented(detail: string) {
 const makeProviderAdapter = Effect.fnUntraced(function* (
   state: Ref.Ref<TestProviderRuntimeState>,
   options: {
+    readonly driver?: ProviderDriverKind;
     readonly failEventStream?: boolean;
     readonly capabilities?: OrchestrationV2ProviderCapabilities;
     readonly mcpConfigs?: Ref.Ref<
@@ -327,6 +332,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     readonly scopeCloseReached?: Deferred.Deferred<void>;
   } = {},
 ) {
+  const driver = options.driver ?? CODEX_DRIVER;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const countClose = Effect.addFinalizer(() =>
     Ref.update(state, (current) => ({
@@ -345,7 +351,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
   );
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: ProviderInstanceId.make("codex"),
-    driver: CODEX_DRIVER,
+    driver,
     getCapabilities: () => Effect.succeed(options.capabilities ?? CodexCapabilities),
     planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
     openSession: (input) =>
@@ -370,6 +376,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
         const session = makeProviderSession({
           providerSessionId: input.providerSessionId,
           now,
+          driver,
           ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
         });
         yield* Ref.update(state, (current) => {
@@ -388,13 +395,13 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
 
         return {
           instanceId: ProviderInstanceId.make("codex"),
-          driver: CODEX_DRIVER,
+          driver,
           providerSessionId: input.providerSessionId,
           providerSession: session,
           events: options.failEventStream
             ? Stream.fail(
                 new ProviderAdapter.ProviderAdapterEventStreamError({
-                  driver: CODEX_DRIVER,
+                  driver,
                   providerSessionId: input.providerSessionId,
                   cause: "process exited",
                 }),
@@ -443,6 +450,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
 });
 
 function layerTest(input: {
+  readonly driver?: ProviderDriverKind;
   readonly state: Ref.Ref<TestProviderRuntimeState>;
   readonly idleTimeoutMs: number;
   readonly maxIdlePinMs?: number;
@@ -483,6 +491,7 @@ function layerTest(input: {
           : layerTestEventSink;
   const layerRegistry = Layer.unwrap(
     makeProviderAdapter(input.state, {
+      ...(input.driver === undefined ? {} : { driver: input.driver }),
       failEventStream: input.failEventStream ?? false,
       ...(input.capabilities === undefined ? {} : { capabilities: input.capabilities }),
       ...(input.mcpConfigs === undefined ? {} : { mcpConfigs: input.mcpConfigs }),
@@ -675,11 +684,15 @@ function makePendingRuntimeRequestEvents(input: {
   readonly providerSessionId: ProviderSessionId;
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly now: DateTime.Utc;
+  readonly nativeRequestId?: string;
+  readonly driver?: ProviderDriverKind;
 }) {
   return Effect.gen(function* () {
+    const driver = input.driver ?? CODEX_DRIVER;
+    const nativeRequestId = input.nativeRequestId ?? "pending-approval";
     const requestId = yield* input.idAllocator.allocate.runtimeRequest({
-      driver: CODEX_DRIVER,
-      nativeRequestId: "pending-approval",
+      driver,
+      nativeRequestId,
     });
     const nodeId = input.idAllocator.derive.approvalNode({ requestId });
     const node = {
@@ -704,8 +717,8 @@ function makePendingRuntimeRequestEvents(input: {
       nodeId,
       providerTurnId: null,
       nativeRequestRef: {
-        driver: CODEX_DRIVER,
-        nativeId: "pending-approval",
+        driver,
+        nativeId: nativeRequestId,
         strength: "strong" as const,
       },
       kind: "command" as const,
@@ -745,7 +758,7 @@ function makePendingRuntimeRequestEvents(input: {
         type: "node.updated" as const,
         threadId: input.threadId,
         nodeId,
-        driver: CODEX_DRIVER,
+        driver,
         occurredAt: input.now,
         payload: node,
       },
@@ -757,7 +770,7 @@ function makePendingRuntimeRequestEvents(input: {
         type: "runtime-request.updated" as const,
         threadId: input.threadId,
         nodeId,
-        driver: CODEX_DRIVER,
+        driver,
         occurredAt: input.now,
         payload: request,
       },
@@ -769,7 +782,7 @@ function makePendingRuntimeRequestEvents(input: {
         type: "turn-item.updated" as const,
         threadId: input.threadId,
         nodeId,
-        driver: CODEX_DRIVER,
+        driver,
         occurredAt: input.now,
         payload: turnItem,
       },
@@ -777,18 +790,18 @@ function makePendingRuntimeRequestEvents(input: {
     const providerEvents = [
       {
         type: "runtime_request.updated" as const,
-        driver: CODEX_DRIVER,
+        driver,
         threadId: input.threadId,
         runtimeRequest: request,
       },
       {
         type: "node.updated" as const,
-        driver: CODEX_DRIVER,
+        driver,
         node,
       },
       {
         type: "turn_item.updated" as const,
-        driver: CODEX_DRIVER,
+        driver,
         turnItem,
       },
     ] satisfies ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>;
@@ -3761,6 +3774,485 @@ it.effect("ProviderSessionManagerV2 terminalizes a pending input transcript item
   }),
 );
 
+it.effect(
+  "ProviderSessionManagerV2 persists runless native Grok Bot messages and timeline items only for attached threads",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const driver = ProviderDriverKind.make("grok-bot");
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const projectId = yield* idAllocator.allocate.project({
+          fixtureName: "provider-session-manager-native-history",
+        });
+        const threadId = yield* idAllocator.allocate.thread({ projectId, fixtureName: "attached" });
+        const otherThreadId = yield* idAllocator.allocate.thread({
+          projectId,
+          fixtureName: "unattached",
+        });
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator, threadId, now, projectId }),
+            yield* makeThreadCreatedEvent({
+              idAllocator,
+              threadId: otherThreadId,
+              now,
+              projectId,
+            }),
+          ],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        const native = {
+          binding: "fixture-account",
+          botId: "fixture-bot",
+          sessionId: "",
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+          generation: 1,
+          afterUpdatedSeq: "0",
+        };
+        const makeMessage = (
+          targetThreadId: ThreadId,
+          role: "user" | "assistant",
+          ordinal: number,
+        ) =>
+          Effect.gen(function* () {
+            return {
+              id: yield* idAllocator.allocate.message({ threadId: targetThreadId, ordinal }),
+              threadId: targetThreadId,
+              runId: null,
+              nodeId: null,
+              role,
+              createdBy: role === "assistant" ? "agent" : "user",
+              creationSource: "provider",
+              text: `${role} native history`,
+              attachments: [],
+              streaming: false,
+              createdAt: now,
+              updatedAt: now,
+            } satisfies OrchestrationV2ConversationMessage;
+          });
+        const foreignMessage = yield* makeMessage(otherThreadId, "assistant", 1);
+        const userMessage = yield* makeMessage(threadId, "user", 1);
+        const assistantMessage = yield* makeMessage(threadId, "assistant", 2);
+        const expectedMessageIds = new Set([userMessage.id, assistantMessage.id]);
+        const afterSequence = yield* eventSink.latestSequence({ threadId });
+        const persistedFiber = yield* eventSink.stream({ threadId, afterSequence }).pipe(
+          Stream.filter(
+            ({ event }) =>
+              (event.type === "message.updated" && expectedMessageIds.has(event.payload.id)) ||
+              (event.type === "turn-item.updated" &&
+                (event.payload.type === "user_message" ||
+                  event.payload.type === "assistant_message") &&
+                expectedMessageIds.has(event.payload.messageId)),
+          ),
+          Stream.take(4),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.isDefined(queue);
+        yield* Queue.offerAll(
+          queue!,
+          [foreignMessage, userMessage, assistantMessage].flatMap((message) => [
+            { type: "message.updated" as const, driver, message },
+            grokBotMessageTurnItem(message, {
+              native: { ...native, threadId: message.threadId },
+            }),
+          ]),
+        );
+        const persisted = yield* Fiber.join(persistedFiber);
+        assert.sameMembers(
+          persisted.map(({ event }) => event.type),
+          ["message.updated", "turn-item.updated", "message.updated", "turn-item.updated"],
+        );
+        const projection = yield* projectionStore.getThreadProjection(threadId);
+        assert.sameMembers(
+          projection.messages.map((message) => message.id),
+          [...expectedMessageIds],
+        );
+        assert.sameMembers(
+          projection.turnItems.flatMap((item) =>
+            item.type === "user_message" || item.type === "assistant_message"
+              ? [item.messageId]
+              : [],
+          ),
+          [...expectedMessageIds],
+        );
+        assert.isTrue(projection.messages.every((message) => message.runId === null));
+        assert.isTrue(
+          projection.turnItems.every((item) => item.runId === null && item.nodeId === null),
+        );
+        assert.isEmpty(projection.runs);
+        const otherProjection = yield* projectionStore.getThreadProjection(otherThreadId);
+        assert.isEmpty(otherProjection.messages);
+        assert.isEmpty(otherProjection.turnItems);
+      });
+      yield* effect.pipe(Effect.provide(layerTest({ state, driver, idleTimeoutMs: 1000 })));
+    }),
+);
+
+it.effect("ProviderSessionManagerV2 does not issue MCP credentials for a Grok Bot observer", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const mcpConfigs = yield* Ref.make<
+      ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
+    >([]);
+    const driver = ProviderDriverKind.make("grok-bot");
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+      const now = yield* DateTime.now;
+      const threadId = yield* idAllocator.allocate.thread({
+        fixtureName: "provider-session-manager-grok-bot-observer-mcp",
+        projectId: yield* idAllocator.allocate.project({
+          fixtureName: "provider-session-manager-grok-bot-observer-mcp",
+        }),
+      });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+      });
+      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      assert.isUndefined((yield* Ref.get(mcpConfigs))[0]);
+      assert.isUndefined(yield* mcpSessions.read(threadId));
+    });
+    yield* effect.pipe(
+      Effect.provide(layerTest({ state, driver, idleTimeoutMs: 1000, mcpConfigs })),
+    );
+  }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 keeps Grok Bot observer events in order until a subscriber attaches",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const driver = ProviderDriverKind.make("grok-bot");
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = yield* idAllocator.allocate.thread({
+          fixtureName: "provider-session-manager-grok-bot-observer-order",
+          projectId: yield* idAllocator.allocate.project({
+            fixtureName: "provider-session-manager-grok-bot-observer-order",
+          }),
+        });
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const providerThreadId = idAllocator.derive.providerThread({
+          driver,
+          nativeThreadId: "observer-order-thread",
+        });
+        const firstTurnId = idAllocator.derive.providerTurn({
+          driver,
+          nativeTurnId: "observer-order-turn-1",
+        });
+        const secondTurnId = idAllocator.derive.providerTurn({
+          driver,
+          nativeTurnId: "observer-order-turn-2",
+        });
+        const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.isDefined(queue);
+        yield* Queue.offerAll(queue!, [
+          {
+            type: "turn.terminal" as const,
+            driver,
+            providerThreadId,
+            providerTurnId: firstTurnId,
+            runOrdinal: 1,
+            status: "completed" as const,
+            failure: null,
+            threadDisposition: "reusable" as const,
+          },
+          {
+            type: "turn.terminal" as const,
+            driver,
+            providerThreadId,
+            providerTurnId: secondTurnId,
+            runOrdinal: 2,
+            status: "completed" as const,
+            failure: null,
+            threadDisposition: "reusable" as const,
+          },
+        ]);
+        const subscription = yield* runtime.subscribeEvents!;
+        const events = yield* subscription.events.pipe(Stream.take(2), Stream.runCollect);
+        assert.deepEqual(
+          events.map((event) =>
+            event.type === "turn.terminal" ? event.providerTurnId : event.type,
+          ),
+          [firstTurnId, secondTurnId],
+        );
+      });
+      yield* effect.pipe(Effect.provide(layerTest({ state, driver, idleTimeoutMs: 60_000 })));
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 replaces a Grok Bot runless approval when the same native card is reobserved",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const driver = ProviderDriverKind.make("grok-bot");
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = yield* idAllocator.allocate.thread({
+          fixtureName: "provider-session-manager-grok-bot-approval-replace",
+          projectId: yield* idAllocator.allocate.project({
+            fixtureName: "provider-session-manager-grok-bot-approval-replace",
+          }),
+        });
+        const firstSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const secondSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator,
+          threadId,
+          providerSessionId: firstSessionId,
+          now,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        yield* manager.open({
+          threadId,
+          providerSessionId: firstSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const first = yield* makePendingRuntimeRequestEvents({
+          idAllocator,
+          threadId,
+          providerSessionId: firstSessionId,
+          providerThread,
+          now,
+          driver,
+          nativeRequestId: "auto_review_approval/native-pending",
+        });
+        const persistFirst = yield* eventSink
+          .stream({
+            threadId,
+            afterSequence: yield* eventSink.latestSequence({ threadId }),
+            eventType: "runtime-request.updated",
+          })
+          .pipe(Stream.take(1), Stream.runDrain, Effect.forkScoped);
+        const firstQueue = (yield* Ref.get(state)).eventQueues.get(String(firstSessionId));
+        assert.isDefined(firstQueue);
+        yield* Queue.offerAll(firstQueue!, first.providerEvents);
+        yield* Fiber.join(persistFirst);
+
+        yield* manager.open({
+          threadId,
+          providerSessionId: secondSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const second = yield* makePendingRuntimeRequestEvents({
+          idAllocator,
+          threadId,
+          providerSessionId: secondSessionId,
+          providerThread,
+          now,
+          driver,
+          nativeRequestId: "auto_review_approval/native-pending",
+        });
+        const persistSecond = yield* eventSink
+          .stream({
+            threadId,
+            afterSequence: yield* eventSink.latestSequence({ threadId }),
+          })
+          .pipe(
+            Stream.filter(
+              ({ event }) =>
+                event.type === "runtime-request.updated" && event.payload.id === second.requestId,
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+        const secondQueue = (yield* Ref.get(state)).eventQueues.get(String(secondSessionId));
+        assert.isDefined(secondQueue);
+        yield* Queue.offerAll(secondQueue!, second.providerEvents);
+        yield* Fiber.join(persistSecond);
+
+        const projection = yield* projectionStore.getThreadProjection(threadId);
+        const firstRequest = projection.runtimeRequests.find(
+          (request) => request.id === first.requestId,
+        );
+        const secondRequest = projection.runtimeRequests.find(
+          (request) => request.id === second.requestId,
+        );
+        const firstItem = projection.turnItems.find(
+          (item) => item.type === "approval_request" && item.requestId === first.requestId,
+        );
+        const livePending = projection.runtimeRequests.filter(
+          (request) => request.status === "pending" && request.responseCapability.type === "live",
+        );
+        assert.equal(firstRequest?.status, "cancelled");
+        assert.equal(firstRequest?.responseCapability.type, "not_resumable");
+        assert.equal(firstItem?.status, "cancelled");
+        assert.equal(secondRequest?.status, "pending");
+        assert.equal(secondRequest?.responseCapability.type, "live");
+        assert.equal(livePending.length, 1);
+        assert.equal(livePending[0]?.id, second.requestId);
+      });
+      yield* effect.pipe(Effect.provide(layerTest({ state, driver, idleTimeoutMs: 60_000 })));
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 invalidates a Grok Bot runless approval when its observer is closed",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const driver = ProviderDriverKind.make("grok-bot");
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = yield* idAllocator.allocate.thread({
+          fixtureName: "provider-session-manager-grok-bot-approval-close",
+          projectId: yield* idAllocator.allocate.project({
+            fixtureName: "provider-session-manager-grok-bot-approval-close",
+          }),
+        });
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const pending = yield* makePendingRuntimeRequestEvents({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          providerThread,
+          now,
+          driver,
+          nativeRequestId: "auto_review_approval/native-pending",
+        });
+        const persist = yield* eventSink
+          .stream({
+            threadId,
+            afterSequence: yield* eventSink.latestSequence({ threadId }),
+            eventType: "runtime-request.updated",
+          })
+          .pipe(Stream.take(1), Stream.runDrain, Effect.forkScoped);
+        const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.isDefined(queue);
+        yield* Queue.offerAll(queue!, pending.providerEvents);
+        yield* Fiber.join(persist);
+        yield* manager.close(providerSessionId);
+
+        const closed = yield* projectionStore.getThreadProjection(threadId);
+        const closedRequest = closed.runtimeRequests.find(
+          (request) => request.id === pending.requestId,
+        );
+        assert.equal(closedRequest?.status, "cancelled");
+        assert.equal(closedRequest?.responseCapability.type, "not_resumable");
+
+        yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const replacement = yield* makePendingRuntimeRequestEvents({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          providerThread,
+          now,
+          driver,
+          nativeRequestId: "auto_review_approval/native-pending",
+        });
+        const persistReplacement = yield* eventSink
+          .stream({
+            threadId,
+            afterSequence: yield* eventSink.latestSequence({ threadId }),
+          })
+          .pipe(
+            Stream.filter(
+              ({ event }) =>
+                event.type === "runtime-request.updated" &&
+                event.payload.id === replacement.requestId,
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+        const reopened = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.isDefined(reopened);
+        yield* Queue.offerAll(reopened!, replacement.providerEvents);
+        yield* Fiber.join(persistReplacement);
+
+        const projection = yield* projectionStore.getThreadProjection(threadId);
+        const livePending = projection.runtimeRequests.filter(
+          (request) => request.status === "pending" && request.responseCapability.type === "live",
+        );
+        assert.equal(livePending.length, 1);
+        assert.equal(livePending[0]?.id, replacement.requestId);
+        assert.equal(
+          projection.runtimeRequests.find((request) => request.id === pending.requestId)
+            ?.responseCapability.type,
+          "not_resumable",
+        );
+      });
+      yield* effect.pipe(Effect.provide(layerTest({ state, driver, idleTimeoutMs: 60_000 })));
+    }),
+);
+
 it.effect("ProviderSessionManagerV2 persists session-scoped runtime requests without a run", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
@@ -4721,5 +5213,148 @@ it.effect(
         projectExists: false,
       });
       assert.isFalse(denied?.capabilities?.has("device"));
+    }),
+);
+
+it.effect(
+  "persists completed Grok Bot run attachments from an idle observer while buffering active run messages",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const driver = ProviderDriverKind.make("grok-bot");
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const projectId = yield* idAllocator.allocate.project({
+          fixtureName: "grok-completed-media",
+        });
+        const threadId = yield* idAllocator.allocate.thread({
+          projectId,
+          fixtureName: "grok-completed-media",
+        });
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const completedRunId = RunId.make("completed-media-run");
+        const activeRunId = RunId.make("active-media-run");
+        const userMessageId = yield* idAllocator.allocate.message({ threadId, ordinal: 1 });
+        yield* eventSink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator, threadId, now, projectId }),
+            ...(yield* Effect.forEach([completedRunId, activeRunId], (runId, index) =>
+              Effect.gen(function* () {
+                return {
+                  id: yield* idAllocator.allocate.event({ threadId }),
+                  threadId,
+                  occurredAt: now,
+                  type: "run.updated" as const,
+                  payload: {
+                    id: runId,
+                    threadId,
+                    ordinal: index + 1,
+                    providerInstanceId: modelSelection.instanceId,
+                    modelSelection,
+                    providerThreadId: null,
+                    userMessageId,
+                    rootNodeId: null,
+                    activeAttemptId: null,
+                    status: index === 0 ? ("completed" as const) : ("running" as const),
+                    requestedAt: now,
+                    startedAt: now,
+                    completedAt: index === 0 ? now : null,
+                    checkpointId: null,
+                    contextHandoffId: null,
+                  },
+                };
+              }),
+            )),
+          ],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const makeMessage = (
+          id: OrchestrationV2ConversationMessage["id"],
+          runId: RunId,
+        ): OrchestrationV2ConversationMessage => ({
+          id,
+          threadId,
+          runId,
+          nodeId: null,
+          role: "assistant",
+          createdBy: "agent",
+          creationSource: "provider",
+          text: "File reply",
+          attachments: [
+            {
+              type: "file",
+              id: "received-file",
+              name: "poteto.txt",
+              mimeType: "text/plain",
+              sizeBytes: 700,
+            },
+          ],
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        });
+        const history = makeMessage(
+          yield* idAllocator.allocate.message({ threadId, ordinal: 2 }),
+          completedRunId,
+        );
+        const active = makeMessage(
+          yield* idAllocator.allocate.message({ threadId, ordinal: 3 }),
+          activeRunId,
+        );
+        const native = {
+          binding: "fixture",
+          botId: "fixture",
+          sessionId: "",
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+          generation: 0,
+          afterUpdatedSeq: "0",
+        };
+        const afterSequence = yield* eventSink.latestSequence({ threadId });
+        const persisted = yield* eventSink.stream({ threadId, afterSequence }).pipe(
+          Stream.filter(
+            ({ event }) =>
+              (event.type === "message.updated" && event.payload.id === history.id) ||
+              (event.type === "turn-item.updated" &&
+                event.payload.type === "assistant_message" &&
+                event.payload.messageId === history.id),
+          ),
+          Stream.take(2),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.isDefined(queue);
+        yield* Queue.offerAll(queue!, [
+          { type: "message.updated" as const, driver, message: active },
+          { type: "message.updated" as const, driver, message: history },
+          grokBotMessageTurnItem(history, { native }),
+        ]);
+        yield* Fiber.join(persisted);
+        const projection = yield* projectionStore.getThreadProjection(threadId);
+        assert.equal(
+          projection.messages.find((message) => message.id === history.id)?.attachments[0]?.name,
+          "poteto.txt",
+        );
+        assert.isUndefined(projection.messages.find((message) => message.id === active.id));
+        const buffered = yield* runtime.events.pipe(Stream.take(1), Stream.runCollect);
+        assert.equal(buffered[0]?.type, "message.updated");
+        if (buffered[0]?.type === "message.updated")
+          assert.equal(buffered[0].message.id, active.id);
+        assert.equal(projection.runs.find((run) => run.id === completedRunId)?.status, "completed");
+        assert.equal(projection.runs.find((run) => run.id === activeRunId)?.status, "running");
+      }).pipe(Effect.provide(layerTest({ state, driver, idleTimeoutMs: 1000 })));
     }),
 );

@@ -1,6 +1,8 @@
 "use client";
 
-import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
+import { useNavigate } from "@tanstack/react-router";
+import { GROK_BOT_DRIVER_KIND, ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
+import { AddGrokBotProviderStep } from "./AddGrokBotProviderStep";
 
 import { Radio as RadioPrimitive } from "@base-ui/react/radio";
 import { CheckIcon } from "lucide-react";
@@ -111,6 +113,7 @@ export function AddProviderInstanceDialog({
   onOpenChange,
   onCreated,
 }: AddProviderInstanceDialogProps) {
+  const navigate = useNavigate();
   const settings = useEnvironmentSettings(environmentId);
   const persistProviderInstance = usePersistEnvironmentProviderInstanceMutation(environmentId);
   const canManageProviders = useEnvironmentScope(environmentId, AuthProvidersManageScope);
@@ -146,6 +149,7 @@ export function AddProviderInstanceDialog({
 
   const driverOption = providerClients.get(driver) ?? DEFAULT_DRIVER_OPTION;
   const isAcpRegistry = driver === ACP_REGISTRY_DRIVER_KIND;
+  const isGrokBot = driver === GROK_BOT_DRIVER_KIND;
   const defaultIdentity: ProviderIdentityDraft = {
     label: driverOption.label,
     accentColor: "",
@@ -378,7 +382,7 @@ export function AddProviderInstanceDialog({
           title="Add provider"
           description={<>Add an account or configure a provider on {environmentLabel}.</>}
         >
-          {isAcpRegistry ? (
+          {isGrokBot ? null : isAcpRegistry ? (
             <AddProviderInstanceWizardSteps
               currentStep={wizardStep}
               summaries={wizardStepSummaries}
@@ -462,7 +466,28 @@ export function AddProviderInstanceDialog({
                 </RadioGroup>
               </div>
 
-              {wizardStep === 0 ? (
+              {wizardStep === 0 && isGrokBot ? (
+                <AddGrokBotProviderStep
+                  environmentId={environmentId}
+                  environmentLabel={environmentLabel}
+                  onOpenConnections={() => {
+                    onOpenChange(false);
+                    void navigate({
+                      to: "/settings/connections",
+                      search: { machine: environmentId },
+                    });
+                  }}
+                  onConnected={(instanceId) => {
+                    if (instanceId) onCreated?.(instanceId);
+                    toastManager.add({
+                      type: "success",
+                      title: "Grok Bot connected",
+                      description: "Your bots are in the sidebar.",
+                    });
+                    onOpenChange(false);
+                  }}
+                />
+              ) : wizardStep === 0 ? (
                 <div className="space-y-4 pt-4">
                   <div className="flex items-center gap-3 text-xs text-muted-foreground">
                     <div aria-hidden className="flex-1 border-t border-border/70" />
@@ -674,7 +699,7 @@ export function AddProviderInstanceDialog({
               >
                 {wizardStep === 0 ? "Cancel" : "Back"}
               </Button>
-              {wizardStep === 0 && driver === "codex" ? (
+              {isGrokBot ? null : wizardStep === 0 && driver === "codex" ? (
                 <>
                   <Button variant="outline" size="sm" onClick={() => navigateToStep(1)}>
                     Configure manually

@@ -1,4 +1,27 @@
 import {
+  GrokBotComputerInput,
+  GrokBotComputerRecreateInput,
+  GrokBotComputerRecreateResult,
+  GrokBotComputerResetInput,
+  GrokBotComputerResetResult,
+  GrokBotComputerUpgradeScheduleInput,
+  GrokBotComputerUpgradeScheduleResult,
+  GrokBotComputer,
+  GrokBotComputerError,
+  GrokBotTeachRecording,
+  GrokBotTeachStartInput,
+  GrokBotTeachStopInput,
+} from "./grokBotComputer.ts";
+import {
+  GrokBotSecretDismissInput,
+  GrokBotSecretDismissResult,
+  GrokBotSecretError,
+  GrokBotSecretPendingInput,
+  GrokBotSecretPendingResult,
+  GrokBotSecretSubmitInput,
+  GrokBotSecretSubmitResult,
+} from "./grokBotSecret.ts";
+import {
   OrchestrationV2SearchThreadError,
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -30,9 +53,56 @@ import {
   GrokBotConversation,
   GrokBotSendInput,
   GrokBotSendResult,
+  GrokBotCreateInput,
   GrokBotUpdateInput,
   GrokBotLinkInput,
+  GrokBotDeleteInput,
+  GrokBotDeleteResult,
 } from "./grokBot.ts";
+import {
+  GrokBotOrchestratorInput,
+  GrokBotOrchestratorConfig,
+  GrokBotOrchestratorError,
+  GrokBotOpenThreadInput,
+  GrokBotOpenThreadResult,
+  GrokBotThreadError,
+} from "./grokBotOrchestrator.ts";
+import {
+  GrokBotRoutineError,
+  GrokBotRoutinesListInput,
+  GrokBotRoutinesListResult,
+  GrokBotRoutineSetEnabledInput,
+  GrokBotRoutineSetEnabledResult,
+  GrokBotRoutineDeleteInput,
+  GrokBotRoutineDeleteResult,
+} from "./grokBotRoutines.ts";
+import {
+  GrokBotComposerResources,
+  GrokBotComposerResourcesError,
+  GrokBotComposerResourcesInput,
+} from "./grokBotComposerResources.ts";
+import {
+  GrokBotMarketplaceError,
+  GrokBotMarketplaceImportInput,
+  GrokBotMarketplaceImportResult,
+  GrokBotMarketplaceListingsInput,
+  GrokBotMarketplaceInstalledPluginsInput,
+  GrokBotMarketplaceInstalledPluginsResult,
+  GrokBotMarketplaceListingsResult,
+  GrokBotMarketplacePluginChangeResult,
+  GrokBotPluginConnectionsInput,
+  GrokBotPluginConnectionsResult,
+  GrokBotPluginAuthenticateInput,
+  GrokBotPluginAuthenticateResult,
+  GrokBotPluginCompleteAuthInput,
+  GrokBotPluginCompleteAuthResult,
+  GrokBotMarketplacePluginInstallInput,
+  GrokBotMarketplacePluginUninstallInput,
+  GrokBotMarketplacePluginsInput,
+  GrokBotMarketplacePluginsResult,
+  GrokBotMarketplaceTemplate,
+  GrokBotMarketplaceTemplateInput,
+} from "./grokBotMarketplace.ts";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
@@ -378,16 +448,63 @@ import {
   SourceControlRepositoryLookupInput,
 } from "./sourceControl.ts";
 import { VcsError } from "./vcs.ts";
+import {
+  GrokBotVoiceCredential,
+  GrokBotVoiceConnectedInput,
+  GrokBotVoiceConnectedResult,
+  GrokBotVoiceEndInput,
+  GrokBotVoiceEndResult,
+  GrokBotVoiceError,
+  GrokBotVoiceRefreshInput,
+  GrokBotVoiceStartInput,
+  GrokBotVoiceStartResult,
+  GrokBotVoiceToolInput,
+  GrokBotVoiceToolResult,
+} from "./grokBotVoice.ts";
 import { Project, ProjectMutation, ProjectMutationError } from "./project.ts";
 
 export const WS_METHODS = {
+  grokBotsTeachRead: "grokBots.teachRead",
+  grokBotsTeachStart: "grokBots.teachStart",
+  grokBotsTeachStop: "grokBots.teachStop",
+  grokBotsComputerRead: "grokBots.computerRead",
+  grokBotsComputerStart: "grokBots.computerStart",
+  grokBotsComputerRecreate: "grokBots.computerRecreate",
+  grokBotsComputerReset: "grokBots.computerReset",
+  grokBotsComputerUpgradeSchedule: "grokBots.computerUpgradeSchedule",
+  grokBotsSecretPending: "grokBots.secretPending",
+  grokBotsSecretSubmit: "grokBots.secretSubmit",
+  grokBotsSecretDismiss: "grokBots.secretDismiss",
+  grokBotsVoiceStart: "grokBots.voiceStart",
+  grokBotsVoiceRefresh: "grokBots.voiceRefresh",
+  grokBotsVoiceTool: "grokBots.voiceTool",
+  grokBotsVoiceConnected: "grokBots.voiceConnected",
+  grokBotsVoiceEnd: "grokBots.voiceEnd",
   grokBotsStatus: "grokBots.status",
   grokBotsSetup: "grokBots.setup",
   grokBotsList: "grokBots.list",
   grokBotsRead: "grokBots.read",
   grokBotsSend: "grokBots.send",
+  grokBotsCreate: "grokBots.create",
   grokBotsUpdate: "grokBots.update",
   grokBotsLink: "grokBots.link",
+  grokBotsDelete: "grokBots.delete",
+  grokBotsOrchestratorConfig: "grokBots.orchestratorConfig",
+  grokBotsOpenThread: "grokBots.openThread",
+  grokBotsListRoutines: "grokBots.listRoutines",
+  grokBotsListComposerResources: "grokBots.listComposerResources",
+  grokBotsSetRoutineEnabled: "grokBots.setRoutineEnabled",
+  grokBotsDeleteRoutine: "grokBots.deleteRoutine",
+  grokBotsListMarketplace: "grokBots.listMarketplace",
+  grokBotsListMarketplacePlugins: "grokBots.listMarketplacePlugins",
+  grokBotsListInstalledMarketplacePlugins: "grokBots.listInstalledMarketplacePlugins",
+  grokBotsPluginConnections: "grokBots.pluginConnections",
+  grokBotsPluginAuthenticate: "grokBots.pluginAuthenticate",
+  grokBotsPluginCompleteAuth: "grokBots.pluginCompleteAuth",
+  grokBotsInstallMarketplacePlugin: "grokBots.installMarketplacePlugin",
+  grokBotsUninstallMarketplacePlugin: "grokBots.uninstallMarketplacePlugin",
+  grokBotsGetMarketplaceTemplate: "grokBots.getMarketplaceTemplate",
+  grokBotsImportMarketplaceTemplate: "grokBots.importMarketplaceTemplate",
   // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
@@ -1894,6 +2011,165 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
 ) {}
 
 export const WsRpcGroup = RpcGroup.make(
+  Rpc.make(WS_METHODS.grokBotsTeachRead, {
+    payload: GrokBotComputerInput,
+    success: GrokBotTeachRecording,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsTeachStart, {
+    payload: GrokBotTeachStartInput,
+    success: GrokBotTeachRecording,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsTeachStop, {
+    payload: GrokBotTeachStopInput,
+    success: GrokBotTeachRecording,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsComputerRead, {
+    payload: GrokBotComputerInput,
+    success: GrokBotComputer,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsComputerStart, {
+    payload: GrokBotComputerInput,
+    success: GrokBotComputer,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsComputerRecreate, {
+    payload: GrokBotComputerRecreateInput,
+    success: GrokBotComputerRecreateResult,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsComputerReset, {
+    payload: GrokBotComputerResetInput,
+    success: GrokBotComputerResetResult,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsComputerUpgradeSchedule, {
+    payload: GrokBotComputerUpgradeScheduleInput,
+    success: GrokBotComputerUpgradeScheduleResult,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsSecretPending, {
+    payload: GrokBotSecretPendingInput,
+    success: GrokBotSecretPendingResult,
+    error: GrokBotSecretError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsSecretSubmit, {
+    payload: GrokBotSecretSubmitInput,
+    success: GrokBotSecretSubmitResult,
+    error: GrokBotSecretError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsSecretDismiss, {
+    payload: GrokBotSecretDismissInput,
+    success: GrokBotSecretDismissResult,
+    error: GrokBotSecretError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsVoiceStart, {
+    payload: GrokBotVoiceStartInput,
+    success: GrokBotVoiceStartResult,
+    error: GrokBotVoiceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsVoiceRefresh, {
+    payload: GrokBotVoiceRefreshInput,
+    success: GrokBotVoiceCredential,
+    error: GrokBotVoiceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsVoiceTool, {
+    payload: GrokBotVoiceToolInput,
+    success: GrokBotVoiceToolResult,
+    error: GrokBotVoiceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsVoiceConnected, {
+    payload: GrokBotVoiceConnectedInput,
+    success: GrokBotVoiceConnectedResult,
+    error: GrokBotVoiceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsVoiceEnd, {
+    payload: GrokBotVoiceEndInput,
+    success: GrokBotVoiceEndResult,
+  }),
+  Rpc.make(WS_METHODS.grokBotsListRoutines, {
+    payload: GrokBotRoutinesListInput,
+    success: GrokBotRoutinesListResult,
+    error: Schema.Union([GrokBotError, GrokBotRoutineError]),
+  }),
+  Rpc.make(WS_METHODS.grokBotsListMarketplace, {
+    payload: GrokBotMarketplaceListingsInput,
+    success: GrokBotMarketplaceListingsResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsListMarketplacePlugins, {
+    payload: GrokBotMarketplacePluginsInput,
+    success: GrokBotMarketplacePluginsResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsListInstalledMarketplacePlugins, {
+    payload: GrokBotMarketplaceInstalledPluginsInput,
+    success: GrokBotMarketplaceInstalledPluginsResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsPluginConnections, {
+    payload: GrokBotPluginConnectionsInput,
+    success: GrokBotPluginConnectionsResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsPluginAuthenticate, {
+    payload: GrokBotPluginAuthenticateInput,
+    success: GrokBotPluginAuthenticateResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsPluginCompleteAuth, {
+    payload: GrokBotPluginCompleteAuthInput,
+    success: GrokBotPluginCompleteAuthResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsInstallMarketplacePlugin, {
+    payload: GrokBotMarketplacePluginInstallInput,
+    success: GrokBotMarketplacePluginChangeResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsUninstallMarketplacePlugin, {
+    payload: GrokBotMarketplacePluginUninstallInput,
+    success: GrokBotMarketplacePluginChangeResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsGetMarketplaceTemplate, {
+    payload: GrokBotMarketplaceTemplateInput,
+    success: GrokBotMarketplaceTemplate,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsImportMarketplaceTemplate, {
+    payload: GrokBotMarketplaceImportInput,
+    success: GrokBotMarketplaceImportResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsListComposerResources, {
+    payload: GrokBotComposerResourcesInput,
+    success: GrokBotComposerResources,
+    error: Schema.Union([GrokBotError, GrokBotComposerResourcesError]),
+  }),
+  Rpc.make(WS_METHODS.grokBotsSetRoutineEnabled, {
+    payload: GrokBotRoutineSetEnabledInput,
+    success: GrokBotRoutineSetEnabledResult,
+    error: Schema.Union([GrokBotError, GrokBotRoutineError]),
+  }),
+  Rpc.make(WS_METHODS.grokBotsDeleteRoutine, {
+    payload: GrokBotRoutineDeleteInput,
+    success: GrokBotRoutineDeleteResult,
+    error: Schema.Union([GrokBotError, GrokBotRoutineError]),
+  }),
+  Rpc.make(WS_METHODS.grokBotsOpenThread, {
+    payload: GrokBotOpenThreadInput,
+    success: GrokBotOpenThreadResult,
+    error: Schema.Union([GrokBotError, GrokBotOrchestratorError, GrokBotThreadError]),
+  }),
+  Rpc.make(WS_METHODS.grokBotsOrchestratorConfig, {
+    payload: GrokBotOrchestratorInput,
+    success: GrokBotOrchestratorConfig,
+    error: Schema.Union([GrokBotError, GrokBotOrchestratorError]),
+  }),
   Rpc.make(WS_METHODS.grokBotsStatus, {
     payload: Schema.Struct({}),
     success: GrokBotStatus,
@@ -1919,6 +2195,11 @@ export const WsRpcGroup = RpcGroup.make(
     success: GrokBotSendResult,
     error: GrokBotError,
   }),
+  Rpc.make(WS_METHODS.grokBotsCreate, {
+    payload: GrokBotCreateInput,
+    success: GrokBot,
+    error: GrokBotError,
+  }),
   Rpc.make(WS_METHODS.grokBotsUpdate, {
     payload: GrokBotUpdateInput,
     success: GrokBot,
@@ -1928,6 +2209,11 @@ export const WsRpcGroup = RpcGroup.make(
     payload: GrokBotLinkInput,
     success: GrokBot,
     error: GrokBotError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsDelete, {
+    payload: GrokBotDeleteInput,
+    success: GrokBotDeleteResult,
+    error: Schema.Union([GrokBotError, GrokBotThreadError]),
   }),
   WsServerProbeRpc,
   WsServerGetConfigRpc,

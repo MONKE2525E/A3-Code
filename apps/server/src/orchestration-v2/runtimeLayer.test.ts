@@ -24,6 +24,7 @@ import {
   PullRequestOperationError,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
   RunId,
@@ -72,6 +73,7 @@ import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
 import { shellStreamItemFromThreadShell } from "./ShellStream.ts";
+import { GrokBotCapabilitiesV2 } from "./Adapters/GrokBotAdapterV2.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
@@ -841,6 +843,139 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
     }).pipe(Effect.provide(Layer.fresh(layerTest))),
   );
 
+  it.effect(
+    "interrupts and restarts a pending Grok attempt for follow-up input without completing it",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const threadId = ThreadId.make("grok-pending-followup");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("grok-followup-create"),
+          threadId,
+          projectId: ProjectId.make("grok-followup-project"),
+          title: "Grok",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: process.cwd(),
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("grok-followup-first"),
+          threadId,
+          messageId: MessageId.make("grok-followup-first"),
+          text: "First",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+        });
+        const initial = yield* orchestrator.getThreadProjection(threadId);
+        const run = initial.runs[0]!;
+        const providerThread = {
+          ...initial.providerThreads[0]!,
+          driver: ProviderDriverKind.make("grok-bot"),
+        };
+        const now = yield* DateTime.now;
+        const providerSession = {
+          id: providerThread.providerSessionId!,
+          driver: providerThread.driver,
+          providerInstanceId: modelSelection.instanceId,
+          status: "running" as const,
+          cwd: process.cwd(),
+          model: modelSelection.model,
+          capabilities: GrokBotCapabilitiesV2,
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+        };
+        const providerTurn = {
+          id: ProviderTurnId.make("grok-followup-pending"),
+          providerThreadId: providerThread.id,
+          nodeId: run.rootNodeId!,
+          runAttemptId: run.activeAttemptId,
+          nativeTurnRef: null,
+          ordinal: 1,
+          status: "pending" as const,
+          startedAt: null,
+          completedAt: null,
+        };
+        yield* eventSink.write({
+          commandId: CommandId.make("grok-followup-seed"),
+          events: [
+            {
+              id: EventId.make("grok-followup-run"),
+              type: "run.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: { ...run, status: "running", startedAt: now },
+            },
+            {
+              id: EventId.make("grok-followup-thread"),
+              type: "provider-thread.updated",
+              threadId,
+              occurredAt: now,
+              payload: providerThread,
+            },
+            {
+              id: EventId.make("grok-followup-session"),
+              type: "provider-session.attached",
+              threadId,
+              occurredAt: now,
+              payload: providerSession,
+            },
+            {
+              id: EventId.make("grok-followup-turn"),
+              type: "provider-turn.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: providerTurn,
+            },
+          ],
+        });
+        const spy = vi
+          .spyOn(sessions, "get")
+          .mockReturnValue(
+            Effect.succeed(
+              Option.some({ providerSession } as ProviderAdapter.ProviderAdapterV2SessionRuntime),
+            ),
+          );
+        yield* Effect.addFinalizer(() => Effect.sync(() => spy.mockRestore()));
+        const commandId = CommandId.make("grok-followup-next");
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "user",
+          creationSource: "web",
+          commandId,
+          threadId,
+          messageId: MessageId.make("grok-followup-next"),
+          text: "Follow up",
+          attachments: [],
+          dispatchMode: { type: "steer_active", targetRunId: run.id },
+        });
+        const effects = yield* outbox.listByCommandId(commandId);
+        assert.isTrue(effects.some((effect) => effect.request.type === "provider-turn.restart"));
+        assert.isFalse(effects.some((effect) => effect.request.type === "provider-turn.steer"));
+        const updated = yield* orchestrator.getThreadProjection(threadId);
+        assert.lengthOf(updated.runs, 1);
+        assert.notEqual(updated.runs[0]?.status, "completed");
+        assert.notEqual(updated.runs[0]?.activeAttemptId, run.activeAttemptId);
+        assert.equal(
+          updated.attempts.find((attempt) => attempt.id === run.activeAttemptId)?.status,
+          "superseded",
+        );
+      }),
+  );
+
   it.effect("resolves delivery intent against the active run and starts after it completes", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -1165,6 +1300,786 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         .pipe(Effect.result);
       assert.equal(duplicate._tag, "Failure");
       assert.equal((yield* orchestrator.getThreadProjection(threadId)).messages.length, 1);
+    }),
+  );
+
+  it.effect(
+    "routes answers on a native-card question: choices go native, the rest go to chat",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("runtime-native-question");
+        const providerSessionId = ProviderSessionId.make("runtime-native-question-session");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("runtime-native-question-create"),
+          createdBy: "user",
+          creationSource: "web",
+          threadId,
+          projectId: ProjectId.make("runtime-native-question-project"),
+          title: "Native question",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: process.cwd(),
+        });
+        const seedQuestion = (name: string) => {
+          const requestId = RuntimeRequestId.make(`runtime-native-question-${name}-request`);
+          const nodeId = NodeId.make(`runtime-native-question-${name}-node`);
+          const itemId = TurnItemId.make(`runtime-native-question-${name}-item`);
+          return eventSink
+            .write({
+              commandId: CommandId.make(`runtime-native-question-${name}-seed`),
+              events: [
+                {
+                  id: EventId.make(`runtime-native-question-${name}-node-event`),
+                  type: "node.updated",
+                  threadId,
+                  nodeId,
+                  occurredAt: now,
+                  payload: {
+                    id: nodeId,
+                    threadId,
+                    runId: null,
+                    parentNodeId: null,
+                    rootNodeId: nodeId,
+                    kind: "user_input_request",
+                    status: "waiting",
+                    countsForRun: false,
+                    providerThreadId: null,
+                    providerTurnId: null,
+                    nativeItemRef: null,
+                    runtimeRequestId: requestId,
+                    checkpointScopeId: null,
+                    startedAt: now,
+                    completedAt: null,
+                  },
+                },
+                {
+                  id: EventId.make(`runtime-native-question-${name}-request-event`),
+                  type: "runtime-request.updated",
+                  threadId,
+                  nodeId,
+                  occurredAt: now,
+                  payload: {
+                    id: requestId,
+                    nodeId,
+                    providerTurnId: null,
+                    nativeRequestRef: null,
+                    kind: "user_input",
+                    status: "pending",
+                    responseCapability: { type: "message", providerSessionId },
+                    createdAt: now,
+                    resolvedAt: null,
+                  },
+                },
+                {
+                  id: EventId.make(`runtime-native-question-${name}-item-event`),
+                  type: "turn-item.updated",
+                  threadId,
+                  nodeId,
+                  occurredAt: now,
+                  payload: {
+                    id: itemId,
+                    type: "user_input_request",
+                    threadId,
+                    runId: null,
+                    nodeId,
+                    providerThreadId: null,
+                    providerTurnId: null,
+                    nativeItemRef: null,
+                    parentItemId: null,
+                    ordinal: 0,
+                    status: "waiting",
+                    title: null,
+                    startedAt: now,
+                    completedAt: null,
+                    updatedAt: now,
+                    requestId,
+                    responseMode: "message",
+                    questions: [
+                      {
+                        id: "color",
+                        header: "Color",
+                        question: "Which color?",
+                        options: [{ label: "Blue", description: "Blue", value: "blue" }],
+                      },
+                    ],
+                  },
+                },
+              ],
+            })
+            .pipe(Effect.as(requestId));
+        };
+        const choice = yield* seedQuestion("choice");
+        const dismissed = yield* seedQuestion("dismissed");
+        const freeform = yield* seedQuestion("freeform");
+        const messageCount = (yield* orchestrator.getThreadProjection(threadId)).messages.length;
+
+        yield* orchestrator.dispatch({
+          type: "runtime-request.respond",
+          commandId: CommandId.make("runtime-native-question-choice-answer"),
+          threadId,
+          requestId: choice,
+          answers: { color: "blue" },
+        });
+        yield* orchestrator.dispatch({
+          type: "runtime-request.respond",
+          commandId: CommandId.make("runtime-native-question-dismiss"),
+          threadId,
+          requestId: dismissed,
+          decision: "cancel",
+        });
+        yield* orchestrator.dispatch({
+          type: "runtime-request.respond",
+          commandId: CommandId.make("runtime-native-question-freeform-answer"),
+          threadId,
+          requestId: freeform,
+          answers: { color: "Teal" },
+        });
+
+        const projection = yield* orchestrator.getThreadProjection(threadId);
+        const statusOf = (requestId: RuntimeRequestId) =>
+          projection.runtimeRequests.find((request) => request.id === requestId)?.status;
+        // Native picks and dismissals stay pending until native confirms; chat answers resolve now.
+        assert.equal(statusOf(choice), "pending");
+        assert.equal(statusOf(dismissed), "pending");
+        assert.equal(statusOf(freeform), "resolved");
+        assert.isTrue(
+          projection.messages.some((message) => message.text === "Which color?\nTeal"),
+          "a chat answer is sent as a message",
+        );
+        assert.equal(projection.messages.length, messageCount + 1);
+        assert.deepEqual(
+          (yield* outbox.listByCommandId(
+            CommandId.make("runtime-native-question-choice-answer"),
+          )).map((effect) => effect.request),
+          [
+            {
+              type: "runtime-request.respond",
+              providerSessionId,
+              requestId: choice,
+              answers: { color: "blue" },
+            },
+          ],
+        );
+        assert.deepEqual(
+          (yield* outbox.listByCommandId(CommandId.make("runtime-native-question-dismiss"))).map(
+            (effect) => effect.request,
+          ),
+          [
+            {
+              type: "runtime-request.respond",
+              providerSessionId,
+              requestId: dismissed,
+              decision: "cancel",
+            },
+          ],
+        );
+        assert.deepEqual(
+          (yield* outbox.listByCommandId(CommandId.make("runtime-native-question-freeform-answer")))
+            .map((effect) => effect.request)
+            .filter((request) => request.type === "runtime-request.respond"),
+          [
+            {
+              type: "runtime-request.respond",
+              providerSessionId,
+              requestId: freeform,
+              answers: { color: "Teal" },
+            },
+          ],
+        );
+      }),
+  );
+
+  // A bound native-card question as the GrokBot adapter projects it: pending until the native
+  // runtime settles it. The provider session is stubbed; everything else runs for real.
+  const createNativeQuestionThread = (threadId: ThreadId, name: string) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`${name}-create`),
+        createdBy: "user",
+        creationSource: "web",
+        threadId,
+        projectId: ProjectId.make(`${name}-project`),
+        title: name,
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: process.cwd(),
+      });
+    });
+
+  const seedNativeQuestion = (input: {
+    readonly threadId: ThreadId;
+    readonly providerSessionId: ProviderSessionId;
+    readonly name: string;
+    readonly grokWidget?: boolean;
+  }) =>
+    Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const question = {
+        requestId: RuntimeRequestId.make(`${input.name}-request`),
+        nodeId: NodeId.make(`${input.name}-node`),
+        itemId: TurnItemId.make(`${input.name}-item`),
+        name: input.name,
+      };
+      yield* eventSink.write({
+        commandId: CommandId.make(`${input.name}-seed`),
+        events: [
+          {
+            id: EventId.make(`${input.name}-node-event`),
+            type: "node.updated",
+            threadId: input.threadId,
+            nodeId: question.nodeId,
+            occurredAt: now,
+            payload: {
+              id: question.nodeId,
+              threadId: input.threadId,
+              runId: null,
+              parentNodeId: null,
+              rootNodeId: question.nodeId,
+              kind: "user_input_request",
+              status: "waiting",
+              countsForRun: false,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: input.grokWidget
+                ? {
+                    driver: ProviderDriverKind.make("grok-bot"),
+                    nativeId: "widget/" + input.name,
+                    strength: "strong",
+                  }
+                : null,
+              runtimeRequestId: question.requestId,
+              checkpointScopeId: null,
+              startedAt: now,
+              completedAt: null,
+            },
+          },
+          {
+            id: EventId.make(`${input.name}-request-event`),
+            type: "runtime-request.updated",
+            threadId: input.threadId,
+            nodeId: question.nodeId,
+            occurredAt: now,
+            payload: {
+              id: question.requestId,
+              nodeId: question.nodeId,
+              providerTurnId: null,
+              nativeRequestRef: null,
+              kind: "user_input",
+              status: "pending",
+              responseCapability: { type: "message", providerSessionId: input.providerSessionId },
+              createdAt: now,
+              resolvedAt: null,
+            },
+          },
+          {
+            id: EventId.make(`${input.name}-item-event`),
+            type: "turn-item.updated",
+            threadId: input.threadId,
+            nodeId: question.nodeId,
+            occurredAt: now,
+            payload: {
+              id: question.itemId,
+              type: "user_input_request",
+              threadId: input.threadId,
+              runId: null,
+              nodeId: question.nodeId,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: input.grokWidget
+                ? {
+                    driver: ProviderDriverKind.make("grok-bot"),
+                    nativeId: "widget/" + input.name,
+                    strength: "strong",
+                  }
+                : null,
+              parentItemId: null,
+              ordinal: 0,
+              status: "waiting",
+              title: null,
+              startedAt: now,
+              completedAt: null,
+              updatedAt: now,
+              requestId: question.requestId,
+              responseMode: "message",
+              questions: [
+                {
+                  id: "color",
+                  header: "Color",
+                  question: "Which color?",
+                  options: [{ label: "Blue", description: "Blue", value: "blue" }],
+                },
+              ],
+            },
+          },
+        ],
+      });
+      return question;
+    });
+
+  // What the adapter offers after native confirms a settled card: the request, its node, and item.
+  const acknowledgeNativeQuestion = (
+    question: {
+      readonly requestId: RuntimeRequestId;
+      readonly nodeId: NodeId;
+      readonly itemId: TurnItemId;
+      readonly name: string;
+    },
+    threadId: ThreadId,
+    providerSessionId: ProviderSessionId,
+    outcome: { readonly answers?: Record<string, string> },
+  ) =>
+    Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const status = outcome.answers === undefined ? "cancelled" : "resolved";
+      yield* eventSink.write({
+        commandId: CommandId.make(`${question.name}-native-ack-${String(now.epochMilliseconds)}`),
+        events: [
+          {
+            id: EventId.make(`${question.name}-ack-request`),
+            type: "runtime-request.updated",
+            threadId,
+            nodeId: question.nodeId,
+            occurredAt: now,
+            payload: {
+              id: question.requestId,
+              nodeId: question.nodeId,
+              providerTurnId: null,
+              nativeRequestRef: null,
+              kind: "user_input",
+              status,
+              responseCapability: { type: "message", providerSessionId },
+              createdAt: now,
+              resolvedAt: now,
+              ...(outcome.answers === undefined
+                ? { decision: "cancel" as const }
+                : { answers: outcome.answers }),
+            },
+          },
+          {
+            id: EventId.make(`${question.name}-ack-item`),
+            type: "turn-item.updated",
+            threadId,
+            nodeId: question.nodeId,
+            occurredAt: now,
+            payload: {
+              id: question.itemId,
+              type: "user_input_request",
+              threadId,
+              runId: null,
+              nodeId: question.nodeId,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 0,
+              status: outcome.answers === undefined ? "cancelled" : "completed",
+              title: null,
+              startedAt: now,
+              completedAt: now,
+              updatedAt: now,
+              requestId: question.requestId,
+              responseMode: "message",
+              questions: [
+                {
+                  id: "color",
+                  header: "Color",
+                  question: "Which color?",
+                  options: [{ label: "Blue", description: "Blue", value: "blue" }],
+                },
+              ],
+            },
+          },
+        ],
+      });
+    });
+
+  it.effect("settles a native card only after native confirms, through the effect worker", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const threadId = ThreadId.make("runtime-native-settle");
+      const providerSessionId = ProviderSessionId.make("runtime-native-settle-session");
+      yield* createNativeQuestionThread(threadId, "runtime-native-settle");
+      const dismissed = yield* seedNativeQuestion({
+        threadId,
+        providerSessionId,
+        name: "runtime-native-settle-dismiss",
+      });
+      const answered = yield* seedNativeQuestion({
+        threadId,
+        providerSessionId,
+        name: "runtime-native-settle-answer",
+        grokWidget: true,
+      });
+      const questions = new Map([
+        [dismissed.requestId, dismissed],
+        [answered.requestId, answered],
+      ]);
+      let nativeAccepts = false;
+      const respondToRuntimeRequest = vi.fn(
+        (input: {
+          readonly requestId: RuntimeRequestId;
+          readonly answers?: Record<string, string>;
+        }) => {
+          if (!nativeAccepts) return Effect.fail(new Error("native refused") as never);
+          const question = questions.get(input.requestId)!;
+          return acknowledgeNativeQuestion(
+            question,
+            threadId,
+            providerSessionId,
+            input.answers === undefined ? {} : { answers: input.answers },
+          ).pipe(Effect.orDie);
+        },
+      );
+      const sessionSpy = vi
+        .spyOn(sessions, "get")
+        .mockReturnValue(Effect.succeed(Option.some({ respondToRuntimeRequest } as never)));
+      yield* Effect.addFinalizer(() => Effect.sync(() => sessionSpy.mockRestore()));
+      // The layer shares one database, so a drain also runs effects that earlier tests left behind.
+      const callsFor = (requestId: RuntimeRequestId) =>
+        respondToRuntimeRequest.mock.calls.filter(([input]) => input.requestId === requestId);
+      const statusOf = (requestId: RuntimeRequestId) =>
+        orchestrator
+          .getThreadProjection(threadId)
+          .pipe(
+            Effect.map(
+              (projection) =>
+                projection.runtimeRequests.find((request) => request.id === requestId)?.status,
+            ),
+          );
+
+      // X on a native card: the request stays pending until native confirms the dismissal.
+      const dismissCommand = CommandId.make("runtime-native-settle-dismiss");
+      yield* orchestrator.dispatch({
+        type: "runtime-request.respond",
+        commandId: dismissCommand,
+        threadId,
+        requestId: dismissed.requestId,
+        decision: "cancel",
+      });
+      assert.equal(yield* statusOf(dismissed.requestId), "pending");
+      yield* worker.drain();
+      assert.equal(callsFor(dismissed.requestId).length, 1);
+      assert.equal(yield* statusOf(dismissed.requestId), "pending");
+      assert.notEqual((yield* outbox.listByCommandId(dismissCommand))[0]?.status, "succeeded");
+      nativeAccepts = true;
+      yield* TestClock.adjust("30 seconds");
+      yield* worker.drain();
+      assert.equal(yield* statusOf(dismissed.requestId), "cancelled");
+      assert.equal((yield* outbox.listByCommandId(dismissCommand))[0]?.status, "succeeded");
+
+      // A custom answer on a Grok native card settles without creating a chat turn.
+      nativeAccepts = false;
+      const answerCommand = CommandId.make("runtime-native-settle-answer");
+      yield* orchestrator.dispatch({
+        type: "runtime-request.respond",
+        commandId: answerCommand,
+        threadId,
+        requestId: answered.requestId,
+        answers: { color: "Gamma custom" },
+      });
+      assert.equal(yield* statusOf(answered.requestId), "pending");
+      assert.isFalse(
+        (yield* outbox.listByCommandId(answerCommand)).some(
+          (effect) => effect.request.type === "provider-turn.start",
+        ),
+      );
+      yield* worker.drain();
+      assert.equal(yield* statusOf(answered.requestId), "pending");
+      nativeAccepts = true;
+      yield* TestClock.adjust("30 seconds");
+      yield* worker.drain();
+      assert.equal(yield* statusOf(answered.requestId), "resolved");
+      assert.deepStrictEqual(callsFor(answered.requestId).at(-1)?.[0], {
+        requestId: answered.requestId,
+        answers: { color: "Gamma custom" },
+      });
+    }),
+  );
+
+  it.effect(
+    "keeps a chat answer on the transcript when its native cleanup is refused or cleared",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const threadId = ThreadId.make("runtime-native-chat-cleanup");
+        const providerSessionId = ProviderSessionId.make("runtime-native-chat-cleanup-session");
+        yield* createNativeQuestionThread(threadId, "runtime-native-chat-cleanup");
+        const freeform = yield* seedNativeQuestion({
+          threadId,
+          providerSessionId,
+          name: "runtime-native-chat-cleanup",
+        });
+        let nativeAccepts = false;
+        const respondToRuntimeRequest = vi.fn(
+          (_input: {
+            readonly requestId: RuntimeRequestId;
+            readonly answers?: Record<string, string>;
+          }) => (nativeAccepts ? Effect.void : Effect.fail(new Error("native refused") as never)),
+        );
+        const sessionSpy = vi
+          .spyOn(sessions, "get")
+          .mockReturnValue(Effect.succeed(Option.some({ respondToRuntimeRequest } as never)));
+        yield* Effect.addFinalizer(() => Effect.sync(() => sessionSpy.mockRestore()));
+
+        const answerCommand = CommandId.make("runtime-native-chat-cleanup-answer");
+        yield* orchestrator.dispatch({
+          type: "runtime-request.respond",
+          commandId: answerCommand,
+          threadId,
+          requestId: freeform.requestId,
+          answers: { color: "Gamma" },
+        });
+        // Chat text resolves locally at once; only the native cleanup is deferred.
+        const recorded = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(
+          recorded.runtimeRequests.find((request) => request.id === freeform.requestId)?.status,
+          "resolved",
+        );
+        const answerRecord = () =>
+          orchestrator
+            .getThreadProjection(threadId)
+            .pipe(
+              Effect.map((projection) =>
+                projection.turnItems.find(
+                  (item) =>
+                    item.type === "user_input_request" && item.requestId === freeform.requestId,
+                ),
+              ),
+            );
+        const questionAnswerOf = () =>
+          answerRecord().pipe(
+            Effect.map((item) =>
+              item?.type === "user_input_request" ? item.questionAnswer : undefined,
+            ),
+          );
+        const recordedAnswer = yield* questionAnswerOf();
+        assert.isDefined(recordedAnswer);
+
+        // The same command also starts a turn, which this layer cannot run. Effects of one thread run
+        // in order, so the cleanup waits until that start has failed for good.
+        for (let attempt = 0; attempt < 10; attempt++) {
+          const turnStart = (yield* outbox.listByCommandId(answerCommand)).find(
+            (effect) => effect.request.type === "provider-turn.start",
+          );
+          if (turnStart === undefined || turnStart.status === "failed") break;
+          yield* worker.drain();
+          yield* TestClock.adjust("30 seconds");
+        }
+        yield* worker.drain();
+        assert.deepStrictEqual(
+          respondToRuntimeRequest.mock.calls.findLast(
+            ([input]) => input.requestId === freeform.requestId,
+          )?.[0],
+          {
+            requestId: freeform.requestId,
+            answers: { color: "Gamma" },
+          },
+        );
+        assert.notEqual(
+          (yield* outbox.listByCommandId(answerCommand)).find(
+            (effect) => effect.request.type === "runtime-request.respond",
+          )?.status,
+          "succeeded",
+        );
+        assert.deepStrictEqual(yield* questionAnswerOf(), recordedAnswer);
+
+        nativeAccepts = true;
+        yield* TestClock.adjust("30 seconds");
+        yield* worker.drain();
+        // The cleared card leaves the recorded answer untouched: nothing settles over it.
+        const cleared = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(
+          cleared.runtimeRequests.find((request) => request.id === freeform.requestId)?.status,
+          "resolved",
+        );
+        assert.deepStrictEqual(yield* questionAnswerOf(), recordedAnswer);
+      }),
+  );
+
+  it.effect("starts a custom answer to a message question once the active turn settles", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("runtime-answer-behind-active");
+      const requestId = RuntimeRequestId.make("runtime-answer-behind-active-request");
+      const nodeId = NodeId.make("runtime-answer-behind-active-node");
+      const itemId = TurnItemId.make("runtime-answer-behind-active-item");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("runtime-answer-behind-active-create"),
+        createdBy: "user",
+        creationSource: "web",
+        threadId,
+        projectId: ProjectId.make("runtime-answer-behind-active-project"),
+        title: "Answer behind active turn",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: process.cwd(),
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-answer-behind-active-message"),
+        threadId,
+        messageId: MessageId.make("runtime-answer-behind-active-message"),
+        text: "Ask me a question.",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+      });
+      yield* eventSink.write({
+        commandId: CommandId.make("runtime-answer-behind-active-seed"),
+        events: [
+          {
+            id: EventId.make("runtime-answer-behind-active-node-event"),
+            type: "node.updated",
+            threadId,
+            nodeId,
+            occurredAt: now,
+            payload: {
+              id: nodeId,
+              threadId,
+              runId: null,
+              parentNodeId: null,
+              rootNodeId: nodeId,
+              kind: "user_input_request",
+              status: "waiting",
+              countsForRun: false,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              runtimeRequestId: requestId,
+              checkpointScopeId: null,
+              startedAt: now,
+              completedAt: null,
+            },
+          },
+          {
+            id: EventId.make("runtime-answer-behind-active-request-event"),
+            type: "runtime-request.updated",
+            threadId,
+            nodeId,
+            occurredAt: now,
+            payload: {
+              id: requestId,
+              nodeId,
+              providerTurnId: null,
+              nativeRequestRef: null,
+              kind: "user_input",
+              status: "pending",
+              responseCapability: { type: "message" },
+              createdAt: now,
+              resolvedAt: null,
+            },
+          },
+          {
+            id: EventId.make("runtime-answer-behind-active-item-event"),
+            type: "turn-item.updated",
+            threadId,
+            nodeId,
+            occurredAt: now,
+            payload: {
+              id: itemId,
+              type: "user_input_request",
+              threadId,
+              runId: null,
+              nodeId,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 0,
+              status: "waiting",
+              title: null,
+              startedAt: now,
+              completedAt: null,
+              updatedAt: now,
+              requestId,
+              responseMode: "message",
+              questions: [{ id: "color", header: "Color", question: "Which color?", options: [] }],
+            },
+          },
+        ],
+      });
+
+      yield* orchestrator.dispatch({
+        type: "runtime-request.respond",
+        commandId: CommandId.make("runtime-answer-behind-active-answer"),
+        threadId,
+        requestId,
+        answers: { color: "Blue" },
+      });
+      const answered = yield* orchestrator.getThreadProjection(threadId);
+      const activeRun = answered.runs.find((run) => run.status === "starting");
+      const queuedRun = answered.runs.find((run) => run.status === "queued");
+      assert.isDefined(activeRun);
+      assert.isDefined(queuedRun);
+      assert.equal(answered.runtimeRequests[0]?.status, "resolved");
+      assert.equal(
+        answered.messages.find((message) => message.id === queuedRun.userMessageId)?.text,
+        "Which color?\nBlue",
+      );
+      assert.isFalse(
+        answered.turnItems.some(
+          (item) => item.type === "user_message" && item.messageId === queuedRun.userMessageId,
+        ),
+        "a queued answer must not reach the transcript before it is dispatched",
+      );
+
+      const promotedRunIds = yield* Queue.unbounded<RunId>();
+      const afterSequence = yield* orchestrator.getThreadEventSequence(threadId);
+      yield* eventSink.stream({ threadId, afterSequence }).pipe(
+        Stream.runForEach((stored) =>
+          stored.event.type === "run.updated" && stored.event.payload.status === "starting"
+            ? Queue.offer(promotedRunIds, stored.event.payload.id)
+            : Effect.void,
+        ),
+        Effect.forkScoped,
+      );
+      yield* Effect.yieldNow;
+
+      const completedAt = yield* DateTime.now;
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("runtime-answer-behind-active-completed"),
+            type: "run.updated",
+            threadId,
+            runId: activeRun.id,
+            ...(activeRun.rootNodeId === null ? {} : { nodeId: activeRun.rootNodeId }),
+            providerInstanceId: activeRun.providerInstanceId,
+            occurredAt: completedAt,
+            payload: { ...activeRun, status: "completed", completedAt },
+          },
+        ],
+      });
+
+      assert.equal(yield* Queue.take(promotedRunIds), queuedRun.id);
+      const promoted = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(promoted.runs.find((run) => run.id === queuedRun.id)?.status, "starting");
     }),
   );
 

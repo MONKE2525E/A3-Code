@@ -239,6 +239,43 @@ describe("ChatMarkdown context references", () => {
   });
 });
 
+describe("ChatMarkdown link overrides", () => {
+  it("replaces only the links the override claims and keeps the rest as anchors", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let renderer: ReactTestRenderer | undefined;
+    const text =
+      "Sign in with [Linear](https://auth.example.test/authorize?state=flow.tgd) or read [the docs](https://example.test/docs).";
+    const claimed: string[] = [];
+    try {
+      await act(async () => {
+        renderer = create(
+          <ChatMarkdown
+            cwd={undefined}
+            text={text}
+            renderLinkOverride={({ href, label }) => {
+              if (!href.startsWith("https://auth.example.test/")) return undefined;
+              claimed.push(href);
+              return <button>Connect {label}</button>;
+            }}
+          />,
+        );
+      });
+      expect(
+        renderer!.root.findAllByType("button").map((button) => button.children.join("")),
+      ).toEqual(["Connect Linear"]);
+      expect(
+        renderer!.root.findAllByType("a").map((anchor) => anchor.props.href as string),
+      ).toEqual(["https://example.test/docs"]);
+      expect(claimed).toEqual(["https://auth.example.test/authorize?state=flow.tgd"]);
+    } finally {
+      await act(async () => {
+        renderer?.unmount();
+      });
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe("ChatMarkdown favicon privacy", () => {
   it("suppresses private link images while preserving public links across updates", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);

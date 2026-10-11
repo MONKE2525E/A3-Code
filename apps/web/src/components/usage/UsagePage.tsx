@@ -30,6 +30,7 @@ import {
 
 import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
+import { providerClients } from "../settings/providerDriverMeta";
 import { environmentPresentations } from "../../state/presentation";
 import { primaryServerKeybindingsAtom, serverEnvironment } from "../../state/server";
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
@@ -94,7 +95,12 @@ import {
   type UsageMetric,
 } from "./usageShortcuts";
 import { useEscapeToGoBack } from "../../hooks/useNavigateBack";
-import { PROVIDER_ORDER, PROVIDER_PRESENTATION, providersWithUsage } from "./usageProviders";
+import {
+  limitsOnlyDrivers,
+  PROVIDER_ORDER,
+  PROVIDER_PRESENTATION,
+  providersWithUsage,
+} from "./usageProviders";
 import {
   readUsagePagePreferences,
   saveUsagePagePreferences,
@@ -178,6 +184,14 @@ export function UsagePage() {
   const isProviderLoading = (provider: UsageProviderKind) =>
     loading.everyProvider || loading.providers.has(provider);
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);
+  const hiddenLimitDrivers = useMemo(
+    () => preferences.hiddenLimitDrivers ?? [],
+    [preferences.hiddenLimitDrivers],
+  );
+  const limitDrivers = useMemo(
+    () => limitsOnlyDrivers(presentations.values(), hiddenLimitDrivers),
+    [presentations, hiddenLimitDrivers],
+  );
   const cursorAccessEnvironments = hiddenProviders.has("cursor")
     ? []
     : cursorKeychainAccessEnvironments(selectedEnvironments);
@@ -406,7 +420,9 @@ export function UsagePage() {
         <WorkspaceBreadcrumbItem current className="min-w-10">
           <UsageProviderFilter
             hiddenProviders={hiddenProviders}
-            onChange={(next) => updatePreferences({ hiddenProviders: next })}
+            limitDrivers={limitDrivers}
+            hiddenLimitDrivers={hiddenLimitDrivers}
+            onChange={(next) => updatePreferences(next)}
           />
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
@@ -543,6 +559,7 @@ export function UsagePage() {
               <UsageLimitsSection
                 selectedEnvironmentIds={selectedEnvironmentIds}
                 hiddenProviders={hiddenProviders}
+                hiddenLimitDrivers={hiddenLimitDrivers}
                 now={limitsNow}
                 cursorPrompt={
                   cursorAccessEnvironments.length > 0 ? (
@@ -1370,23 +1387,41 @@ function UsageEnvironmentFilter({
   );
 }
 
-/** Provider visibility shared by every tab. Stored as the hidden set. */
+/**
+ * Provider visibility shared by every tab. Stored as the hidden set. Limits-only
+ * drivers (no cost data, e.g. GrokBot) get their own checkboxes and only affect
+ * the Limits tab.
+ */
 function UsageProviderFilter({
   hiddenProviders,
+  limitDrivers,
+  hiddenLimitDrivers,
   onChange,
 }: {
   readonly hiddenProviders: ReadonlySet<UsageProviderKind>;
-  readonly onChange: (hiddenProviders: readonly UsageProviderKind[]) => void;
+  readonly limitDrivers: readonly string[];
+  readonly hiddenLimitDrivers: readonly string[];
+  readonly onChange: (
+    patch: Pick<UsagePagePreferences, "hiddenProviders" | "hiddenLimitDrivers">,
+  ) => void;
 }) {
-  const visible = PROVIDER_ORDER.filter((provider) => !hiddenProviders.has(provider));
+  const hiddenDrivers = new Set(hiddenLimitDrivers);
+  const visibleCost = PROVIDER_ORDER.filter((provider) => !hiddenProviders.has(provider));
+  const visibleDrivers = limitDrivers.filter((driver) => !hiddenDrivers.has(driver));
+  const total = PROVIDER_ORDER.length + limitDrivers.length;
+  const visibleCount = visibleCost.length + visibleDrivers.length;
+  const driverLabel = (driver: string) =>
+    providerClients.get(ProviderDriverKind.make(driver))?.label ?? driver;
   const label =
-    visible.length === PROVIDER_ORDER.length
+    visibleCount === total
       ? "All providers"
-      : visible.length === 0
+      : visibleCount === 0
         ? "No providers"
-        : visible.length === 1
-          ? PROVIDER_PRESENTATION[visible[0]!].label
-          : `${visible.length} providers`;
+        : visibleCount === 1
+          ? visibleCost.length === 1
+            ? PROVIDER_PRESENTATION[visibleCost[0]!].label
+            : driverLabel(visibleDrivers[0]!)
+          : `${visibleCount} providers`;
 
   return (
     <Menu>
@@ -1399,9 +1434,15 @@ function UsageProviderFilter({
       </MenuTrigger>
       <MenuPopup align="start">
         <MenuCheckboxItem
-          checked={hiddenProviders.size === 0}
+          checked={visibleCount === total}
           closeOnClick={false}
-          onCheckedChange={(checked) => onChange(checked ? [] : PROVIDER_ORDER)}
+          onCheckedChange={(checked) =>
+            onChange(
+              checked
+                ? { hiddenProviders: [], hiddenLimitDrivers: [] }
+                : { hiddenProviders: PROVIDER_ORDER, hiddenLimitDrivers: limitDrivers },
+            )
+          }
         >
           All providers
         </MenuCheckboxItem>
@@ -1412,17 +1453,35 @@ function UsageProviderFilter({
             checked={!hiddenProviders.has(provider)}
             closeOnClick={false}
             onCheckedChange={(checked) =>
-              onChange(
-                PROVIDER_ORDER.filter((entry) =>
+              onChange({
+                hiddenProviders: PROVIDER_ORDER.filter((entry) =>
                   entry === provider ? !checked : hiddenProviders.has(entry),
                 ),
-              )
+                hiddenLimitDrivers,
+              })
             }
           >
             <span className="flex min-w-0 items-center gap-2">
               <ProviderMark provider={provider} className="size-3.5" />
               <span className="truncate">{PROVIDER_PRESENTATION[provider].label}</span>
             </span>
+          </MenuCheckboxItem>
+        ))}
+        {limitDrivers.map((driver) => (
+          <MenuCheckboxItem
+            key={driver}
+            checked={!hiddenDrivers.has(driver)}
+            closeOnClick={false}
+            onCheckedChange={(checked) =>
+              onChange({
+                hiddenProviders: [...hiddenProviders],
+                hiddenLimitDrivers: limitDrivers.filter((entry) =>
+                  entry === driver ? !checked : hiddenDrivers.has(entry),
+                ),
+              })
+            }
+          >
+            <span className="truncate">{driverLabel(driver)}</span>
           </MenuCheckboxItem>
         ))}
       </MenuPopup>

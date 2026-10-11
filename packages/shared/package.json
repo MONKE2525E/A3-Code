@@ -247,6 +247,10 @@
       "types": "./src/composerInlineTokens.ts",
       "import": "./src/composerInlineTokens.ts"
     },
+    "./grokBotComposerRichText": {
+      "types": "./src/grokBotComposerRichText.ts",
+      "import": "./src/grokBotComposerRichText.ts"
+    },
     "./assistantCitations": {
       "types": "./src/assistantCitations.ts",
       "import": "./src/assistantCitations.ts"

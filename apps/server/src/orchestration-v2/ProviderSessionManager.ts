@@ -7,6 +7,7 @@ import {
   OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   OrchestrationV2RuntimeRequest,
+  type OrchestrationV2ThreadProjection,
   ProviderInstanceId,
   ProviderSessionId,
   ThreadId,
@@ -216,6 +217,7 @@ interface LiveSessionEntry {
   readonly eventSubscribers: Ref.Ref<
     ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
   >;
+  readonly remotePendingEvents: Ref.Ref<ReadonlyArray<ProviderSessionEventSignal>>;
   readonly requestEventPermit: Semaphore.Semaphore;
   readonly scope: Scope.Closeable;
   readonly idleGeneration: number;
@@ -279,6 +281,18 @@ function sessionKey(providerSessionId: ProviderSessionId): string {
  * Their node and transcript item are runless too, so they bypass the normal
  * per-run subscriber and are persisted by the session event pump.
  */
+function sameNativeRequestRef(
+  left: OrchestrationV2RuntimeRequest["nativeRequestRef"],
+  right: OrchestrationV2RuntimeRequest["nativeRequestRef"],
+): boolean {
+  return (
+    left !== null &&
+    right !== null &&
+    left.driver === right.driver &&
+    left.nativeId === right.nativeId
+  );
+}
+
 function sessionScopedRuntimeRequestThreadId(
   event: ProviderAdapter.ProviderAdapterV2Event,
 ): ThreadId | undefined {
@@ -668,6 +682,92 @@ export const layerWithOptions = (
           });
         });
 
+      const retiredRuntimeRequestEvents = (input: {
+        readonly driver: LiveSessionEntry["runtime"]["driver"];
+        readonly providerSessionId: ProviderSessionId;
+        readonly threadId: ThreadId;
+        readonly now: DateTime.Utc;
+        readonly requests: readonly OrchestrationV2RuntimeRequest[];
+        readonly nodes: OrchestrationV2ThreadProjection["nodes"];
+        readonly turnItems: OrchestrationV2ThreadProjection["turnItems"];
+        readonly status: OrchestrationV2RuntimeRequest["status"];
+        readonly reason: string;
+        readonly itemStatus: "cancelled" | "failed";
+      }) =>
+        Effect.gen(function* () {
+          const events: Array<OrchestrationV2DomainEvent> = [];
+          for (const request of input.requests) {
+            events.push({
+              id: yield* idAllocator.allocate.event({
+                threadId: input.threadId,
+                providerSessionId: input.providerSessionId,
+              }),
+              type: "runtime-request.updated",
+              threadId: input.threadId,
+              nodeId: request.nodeId,
+              driver: input.driver,
+              occurredAt: input.now,
+              payload: {
+                ...request,
+                status: input.status,
+                responseCapability: {
+                  type: "not_resumable",
+                  reason: input.reason,
+                },
+                resolvedAt: input.now,
+              },
+            });
+
+            const requestNode = input.nodes.find((node) => node.id === request.nodeId);
+            if (requestNode !== undefined) {
+              events.push({
+                id: yield* idAllocator.allocate.event({
+                  threadId: input.threadId,
+                  providerSessionId: input.providerSessionId,
+                }),
+                type: "node.updated",
+                threadId: input.threadId,
+                ...(requestNode.runId === null ? {} : { runId: requestNode.runId }),
+                nodeId: requestNode.id,
+                driver: input.driver,
+                occurredAt: input.now,
+                payload: {
+                  ...requestNode,
+                  status: input.itemStatus,
+                  completedAt: input.now,
+                },
+              });
+            }
+
+            const turnItem = input.turnItems.find(
+              (item) =>
+                (item.type === "approval_request" || item.type === "user_input_request") &&
+                item.requestId === request.id,
+            );
+            if (turnItem !== undefined) {
+              events.push({
+                id: yield* idAllocator.allocate.event({
+                  threadId: input.threadId,
+                  providerSessionId: input.providerSessionId,
+                }),
+                type: "turn-item.updated",
+                threadId: input.threadId,
+                ...(turnItem.runId === null ? {} : { runId: turnItem.runId }),
+                ...(turnItem.nodeId === null ? {} : { nodeId: turnItem.nodeId }),
+                driver: input.driver,
+                occurredAt: input.now,
+                payload: {
+                  ...turnItem,
+                  status: input.itemStatus,
+                  completedAt: input.now,
+                  updatedAt: input.now,
+                },
+              });
+            }
+          }
+          return events;
+        });
+
       const writeReleasedRuntimeRequestEvents = (input: {
         readonly entry: LiveSessionEntry;
         readonly reason: ProviderSessionReleaseReason;
@@ -697,78 +797,70 @@ export const layerWithOptions = (
                 request.responseCapability.providerSessionId === providerSessionId &&
                 DateTime.isLessThanOrEqualTo(request.createdAt, input.releasedAt),
             );
-
-            for (const request of releasedRequests) {
-              events.push({
-                id: yield* idAllocator.allocate.event({
-                  threadId,
-                  providerSessionId,
-                }),
-                type: "runtime-request.updated",
-                threadId,
-                nodeId: request.nodeId,
+            events.push(
+              ...(yield* retiredRuntimeRequestEvents({
                 driver: input.entry.runtime.driver,
-                occurredAt: now,
-                payload: {
-                  ...request,
-                  status,
-                  responseCapability: {
-                    type: "not_resumable",
-                    reason,
-                  },
-                  resolvedAt: now,
-                },
-              });
-
-              const requestNode = projection.nodes.find((node) => node.id === request.nodeId);
-              if (requestNode !== undefined) {
-                events.push({
-                  id: yield* idAllocator.allocate.event({
-                    threadId,
-                    providerSessionId,
-                  }),
-                  type: "node.updated",
-                  threadId,
-                  ...(requestNode.runId === null ? {} : { runId: requestNode.runId }),
-                  nodeId: requestNode.id,
-                  driver: input.entry.runtime.driver,
-                  occurredAt: now,
-                  payload: {
-                    ...requestNode,
-                    status: input.reason === "runtime_error" ? "failed" : "cancelled",
-                    completedAt: now,
-                  },
-                });
-              }
-
-              const turnItem = projection.turnItems.find(
-                (item) =>
-                  (item.type === "approval_request" || item.type === "user_input_request") &&
-                  item.requestId === request.id,
-              );
-              if (turnItem !== undefined) {
-                events.push({
-                  id: yield* idAllocator.allocate.event({
-                    threadId,
-                    providerSessionId,
-                  }),
-                  type: "turn-item.updated",
-                  threadId,
-                  ...(turnItem.runId === null ? {} : { runId: turnItem.runId }),
-                  ...(turnItem.nodeId === null ? {} : { nodeId: turnItem.nodeId }),
-                  driver: input.entry.runtime.driver,
-                  occurredAt: now,
-                  payload: {
-                    ...turnItem,
-                    status: input.reason === "runtime_error" ? "failed" : "cancelled",
-                    completedAt: now,
-                    updatedAt: now,
-                  },
-                });
-              }
-            }
+                providerSessionId,
+                threadId,
+                now,
+                requests: releasedRequests,
+                nodes: projection.nodes,
+                turnItems: projection.turnItems,
+                status,
+                reason,
+                itemStatus: input.reason === "runtime_error" ? "failed" : "cancelled",
+              })),
+            );
           }
 
+          if (events.length > 0) {
+            yield* eventSink.write({ events });
+          }
+        });
+
+      /**
+       * Grok Bot (and other runless) approval projections allocate a new
+       * runtimeRequest id per observer instance. Re-observing the same native
+       * card must retire the previous live T3 request so the user does not
+       * see two actionable cards.
+       */
+      const retireSupersededNativeRuntimeRequests = (input: {
+        readonly entry: LiveSessionEntry;
+        readonly threadId: ThreadId;
+        readonly incoming: OrchestrationV2RuntimeRequest;
+      }) =>
+        Effect.gen(function* () {
+          if (
+            input.incoming.status !== "pending" ||
+            input.incoming.nativeRequestRef === null ||
+            input.incoming.responseCapability.type !== "live"
+          )
+            return;
+          const projection = yield* projectionStore.getThreadRecords(
+            input.threadId,
+            ["runtimeRequests", "nodes", "turnItems"],
+            { turnItemTypes: ["approval_request", "user_input_request"] },
+          );
+          const superseded = projection.runtimeRequests.filter(
+            (request) =>
+              request.id !== input.incoming.id &&
+              request.status === "pending" &&
+              request.responseCapability.type === "live" &&
+              sameNativeRequestRef(request.nativeRequestRef, input.incoming.nativeRequestRef),
+          );
+          if (superseded.length === 0) return;
+          const events = yield* retiredRuntimeRequestEvents({
+            driver: input.entry.runtime.driver,
+            providerSessionId: input.entry.runtime.providerSessionId,
+            threadId: input.threadId,
+            now: yield* DateTime.now,
+            requests: superseded,
+            nodes: projection.nodes,
+            turnItems: projection.turnItems,
+            status: "cancelled",
+            reason: "A newer observation replaced this runtime request.",
+            itemStatus: "cancelled",
+          });
           if (events.length > 0) {
             yield* eventSink.write({ events });
           }
@@ -951,7 +1043,10 @@ export const layerWithOptions = (
                   if (input.cancelIdleFiber !== false) {
                     yield* cancelIdleFiber(entry.idleFiber);
                   }
-                  if (input.gracefulSubscribers === true) {
+                  if (
+                    input.gracefulSubscribers === true ||
+                    (entry.runtime.driver === "grok-bot" && input.reason === "manual_shutdown")
+                  ) {
                     yield* endSubscribers(entry);
                   } else if (input.reason === "server_shutdown") {
                     yield* closeSubscribers(entry);
@@ -1318,7 +1413,10 @@ export const layerWithOptions = (
               Effect.uninterruptible,
             );
             if (attached !== undefined) {
-              const prepared = yield* prepareMcpSession(input.threadId, input.providerInstanceId);
+              const prepared =
+                attached.driver === "grok-bot"
+                  ? { mcpCredentialId: undefined, issued: false }
+                  : yield* prepareMcpSession(input.threadId, input.providerInstanceId);
               preparedForCleanup = prepared;
               if (prepared.mcpCredentialId !== undefined) {
                 const mcpCredentialId = prepared.mcpCredentialId;
@@ -1640,6 +1738,9 @@ export const layerWithOptions = (
         subscribers: Ref.Ref<
           ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
         >,
+        remotePendingEvents: Ref.Ref<ReadonlyArray<ProviderSessionEventSignal>>,
+        requestEventPermit: Semaphore.Semaphore,
+        remote: boolean,
       ): Effect.Effect<ProviderAdapter.ProviderAdapterV2EventSubscription> =>
         Effect.gen(function* () {
           const queue = yield* Queue.unbounded<ProviderSessionEventSignal, Cause.Done>();
@@ -1649,6 +1750,10 @@ export const layerWithOptions = (
             updated.set(subscriberId, queue);
             return updated;
           });
+          if (remote) {
+            const pending = yield* Ref.getAndSet(remotePendingEvents, []);
+            for (const signal of pending) yield* Queue.offer(queue, signal);
+          }
           const close = Ref.modify(subscribers, (current) => {
             if (!current.has(subscriberId)) {
               return [false, current] as const;
@@ -1672,16 +1777,23 @@ export const layerWithOptions = (
             Stream.ensuring(close),
           );
           return { events, close } satisfies ProviderAdapter.ProviderAdapterV2EventSubscription;
-        });
+        }).pipe(requestEventPermit.withPermits(1));
 
       const decorateRuntime = (
         runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
         eventSubscribers: Ref.Ref<
           ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
         >,
+        remotePendingEvents: Ref.Ref<ReadonlyArray<ProviderSessionEventSignal>>,
+        requestEventPermit: Semaphore.Semaphore,
       ): ProviderAdapter.ProviderAdapterV2SessionRuntime => {
         const providerSessionId = runtime.providerSessionId;
-        const subscribeEvents = makeEventSubscription(eventSubscribers);
+        const subscribeEvents = makeEventSubscription(
+          eventSubscribers,
+          remotePendingEvents,
+          requestEventPermit,
+          runtime.driver === "grok-bot",
+        );
         // Every provider's turn operations pass through here, so this is where they are
         // counted. Only turn starts are timed: until the provider accepts the turn.
         const turnMetrics = (operation: string, model?: string) =>
@@ -1890,6 +2002,7 @@ export const layerWithOptions = (
 
       const startEventPump = (entry: LiveSessionEntry) => {
         let stoppedByProvider = false;
+        const settledGrokRuns = new Set<string>();
         return entry.runtime.events.pipe(
           Stream.runForEach((event) => {
             if (shutdownSignal.received) return Effect.void;
@@ -1920,13 +2033,79 @@ export const layerWithOptions = (
                   // (project trust, login, or session-switch hooks). Persist
                   // their runless request artifacts directly so the normal T3
                   // request UI can answer them and unblock session setup.
-                  const threadId = sessionScopedRuntimeRequestThreadId(event);
+                  const grokHistory =
+                    entry.runtime.driver === "grok-bot"
+                      ? event.type === "message.updated"
+                        ? event.message
+                        : event.type === "turn_item.updated"
+                          ? event.turnItem
+                          : undefined
+                      : undefined;
+                  let settledHistoryThreadId: ThreadId | undefined;
+                  if (
+                    grokHistory?.runId != null &&
+                    entry.attachedThreadIds.has(grokHistory.threadId)
+                  ) {
+                    if (!settledGrokRuns.has(grokHistory.runId)) {
+                      const records = yield* projectionStore
+                        .getThreadRecords(grokHistory.threadId, ["runs"])
+                        .pipe(
+                          Effect.mapError(
+                            (cause) =>
+                              new ProviderAdapter.ProviderAdapterEventStreamError({
+                                driver: entry.runtime.driver,
+                                providerSessionId: entry.runtime.providerSessionId,
+                                cause,
+                              }),
+                          ),
+                        );
+                      for (const run of records.runs) {
+                        if (
+                          ["completed", "failed", "cancelled", "interrupted"].includes(run.status)
+                        )
+                          settledGrokRuns.add(run.id);
+                      }
+                    }
+                    if (settledGrokRuns.has(grokHistory.runId))
+                      settledHistoryThreadId = grokHistory.threadId;
+                  }
+                  const threadId =
+                    settledHistoryThreadId ??
+                    (entry.runtime.driver === "grok-bot" &&
+                    event.type === "message.updated" &&
+                    event.message.runId === null &&
+                    event.message.nodeId === null &&
+                    entry.attachedThreadIds.has(event.message.threadId)
+                      ? event.message.threadId
+                      : entry.runtime.driver === "grok-bot" &&
+                          event.type === "turn_item.updated" &&
+                          event.turnItem.runId === null &&
+                          event.turnItem.nodeId === null &&
+                          entry.attachedThreadIds.has(event.turnItem.threadId)
+                        ? event.turnItem.threadId
+                        : sessionScopedRuntimeRequestThreadId(event));
                   if (threadId !== undefined) {
                     yield* Effect.gen(function* () {
                       const current = (yield* Ref.get(sessions)).get(
                         sessionKey(entry.runtime.providerSessionId),
                       );
                       if (current?.runtime !== entry.runtime) return;
+                      if (event.type === "runtime_request.updated") {
+                        yield* retireSupersededNativeRuntimeRequests({
+                          entry: current,
+                          threadId,
+                          incoming: event.runtimeRequest,
+                        }).pipe(
+                          Effect.mapError(
+                            (cause) =>
+                              new ProviderAdapter.ProviderAdapterEventStreamError({
+                                driver: entry.runtime.driver,
+                                providerSessionId: entry.runtime.providerSessionId,
+                                cause,
+                              }),
+                          ),
+                        );
+                      }
                       yield* providerEventIngestor
                         .ingestNormalized({
                           providerSessionId: entry.runtime.providerSessionId,
@@ -1947,7 +2126,22 @@ export const layerWithOptions = (
                     }).pipe(entry.requestEventPermit.withPermits(1));
                     return;
                   }
-                  yield* publishToSubscribers(entry.eventSubscribers, { type: "event", event });
+                  yield* Effect.gen(function* () {
+                    const signal = { type: "event" as const, event };
+                    if (
+                      entry.runtime.driver === "grok-bot" &&
+                      (yield* Ref.get(entry.eventSubscribers)).size === 0
+                    ) {
+                      const pending = yield* Ref.get(entry.remotePendingEvents);
+                      if (pending.length >= 256)
+                        return yield* new ProviderAdapter.ProviderAdapterEventStreamError({
+                          driver: entry.runtime.driver,
+                          providerSessionId: entry.runtime.providerSessionId,
+                          cause: "Native observation backlog requires a fresh snapshot.",
+                        });
+                      yield* Ref.set(entry.remotePendingEvents, [...pending, signal]);
+                    } else yield* publishToSubscribers(entry.eventSubscribers, signal);
+                  }).pipe(entry.requestEventPermit.withPermits(1));
                 }),
               ),
             );
@@ -2078,10 +2272,11 @@ export const layerWithOptions = (
                     }),
                 ),
               );
-              const prepared = yield* prepareMcpSession(
-                input.threadId,
-                input.modelSelection.instanceId,
-              );
+              // Remote turns own durable, run-scoped credentials independently of this observer.
+              const prepared =
+                adapter.driver === "grok-bot"
+                  ? { mcpCredentialId: undefined, issued: false }
+                  : yield* prepareMcpSession(input.threadId, input.modelSelection.instanceId);
               const mcpCredentialId = prepared.mcpCredentialId;
               // The reservation from prepare protects the credential (which
               // eager adapters bake into the provider process during
@@ -2159,7 +2354,16 @@ export const layerWithOptions = (
               const eventSubscribers = yield* Ref.make<
                 ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
               >(new Map());
-              const exposedRuntime = decorateRuntime(runtime, eventSubscribers);
+              const remotePendingEvents = yield* Ref.make<
+                ReadonlyArray<ProviderSessionEventSignal>
+              >([]);
+              const requestEventPermit = yield* Semaphore.make(1);
+              const exposedRuntime = decorateRuntime(
+                runtime,
+                eventSubscribers,
+                remotePendingEvents,
+                requestEventPermit,
+              );
               const now = yield* Clock.currentTimeMillis;
               const entry: LiveSessionEntry = {
                 attachedThreadIds: new Set([input.threadId]),
@@ -2174,7 +2378,8 @@ export const layerWithOptions = (
                 runtime,
                 exposedRuntime,
                 eventSubscribers,
-                requestEventPermit: yield* Semaphore.make(1),
+                remotePendingEvents,
+                requestEventPermit,
                 scope: sessionScope,
                 idleGeneration: 0,
                 busyTurns: new Set(),

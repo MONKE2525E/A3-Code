@@ -6,6 +6,8 @@ import {
 
 const LEGACY_AUTOMATION_PREFIX = /^\[Triggered by schedule task: [^\r\n]+\]\r?\n\r?\n/;
 const LEGACY_AUTOMATION_MESSAGE_ID = /^scheduled-task-message:(.+):\d+:(?:scheduled|manual)$/;
+/** The opening line the voice bridge wrote before it recorded `voiceRequest`. */
+const LEGACY_VOICE_REQUEST_PREFIX = "[From a voice call]";
 
 /**
  * Text and sender label for a user-role message. Older scheduled messages
@@ -18,10 +20,14 @@ export function resolveUserMessagePresentation(message: {
   readonly createdBy?: OrchestrationV2Actor;
   readonly creationSource?: OrchestrationV2CreationSource;
   readonly scheduledTaskId?: ScheduledTaskId;
+  readonly voiceRequest?: true;
 }): {
   readonly text: string;
-  /** Who sent a user-role message the user did not type. */
-  readonly attribution: "automation" | "agent" | "t3code" | null;
+  /**
+   * Who sent a user-role message the user did not type. `voice` is a request a voice call made
+   * to the bot's T3 agents; its text is internal and comes back empty.
+   */
+  readonly attribution: "automation" | "agent" | "t3code" | "voice" | null;
   readonly scheduledTaskId: ScheduledTaskId | undefined;
 } {
   if (message.role !== "user") {
@@ -33,6 +39,9 @@ export function resolveUserMessagePresentation(message: {
       attribution: "automation",
       scheduledTaskId: message.scheduledTaskId,
     };
+  }
+  if (message.createdBy === "agent" && isVoiceRequest(message)) {
+    return { text: "", attribution: "voice", scheduledTaskId: undefined };
   }
   const legacyPrefix = LEGACY_AUTOMATION_PREFIX.exec(message.text);
   const legacyTaskId = legacyPrefix
@@ -56,4 +65,21 @@ export function resolveUserMessagePresentation(message: {
           : "agent",
     scheduledTaskId: undefined,
   };
+}
+
+/**
+ * A request a voice call made. New requests carry `voiceRequest: true`; older bridge
+ * messages were sent as MCP text whose first line is exactly the voice marker.
+ */
+function isVoiceRequest(message: {
+  readonly text: string;
+  readonly creationSource?: OrchestrationV2CreationSource;
+  readonly voiceRequest?: true;
+}): boolean {
+  if (message.voiceRequest === true) return true;
+  return (
+    message.creationSource === "mcp" &&
+    (message.text === LEGACY_VOICE_REQUEST_PREFIX ||
+      message.text.startsWith(`${LEGACY_VOICE_REQUEST_PREFIX}\n`))
+  );
 }

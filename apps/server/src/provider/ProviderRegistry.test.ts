@@ -1,4 +1,5 @@
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as GrokBotProviderServicesTestkit from "../grokBot/GrokBotProviderServices.testkit.ts";
 import * as CodexInstallation from "./CodexInstallation.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -40,6 +41,7 @@ import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 
 import { checkCodexProviderStatus, type CodexAppServerProviderSnapshot } from "./CodexProvider.ts";
 import { checkClaudeProviderStatus } from "./ClaudeProvider.ts";
+import { checkGrokBotProvider } from "./Drivers/GrokBotDriver.ts";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as AntigravityInstallation from "./AntigravityInstallation.ts";
 import * as ModelManifest from "./ModelManifest.ts";
@@ -403,6 +405,7 @@ const awaitPersistedProvider = (
 
 const layerTestNodeServices = Layer.mergeAll(
   NodeServices.layer,
+  GrokBotProviderServicesTestkit.layer,
   Layer.mock(CodexInstallation.CodexInstallation)({
     managedDirectory: "unused-managed-installation",
   }),
@@ -415,6 +418,23 @@ const layerTestNodeServices = Layer.mergeAll(
 it.layer(
   Layer.mergeAll(layerTestNodeServices, ServerSettingsModule.layerTest(), layerTestHttpClient),
 )("ProviderRegistry", (it) => {
+  it.effect("keeps Grok Bot unavailable without a native test account", () =>
+    Effect.gen(function* () {
+      const provider = yield* checkGrokBotProvider({
+        instanceId: ProviderInstanceId.make("grok-bot-test"),
+        displayName: undefined,
+        enabled: true,
+        environment: [],
+        config: { accountBinding: "a".repeat(64) },
+      });
+
+      assert.strictEqual(provider.status, "error");
+      assert.strictEqual(provider.auth.status, "unknown");
+      assert.deepStrictEqual(provider.models, []);
+      assert.strictEqual(provider.message, "The selected native Grok Bot account is unavailable.");
+    }),
+  );
+
   describe("checkCodexProviderStatus", () => {
     it.effect("uses the app-server account and model list for provider status", () =>
       Effect.gen(function* () {

@@ -10,6 +10,7 @@ import type {
 import {
   type ChatAttachment,
   CommandId,
+  isGrokBotBackingThread,
   MessageId,
   OrchestrationV2StopWorkflowError,
   type OrchestrationV2StopWorkflowInput,
@@ -120,6 +121,7 @@ export interface ThreadManagementSendInput {
   readonly messageId: MessageId;
   readonly scheduledTaskId?: ScheduledTaskId;
   readonly senderThreadId?: ThreadId;
+  readonly voiceRequest?: true;
   readonly text: string;
   readonly attachments: ReadonlyArray<ChatAttachment>;
   readonly modelSelection?: ModelSelection;
@@ -495,7 +497,7 @@ export function latestActiveRun(
 }
 
 function latestSteerableRun(
-  projection: Pick<OrchestrationV2ThreadProjection, "runs" | "providerTurns">,
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "providerTurns">,
 ): OrchestrationV2Run | undefined {
   return projection.runs
     .filter(
@@ -503,7 +505,10 @@ function latestSteerableRun(
         run.status === "running" &&
         run.activeAttemptId !== null &&
         projection.providerTurns.some(
-          (turn) => turn.runAttemptId === run.activeAttemptId && turn.status === "running",
+          (turn) =>
+            turn.runAttemptId === run.activeAttemptId &&
+            (turn.status === "running" ||
+              (isGrokBotBackingThread(projection.thread) && turn.status === "pending")),
         ),
     )
     .toSorted((left, right) => right.ordinal - left.ordinal)[0];
@@ -769,6 +774,7 @@ const make = Effect.gen(function* () {
         messageId: input.messageId,
         ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
         ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
+        ...(input.voiceRequest === undefined ? {} : { voiceRequest: input.voiceRequest }),
         text: input.text,
         attachments: input.attachments,
         ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),

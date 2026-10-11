@@ -36,6 +36,7 @@ import {
   resolveNewThreadModelSelectionOverride,
 } from "../lib/chatThreadActions";
 import { readT3ProjectFile } from "../lib/t3ProjectFileDefaults";
+import { omitGrokBotModelSelection } from "../providerInstances";
 import { environmentServerConfigsAtom } from "../state/server";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
@@ -86,6 +87,8 @@ export function useNewThreadHandler() {
       const projects = readProjects();
       const targetServerSettings =
         environmentServerConfigs.get(projectRef.environmentId)?.settings ?? DEFAULT_SERVER_SETTINGS;
+      const targetProviders =
+        environmentServerConfigs.get(projectRef.environmentId)?.providers ?? [];
       const {
         getComposerDraft,
         getDraftSessionByLogicalProjectKey,
@@ -122,8 +125,11 @@ export function useNewThreadHandler() {
       const composerModelSelection = composerActiveProvider
         ? (carrySourceComposer?.modelSelectionByProvider[composerActiveProvider] ?? null)
         : null;
-      const carryModelSelection =
-        composerModelSelection ?? carrySourceShell?.modelSelection ?? null;
+      // A bot thread's selection must not carry into an ordinary new thread.
+      const carryModelSelection = omitGrokBotModelSelection(
+        composerModelSelection ?? carrySourceShell?.modelSelection ?? null,
+        targetProviders,
+      );
       const carryInteractionMode =
         carrySourceComposer?.interactionMode ??
         carrySourceShell?.interactionMode ??
@@ -141,7 +147,10 @@ export function useNewThreadHandler() {
         project?.id ?? null,
         project,
       );
-      const projectDefaultModelSelection = projectSettings.settings.defaultModelSelection;
+      const projectDefaultModelSelection = omitGrokBotModelSelection(
+        projectSettings.settings.defaultModelSelection ?? null,
+        targetProviders,
+      );
       const defaultRuntimeMode = projectSettings.settings.defaultRuntimeMode;
       const resolveModelSelectionOverride = (destinationDraftId: DraftId) =>
         resolveNewThreadModelSelectionOverride({

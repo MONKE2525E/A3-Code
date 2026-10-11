@@ -37,6 +37,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type CSSProperties,
 } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 
@@ -93,6 +94,11 @@ import { cn, isMacPlatform } from "~/lib/utils";
 import { basenameOfPath } from "~/pierre-icons";
 import { WorkspaceEntryTooltip } from "./chat/WorkspaceEntryIcon";
 import { FileTagChipContent } from "./chat/FileTagChip";
+import { GrokBotAvatar } from "./grokBot/GrokBotAvatar";
+import { GrokBotConnectorIcon } from "./grokBot/GrokBotConnectorIcon";
+import { GROK_BOT_AVATAR_COLORS } from "./grokBot/grokBotAvatarShapes";
+import { resolveGrokBotAvatarColor } from "./grokBot/grokBotPresentation";
+import { grokBotConnectorLabel } from "~/lib/grokBotComposerDiscovery";
 import { SkillChipIcon } from "./chat/SkillInlineText";
 import { AssistantCitationChip } from "./chat/AssistantCitationChip";
 import { getTimelinePageScrollKey } from "./chat/pageScrollController";
@@ -262,23 +268,55 @@ const ComposerMentionExtension = Node.create({
 function ComposerMentionNodeView({ node }: NodeViewProps) {
   const actions = use(ComposerContextActionsContext);
   const path = (node.attrs.path as string) ?? "";
+  const bot = actions.grokBotResources?.bots.find((candidate) => candidate.name === path);
+  const connector = actions.grokBotResources?.connectors.find(
+    (candidate) => grokBotConnectorLabel(candidate) === path,
+  );
   const chip = (
     <ContextChip
       kind="mention"
       render={<button type="button" />}
-      onClick={() => actions.openMention(path)}
-      aria-label={`Preview ${path}`}
+      onClick={bot || connector ? undefined : () => actions.openMention(path)}
+      aria-label={bot || connector ? path : `Preview ${path}`}
+      style={
+        bot
+          ? ({
+              "--context-chip-accent":
+                GROK_BOT_AVATAR_COLORS[resolveGrokBotAvatarColor(bot.avatarColor ?? "", bot.id)],
+            } as CSSProperties)
+          : undefined
+      }
       contentEditable={false}
       spellCheck={false}
       data-composer-mention-chip="true"
     >
-      <FileTagChipContent
-        path={path}
-        environmentId={actions.environmentId}
-        cwd={actions.cwd}
-        label={basenameOfPath(path)}
-        theme={resolvedThemeFromDocument()}
-      />
+      {bot ? (
+        <>
+          <GrokBotAvatar
+            bot={{ ...bot, avatarShape: bot.avatarShape ?? "", avatarColor: bot.avatarColor ?? "" }}
+            size="xs"
+            {...(actions.environmentId ? { environmentId: actions.environmentId } : {})}
+            restingPose="upright"
+          />
+          <span>{bot.name}</span>
+        </>
+      ) : connector ? (
+        <>
+          <GrokBotConnectorIcon
+            logoUrl={actions.grokBotConnectorLogoUrls?.get(connector.pluginId) ?? null}
+            className="size-3.5"
+          />
+          <span>{grokBotConnectorLabel(connector)}</span>
+        </>
+      ) : (
+        <FileTagChipContent
+          path={path}
+          environmentId={actions.environmentId}
+          cwd={actions.cwd}
+          label={basenameOfPath(path)}
+          theme={resolvedThemeFromDocument()}
+        />
+      )}
     </ContextChip>
   );
   return (
@@ -286,11 +324,15 @@ function ComposerMentionNodeView({ node }: NodeViewProps) {
       <Tooltip>
         <TooltipTrigger render={chip} />
         <TooltipPopup side="top">
-          <WorkspaceEntryTooltip
-            path={path}
-            environmentId={actions.environmentId}
-            cwd={actions.cwd}
-          />
+          {bot || connector ? (
+            path
+          ) : (
+            <WorkspaceEntryTooltip
+              path={path}
+              environmentId={actions.environmentId}
+              cwd={actions.cwd}
+            />
+          )}
         </TooltipPopup>
       </Tooltip>
     </NodeViewWrapper>

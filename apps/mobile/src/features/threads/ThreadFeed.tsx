@@ -17,6 +17,7 @@ import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thr
 import {
   type OrchestrationMessageContext,
   ThreadId,
+  isGrokBotBackingThread,
   type ChatAttachment,
   type ChatFileAttachment,
   type ChatImageAttachment,
@@ -1706,9 +1707,22 @@ function renderFeedEntry(
       !assistantTurnStillInProgress &&
       !message.streaming;
 
+    if (isUser && presentation.attribution === "voice") {
+      return (
+        <View className="mb-5 items-end">
+          <Text className="pr-1 font-t3-medium text-2xs text-foreground-muted opacity-60">
+            Requested during voice call
+          </Text>
+        </View>
+      );
+    }
+
     if (isUser) {
       const enterAnimated = isFreshTimestamp(message.createdAt);
-      const intentBadge = resolveUserMessageIntentBadge(message.inputIntent);
+      // Bot chats are normal chat, so a persisted steer intent is not badged.
+      const intentBadge = isGrokBotBackingThread({ id: props.threadId })
+        ? null
+        : resolveUserMessageIntentBadge(message.inputIntent);
       const referenceIds = new Set(
         collectComposerContextReferences(message.text).map((reference) => reference.contextId),
       );

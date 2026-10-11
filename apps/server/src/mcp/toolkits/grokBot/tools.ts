@@ -2,6 +2,8 @@ import {
   GrokBot,
   GrokBotConversation,
   GrokBotError,
+  GrokBotOrchestratorError,
+  GrokBotThreadError,
   GrokBotStatus,
   GrokBotReadInput,
   GrokBotSendInput,
@@ -13,14 +15,21 @@ import {
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 import * as GrokBotService from "../../../grokBot/GrokBotService.ts";
+import * as BotThreads from "../../../grokBot/GrokBotThreadService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const shared = {
-  failure: Schema.Union([GrokBotError, OrchestratorMcpFailure]),
+  failure: Schema.Union([
+    GrokBotError,
+    GrokBotThreadError,
+    GrokBotOrchestratorError,
+    OrchestratorMcpFailure,
+  ]),
   failureMode: "return" as const,
   dependencies: [
     GrokBotService.GrokBotService,
+    BotThreads.GrokBotThreadService,
     McpInvocationContext.McpInvocationContext,
     ThreadManagementService.ThreadManagementService,
   ],
@@ -41,7 +50,7 @@ export const GrokBotToolkit = Toolkit.make(
   Tool.make("grok_bots_list", {
     ...shared,
     description:
-      "List the signed-in account's real persistent Grok Bots and their T3 pin, featured, and PR associations.",
+      "Discover named persistent bots (for example CEO). Use this, not your own session list, to find a bot by name. Lists the signed-in account's real persistent Grok Bots and their T3 pin, featured, and PR associations.",
     success: Schema.Array(GrokBot),
   }).annotate(Tool.Readonly, true),
   Tool.make("grok_bot_read", {
@@ -54,7 +63,7 @@ export const GrokBotToolkit = Toolkit.make(
   Tool.make("grok_bot_send", {
     ...shared,
     description:
-      "Send one message to a real Grok Bot. An uncertain-delivery error must be reconciled by reading the conversation; do not resend automatically.",
+      "Send a message to a named persistent bot (find it with grok_bots_list) through its persistent T3 thread. Requires full access. Queues behind active work and returns thread/message/run IDs for t3_thread_read or t3_thread_wait. Reuse clientRequestId when retrying the same message; do not resend with a new key after an uncertain response. Use t3_thread_send_attachments on this thread for prepared attachments.",
     parameters: GrokBotSendInput,
     success: GrokBotSendResult,
   }),

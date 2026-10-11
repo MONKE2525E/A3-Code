@@ -1,13 +1,14 @@
 import {
   CommandId,
+  EventId,
   type OrchestrationV2Run,
   OrchestrationV2DomainEvent,
+  OrchestrationV2RuntimeRequest,
   OrchestrationV2StoredEvent,
   ProviderThreadId,
   RunAttemptId,
   RunId,
   RuntimeRequestId,
-  NodeId,
   type ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -22,6 +23,10 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import {
+  grokBotCompletionMessage,
+  grokBotCompletionTurnItem,
+} from "./Adapters/GrokBotSettlementProjection.ts";
 import { replayAndBufferProjectedLiveEvents } from "./LiveStreamBudget.ts";
 import type { UnsequencedProjectEvent } from "../persistence/OrchestrationEventStore.ts";
 import { projectDomainEventForWire } from "./WireProjection.ts";
@@ -32,6 +37,7 @@ import * as EventStore from "./EventStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
+import * as GrokBotManagedStateStore from "../grokBot/GrokBotManagedStateStore.ts";
 
 /**
  * ERRORS
@@ -191,6 +197,15 @@ export class EventSinkV2 extends Context.Service<EventSinkV2, EventSinkV2Shape>(
 /**
  * IMPLEMENTATIONS
  */
+
+// Grok widget questions are answered in the native widget, so their pending message capability
+// is not a chat-answer route. Native cancellation of these must still land. Other message
+// capability requests stay protected from stale cleanup.
+const isNativeGrokWidgetQuestion = (request: OrchestrationV2RuntimeRequest) =>
+  request.nativeRequestRef?.driver === "grok-bot" &&
+  request.nativeRequestRef.strength === "strong" &&
+  request.nativeRequestRef.nativeId?.startsWith("widget/") === true;
+
 const layerBase: Layer.Layer<
   EventSinkV2,
   never,
@@ -211,6 +226,9 @@ const layerBase: Layer.Layer<
     const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
     const projectStore = yield* ProjectStore.ProjectStoreV2;
     const turnItemPositions = yield* TurnItemPositionStore.TurnItemPositionStoreV2;
+    const managedBots = yield* Effect.serviceOption(
+      GrokBotManagedStateStore.GrokBotManagedStateStore,
+    );
     const liveEvents = yield* PubSub.unbounded<OrchestrationV2StoredEvent>();
     const liveEventsByType = new Map<
       OrchestrationV2DomainEvent["type"],
@@ -261,31 +279,52 @@ const layerBase: Layer.Layer<
           );
       });
 
-    // A user can answer after terminal normalization reads the pending request.
-    // Recheck inside the write transaction so stale cleanup cannot erase answers.
+    // A user can answer after terminal normalization reads the pending request, and native cleanup
+    // can arrive as a separate write from the request it clears. Recheck each cancelled question
+    // against the stored request inside the write transaction so stale cleanup cannot erase answers.
     const guardUserInputCancellations = (events: ReadonlyArray<OrchestrationV2DomainEvent>) =>
       Effect.gen(function* () {
         const staleRequests = new Set<RuntimeRequestId>();
-        const staleNodes = new Set<NodeId>();
         for (const event of events) {
-          if (
-            event.type !== "runtime-request.updated" ||
-            event.payload.kind !== "user_input" ||
-            event.payload.status !== "cancelled"
-          )
-            continue;
+          const question =
+            event.type === "runtime-request.updated" &&
+            event.payload.kind === "user_input" &&
+            event.payload.status === "cancelled"
+              ? {
+                  threadId: event.threadId,
+                  requestId: event.payload.id,
+                  providerTurnId: event.payload.providerTurnId,
+                }
+              : event.type === "turn-item.updated" &&
+                  event.payload.type === "user_input_request" &&
+                  event.payload.status === "cancelled"
+                ? {
+                    threadId: event.threadId,
+                    requestId: event.payload.requestId,
+                    providerTurnId: event.payload.providerTurnId,
+                  }
+                : event.type === "node.updated" &&
+                    event.payload.kind === "user_input_request" &&
+                    event.payload.status === "cancelled" &&
+                    event.payload.runtimeRequestId !== null
+                  ? {
+                      threadId: event.threadId,
+                      requestId: event.payload.runtimeRequestId,
+                      providerTurnId: event.payload.providerTurnId,
+                    }
+                  : undefined;
+          if (question === undefined) continue;
           const current = yield* projectionStore.getRuntimeRequest(
-            event.threadId,
-            event.payload.id,
+            question.threadId,
+            question.requestId,
           );
           if (
             current?.status !== "pending" ||
             current.kind !== "user_input" ||
-            current.providerTurnId !== event.payload.providerTurnId ||
-            current.responseCapability.type === "message"
+            current.providerTurnId !== question.providerTurnId ||
+            (current.responseCapability.type === "message" && !isNativeGrokWidgetQuestion(current))
           ) {
-            staleRequests.add(event.payload.id);
-            staleNodes.add(event.payload.nodeId);
+            staleRequests.add(question.requestId);
           }
         }
         return events.filter((event) => {
@@ -293,7 +332,11 @@ const layerBase: Layer.Layer<
             case "runtime-request.updated":
               return event.payload.status !== "cancelled" || !staleRequests.has(event.payload.id);
             case "node.updated":
-              return event.payload.status !== "cancelled" || !staleNodes.has(event.payload.id);
+              return (
+                event.payload.status !== "cancelled" ||
+                event.payload.runtimeRequestId === null ||
+                !staleRequests.has(event.payload.runtimeRequestId)
+              );
             case "turn-item.updated":
               return (
                 event.payload.type !== "user_input_request" ||
@@ -306,34 +349,140 @@ const layerBase: Layer.Layer<
         });
       });
 
-    const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
-      const runOrdinals = new Map(
-        events.flatMap((event) =>
-          event.type === "run.created" || event.type === "run.updated"
-            ? [[event.payload.id, event.payload.ordinal] as const]
-            : [],
-        ),
-      );
-      return Effect.forEach(
-        events,
-        (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
-          event.type === "turn-item.updated"
-            ? turnItemPositions
-                .normalize(
-                  event.payload,
-                  event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
-                )
-                .pipe(Effect.map((payload) => ({ ...event, payload })))
-            : Effect.succeed(event),
-        { concurrency: 1 },
-      );
-    };
+    const retainManagedAnswers = Effect.fnUntraced(function* (
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+    ) {
+      if (Option.isNone(managedBots)) return events;
+      const answers: OrchestrationV2DomainEvent[] = [];
+      for (const event of events) {
+        const target =
+          event.type === "run.updated" &&
+          event.payload.activeAttemptId !== null &&
+          ["waiting", "completed", "failed", "cancelled", "interrupted"].includes(
+            event.payload.status,
+          )
+            ? { runId: event.payload.id, attemptId: event.payload.activeAttemptId }
+            : event.type === "provider-turn.updated" &&
+                event.runId !== undefined &&
+                event.payload.runAttemptId !== null &&
+                ["completed", "failed", "cancelled", "interrupted"].includes(event.payload.status)
+              ? { runId: event.runId, attemptId: event.payload.runAttemptId }
+              : undefined;
+        if (target === undefined) continue;
+        const owned = yield* managedBots.value.lookupTurn(target);
+        if (owned === undefined) continue;
+        const declaration = yield* managedBots.value.lookupCompletion(owned.identity);
+        if (declaration === undefined) continue;
+        const message = grokBotCompletionMessage(declaration).message;
+        const turnItem = grokBotCompletionTurnItem(declaration).turnItem;
+        const records = yield* projectionStore.getThreadRecords(
+          event.threadId,
+          ["messages", "turnItems"],
+          {
+            messageIds: [message.id],
+            turnItemRunIds: [owned.identity.runId],
+            turnItemTypes: ["assistant_message"],
+          },
+        );
+        if (
+          !records.messages.some((saved) => saved.id === message.id) &&
+          ![...events, ...answers].some(
+            (candidate) =>
+              candidate.type === "message.updated" && candidate.payload.id === message.id,
+          )
+        )
+          answers.push({
+            id: EventId.make(`${event.id}:managed-final-answer`),
+            type: "message.updated",
+            threadId: event.threadId,
+            runId: owned.identity.runId,
+            nodeId: owned.identity.rootNodeId,
+            providerInstanceId: owned.identity.native.providerInstanceId,
+            occurredAt: message.updatedAt,
+            payload: message,
+          });
+        if (
+          !records.turnItems.some((saved) => saved.id === turnItem.id) &&
+          ![...events, ...answers].some(
+            (candidate) =>
+              candidate.type === "turn-item.updated" && candidate.payload.id === turnItem.id,
+          )
+        )
+          answers.push({
+            id: EventId.make(`${event.id}:managed-final-answer-item`),
+            type: "turn-item.updated",
+            threadId: event.threadId,
+            runId: owned.identity.runId,
+            nodeId: owned.identity.rootNodeId,
+            providerInstanceId: owned.identity.native.providerInstanceId,
+            occurredAt: turnItem.updatedAt,
+            payload: turnItem,
+          });
+      }
+      // This runs inside the terminal SQL transaction. A racing declaration either precedes
+      // this read and retains its answer, or sees the committed settled turn and is refused.
+      return [...answers, ...events];
+    });
+    const normalizeEvents = (input: ReadonlyArray<OrchestrationV2DomainEvent>) =>
+      Effect.gen(function* () {
+        const events = yield* retainManagedAnswers(input);
+        const runOrdinals = new Map(
+          events.flatMap((event) =>
+            event.type === "run.created" || event.type === "run.updated"
+              ? [[event.payload.id, event.payload.ordinal] as const]
+              : [],
+          ),
+        );
+        return yield* Effect.forEach(
+          events,
+          (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
+            event.type === "turn-item.updated"
+              ? turnItemPositions
+                  .normalize(
+                    event.payload,
+                    event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
+                  )
+                  .pipe(Effect.map((payload) => ({ ...event, payload })))
+              : Effect.succeed(event),
+          { concurrency: 1 },
+        );
+      });
 
     const applyStoredEvents = (storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>) =>
       Effect.gen(function* () {
         yield* Effect.forEach(storedEvents, (stored) => projectionStore.apply(stored.event), {
           concurrency: 1,
         });
+        if (Option.isSome(managedBots)) {
+          for (const { event } of storedEvents) {
+            if (
+              event.type !== "run.updated" ||
+              event.payload.activeAttemptId === null ||
+              event.payload.rootNodeId === null ||
+              event.payload.completedAt === null ||
+              !["completed", "failed", "cancelled", "interrupted"].includes(event.payload.status)
+            )
+              continue;
+            const owned = yield* managedBots.value.lookupTurn({
+              runId: event.payload.id,
+              attemptId: event.payload.activeAttemptId,
+            });
+            if (owned === undefined) continue;
+            yield* managedBots.value.projectSettlement({
+              threadId: event.threadId,
+              providerTurnId: owned.identity.providerTurnId,
+              attemptId: event.payload.activeAttemptId,
+              rootNodeId: event.payload.rootNodeId,
+              outcome:
+                event.payload.status === "completed"
+                  ? "success"
+                  : event.payload.status === "failed"
+                    ? "error"
+                    : "cancelled",
+              settledAtMs: DateTime.toEpochMillis(event.payload.completedAt),
+            });
+          }
+        }
         const sequence = storedEvents.at(-1)?.sequence;
         if (sequence !== undefined) {
           const now = DateTime.formatIso(yield* DateTime.now);

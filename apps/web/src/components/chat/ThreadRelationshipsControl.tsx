@@ -58,6 +58,7 @@ import {
   useThreadProjection,
   useThreadShells,
 } from "../../state/entities";
+import { useNowMinute } from "../../hooks/useNowMinute";
 import { threadEnvironment } from "../../state/threads";
 import { orchestrationEnvironment } from "../../state/orchestration";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -182,6 +183,24 @@ function relationshipThreadTitle(input: {
   return formatSubagentDisplayTitle(input.title);
 }
 
+/** A completed subagent leaves Previous agents this long after its run completed. */
+const PREVIOUS_AGENT_COMPLETED_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Hides a completed subagent from the view once it has been finished for a day. Only the
+ * display changes; the thread and its history stay. Failed and other statuses stay visible.
+ */
+export function isExpiredCompletedSubagentRow(input: {
+  readonly row: ThreadRelationshipWalkRow;
+  readonly completedAt: DateTime.Utc | null | undefined;
+  readonly nowMs: number;
+}): boolean {
+  const { row, completedAt, nowMs } = input;
+  if (row.edge.kind !== "subagent" || row.edge.status !== "completed") return false;
+  if (!completedAt) return false;
+  return nowMs - DateTime.toEpochMillis(completedAt) >= PREVIOUS_AGENT_COMPLETED_TTL_MS;
+}
+
 /**
  * The row's timer and hover card follow current child work, including queued
  * follow-ups whose provider turn has not started yet.
@@ -287,6 +306,8 @@ export function ThreadRelationshipsPanel(props: {
   const [stoppingId, setStoppingId] = useState<string | null>(null);
   const latestMergeBackRun = projection === null ? null : resolveLatestMergeBackRun(projection);
   const mergeTargetThreadId = resolveMergeBackTargetThreadId(projection);
+  // The minute clock re-checks completed-subagent expiry while the panel stays open.
+  const nowMs = Date.parse(`${useNowMinute()}:00Z`);
   const relationshipRows = useMemo(
     () =>
       orderWebThreadLineageRows({
@@ -294,17 +315,26 @@ export function ThreadRelationshipsPanel(props: {
         rows: immediateThreadRelationships(graph, props.threadId),
         currentThreadId: props.threadId,
         mergeTargetThreadId,
-      }).map((row) => {
-        const agent =
-          row.edge.kind === "subagent" && !isParentThreadRelationship(row.edge, props.threadId)
-            ? subagentsByThreadId.get(row.threadId)
-            : undefined;
-        const workflowGroup = agent === undefined ? undefined : workflowGroupsById.get(agent.id);
-        return workflowGroup === undefined
-          ? row
-          : { ...row, edge: { ...row.edge, status: workflowGroup.workflow.status } };
-      }),
-    [graph, mergeTargetThreadId, props.threadId, subagentsByThreadId, workflowGroupsById],
+      })
+        .map((row) => {
+          const agent =
+            row.edge.kind === "subagent" && !isParentThreadRelationship(row.edge, props.threadId)
+              ? subagentsByThreadId.get(row.threadId)
+              : undefined;
+          const workflowGroup = agent === undefined ? undefined : workflowGroupsById.get(agent.id);
+          return workflowGroup === undefined
+            ? row
+            : { ...row, edge: { ...row.edge, status: workflowGroup.workflow.status } };
+        })
+        .filter(
+          (row) =>
+            !isExpiredCompletedSubagentRow({
+              row,
+              completedAt: graph.nodes.get(row.threadId)?.thread?.latestRunCompletedAt,
+              nowMs,
+            }),
+        ),
+    [graph, mergeTargetThreadId, nowMs, props.threadId, subagentsByThreadId, workflowGroupsById],
   );
   const canMerge = mergeTargetThreadId !== null && latestMergeBackRun !== null;
   const canDetach = projection ? canDetachThreadProviderSession(projection) : false;

@@ -586,6 +586,33 @@ describe("orchestration V2 contracts", () => {
     expect(checkpoint.parentCheckpointId).toBe(CheckpointId.make("checkpoint-root-1"));
   });
 
+  it("marks voice requests with an optional field instead of a new creation source", () => {
+    const dispatch = {
+      type: "message.dispatch",
+      createdBy: "agent",
+      creationSource: "mcp",
+      commandId: "command-voice",
+      threadId: "thread-1",
+      messageId: "message-voice",
+      text: "[From a voice call]\nFix the login bug",
+      attachments: [],
+      dispatchMode: { type: "start_immediately" },
+    };
+    expect(decodeOrchestrationV2Command({ ...dispatch, voiceRequest: true })).toMatchObject({
+      voiceRequest: true,
+    });
+    // Events stored before the field existed still decode.
+    expect(decodeOrchestrationV2Command(dispatch)).not.toHaveProperty("voiceRequest");
+    // A client built before the field ignores it, whereas it would reject a new source literal.
+    const olderClient = Schema.decodeUnknownSync(
+      Schema.Struct({
+        creationSource: Schema.Literals(["web", "mobile", "mcp", "provider", "server"]),
+      }),
+    );
+    expect(olderClient({ ...dispatch, voiceRequest: true }).creationSource).toBe("mcp");
+    expect(() => olderClient({ ...dispatch, creationSource: "voice" })).toThrow();
+  });
+
   it("decodes command and domain event shapes for command-to-projection tests", () => {
     const command = decodeOrchestrationV2Command({
       type: "message.dispatch",
@@ -635,7 +662,7 @@ describe("orchestration V2 contracts", () => {
   });
 
   it("decodes app-owned delegated task commands", () => {
-    const command = decodeOrchestrationV2Command({
+    const input = {
       type: "delegated_task.request",
       createdBy: "user",
       creationSource: "web",
@@ -651,7 +678,8 @@ describe("orchestration V2 contracts", () => {
       },
       runtimeMode: "approval-required",
       interactionMode: "plan",
-    });
+    };
+    const command = decodeOrchestrationV2Command(input);
 
     expect(command.type).toBe("delegated_task.request");
     if (command.type !== "delegated_task.request") {
@@ -660,6 +688,12 @@ describe("orchestration V2 contracts", () => {
     expect(command.parentThreadId).toBe(ThreadId.make("thread-parent-1"));
     expect(command.parentRunId).toBe(RunId.make("run-parent-1"));
     expect(command.parentNodeId).toBe(NodeId.make("node-parent-1"));
+    expect(command.projectId).toBeUndefined();
+    const destination = decodeOrchestrationV2Command({ ...input, projectId: "project-target" });
+    if (destination.type !== "delegated_task.request") {
+      throw new Error("expected delegated_task.request");
+    }
+    expect(destination.projectId).toBe(ProjectId.make("project-target"));
   });
 
   it("decodes delegated task wake-policy commands", () => {

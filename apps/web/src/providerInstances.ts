@@ -334,18 +334,44 @@ export function resolveSelectableProviderInstance(
 }
 
 /**
+ * Native Grok Bot instances serve bot threads only. Ordinary coding pickers,
+ * defaults, and fallbacks drop them, so a stale bot selection cannot come back
+ * as a new thread's provider. Bot threads keep them via their own composer.
+ */
+export function isGrokBotDriverKind(driver: string): boolean {
+  return driver === "grok-bot";
+}
+
+export function omitGrokBotProviderEntries(
+  entries: ReadonlyArray<ProviderInstanceEntry>,
+): ReadonlyArray<ProviderInstanceEntry> {
+  return entries.filter((entry) => !isGrokBotDriverKind(entry.driverKind));
+}
+
+/** Drop a stored selection that points at a Grok Bot instance; other selections pass through. */
+export function omitGrokBotModelSelection(
+  selection: ModelSelection | null,
+  providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "driver">>,
+): ModelSelection | null {
+  if (selection === null) return null;
+  const driver = providers.find((provider) => provider.instanceId === selection.instanceId)?.driver;
+  return driver !== undefined && isGrokBotDriverKind(driver) ? null : selection;
+}
+
+/**
  * Resolve the model selection persisted for a project or new thread. A valid
  * stored selection is preserved byte-for-byte. Falling back to another
  * instance also resets the model to that instance's own default, avoiding
- * cross-provider instance/model pairs.
+ * cross-provider instance/model pairs. Grok Bot instances are never a default.
  */
 export function resolveDefaultProviderModelSelection(
   providers: ReadonlyArray<ServerProvider>,
   selection: ModelSelection | null | undefined,
 ): ModelSelection | null {
-  const instanceId = resolveSelectableProviderInstance(providers, selection?.instanceId);
+  const ordinaryProviders = providers.filter((provider) => !isGrokBotDriverKind(provider.driver));
+  const instanceId = resolveSelectableProviderInstance(ordinaryProviders, selection?.instanceId);
   if (instanceId === undefined) return null;
   if (selection?.instanceId === instanceId) return selection;
-  const model = getDefaultProviderInstanceModel(providers, instanceId);
+  const model = getDefaultProviderInstanceModel(ordinaryProviders, instanceId);
   return model ? { instanceId, model } : null;
 }

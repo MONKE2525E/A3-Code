@@ -85,9 +85,16 @@ export const layer: Layer.Layer<
               requestId: input.requestId,
             });
           }
-          // Dispatch validates the request while it is pending, then persists the
-          // resolved projection before this effect is executed.
-          if (request.status !== "resolved") {
+          // A bound native message card stays pending until native confirms the call, so it may
+          // run while pending; the adapter settles it. Every other request runs only once
+          // dispatch has resolved it and persisted that projection.
+          const boundNativeMessage =
+            request.responseCapability.type === "message" &&
+            request.responseCapability.providerSessionId === input.providerSessionId;
+          if (
+            request.status !== "resolved" &&
+            !(request.status === "pending" && boundNativeMessage)
+          ) {
             return yield* new RuntimeRequestResponseExecutionError({
               reason: "request-not-ready",
               threadId: input.threadId,
@@ -96,7 +103,8 @@ export const layer: Layer.Layer<
             });
           }
           if (
-            request.responseCapability.type !== "live" ||
+            (request.responseCapability.type !== "live" &&
+              request.responseCapability.type !== "message") ||
             request.responseCapability.providerSessionId !== input.providerSessionId
           ) {
             return yield* new RuntimeRequestResponseExecutionError({

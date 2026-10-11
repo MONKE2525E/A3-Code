@@ -29,6 +29,8 @@ import * as PreviewControlsHandlers from "./toolkits/previewControls/handlers.ts
 import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 import { GrokBotToolkit } from "./toolkits/grokBot/tools.ts";
 import * as GrokBotHandlers from "./toolkits/grokBot/handlers.ts";
+import * as GrokBotOrchestrator from "./toolkits/grokBot/orchestrator.ts";
+import * as GrokBotCompletion from "./toolkits/grokBot/completion.ts";
 import * as EnvironmentHandlers from "./toolkits/environment/handlers.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
@@ -876,6 +878,8 @@ export const layer = Layer.mergeAll(
   layerProjectRegistration,
   layerEnvironmentToolkit,
   toolkitRegistration(GrokBotToolkit, GrokBotHandlers.layer),
+  toolkitRegistration(GrokBotOrchestrator.toolkit, GrokBotOrchestrator.layer),
+  toolkitRegistration(GrokBotCompletion.toolkit, GrokBotCompletion.layer),
   layerPreviewControlsRegistration,
   layerWorktreeToolkitRegistration,
   layerPullRequestsToolkit,

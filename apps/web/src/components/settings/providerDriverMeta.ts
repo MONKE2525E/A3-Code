@@ -4,6 +4,7 @@ import {
   CodexSettings,
   ProviderDriverKind,
 } from "@t3tools/contracts";
+import { GrokBotProviderSettings } from "@t3tools/contracts/grokBotProvider";
 import { acpRegistryClient } from "@t3tools/provider-acp-registry/client";
 import { makeProviderClientRegistry } from "@t3tools/provider-core/client";
 import { cursorClient } from "@t3tools/provider-cursor/client";
@@ -31,6 +32,13 @@ export const providerClients = makeProviderClientRegistry([
     driverKind: ProviderDriverKind.make("antigravity"),
     label: "Antigravity",
     settingsSchema: AntigravitySettings,
+  },
+  {
+    driverKind: ProviderDriverKind.make("grok-bot"),
+    label: "GrokBot",
+    settingsSchema: GrokBotProviderSettings,
+    // Bots are added through the native GrokBot step and edited in the bot panel.
+    hasDefaultInstance: false,
   },
   museClient,
   piClient,

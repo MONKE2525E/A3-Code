@@ -25,12 +25,15 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   deriveActivePlanState,
   deriveCanInterruptRunningThread,
+  deriveGrokBotAwaitingCompletion,
+  deriveGrokBotAwaitingInput,
   deriveTimelineEntriesFromVisibleTurnItems,
   deriveTimelineEntriesFromVisibleTurnItemsWithState,
   deriveRevertTurnCountByUserMessageId,
   derivePhase,
   findLatestProposedPlan,
   isLatestRunSettled,
+  resolveGrokBotSendDispatchMode,
   selectHandoffImageResources,
   selectMessageImageResources,
   createMessageAttachmentPreviewProjector,
@@ -107,6 +110,117 @@ describe("V2 session presentation", () => {
 
     // No runtime at all: nothing to interrupt.
     expect(deriveCanInterruptRunningThread(true, null)).toBe(false);
+  });
+
+  it("shows a Grok Bot run blocked on the user as awaiting input, not running", () => {
+    const waiting: ThreadRuntimeSummary = {
+      status: "waiting",
+      activeRunId: RunId.make("run-grok-question"),
+      providerInstanceId: ProviderInstanceId.make("grok-bot"),
+      providerName: null,
+      lastError: null,
+      updatedAt: "2026-09-29T00:00:00.000Z",
+    };
+    const phase = derivePhase(waiting);
+    // Phase stays running, so Stop is still offered while the question waits.
+    expect(phase).toBe("running");
+    expect(deriveCanInterruptRunningThread(true, waiting)).toBe(true);
+
+    expect(
+      deriveGrokBotAwaitingInput({ isGrokBotThread: true, phase, hasPendingInput: true }),
+    ).toBe(true);
+    // Without a pending question the run is still thinking.
+    expect(
+      deriveGrokBotAwaitingInput({ isGrokBotThread: true, phase, hasPendingInput: false }),
+    ).toBe(false);
+    // Other providers keep their running indicator even with a pending approval.
+    expect(
+      deriveGrokBotAwaitingInput({ isGrokBotThread: false, phase, hasPendingInput: true }),
+    ).toBe(false);
+  });
+
+  it("waits for a Grok Bot managed run only after a fresh native idle reading", () => {
+    const runStartedAtMs = Date.parse("2026-10-11T10:00:00.000Z");
+    const nowMs = runStartedAtMs + 60_000;
+    const idle = {
+      source: "native" as const,
+      observedAtMs: runStartedAtMs + 5_000,
+      staleAtMs: nowMs + 30_000,
+      isRunning: false,
+      isComposingMessage: false,
+      awaitingUserResponse: null,
+    };
+    const waiting = (overrides: Partial<Parameters<typeof deriveGrokBotAwaitingCompletion>[0]>) =>
+      deriveGrokBotAwaitingCompletion({
+        isGrokBotThread: true,
+        phase: "running",
+        hasPendingInput: false,
+        runStartedAtMs,
+        nowMs,
+        nativeActivity: idle,
+        ...overrides,
+      });
+
+    expect(waiting({})).toBe(true);
+    // Live state with no stale time still counts as fresh.
+    const { staleAtMs: _staleAtMs, ...withoutStaleAt } = idle;
+    expect(waiting({ nativeActivity: withoutStaleAt })).toBe(true);
+
+    // Idle observed before the current run started is from the previous run.
+    expect(waiting({ nativeActivity: { ...idle, observedAtMs: runStartedAtMs - 1 } })).toBe(false);
+    expect(waiting({ runStartedAtMs: null })).toBe(false);
+    // A reading that has gone stale is not authoritative.
+    expect(waiting({ nativeActivity: { ...idle, staleAtMs: nowMs } })).toBe(false);
+    // Transcript-derived activity never clears Thinking.
+    expect(waiting({ nativeActivity: { ...idle, source: "transcript" } })).toBe(false);
+    expect(waiting({ nativeActivity: undefined })).toBe(false);
+    expect(waiting({ nativeActivity: null })).toBe(false);
+    // Any sign of native work keeps Thinking, even if the phase is still running.
+    expect(waiting({ nativeActivity: { ...idle, isRunning: true } })).toBe(false);
+    expect(waiting({ nativeActivity: { ...idle, isComposingMessage: true } })).toBe(false);
+    const { isRunning: _isRunning, ...withoutIsRunning } = idle;
+    expect(waiting({ nativeActivity: withoutIsRunning })).toBe(false);
+    expect(
+      waiting({
+        nativeActivity: { ...idle, currentActivity: { kind: "thinking", hasDetail: false } },
+      }),
+    ).toBe(false);
+    expect(
+      waiting({
+        nativeActivity: { ...idle, awaitingUserResponse: { reason: "question" } },
+      }),
+    ).toBe(false);
+    // Pending questions and approvals keep their own label, and the run is not connecting.
+    expect(waiting({ hasPendingInput: true })).toBe(false);
+    expect(waiting({ phase: "connecting" })).toBe(false);
+    expect(waiting({ phase: "ready" })).toBe(false);
+    expect(waiting({ isGrokBotThread: false })).toBe(false);
+  });
+
+  it("follows native activity as a Grok Bot run goes idle and busy again", () => {
+    const runStartedAtMs = Date.parse("2026-10-11T10:00:00.000Z");
+    const reading = (observedAtMs: number, isRunning: boolean) => ({
+      source: "native" as const,
+      observedAtMs,
+      staleAtMs: observedAtMs + 90_000,
+      isRunning,
+      isComposingMessage: false,
+      awaitingUserResponse: null,
+    });
+    const isWaiting = (nativeActivity: ReturnType<typeof reading>, nowMs: number) =>
+      deriveGrokBotAwaitingCompletion({
+        isGrokBotThread: true,
+        phase: "running",
+        hasPendingInput: false,
+        runStartedAtMs,
+        nowMs,
+        nativeActivity,
+      });
+
+    expect(isWaiting(reading(runStartedAtMs + 1_000, true), runStartedAtMs + 2_000)).toBe(false);
+    expect(isWaiting(reading(runStartedAtMs + 3_000, false), runStartedAtMs + 4_000)).toBe(true);
+    // Native resumes work after the idle reading, so Thinking returns.
+    expect(isWaiting(reading(runStartedAtMs + 5_000, true), runStartedAtMs + 6_000)).toBe(false);
   });
 
   it("labels provider retry progress, delay, recovery, and exhaustion", () => {
@@ -633,6 +747,10 @@ describe("V2 session presentation", () => {
       creationSource: "mcp" as const,
       scheduledTaskId: ScheduledTaskId.make("task-queued"),
       senderThreadId: ThreadId.make("thread-agent-sender"),
+      grokBotPeer: { botId: "peer-bot", name: "Research Bot", direction: "from" },
+      grokBotWorkflowReferences: [
+        { id: "learn-from-demonstration", label: "Learn from demonstration" },
+      ],
     } satisfies OrchestrationV2TurnItem;
     const promotedEntries = deriveTimelineEntriesFromVisibleTurnItems({
       visibleTurnItems: [
@@ -652,6 +770,39 @@ describe("V2 session presentation", () => {
       expect(promotedEntries[0].message.inputIntent).toBe("turn_start");
       expect(promotedEntries[0].message.scheduledTaskId).toBe("task-queued");
       expect(promotedEntries[0].message.senderThreadId).toBe("thread-agent-sender");
+      expect(promotedEntries[0].message.grokBotPeer).toEqual({
+        botId: "peer-bot",
+        name: "Research Bot",
+        direction: "from",
+      });
+      expect(promotedEntries[0].message.grokBotWorkflowReferences).toEqual([
+        { id: "learn-from-demonstration", label: "Learn from demonstration" },
+      ]);
+    }
+    const assistantPeerEntries = deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: [
+        {
+          position: 0,
+          visibility: "local",
+          sourceThreadId: projection.thread.id,
+          sourceItemId: dispatchedItem.id,
+          item: {
+            ...dispatchedItem,
+            type: "assistant_message",
+            streaming: false,
+            grokBotPeer: { botId: "peer-bot", name: "Research Bot", direction: "to" },
+          },
+        },
+      ],
+      optimisticMessages: [],
+    });
+    expect(assistantPeerEntries[0]?.kind).toBe("message");
+    if (assistantPeerEntries[0]?.kind === "message") {
+      expect(assistantPeerEntries[0].message.grokBotPeer).toEqual({
+        botId: "peer-bot",
+        name: "Research Bot",
+        direction: "to",
+      });
     }
   });
 
@@ -1829,4 +1980,83 @@ it("renders automatic completion as a work entry instead of a user bubble", () =
       ],
     })[0]?.kind,
   ).toBe("message");
+});
+
+describe("Grok Bot send dispatch", () => {
+  it("restarts a Grok Bot run for a send while it is in flight, whatever the native turn state", () => {
+    // Running with no active provider turn (stale or native-idle-unsettled) still restarts.
+    expect(
+      resolveGrokBotSendDispatchMode({
+        isGrokBotThread: true,
+        phase: "running",
+        dispatchMode: "auto",
+      }),
+    ).toBe("restart");
+    expect(
+      resolveGrokBotSendDispatchMode({
+        isGrokBotThread: true,
+        phase: "running",
+        dispatchMode: "queue",
+      }),
+    ).toBe("restart");
+  });
+
+  it("restarts when the run is awaiting native completion, since the phase stays running", () => {
+    const awaitingCompletion = deriveGrokBotAwaitingCompletion({
+      isGrokBotThread: true,
+      phase: "running",
+      hasPendingInput: false,
+      runStartedAtMs: 1_000,
+      nowMs: 2_000,
+      nativeActivity: {
+        source: "native",
+        isRunning: false,
+        isComposingMessage: false,
+        awaitingUserResponse: null,
+        observedAtMs: 1_500,
+      },
+    });
+    expect(awaitingCompletion).toBe(true);
+    expect(
+      resolveGrokBotSendDispatchMode({
+        isGrokBotThread: true,
+        phase: "running",
+        dispatchMode: "auto",
+      }),
+    ).toBe("restart");
+  });
+
+  it("keeps the caller's dispatch for an idle Grok Bot send", () => {
+    expect(
+      resolveGrokBotSendDispatchMode({
+        isGrokBotThread: true,
+        phase: "ready",
+        dispatchMode: "auto",
+      }),
+    ).toBe("auto");
+    expect(
+      resolveGrokBotSendDispatchMode({
+        isGrokBotThread: true,
+        phase: "disconnected",
+        dispatchMode: "auto",
+      }),
+    ).toBe("auto");
+  });
+
+  it("leaves other providers' running sends on their configured dispatch", () => {
+    expect(
+      resolveGrokBotSendDispatchMode({
+        isGrokBotThread: false,
+        phase: "running",
+        dispatchMode: "steer",
+      }),
+    ).toBe("steer");
+    expect(
+      resolveGrokBotSendDispatchMode({
+        isGrokBotThread: false,
+        phase: "running",
+        dispatchMode: "queue",
+      }),
+    ).toBe("queue");
+  });
 });

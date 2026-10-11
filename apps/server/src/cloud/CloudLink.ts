@@ -100,6 +100,7 @@ import {
 } from "./config.ts";
 import { getOrCreateEnvironmentKeyPairFromSecretStore } from "./environmentKeys.ts";
 import * as ManagedEndpointRuntime from "./ManagedEndpointRuntime.ts";
+import * as ManagedEndpointAddress from "./ManagedEndpointAddress.ts";
 import { relayUrlConfig } from "./publicConfig.ts";
 import {
   filterRelayResponse,
@@ -569,6 +570,7 @@ const make = Effect.gen(function* () {
   const secrets = yield* ServerSecretStore.ServerSecretStore;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const endpointRuntime = yield* ManagedEndpointRuntime.CloudManagedEndpointRuntime;
+  const endpointAddress = yield* ManagedEndpointAddress.ManagedEndpointAddress;
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
   const cliTokenManager = yield* CliTokenManager.CloudCliTokenManager;
   const httpClient = yield* HttpClient.HttpClient;
@@ -945,6 +947,15 @@ const make = Effect.gen(function* () {
           confirmedOrigin: parsedOrigin.origin,
         },
       );
+      if (link.endpointRuntime !== null) {
+        yield* endpointAddress
+          .remember({ endpoint: link.endpoint, config: link.endpointRuntime })
+          .pipe(
+            Effect.mapError(
+              (cause) => new CloudLinkInternalError({ operation: "persist-desired-link", cause }),
+            ),
+          );
+      }
       // Callers decide on managed tunnel recovery from the mode this link
       // actually used, not from a value read before the relay round trip.
       return mode;
@@ -1159,6 +1170,14 @@ const make = Effect.gen(function* () {
         }
         yield* secrets.set(CLOUD_ENDPOINT_RUNTIME_CONFIG, stringToBytes(encoded));
         yield* secrets.remove(CLOUD_ENDPOINT_CONFIRMED_ORIGIN);
+        yield* endpointAddress
+          .remember({ endpoint: recovered.endpoint, config: recovered.endpointRuntime })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new CloudLinkInternalError({ operation: "persist-recovered-tunnel", cause }),
+            ),
+          );
         return true;
       }),
     );
@@ -1357,6 +1376,7 @@ const make = Effect.gen(function* () {
               secrets.remove(CLOUD_MINT_PUBLIC_KEY),
               secrets.remove(CLOUD_ENDPOINT_RUNTIME_CONFIG),
               secrets.remove(CLOUD_ENDPOINT_CONFIRMED_ORIGIN),
+              secrets.remove(ManagedEndpointAddress.CLOUD_MANAGED_ENDPOINT_ADDRESS),
               secrets.remove(PUBLISH_AGENT_ACTIVITY_SECRET),
               secrets.remove(HOLD_WEBHOOKS_WHILE_OFFLINE_SECRET),
             ],
@@ -1674,4 +1694,6 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(CloudLink, make);
+export const layer = Layer.effect(CloudLink, make).pipe(
+  Layer.provide(ManagedEndpointAddress.layer),
+);

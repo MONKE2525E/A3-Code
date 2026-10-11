@@ -44,6 +44,7 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import { grokBotSenderNote } from "./GrokBotSenderNote.ts";
 import {
   isRestartNoteContinuation,
   pendingRestartCancelledBackgroundWork,
@@ -75,6 +76,11 @@ export interface ProviderTurnStartServiceV2Shape {
     readonly threadId: ThreadId;
     readonly runId: RunId;
     readonly willRetry?: boolean;
+  }) => Effect.Effect<void, ProviderTurnStartError>;
+  readonly reconnect: (input: {
+    readonly threadId: ThreadId;
+    readonly runId: RunId;
+    readonly reconcileAttempt?: number;
   }) => Effect.Effect<void, ProviderTurnStartError>;
 }
 
@@ -643,7 +649,10 @@ export const layer: Layer.Layer<
             }),
           );
         }
-        if (providerThread.nativeThreadRef === null) {
+        if (
+          providerThread.nativeThreadRef === null ||
+          providerThread.nativeThreadRef.nativeId === null
+        ) {
           // Hand the run's provider thread to the adapter so it adopts this
           // row's identity when attaching native state. An adapter that mints
           // its own row instead leaves two live rows per app thread, and
@@ -947,10 +956,26 @@ export const layer: Layer.Layer<
       const routableSubagents = projection.subagents.filter((subagent) =>
         RunExecutionService.canRouteRelatedSubagent(subagent.status),
       );
-      const userText = projectComposerContextForProvider({
+      const providerDriver = projection.providerThreads.find(
+        (candidate) => candidate.id === run.providerThreadId,
+      )?.driver;
+      // Grok bots receive only text, so the sender is stated in it.
+      const senderNote =
+        providerDriver === "grok-bot" && message.senderThreadId !== undefined
+          ? grokBotSenderNote(
+              Option.getOrUndefined(
+                yield* projectionStore.getThread(message.senderThreadId).pipe(
+                  Effect.map((thread) => thread.title),
+                  Effect.option,
+                ),
+              ),
+            )
+          : undefined;
+      const composedText = projectComposerContextForProvider({
         text: message.text,
         records: message.context?.records ?? [],
       });
+      const userText = senderNote === undefined ? composedText : `${senderNote}\n\n${composedText}`;
       // Delivered once: this run's provider turn marks the work as told. A
       // restart continuation is prompted by its own text or resumes natively.
       const noteContinuation = isRestartNoteContinuation(
@@ -1271,13 +1296,128 @@ export const layer: Layer.Layer<
           ...(message.senderThreadId === undefined
             ? {}
             : { senderThreadId: message.senderThreadId }),
+          ...(message.voiceRequest === undefined ? {} : { voiceRequest: message.voiceRequest }),
         },
         modelSelection: run.modelSelection,
         runtimePolicy: resolvedRuntimePolicy,
       });
     });
 
+    const reconnect = Effect.fn("orchestrationV2.providerTurnStart.reconnect")(function* (input: {
+      readonly threadId: ThreadId;
+      readonly runId: RunId;
+      readonly reconcileAttempt?: number;
+    }) {
+      const projection = yield* projectionStore.getTurnStartContext(input.threadId, input.runId);
+      const run = projection.runs.find((candidate) => candidate.id === input.runId);
+      if (run === undefined || (run.status !== "running" && run.status !== "starting")) return;
+      const attempt = projection.attempts.find((candidate) => candidate.id === run.activeAttemptId);
+      const rootNode = projection.nodes.find((candidate) => candidate.id === run.rootNodeId);
+      const providerThread = projection.providerThreads.find(
+        (candidate) => candidate.id === run.providerThreadId,
+      );
+      const checkpointScope = projection.checkpointScopes.find(
+        (candidate) => candidate.id === rootNode?.checkpointScopeId,
+      );
+      if (
+        attempt === undefined ||
+        rootNode === undefined ||
+        checkpointScope === undefined ||
+        providerThread?.driver !== "grok-bot" ||
+        providerThread.providerSessionId === null ||
+        providerThread.nativeThreadRef === null ||
+        providerThread.nativeThreadRef.nativeId === null
+      )
+        return yield* new ProviderTurnStartError({
+          runId: input.runId,
+          cause: "Remote observation requires the persisted native run binding.",
+        });
+      const live = yield* providerSessions.get(providerThread.providerSessionId);
+      // A prior observer may have consumed a settlement whose ingestion failed.
+      // Reopen its snapshot rather than trusting an in-memory delivered nonce.
+      if (Option.isSome(live)) yield* providerSessions.close(providerThread.providerSessionId);
+      if (run.status === "starting") {
+        yield* start({ ...input, willRetry: true });
+        return;
+      }
+      const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
+      if (message === undefined)
+        return yield* new ProviderTurnStartError({
+          runId: input.runId,
+          cause: "The saved native delivery has no committed message.",
+        });
+      const policy = yield* runtimePolicy.resolve({
+        thread: projection.thread,
+        modelSelection: run.modelSelection,
+      });
+      const persistedSession = projection.providerSessions.find(
+        (candidate) => candidate.id === providerThread.providerSessionId,
+      );
+      const session = yield* providerSessions.open({
+        threadId: input.threadId,
+        providerSessionId: providerThread.providerSessionId,
+        modelSelection: run.modelSelection,
+        runtimePolicy: policy,
+        ...(persistedSession === undefined ? {} : { resumeFromSession: persistedSession }),
+        initialNativeThreadId: providerThread.nativeThreadRef.nativeId,
+      });
+      const loaded = yield* session.resumeThread({
+        providerThread,
+        modelSelection: run.modelSelection,
+        runtimePolicy: policy,
+      });
+      const controls = makeRunControls({
+        threadId: input.threadId,
+        runId: run.id,
+        attemptId: attempt.id,
+        providerThreadId: providerThread.id,
+        runOrdinal: run.ordinal,
+        inheritedBackgroundTurnItems: [],
+      });
+      yield* runExecution.startRootRun({
+        observationOnly: true,
+        reconcileRemoteDelivery: true,
+        remoteReconcileAttempt: input.reconcileAttempt ?? 0,
+        commandId: CommandId.make(
+          `command:effect:provider-runtime.reconnect:${run.id}:${attempt.id}`,
+        ),
+        appThread: projection.thread,
+        providerSessionId: providerThread.providerSessionId,
+        session,
+        run,
+        rootNode,
+        checkpointScope,
+        providerThread: loaded,
+        attempt,
+        attemptId: attempt.id,
+        providerTurnOrdinal:
+          latestProviderTurnForAttempt(projection.providerTurns, attempt.id)?.ordinal ?? 1,
+        shouldStartProviderTurn: controls.shouldStartProviderTurn,
+        shouldFinalizeRun: controls.shouldFinalizeRun,
+        hasUnpairedRunInterruptRequest: controls.hasUnpairedRunInterruptRequest,
+        message: {
+          messageId: run.userMessageId,
+          text: projectComposerContextForProvider({
+            text: message.text,
+            records: message.context?.records ?? [],
+          }),
+          attachments: message.attachments,
+          createdBy: message.createdBy,
+          creationSource: message.creationSource,
+        },
+        modelSelection: run.modelSelection,
+        runtimePolicy: policy,
+      });
+    });
     return ProviderTurnStartServiceV2.of({
+      reconnect: (input) =>
+        reconnect(input).pipe(
+          Effect.mapError((cause) =>
+            isProviderTurnStartError(cause)
+              ? cause
+              : new ProviderTurnStartError({ runId: input.runId, cause }),
+          ),
+        ),
       start: (input) =>
         start(input).pipe(
           Effect.mapError((cause) =>

@@ -3,141 +3,174 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
-import type { EnvironmentId, GrokBot, PullRequestRef } from "@t3tools/contracts";
-import { LinkIcon, Trash2Icon } from "lucide-react";
-import { type ReactNode, useCallback, useState } from "react";
+import type { EnvironmentId, GrokBot } from "@t3tools/contracts";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 
-import { DraftInput } from "~/components/ui/draft-input";
 import { Button } from "~/components/ui/button";
-import { Input } from "~/components/ui/input";
+import { DraftInput } from "~/components/ui/draft-input";
 import { Label } from "~/components/ui/label";
-import {
-  Select,
-  SelectItem,
-  SelectPopup,
-  SelectTrigger,
-  SelectValue,
-} from "~/components/ui/select";
+import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { Switch } from "~/components/ui/switch";
 import { Textarea } from "~/components/ui/textarea";
 import { cn } from "~/lib/utils";
-import { grokBotsLink, grokBotsUpdate } from "~/state/grokBots";
+import { grokBotsListQuery, grokBotsUpdate } from "~/state/grokBots";
+import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
 
+import { GROK_BOT_HAPPY_MS } from "./grokBotActivity";
 import { GrokBotAppearancePicker } from "./GrokBotAppearancePicker";
+import { grokBotFailureMessage, grokBotSurfaceKey } from "./grokBotPresentation";
 import {
-  grokBotFailureMessage,
-  grokBotPullRequestRefFromUrl,
-  grokBotSurfaceKey,
-} from "./grokBotPresentation";
+  isGrokBotProfileSaveRejected,
+  type PendingLook,
+  type ProfilePatch,
+  type ProfileSaveState,
+  reconcileProfileSave,
+  UNCERTAIN_SAVE_MESSAGE,
+} from "./grokBotProfileSave";
+
+type SaveOutcome = "saved" | "rejected" | "uncertain";
 
 export function GrokBotProfileEditor({
   environmentId,
   bot,
-  projects,
   compact = false,
 }: {
   readonly environmentId: EnvironmentId;
   readonly bot: GrokBot;
-  readonly projects: readonly EnvironmentProject[];
   readonly compact?: boolean;
 }) {
   const canUpdate = useAtomValue(grokBotsUpdate.permissionAtom(environmentId));
-  const canLink = useAtomValue(grokBotsLink.permissionAtom(environmentId));
   const updateBot = useAtomCommand(grokBotsUpdate, { reportFailure: false });
-  const linkBot = useAtomCommand(grokBotsLink, { reportFailure: false });
+  const roster = useEnvironmentQuery(grokBotsListQuery({ environmentId, input: {} }));
   const identity = grokBotSurfaceKey(environmentId, bot.id);
-  const [error, setError] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
+  // A count, not a flag: a blur-triggered save can overlap a switch or picker save.
+  const [pendingCount, setPendingCount] = useState(0);
+  const pending = pendingCount > 0;
   const [description, setDescription] = useState(bot.description);
-  // Show a new look right away; the roster catches up after the Grok Bot round trip.
-  const [pendingLook, setPendingLook] = useState<{ shape: string; color: string } | null>(null);
-  const [spinSignal, setSpinSignal] = useState(0);
+  const [saveState, setSaveState] = useState<ProfileSaveState>({ look: null, issue: null });
+  const [reconcileStartedAt, setReconcileStartedAt] = useState<number | null>(null);
+  const [appearanceSignal, setAppearanceSignal] = useState(0);
+  const [celebrating, setCelebrating] = useState(false);
+  const celebrationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (celebrationTimer.current !== null) clearTimeout(celebrationTimer.current);
+    },
+    [],
+  );
+  // The roster decides what is confirmed. One pure pass settles the held look and the issue together.
+  const reconciled = reconcileProfileSave(saveState, bot, roster.dataUpdatedAt);
+  if (reconciled !== saveState) setSaveState(reconciled);
+  const { look: pendingLook, issue } = reconciled;
+  // Settles only the spinner. A refresh never decides a save: it may fall back to a stale roster.
   if (
-    pendingLook !== null &&
-    pendingLook.shape === bot.avatarShape &&
-    pendingLook.color === bot.avatarColor
+    reconcileStartedAt !== null &&
+    !roster.isPending &&
+    (roster.error !== null || roster.dataUpdatedAt >= reconcileStartedAt)
   ) {
-    setPendingLook(null);
+    setReconcileStartedAt(null);
   }
-  const look = pendingLook ?? { shape: bot.avatarShape, color: bot.avatarColor };
+  const look = pendingLook ?? { shape: bot.avatarShape, color: bot.avatarColor, acceptedAt: null };
 
   const save = useCallback(
-    async (patch: {
-      name?: string;
-      label?: string;
-      description?: string;
-      notificationEnabled?: boolean;
-      hidden?: boolean;
-      pinned?: boolean;
-      avatarShape?: string;
-      avatarColor?: string;
-    }) => {
-      if (!canUpdate) return false;
-      setPending(true);
-      setError(null);
+    async (patch: ProfilePatch): Promise<SaveOutcome> => {
+      if (!canUpdate) return "rejected";
+      setPendingCount((count) => count + 1);
+      // An uncertain change stays visible until the roster shows it, even across another save.
+      setSaveState((current) => ({
+        ...current,
+        issue: current.issue?.uncertain ? current.issue : null,
+      }));
       const result = await updateBot({
         environmentId,
         input: { botId: bot.id, ...patch },
       });
-      setPending(false);
-      if (result._tag === "Failure") {
-        if (!isAtomCommandInterrupted(result)) {
-          setError(grokBotFailureMessage(squashAtomCommandFailure(result)));
-        }
-        return false;
+      setPendingCount((count) => count - 1);
+      if (result._tag === "Success") return "saved";
+      const error = squashAtomCommandFailure(result);
+      if (isGrokBotProfileSaveRejected(error, isAtomCommandInterrupted(result))) {
+        setSaveState((current) => ({
+          ...current,
+          issue: { message: grokBotFailureMessage(error), uncertain: null },
+        }));
+        return "rejected";
       }
-      return true;
+      setSaveState((current) => ({
+        ...current,
+        issue: { message: UNCERTAIN_SAVE_MESSAGE, uncertain: patch },
+      }));
+      return "uncertain";
     },
     [bot.id, canUpdate, environmentId, updateBot],
   );
 
   const changeLook = (patch: { avatarShape?: string; avatarColor?: string }) => {
-    setPendingLook({
+    // Send both avatar fields so the uncertain check covers the whole look, not one half of it.
+    const next: PendingLook = {
       shape: patch.avatarShape ?? look.shape,
       color: patch.avatarColor ?? look.color,
-    });
-    setSpinSignal((current) => current + 1);
-    void save(patch).then((saved) => {
-      if (!saved) setPendingLook(null);
+      acceptedAt: null,
+    };
+    setSaveState((current) => ({ ...current, look: next }));
+    setAppearanceSignal((current) => current + 1);
+    if (celebrationTimer.current !== null) clearTimeout(celebrationTimer.current);
+    setCelebrating(true);
+    celebrationTimer.current = setTimeout(() => setCelebrating(false), GROK_BOT_HAPPY_MS);
+    void save({ avatarShape: next.shape, avatarColor: next.color }).then((outcome) => {
+      // A newer look replaced this one, so its outcome no longer applies to what is shown.
+      const applies = (current: ProfileSaveState) => current.look === next;
+      if (outcome === "rejected") {
+        setSaveState((current) => (applies(current) ? { ...current, look: null } : current));
+        return;
+      }
+      setSaveState((current) =>
+        applies(current) ? { ...current, look: { ...next, acceptedAt: Date.now() } } : current,
+      );
     });
   };
 
-  const toggleLink = useCallback(
-    async (reference: PullRequestRef, remove = false) => {
-      if (!canLink) return;
-      setPending(true);
-      setError(null);
-      const result = await linkBot({
-        environmentId,
-        input: { botId: bot.id, reference, ...(remove ? { remove: true } : {}) },
-      });
-      setPending(false);
-      if (result._tag === "Failure") {
-        if (isAtomCommandInterrupted(result)) return;
-        setError(grokBotFailureMessage(squashAtomCommandFailure(result)));
-      }
-    },
-    [bot.id, canLink, environmentId, linkBot],
-  );
+  const refreshRoster = () => {
+    setReconcileStartedAt(Date.now());
+    roster.refresh();
+  };
 
   return (
     <div className={cn("flex flex-col gap-6", compact && "gap-5")}>
-      <div className="flex items-center gap-3">
-        <GrokBotAppearancePicker
-          shape={look.shape}
-          color={look.color}
-          name={bot.name}
-          spinSignal={spinSignal}
-          disabled={!canUpdate || pending}
-          onSelectShape={(avatarShape) => changeLook({ avatarShape })}
-          onSelectColor={(avatarColor) => changeLook({ avatarColor })}
-        />
-        <div className="min-w-0">
-          <p className="truncate text-base font-medium">{bot.name}</p>
-          <p className="text-xs text-muted-foreground">Click the bot to change how it looks.</p>
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-3">
+          <GrokBotAppearancePicker
+            botId={bot.id}
+            shape={look.shape}
+            color={look.color}
+            name={bot.name}
+            appearanceSignal={appearanceSignal}
+            celebrating={celebrating}
+            disabled={!canUpdate || pending}
+            onSelectShape={(avatarShape) => changeLook({ avatarShape })}
+            onSelectColor={(avatarColor) => changeLook({ avatarColor })}
+          />
+          <div className="min-w-0">
+            <p className="truncate text-base font-medium">{bot.name}</p>
+            <p className="text-xs text-muted-foreground">Click the bot to change how it looks.</p>
+          </div>
         </div>
+        {issue ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm text-destructive-foreground">{issue.message}</p>
+            {issue.uncertain !== null ? (
+              <Button
+                size="xs"
+                variant="ghost-muted"
+                disabled={pending || reconcileStartedAt !== null}
+                onClick={refreshRoster}
+              >
+                <RefreshIcon refreshing={reconcileStartedAt !== null} />
+                Refresh
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
       <EditorGroup title="Profile">
         <EditorField htmlFor={`grok-bot-name-${identity}`} label="Name">
@@ -176,6 +209,7 @@ export function GrokBotProfileEditor({
           <Textarea
             id={`grok-bot-description-${identity}`}
             size="sm"
+            className="overflow-hidden [&_textarea]:resize-none"
             maxLength={16000}
             disabled={!canUpdate || pending}
             value={description}
@@ -209,158 +243,7 @@ export function GrokBotProfileEditor({
           onChange={(notificationEnabled) => void save({ notificationEnabled })}
         />
       </EditorGroup>
-      <GrokBotPullRequestLinks
-        key={identity}
-        bot={bot}
-        projects={projects}
-        disabled={!canLink || pending}
-        onAdd={(reference) => void toggleLink(reference)}
-        onRemove={(reference) => void toggleLink(reference, true)}
-      />
-      {error ? <p className="text-sm text-destructive-foreground">{error}</p> : null}
     </div>
-  );
-}
-
-function GrokBotPullRequestLinks({
-  bot,
-  projects,
-  disabled,
-  onAdd,
-  onRemove,
-}: {
-  readonly bot: GrokBot;
-  readonly projects: readonly EnvironmentProject[];
-  readonly disabled: boolean;
-  readonly onAdd: (reference: PullRequestRef) => void;
-  readonly onRemove: (reference: PullRequestRef) => void;
-}) {
-  const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
-  const [url, setUrl] = useState("");
-  const [localError, setLocalError] = useState<string | null>(null);
-  const resolvedProjectId = projects.some((project) => project.id === projectId)
-    ? projectId
-    : (projects[0]?.id ?? "");
-  const selectedProject = projects.find((project) => project.id === resolvedProjectId) ?? null;
-
-  const submit = () => {
-    if (selectedProject === null) {
-      setLocalError("Choose a project that can read the pull request.");
-      return;
-    }
-    const reference = grokBotPullRequestRefFromUrl(url, selectedProject);
-    if (reference === null) {
-      setLocalError("Paste a GitHub pull request URL.");
-      return;
-    }
-    setLocalError(null);
-    setUrl("");
-    onAdd(reference);
-  };
-
-  return (
-    <div className="flex flex-col gap-3">
-      <div>
-        <p className="text-sm font-medium">Pull requests</p>
-        <p className="text-xs text-muted-foreground">
-          Attach existing GitHub pull requests. This does not create a pull request.
-        </p>
-      </div>
-      {bot.pullRequests.length > 0 ? (
-        <ul className="flex flex-col gap-1.5">
-          {bot.pullRequests.map((pullRequest) => (
-            <GrokBotPullRequestRow
-              key={`${pullRequest.reference.projectId}:${pullRequest.reference.repository}:${pullRequest.reference.number}`}
-              pullRequest={pullRequest}
-              disabled={disabled}
-              onRemove={() => onRemove(pullRequest.reference)}
-            />
-          ))}
-        </ul>
-      ) : (
-        <p className="text-xs text-muted-foreground">No pull requests linked.</p>
-      )}
-      <div className="flex flex-col gap-2">
-        <Select
-          value={resolvedProjectId}
-          onValueChange={(value) => setProjectId(value ?? "")}
-          disabled={disabled || projects.length === 0}
-        >
-          <SelectTrigger size="sm" className="w-full">
-            <SelectValue>
-              {selectedProject?.title ??
-                (projects.length === 0 ? "No projects" : "Choose a project")}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectPopup>
-            {projects.map((project) => (
-              <SelectItem key={project.id} value={project.id}>
-                {project.title}
-              </SelectItem>
-            ))}
-          </SelectPopup>
-        </Select>
-        <div className="flex gap-2">
-          <Input
-            size="sm"
-            value={url}
-            disabled={disabled}
-            placeholder="https://github.com/org/repo/pull/123"
-            aria-label="GitHub pull request URL"
-            onChange={(event) => setUrl(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                submit();
-              }
-            }}
-          />
-          <Button size="sm" variant="outline" disabled={disabled} onClick={submit}>
-            <LinkIcon />
-            Link
-          </Button>
-        </div>
-        {localError ? <p className="text-xs text-destructive-foreground">{localError}</p> : null}
-      </div>
-    </div>
-  );
-}
-
-function GrokBotPullRequestRow({
-  pullRequest,
-  disabled,
-  onRemove,
-}: {
-  readonly pullRequest: GrokBot["pullRequests"][number];
-  readonly disabled: boolean;
-  readonly onRemove: () => void;
-}) {
-  return (
-    <li className="flex items-start gap-2 rounded-lg border border-border/50 px-2.5 py-2">
-      <div className="min-w-0 flex-1">
-        <a
-          href={pullRequest.url}
-          target="_blank"
-          rel="noreferrer"
-          className="block truncate text-sm font-medium text-foreground hover:underline"
-        >
-          {pullRequest.title ||
-            `${pullRequest.reference.repository}#${pullRequest.reference.number}`}
-        </a>
-        <p className="truncate text-xs text-muted-foreground">
-          {pullRequest.reference.repository}#{pullRequest.reference.number} · {pullRequest.state}
-        </p>
-      </div>
-      <Button
-        size="icon-xs"
-        variant="ghost"
-        disabled={disabled}
-        aria-label="Remove pull request link"
-        onClick={onRemove}
-      >
-        <Trash2Icon />
-      </Button>
-    </li>
   );
 }
 

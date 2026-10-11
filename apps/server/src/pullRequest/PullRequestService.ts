@@ -3470,6 +3470,7 @@ export const make = Effect.gen(function* () {
       if (confirmed?.state !== "merged") return;
       yield* PubSub.publish(mergedPullRequests, {
         projectId: input.projectId,
+        host: ref.host,
         repository,
         number: input.number,
         mergedAt: DateTime.formatIso(yield* DateTime.now),

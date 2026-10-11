@@ -1,15 +1,17 @@
-import { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   compareGrokBots,
-  grokBotPullRequestRefFromUrl,
+  grokBotLegacySettingsRedirect,
+  environmentChangeSearch,
   grokBotSettingsDestinationSearch,
+  providerSelectionSearch,
   grokBotSurfaceKey,
-  isGitHubChangeRequestHost,
-  isGrokBotPullRequestUrl,
+  isGrokBotProviderSelected,
+  settingsSearchResultSearch,
   partitionGrokBotRoster,
-  resolveGrokBotAvatarFill,
+  resolveGrokBotAvatarColor,
   resolveGrokBotAvatarKind,
   resolveGrokBotSelectedEnvironment,
   resolveGrokBotSettingsEnvironment,
@@ -18,6 +20,7 @@ import {
   validateGrokBotConversationSearch,
   validateGrokBotSettingsSearch,
 } from "./grokBotPresentation";
+import { GROK_BOT_PICKER_SHAPES, GROK_BOT_UNKNOWN_SHAPE_KINDS } from "./grokBotAvatarShapes";
 
 function bot(partial: {
   id: string;
@@ -73,71 +76,6 @@ describe("compareGrokBots", () => {
   });
 });
 
-describe("grokBotPullRequestRefFromUrl", () => {
-  const project = {
-    id: ProjectId.make("project-1"),
-    repositoryIdentity: {
-      provider: "github",
-      owner: "acme",
-      name: "widget",
-      canonicalKey: "github.com/acme/widget",
-      locator: {
-        source: "git-remote" as const,
-        remoteName: "origin",
-        remoteUrl: "https://github.com/acme/widget.git",
-      },
-    },
-  };
-
-  it("parses a GitHub pull request URL onto the chosen project", () => {
-    expect(grokBotPullRequestRefFromUrl("https://github.com/acme/widget/pull/42", project)).toEqual(
-      {
-        projectId: "project-1",
-        host: "github.com",
-        repository: "acme/widget",
-        number: 42,
-      },
-    );
-  });
-
-  it("keeps the pasted repository when the number matches another repo", () => {
-    expect(
-      grokBotPullRequestRefFromUrl("https://github.com/other/backend/pull/42", project),
-    ).toEqual({
-      projectId: "project-1",
-      host: "github.com",
-      repository: "other/backend",
-      number: 42,
-    });
-  });
-
-  it("keeps an Enterprise host and repository from the pasted URL", () => {
-    expect(
-      grokBotPullRequestRefFromUrl("https://github.acme.test/platform/api/pull/7", project),
-    ).toEqual({
-      projectId: "project-1",
-      host: "github.acme.test",
-      repository: "platform/api",
-      number: 7,
-    });
-  });
-
-  it("rejects non-GitHub change request URLs", () => {
-    expect(
-      grokBotPullRequestRefFromUrl("https://gitlab.com/acme/widget/-/merge_requests/42", project),
-    ).toBeNull();
-  });
-});
-
-describe("isGitHubChangeRequestHost", () => {
-  it("accepts github.com and Enterprise hosts the URL parser already allows", () => {
-    expect(isGitHubChangeRequestHost("github.com")).toBe(true);
-    expect(isGitHubChangeRequestHost("github.acme.test")).toBe(true);
-    expect(isGrokBotPullRequestUrl("https://github.acme.test/platform/api/pull/7")).toBe(true);
-    expect(isGrokBotPullRequestUrl("https://gitlab.com/acme/widget/pull/42")).toBe(false);
-  });
-});
-
 describe("grokBotSettingsDestinationSearch", () => {
   it("writes the clicked environment onto the settings machine axis", () => {
     expect(
@@ -146,6 +84,7 @@ describe("grokBotSettingsDestinationSearch", () => {
         botId: "dr-chicken",
       }),
     ).toEqual({
+      provider: "grok-bot",
       machine: "env-bot",
       botId: "dr-chicken",
     });
@@ -153,8 +92,13 @@ describe("grokBotSettingsDestinationSearch", () => {
 
   it("omits a machine when the destination has no environment", () => {
     expect(grokBotSettingsDestinationSearch({ botId: "dr-chicken" })).toEqual({
+      provider: "grok-bot",
       botId: "dr-chicken",
     });
+  });
+
+  it("writes the persistent intent even without a bot", () => {
+    expect(grokBotSettingsDestinationSearch({})).toEqual({ provider: "grok-bot" });
   });
 });
 
@@ -253,13 +197,35 @@ describe("grokBotSurfaceKey", () => {
   });
 });
 
-describe("avatar helpers", () => {
-  it("maps known shapes, legacy aliases, and colors", () => {
-    expect(resolveGrokBotAvatarKind("leaf")).toBe("leaf");
-    expect(resolveGrokBotAvatarKind("triangle")).toBe("wedge");
-    expect(resolveGrokBotAvatarFill("violet")).toBe("#9159fe");
-    expect(resolveGrokBotAvatarFill("#8b5cf6")).toBe("#8b5cf6");
-    expect(resolveGrokBotAvatarFill("not-a-color")).toMatch(/^#/);
+describe("avatar look resolution", () => {
+  it("keeps shape and color names the Grok Bot app draws", () => {
+    expect(resolveGrokBotAvatarKind("sparkle", "dr-chicken")).toBe("sparkle");
+    expect(resolveGrokBotAvatarColor("violet", "dr-chicken")).toBe("violet");
+  });
+
+  it("does not map legacy names onto other shapes", () => {
+    expect(resolveGrokBotAvatarKind("triangle", "bot-a")).toBe("tablet");
+    expect(resolveGrokBotAvatarColor("purple", "bot-a")).toBe("orange");
+  });
+
+  it("chooses an unknown shape from the bot id, matching the Grok Bot app", () => {
+    expect(resolveGrokBotAvatarKind("not-a-shape", "dr-chicken")).toBe("teardrop");
+    expect(resolveGrokBotAvatarKind("not-a-shape", "bot-a")).toBe("tablet");
+    expect(GROK_BOT_UNKNOWN_SHAPE_KINDS).toContain(resolveGrokBotAvatarKind("x", "anything"));
+  });
+
+  it("chooses an unknown color from the bot id, never black", () => {
+    expect(resolveGrokBotAvatarColor("not-a-color", "dr-chicken")).toBe("red");
+    expect(resolveGrokBotAvatarColor("not-a-color", "bot-a")).toBe("orange");
+    expect(resolveGrokBotAvatarColor("not-a-color", "sol")).not.toBe("black");
+  });
+});
+
+describe("avatar picker", () => {
+  it("offers the thirteen shapes of the Grok Bot character editor", () => {
+    expect(GROK_BOT_PICKER_SHAPES).toHaveLength(13);
+    expect(GROK_BOT_PICKER_SHAPES).toContain("house");
+    expect(GROK_BOT_PICKER_SHAPES).toContain("hex");
   });
 });
 
@@ -275,8 +241,174 @@ describe("validateGrokBotConversationSearch", () => {
 describe("validateGrokBotSettingsSearch", () => {
   it("keeps a selected bot", () => {
     expect(validateGrokBotSettingsSearch({ botId: "dr-chicken" })).toEqual({
+      provider: "grok-bot",
       botId: "dr-chicken",
     });
+    expect(validateGrokBotSettingsSearch({ provider: "grok-bot" })).toEqual({
+      provider: "grok-bot",
+    });
+    expect(validateGrokBotSettingsSearch({ provider: "codex" })).toEqual({});
     expect(validateGrokBotSettingsSearch({})).toEqual({});
+  });
+});
+
+describe("isGrokBotProviderSelected", () => {
+  const base = {
+    instanceId: undefined,
+    instanceDriver: undefined,
+    botId: undefined,
+    provider: undefined,
+    searchTargetId: null,
+    grokBotDriver: "grok-bot",
+  };
+  it("selects Grok Bot for a bot link or search target without an instance", () => {
+    expect(isGrokBotProviderSelected({ ...base, botId: "b1" })).toBe(true);
+    expect(isGrokBotProviderSelected({ ...base, searchTargetId: "grok-bots-editor" })).toBe(true);
+    expect(isGrokBotProviderSelected(base)).toBe(false);
+  });
+  it("selects Grok Bot from the persistent intent after the target hash is cleared", () => {
+    expect(isGrokBotProviderSelected({ ...base, provider: "grok-bot" })).toBe(true);
+  });
+  it("lets a standard provider win over a stale intent", () => {
+    expect(
+      isGrokBotProviderSelected({
+        ...base,
+        provider: "grok-bot",
+        instanceId: "codex",
+        instanceDriver: "codex",
+      }),
+    ).toBe(false);
+  });
+  it("lets an explicit instance win over a bot id", () => {
+    expect(
+      isGrokBotProviderSelected({
+        ...base,
+        instanceId: "codex",
+        instanceDriver: "codex",
+        botId: "b1",
+        searchTargetId: "grok-bots-editor",
+      }),
+    ).toBe(false);
+    expect(
+      isGrokBotProviderSelected({ ...base, instanceId: "grok-bot", instanceDriver: "grok-bot" }),
+    ).toBe(true);
+  });
+});
+
+describe("account-bound Grok Bot instance", () => {
+  it("is selected by its real instance id once its driver is known", () => {
+    expect(
+      isGrokBotProviderSelected({
+        instanceId: "grok-bot-86778c829250337927602dbb67889af4",
+        instanceDriver: "grok-bot",
+        botId: undefined,
+        provider: undefined,
+        searchTargetId: null,
+        grokBotDriver: "grok-bot",
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("grokBotLegacySettingsRedirect", () => {
+  it("drops a stale Codex instance and keeps machine and bot, defaulting the hash", () => {
+    expect(
+      grokBotLegacySettingsRedirect({
+        previousSearch: { instanceId: "codex", machine: "env-1" },
+        search: { botId: "b1" },
+        hash: "",
+      }),
+    ).toEqual({
+      search: { machine: "env-1", botId: "b1", provider: "grok-bot" },
+      hash: "grok-bots-editor",
+    });
+  });
+  it("drops an instance carried by the incoming search too", () => {
+    expect(
+      grokBotLegacySettingsRedirect({
+        previousSearch: {},
+        search: { botId: "b1", instanceId: "codex" } as never,
+        hash: "",
+      }).search,
+    ).toEqual({ botId: "b1", provider: "grok-bot" });
+  });
+  it("keeps an explicit hash", () => {
+    expect(
+      grokBotLegacySettingsRedirect({ previousSearch: {}, search: {}, hash: "grok-bots-pinned" })
+        .hash,
+    ).toBe("grok-bots-pinned");
+  });
+});
+
+describe("providerSelectionSearch", () => {
+  it("clears the intent and stale bot when a standard provider is picked", () => {
+    expect(
+      providerSelectionSearch(
+        { machine: "env-1", provider: "grok-bot", botId: "b1" },
+        { instanceId: "codex", isGrokBot: false },
+      ),
+    ).toEqual({ machine: "env-1", instanceId: "codex" });
+  });
+  it("keeps the intent and bot when the Grok Bot instance is picked", () => {
+    expect(
+      providerSelectionSearch(
+        { machine: "env-1", botId: "b1" },
+        { instanceId: "grok-bot-abc", isGrokBot: true },
+      ),
+    ).toEqual({ machine: "env-1", botId: "b1", provider: "grok-bot", instanceId: "grok-bot-abc" });
+  });
+});
+
+describe("environmentChangeSearch", () => {
+  it("keeps only the intent when Grok Bot is selected", () => {
+    expect(
+      environmentChangeSearch({ machine: "env-2" }, { provider: "grok-bot", botId: "b1" }),
+    ).toEqual({ machine: "env-2", provider: "grok-bot" });
+  });
+  it("adds nothing for a standard provider", () => {
+    expect(environmentChangeSearch({ machine: "env-2" }, {})).toEqual({ machine: "env-2" });
+  });
+  it("keeps the intent for a selected Grok Bot instance without a provider query", () => {
+    expect(
+      environmentChangeSearch(
+        { machine: "env-2" },
+        { instanceId: "grok-bot-abc", instanceDriver: "grok-bot" },
+      ),
+    ).toEqual({ machine: "env-2", provider: "grok-bot" });
+  });
+  it("keeps the intent when the source machine is absent and the query names only the intent", () => {
+    // No resolved environment means no driver is known, so only the query can carry the selection.
+    expect(environmentChangeSearch({ machine: "env-2" }, { provider: "grok-bot" })).toEqual({
+      machine: "env-2",
+      provider: "grok-bot",
+    });
+  });
+  it("drops an unresolvable instance when the source machine is absent", () => {
+    expect(environmentChangeSearch({ machine: "env-2" }, { instanceId: "grok-bot-abc" })).toEqual({
+      machine: "env-2",
+    });
+  });
+  it("lets an explicit Codex instance beat a stale intent", () => {
+    expect(
+      environmentChangeSearch(
+        { machine: "env-2" },
+        { provider: "grok-bot", instanceId: "codex", instanceDriver: "codex" },
+      ),
+    ).toEqual({ machine: "env-2" });
+  });
+});
+
+describe("settingsSearchResultSearch", () => {
+  it.each(["grok-bots", "grok-bots-bridge", "grok-bots-editor", "grok-bots-computer"])(
+    "selects Grok Bot and drops a stale instance for %s",
+    (id) => {
+      expect(
+        settingsSearchResultSearch(id, { machine: "env-1", instanceId: "codex", botId: "b1" }),
+      ).toEqual({ machine: "env-1", botId: "b1", provider: "grok-bot" });
+    },
+  );
+  it("leaves other results untouched", () => {
+    const previous = { machine: "env-1", instanceId: "codex" };
+    expect(settingsSearchResultSearch("providers", previous)).toBe(previous);
   });
 });

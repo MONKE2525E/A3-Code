@@ -14,9 +14,11 @@ import {
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   type OrchestrationV2TurnItem,
+  type ThreadId,
   ProviderDriverKind,
   ProviderInstanceId,
   PlanId,
+  type ProviderSessionId,
   type ProviderThreadId,
   ProviderTurnId,
   RunAttemptId,
@@ -240,6 +242,92 @@ it.effect("records accepted billed turn usage once without billing the context w
     });
   }).pipe(Effect.provide(layerTest.pipe(Layer.provide(layerAnalytics))));
 });
+
+const nativeWidgetDriver = ProviderDriverKind.make("grok-bot");
+const nativeWidgetInstance = ProviderInstanceId.make("grok-bot");
+
+const nativeWidgetQuestion = {
+  id: "native-widget-entry",
+  header: "Question",
+  question: "Which workspace?",
+  options: [{ label: "Existing", description: "Existing" }],
+  multiSelect: false,
+  allowCustomAnswer: true,
+};
+
+// One native question card as a provider reports it: request, node, and turn item sharing a
+// stable native id. Message capability without a session models legacy grok-bot observations.
+const nativeWidgetCard = (input: {
+  readonly driver: ProviderDriverKind;
+  readonly threadId: ThreadId;
+  readonly providerThreadId: ProviderThreadId;
+  readonly requestId: RuntimeRequestId;
+  readonly nativeId: string;
+  readonly capability: OrchestrationV2RuntimeRequest["responseCapability"];
+  readonly state: "pending" | "resolved" | "cancelled";
+  readonly now: DateTime.Utc;
+}) => {
+  const nodeId = NodeId.make(`${input.requestId}:node`);
+  const nativeItemRef = {
+    driver: input.driver,
+    nativeId: input.nativeId,
+    strength: "strong" as const,
+  };
+  const settled = input.state !== "pending";
+  const answers = { [nativeWidgetQuestion.id]: "Use a new workspace" };
+  const request: OrchestrationV2RuntimeRequest = {
+    id: input.requestId,
+    nodeId,
+    providerTurnId: null,
+    nativeRequestRef: nativeItemRef,
+    kind: "user_input",
+    status: input.state,
+    responseCapability: input.capability,
+    createdAt: input.now,
+    resolvedAt: settled ? input.now : null,
+    ...(input.state === "resolved" ? { answers } : {}),
+  };
+  const nodeStatus =
+    input.state === "pending" ? "waiting" : input.state === "resolved" ? "completed" : "cancelled";
+  const node: OrchestrationV2ExecutionNode = {
+    id: nodeId,
+    threadId: input.threadId,
+    runId: null,
+    parentNodeId: null,
+    rootNodeId: nodeId,
+    kind: "user_input_request",
+    status: nodeStatus,
+    countsForRun: false,
+    providerThreadId: input.providerThreadId,
+    providerTurnId: null,
+    nativeItemRef,
+    runtimeRequestId: input.requestId,
+    checkpointScopeId: null,
+    startedAt: input.now,
+    completedAt: settled ? input.now : null,
+  };
+  const item: OrchestrationV2TurnItem = {
+    id: TurnItemId.make(`${input.requestId}:item`),
+    threadId: input.threadId,
+    runId: null,
+    nodeId,
+    providerThreadId: input.providerThreadId,
+    providerTurnId: null,
+    nativeItemRef,
+    parentItemId: null,
+    ordinal: 0,
+    status: nodeStatus,
+    title: null,
+    startedAt: input.now,
+    completedAt: settled ? input.now : null,
+    updatedAt: input.now,
+    type: "user_input_request",
+    requestId: input.requestId,
+    questions: [nativeWidgetQuestion],
+  };
+  return { request, node, item };
+};
+type NativeWidgetCard = ReturnType<typeof nativeWidgetCard>;
 
 layer("ProviderEventIngestorV2", (it) => {
   it.effect("normalizes provider events through the real event log and projection store", () =>
@@ -1345,6 +1433,727 @@ layer("ProviderEventIngestorV2", (it) => {
           );
         }),
       ),
+  );
+
+  it.effect(
+    "keeps a chat-recorded native question answer against cancelled artifacts ingested before cleanup",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const eventSink = yield* EventSink.EventSinkV2;
+          const eventStore = yield* EventStore.EventStoreV2;
+          const projections = yield* ProjectionStore.ProjectionStoreV2;
+          const idAllocator = yield* IdAllocator.IdAllocatorV2;
+          const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+          const now = yield* DateTime.now;
+          const threadEvent = yield* threadCreatedEvent(now);
+          const threadId = threadEvent.threadId;
+          const driver = ProviderDriverKind.make("grok-bot");
+          const providerInstanceId = ProviderInstanceId.make("grok-bot");
+          const providerSessionId = yield* idAllocator.allocate.providerSession({
+            providerInstanceId,
+            threadId,
+          });
+          const providerThreadId = idAllocator.derive.providerThread({
+            driver,
+            nativeThreadId: `${threadId}:native-question`,
+          });
+          const nodeId = NodeId.make(`${threadId}:native-question`);
+          const requestId = RuntimeRequestId.make(`${threadId}:native-question`);
+          const question = {
+            id: "native-question-entry",
+            header: "Question",
+            question: "Which workspace?",
+            options: [{ label: "Existing", description: "Existing" }],
+            multiSelect: false,
+            allowCustomAnswer: true,
+          };
+          const native = {
+            driver,
+            threadId,
+            nativeItemRef: {
+              driver,
+              nativeId: "widget/native-question-entry",
+              strength: "strong" as const,
+            },
+          };
+          const request: OrchestrationV2RuntimeRequest = {
+            id: requestId,
+            nodeId,
+            providerTurnId: null,
+            nativeRequestRef: native.nativeItemRef,
+            kind: "user_input",
+            status: "pending",
+            responseCapability: { type: "message", providerSessionId },
+            createdAt: now,
+            resolvedAt: null,
+          };
+          const node: OrchestrationV2ExecutionNode = {
+            id: nodeId,
+            threadId,
+            runId: null,
+            parentNodeId: null,
+            rootNodeId: nodeId,
+            kind: "user_input_request",
+            status: "waiting",
+            countsForRun: false,
+            providerThreadId,
+            providerTurnId: null,
+            nativeItemRef: native.nativeItemRef,
+            runtimeRequestId: requestId,
+            checkpointScopeId: null,
+            startedAt: now,
+            completedAt: null,
+          };
+          const item: OrchestrationV2TurnItem = {
+            id: TurnItemId.make(`${threadId}:native-question-item`),
+            threadId,
+            runId: null,
+            nodeId,
+            providerThreadId,
+            providerTurnId: null,
+            nativeItemRef: native.nativeItemRef,
+            parentItemId: null,
+            ordinal: 0,
+            status: "waiting",
+            title: null,
+            startedAt: now,
+            completedAt: null,
+            updatedAt: now,
+            type: "user_input_request",
+            requestId,
+            questions: [question],
+          };
+          const seedEvents: Array<OrchestrationV2DomainEvent> = [threadEvent];
+          for (const payload of [
+            { type: "runtime-request.updated" as const, payload: request },
+            { type: "node.updated" as const, payload: node },
+            { type: "turn-item.updated" as const, payload: item },
+          ])
+            seedEvents.push({
+              id: yield* idAllocator.allocate.event({ threadId }),
+              threadId,
+              occurredAt: now,
+              ...payload,
+            });
+          yield* eventSink.write({ events: seedEvents });
+
+          // The orchestrator commits a chat answer locally before the native card is cleaned up.
+          const answers = { [question.id]: "Use a new workspace" };
+          const recordedEvents: Array<OrchestrationV2DomainEvent> = [];
+          for (const payload of [
+            {
+              type: "runtime-request.updated" as const,
+              payload: { ...request, status: "resolved" as const, answers, resolvedAt: now },
+            },
+            {
+              type: "node.updated" as const,
+              payload: { ...node, status: "completed" as const, completedAt: now },
+            },
+            {
+              type: "turn-item.updated" as const,
+              payload: {
+                ...item,
+                status: "completed" as const,
+                completedAt: now,
+                updatedAt: now,
+                questionAnswer: {
+                  requestId,
+                  answers,
+                  attachmentsByQuestionId: {},
+                  questionTextById: { [question.id]: question.question },
+                },
+              },
+            },
+          ])
+            recordedEvents.push({
+              id: yield* idAllocator.allocate.event({ threadId }),
+              threadId,
+              occurredAt: now,
+              ...payload,
+            });
+          yield* eventSink.write({ events: recordedEvents });
+
+          // Native then reports the same card as cancelled, as a supersede or delete would.
+          const nativeCancelled = [
+            {
+              type: "runtime_request.updated" as const,
+              driver,
+              threadId,
+              runtimeRequest: { ...request, status: "cancelled" as const, resolvedAt: now },
+            },
+            {
+              type: "node.updated" as const,
+              driver,
+              node: { ...node, status: "cancelled" as const, completedAt: now },
+            },
+            {
+              type: "turn_item.updated" as const,
+              driver,
+              turnItem: { ...item, status: "cancelled" as const, completedAt: now, updatedAt: now },
+            },
+          ];
+          for (const event of nativeCancelled) {
+            yield* ingestor.ingestNormalized({
+              providerSessionId,
+              providerInstanceId,
+              threadId,
+              event,
+            });
+          }
+
+          const projection = yield* projections.getThreadProjection(threadId);
+          const answered = projection.runtimeRequests.find((entry) => entry.id === requestId)!;
+          assert.equal(answered.status, "resolved");
+          assert.deepEqual(answered.answers, answers);
+          assert.equal(projection.nodes.find((entry) => entry.id === nodeId)!.status, "completed");
+          const recorded = projection.turnItems.find((entry) => entry.id === item.id)!;
+          assert.equal(recorded.status, "completed");
+          assert.equal(
+            recorded.type === "user_input_request" ? recorded.questionAnswer?.requestId : undefined,
+            requestId,
+          );
+          assert.deepEqual(
+            recorded.type === "user_input_request" ? recorded.questionAnswer?.answers : undefined,
+            answers,
+          );
+          const history = yield* eventStore.read({ threadId }).pipe(Stream.runCollect);
+          assert.isFalse(
+            history.some(
+              (stored) =>
+                (stored.event.type === "runtime-request.updated" &&
+                  stored.event.payload.status === "cancelled") ||
+                (stored.event.type === "turn-item.updated" &&
+                  stored.event.payload.status === "cancelled"),
+            ),
+          );
+        }),
+      ),
+  );
+
+  const writeNativeWidgetCards = (threadId: ThreadId, cards: ReadonlyArray<NativeWidgetCard>) =>
+    Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const events: Array<OrchestrationV2DomainEvent> = [];
+      for (const card of cards)
+        for (const payload of [
+          { type: "runtime-request.updated" as const, payload: card.request },
+          { type: "node.updated" as const, payload: card.node },
+          { type: "turn-item.updated" as const, payload: card.item },
+        ])
+          events.push({
+            id: yield* idAllocator.allocate.event({ threadId }),
+            threadId,
+            occurredAt: card.request.createdAt,
+            ...payload,
+          });
+      yield* eventSink.write({ events });
+    });
+
+  // Replays one native card the way a provider reports it: request, then node, then turn item.
+  const ingestNativeWidgetCard = (input: {
+    readonly driver: ProviderDriverKind;
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly providerSessionId: ProviderSessionId;
+    readonly threadId: ThreadId;
+    readonly card: NativeWidgetCard;
+  }) =>
+    Effect.gen(function* () {
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const { driver, providerInstanceId, providerSessionId, threadId, card } = input;
+      const base = { providerSessionId, providerInstanceId, threadId };
+      yield* ingestor.ingestNormalized({
+        ...base,
+        event: {
+          type: "runtime_request.updated",
+          driver,
+          threadId,
+          runtimeRequest: card.request,
+        },
+      });
+      yield* ingestor.ingestNormalized({
+        ...base,
+        event: { type: "node.updated", driver, node: card.node },
+      });
+      yield* ingestor.ingestNormalized({
+        ...base,
+        event: { type: "turn_item.updated", driver, turnItem: card.item },
+      });
+    });
+
+  const nativeWidgetThread = Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const threadEvent = yield* threadCreatedEvent(now);
+    const eventSink = yield* EventSink.EventSinkV2;
+    yield* eventSink.write({ events: [threadEvent] });
+    const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    const providerSessionId = yield* idAllocator.allocate.providerSession({
+      providerInstanceId: nativeWidgetInstance,
+      threadId: threadEvent.threadId,
+    });
+    const providerThreadId = idAllocator.derive.providerThread({
+      driver: nativeWidgetDriver,
+      nativeThreadId: `${threadEvent.threadId}:native-widget`,
+    });
+    return { now, threadId: threadEvent.threadId, providerSessionId, providerThreadId };
+  });
+
+  it.effect(
+    "cancels legacy duplicate native widget questions when the latest stable widget is observed",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const projections = yield* ProjectionStore.ProjectionStoreV2;
+          const { now, threadId, providerSessionId, providerThreadId } = yield* nativeWidgetThread;
+          const card = (
+            requestId: string,
+            capability: NativeWidgetCard["request"]["responseCapability"],
+            state: "pending" | "resolved" | "cancelled",
+          ) =>
+            nativeWidgetCard({
+              driver: nativeWidgetDriver,
+              threadId,
+              providerThreadId,
+              requestId: RuntimeRequestId.make(`${threadId}:${requestId}`),
+              nativeId: "widget/entry-1",
+              capability,
+              state,
+              now,
+            });
+          const legacyA = card("legacy-a", { type: "message" }, "pending");
+          const legacyB = card("legacy-b", { type: "message" }, "pending");
+          const answered = card("answered", { type: "message" }, "resolved");
+          yield* writeNativeWidgetCards(threadId, [legacyA, legacyB, answered]);
+
+          const latest = card("latest", { type: "message", providerSessionId }, "pending");
+          yield* ingestNativeWidgetCard({
+            driver: nativeWidgetDriver,
+            providerInstanceId: nativeWidgetInstance,
+            providerSessionId,
+            threadId,
+            card: latest,
+          });
+
+          const projection = yield* projections.getThreadProjection(threadId);
+          const request = (card: NativeWidgetCard) =>
+            projection.runtimeRequests.find((entry) => entry.id === card.request.id)!;
+          const node = (card: NativeWidgetCard) =>
+            projection.nodes.find((entry) => entry.id === card.node.id)!;
+          const item = (card: NativeWidgetCard) =>
+            projection.turnItems.find((entry) => entry.id === card.item.id)!;
+          for (const legacy of [legacyA, legacyB]) {
+            assert.equal(request(legacy).status, "cancelled");
+            assert.equal(node(legacy).status, "cancelled");
+            assert.equal(item(legacy).status, "cancelled");
+          }
+          assert.equal(request(latest).status, "pending");
+          assert.equal(request(answered).status, "resolved");
+          assert.deepEqual(request(answered).answers, answered.request.answers);
+          assert.equal(node(answered).status, "completed");
+        }),
+      ),
+  );
+
+  it.effect("keeps closed native widget cards closed when a stale pending replay arrives", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const { now, threadId, providerSessionId, providerThreadId } = yield* nativeWidgetThread;
+        const card = (
+          requestId: string,
+          capability: NativeWidgetCard["request"]["responseCapability"],
+          state: "pending" | "resolved" | "cancelled",
+        ) =>
+          nativeWidgetCard({
+            driver: nativeWidgetDriver,
+            threadId,
+            providerThreadId,
+            requestId: RuntimeRequestId.make(`${threadId}:${requestId}`),
+            nativeId: "widget/entry-1",
+            capability,
+            state,
+            now,
+          });
+        const legacy = card("legacy", { type: "message" }, "pending");
+        const answered = card("answered", { type: "message" }, "resolved");
+        yield* writeNativeWidgetCards(threadId, [legacy, answered]);
+        const latest = card("latest", { type: "message", providerSessionId }, "pending");
+        const ingest = (target: NativeWidgetCard) =>
+          ingestNativeWidgetCard({
+            driver: nativeWidgetDriver,
+            providerInstanceId: nativeWidgetInstance,
+            providerSessionId,
+            threadId,
+            card: target,
+          });
+        yield* ingest(latest);
+
+        // Native replays the superseded cards as still pending after the latest one is current.
+        yield* ingest(card("legacy", { type: "message" }, "pending"));
+        yield* ingest(card("answered", { type: "message" }, "pending"));
+
+        const projection = yield* projections.getThreadProjection(threadId);
+        const request = (target: NativeWidgetCard) =>
+          projection.runtimeRequests.find((entry) => entry.id === target.request.id)!;
+        const node = (target: NativeWidgetCard) =>
+          projection.nodes.find((entry) => entry.id === target.node.id)!;
+        assert.equal(request(legacy).status, "cancelled");
+        assert.equal(node(legacy).status, "cancelled");
+        assert.equal(request(answered).status, "resolved");
+        assert.deepEqual(request(answered).answers, answered.request.answers);
+        assert.equal(node(answered).status, "completed");
+        assert.equal(request(latest).status, "pending");
+      }),
+    ),
+  );
+
+  it.effect(
+    "retires every pending native widget duplicate when the latest stable widget is already settled",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const projections = yield* ProjectionStore.ProjectionStoreV2;
+          for (const state of ["resolved", "cancelled"] as const) {
+            const { now, threadId, providerSessionId, providerThreadId } =
+              yield* nativeWidgetThread;
+            const card = (
+              requestId: string,
+              capability: NativeWidgetCard["request"]["responseCapability"],
+              cardState: "pending" | "resolved" | "cancelled",
+            ) =>
+              nativeWidgetCard({
+                driver: nativeWidgetDriver,
+                threadId,
+                providerThreadId,
+                requestId: RuntimeRequestId.make(`${threadId}:${requestId}`),
+                nativeId: "widget/entry-1",
+                capability,
+                state: cardState,
+                now,
+              });
+            const legacyA = card("legacy-a", { type: "message" }, "pending");
+            const legacyB = card("legacy-b", { type: "message" }, "pending");
+            const answered = card("answered", { type: "message" }, "resolved");
+            yield* writeNativeWidgetCards(threadId, [legacyA, legacyB, answered]);
+
+            const latest = card("latest", { type: "message", providerSessionId }, state);
+            yield* ingestNativeWidgetCard({
+              driver: nativeWidgetDriver,
+              providerInstanceId: nativeWidgetInstance,
+              providerSessionId,
+              threadId,
+              card: latest,
+            });
+            // Native replays the chat-answered card as pending after the latest one settled.
+            yield* ingestNativeWidgetCard({
+              driver: nativeWidgetDriver,
+              providerInstanceId: nativeWidgetInstance,
+              providerSessionId,
+              threadId,
+              card: card("answered", { type: "message" }, "pending"),
+            });
+
+            const projection = yield* projections.getThreadProjection(threadId);
+            const request = (target: NativeWidgetCard) =>
+              projection.runtimeRequests.find((entry) => entry.id === target.request.id)!;
+            assert.equal(request(legacyA).status, "cancelled");
+            assert.equal(request(legacyB).status, "cancelled");
+            // A cancelled card the projection has never seen has nothing to close, so no request is recorded.
+            assert.equal(
+              projection.runtimeRequests.find((entry) => entry.id === latest.request.id)?.status,
+              state === "resolved" ? "resolved" : undefined,
+            );
+            assert.equal(request(answered).status, "resolved");
+            assert.deepEqual(request(answered).answers, answered.request.answers);
+            assert.deepEqual(
+              projection.runtimeRequests.filter((entry) => entry.status === "pending"),
+              [],
+            );
+          }
+        }),
+      ),
+  );
+
+  const activeNativeWidget = Effect.gen(function* () {
+    const fixture = yield* nativeWidgetThread;
+    const { now, threadId, providerThreadId, providerSessionId } = fixture;
+    const ids = yield* IdAllocator.IdAllocatorV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const runId = RunId.make(threadId + ":active-run");
+    const attemptId = RunAttemptId.make(threadId + ":active-attempt");
+    const rootNodeId = NodeId.make(threadId + ":active-root");
+    const providerTurnId = ProviderTurnId.make(threadId + ":active-turn");
+    yield* sink.write({
+      events: [
+        {
+          id: yield* ids.allocate.event({ threadId }),
+          type: "run.created",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: runId,
+            threadId,
+            ordinal: 1,
+            providerInstanceId: nativeWidgetInstance,
+            modelSelection: { instanceId: nativeWidgetInstance, model: "bot" },
+            providerThreadId,
+            userMessageId: MessageId.make(threadId + ":user"),
+            rootNodeId,
+            activeAttemptId: attemptId,
+            status: "running",
+            requestedAt: now,
+            startedAt: now,
+            completedAt: null,
+            checkpointId: null,
+            contextHandoffId: null,
+          },
+        },
+        {
+          id: yield* ids.allocate.event({ threadId }),
+          type: "provider-turn.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: providerTurnId,
+            providerThreadId,
+            nodeId: rootNodeId,
+            runAttemptId: attemptId,
+            nativeTurnRef: null,
+            ordinal: 1,
+            status: "running",
+            startedAt: now,
+            completedAt: null,
+          },
+        },
+      ],
+    });
+    const base = nativeWidgetCard({
+      driver: nativeWidgetDriver,
+      threadId,
+      providerThreadId,
+      requestId: RuntimeRequestId.make(threadId + ":owned"),
+      nativeId: "widget/latest",
+      capability: { type: "message", providerSessionId },
+      state: "pending",
+      now,
+    });
+    const owned = {
+      request: { ...base.request, providerTurnId },
+      node: {
+        ...base.node,
+        runId,
+        providerTurnId,
+        parentNodeId: rootNodeId,
+        rootNodeId,
+        countsForRun: true,
+      },
+      item: { ...base.item, runId, providerTurnId },
+    };
+    return { ...fixture, owned };
+  });
+
+  it.effect("does not let an older runless replay retire a current managed widget", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { threadId, now, providerThreadId, providerSessionId, owned } =
+          yield* activeNativeWidget;
+        yield* writeNativeWidgetCards(threadId, [owned]);
+        const older = nativeWidgetCard({
+          driver: nativeWidgetDriver,
+          threadId,
+          providerThreadId,
+          requestId: RuntimeRequestId.make(threadId + ":old-replay"),
+          nativeId: "widget/older",
+          capability: { type: "message", providerSessionId },
+          state: "pending",
+          now,
+        });
+        yield* ingestNativeWidgetCard({
+          driver: nativeWidgetDriver,
+          providerInstanceId: nativeWidgetInstance,
+          providerSessionId,
+          threadId,
+          card: older,
+        });
+        const projection = yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadProjection(
+          threadId,
+        );
+        assert.equal(
+          projection.runtimeRequests.find((r) => r.id === owned.request.id)?.status,
+          "pending",
+        );
+        assert.equal(projection.turnItems.find((r) => r.id === owned.item.id)?.status, "waiting");
+      }),
+    ),
+  );
+
+  it.effect(
+    "recovers an exact active widget after local cancellation but preserves recorded answers",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const { threadId, now, providerSessionId, owned } = yield* activeNativeWidget;
+          const cancelled = {
+            request: {
+              ...owned.request,
+              providerTurnId: null,
+              status: "cancelled" as const,
+              resolvedAt: now,
+            },
+            node: { ...owned.node, status: "cancelled" as const, completedAt: now },
+            item: { ...owned.item, status: "cancelled" as const, completedAt: now },
+          };
+          yield* writeNativeWidgetCards(threadId, [cancelled]);
+          const ingest = (card: NativeWidgetCard) =>
+            ingestNativeWidgetCard({
+              driver: nativeWidgetDriver,
+              providerInstanceId: nativeWidgetInstance,
+              providerSessionId,
+              threadId,
+              card,
+            });
+          const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+          yield* ingestor.ingestNormalized({
+            providerSessionId,
+            providerInstanceId: nativeWidgetInstance,
+            threadId,
+            event: { type: "node.updated", driver: nativeWidgetDriver, node: owned.node },
+          });
+          yield* ingest(owned);
+          const projections = yield* ProjectionStore.ProjectionStoreV2;
+          let projection = yield* projections.getThreadProjection(threadId);
+          assert.equal(
+            projection.runtimeRequests.find((r) => r.id === owned.request.id)?.status,
+            "pending",
+          );
+          assert.equal(projection.turnItems.find((r) => r.id === owned.item.id)?.status, "waiting");
+          assert.equal(projection.nodes.find((r) => r.id === owned.node.id)?.status, "waiting");
+          yield* writeNativeWidgetCards(threadId, [
+            {
+              ...owned,
+              request: {
+                ...owned.request,
+                status: "resolved",
+                resolvedAt: now,
+                answers: { answer: "saved" },
+              },
+              node: { ...owned.node, status: "completed", completedAt: now },
+              item: { ...owned.item, status: "completed", completedAt: now },
+            },
+          ]);
+          yield* ingest(owned);
+          projection = yield* projections.getThreadProjection(threadId);
+          assert.equal(
+            projection.runtimeRequests.find((r) => r.id === owned.request.id)?.status,
+            "resolved",
+          );
+          assert.deepEqual(
+            projection.runtimeRequests.find((r) => r.id === owned.request.id)?.answers,
+            { answer: "saved" },
+          );
+        }),
+      ),
+  );
+
+  it.effect("moves a pending native widget question to its newest provider session", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const { now, threadId, providerSessionId, providerThreadId } = yield* nativeWidgetThread;
+        const newerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: nativeWidgetInstance,
+          threadId,
+        });
+        const latest = (sessionId: typeof providerSessionId) =>
+          nativeWidgetCard({
+            driver: nativeWidgetDriver,
+            threadId,
+            providerThreadId,
+            requestId: RuntimeRequestId.make(`${threadId}:latest`),
+            nativeId: "widget/entry-1",
+            capability: { type: "message", providerSessionId: sessionId },
+            state: "pending",
+            now,
+          });
+        for (const sessionId of [providerSessionId, newerSessionId]) {
+          yield* ingestNativeWidgetCard({
+            driver: nativeWidgetDriver,
+            providerInstanceId: nativeWidgetInstance,
+            providerSessionId: sessionId,
+            threadId,
+            card: latest(sessionId),
+          });
+        }
+
+        const projection = yield* projections.getThreadProjection(threadId);
+        const request = projection.runtimeRequests.find(
+          (entry) => entry.id === RuntimeRequestId.make(`${threadId}:latest`),
+        )!;
+        assert.equal(request.status, "pending");
+        assert.deepEqual(request.responseCapability, {
+          type: "message",
+          providerSessionId: newerSessionId,
+        });
+      }),
+    ),
+  );
+
+  it.effect("keeps ordinary unbound message questions pending against native cancellation", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const { now, threadId, providerSessionId, providerThreadId } = yield* nativeWidgetThread;
+        const codexDriver = ProviderDriverKind.make("codex");
+        const codexInstance = ProviderInstanceId.make("codex");
+        const plain = nativeWidgetCard({
+          driver: nativeWidgetDriver,
+          threadId,
+          providerThreadId,
+          requestId: RuntimeRequestId.make(`${threadId}:plain`),
+          nativeId: "question/plain",
+          capability: { type: "message" },
+          state: "pending",
+          now,
+        });
+        const otherProvider = nativeWidgetCard({
+          driver: codexDriver,
+          threadId,
+          providerThreadId,
+          requestId: RuntimeRequestId.make(`${threadId}:other-provider`),
+          nativeId: "widget/entry-2",
+          capability: { type: "message" },
+          state: "pending",
+          now,
+        });
+        yield* writeNativeWidgetCards(threadId, [plain, otherProvider]);
+
+        for (const [driver, providerInstanceId, target] of [
+          [nativeWidgetDriver, nativeWidgetInstance, plain],
+          [codexDriver, codexInstance, otherProvider],
+        ] as const)
+          yield* ingestor.ingestNormalized({
+            providerSessionId,
+            providerInstanceId,
+            threadId,
+            event: {
+              type: "runtime_request.updated",
+              driver,
+              threadId,
+              runtimeRequest: { ...target.request, status: "cancelled", resolvedAt: now },
+            },
+          });
+
+        const projection = yield* projections.getThreadProjection(threadId);
+        for (const target of [plain, otherProvider])
+          assert.equal(
+            projection.runtimeRequests.find((entry) => entry.id === target.request.id)!.status,
+            "pending",
+          );
+      }),
+    ),
   );
 
   it.effect("persists a failed provider terminal as one expected error item", () =>

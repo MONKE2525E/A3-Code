@@ -461,6 +461,25 @@ describe("sidebar thread lineage helpers", () => {
     expect(isSidebarSubagentThread(makeThreadFixture())).toBe(false);
   });
 
+  it("keeps Grok Bot work threads out of the sidebar, including when they sit in a project", () => {
+    const environmentId = EnvironmentId.make("environment-a");
+    const projectId = ProjectId.make("project-a");
+    const ordinary = makeThreadFixture({
+      id: ThreadId.make("thread-ordinary"),
+      environmentId,
+      projectId,
+    });
+    const botWork = makeThreadFixture({
+      id: ThreadId.make("grok-bot:9f2c"),
+      environmentId,
+      projectId,
+    });
+
+    expect(filterSidebarV2VisibleThreads([ordinary, botWork], null).map((t) => t.id)).toEqual([
+      ordinary.id,
+    ]);
+  });
+
   it("resolves the parent thread for fork sidebar affordances", () => {
     const parentId = ThreadId.make("thread-parent");
     const fallbackParentId = ThreadId.make("thread-fallback-parent");

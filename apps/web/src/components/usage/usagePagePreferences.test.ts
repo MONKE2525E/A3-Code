@@ -76,3 +76,14 @@ describe("Usage page preferences", () => {
     expect(() => saveUsagePagePreferences({ metric: "tokens", windowDays: 7 })).not.toThrow();
   });
 });
+
+describe("Usage page limits-only driver filter", () => {
+  it("round-trips hidden limits-only drivers", () => {
+    saveUsagePagePreferences({
+      metric: "limits",
+      windowDays: 30,
+      hiddenLimitDrivers: ["grok-bot"],
+    });
+    expect(readUsagePagePreferences().hiddenLimitDrivers).toEqual(["grok-bot"]);
+  });
+});

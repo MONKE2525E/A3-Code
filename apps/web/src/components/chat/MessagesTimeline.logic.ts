@@ -723,7 +723,8 @@ function deriveTerminalAssistantMessageIds(timelineEntries: ReadonlyArray<Timeli
       nullTurnResponseIndex += 1;
       continue;
     }
-    if (message.role !== "assistant") {
+    // A voice-call marker is a call record, not the response; it must not displace the real summary.
+    if (message.role !== "assistant" || message.grokBotVoiceCall !== undefined) {
       continue;
     }
 
@@ -929,6 +930,14 @@ function timelineEntryFoldRunId(entry: TimelineEntry, runlessKey: RunId | null):
   return null;
 }
 
+/** The call's marker, or a reply the native call produced (its summary), as opposed to turn work. */
+function timelineEntryIsVoiceCallMessage(entry: TimelineEntry): boolean {
+  return (
+    entry.kind === "message" &&
+    (entry.message.grokBotVoiceCall !== undefined || entry.message.grokBotVoiceCallId !== undefined)
+  );
+}
+
 /** A steer adds input to its existing turn, without creating a new header. */
 function timelineEntryStartsResponse(entry: TimelineEntry): boolean {
   return (
@@ -1021,6 +1030,8 @@ function deriveTurnFolds(input: {
   liveSubagentEntryIds: ReadonlySet<string>;
   /** Finished replies a steer superseded; they answer their prompt, so they stay out. */
   completeSupersededReplyEntryIds: ReadonlySet<string>;
+  /** Assistant messages carrying files stay in view instead of folding away. */
+  keepAssistantAttachmentsVisible: boolean;
 }): ReadonlyMap<string, TurnFold> {
   const interruptedRunIds = new Set<RunId>();
   for (const entry of input.timelineEntries) {
@@ -1116,6 +1127,11 @@ function deriveTurnFolds(input: {
     if (group.hasStreamingMessage) {
       continue;
     }
+    // A voice call's replies are conversation, not turn work; folding them hides the summary.
+    // The summary arrives in a runless group after the call's marker, so the marker alone is not enough.
+    if (group.entries.some(timelineEntryIsVoiceCallMessage)) {
+      continue;
+    }
     const hiddenEntryIds = new Set<string>();
     const terminalEntryIndex = group.terminalEntry
       ? group.entries.findIndex((entry) => entry.id === group.terminalEntry?.id)
@@ -1143,6 +1159,14 @@ function deriveTurnFolds(input: {
         continue;
       }
       if (entry.kind === "work" && entry.entry.itemType === "notification") continue;
+      if (
+        input.keepAssistantAttachmentsVisible &&
+        entry.kind === "message" &&
+        entry.message.role === "assistant" &&
+        (entry.message.attachments?.length ?? 0) > 0
+      ) {
+        continue;
+      }
       hiddenEntryIds.add(entry.id);
     }
     if (hiddenEntryIds.size === 0) {
@@ -1350,15 +1374,55 @@ function settleSupersededReasoning(entries: ReadonlyArray<TimelineEntry>) {
   });
 }
 
+/**
+ * Native can import a call's marker after its summaries, so its turn order is not the call's order.
+ * Move each marker directly before the first summary linked to its call. Nothing else moves.
+ */
+function orderVoiceCallMarkersBeforeSummaries(
+  entries: ReadonlyArray<TimelineEntry>,
+): ReadonlyArray<TimelineEntry> {
+  const firstSummaryIndexByCallId = new Map<string, number>();
+  for (const [index, entry] of entries.entries()) {
+    const callId = entry.kind === "message" ? entry.message.grokBotVoiceCallId : undefined;
+    if (callId !== undefined && !firstSummaryIndexByCallId.has(callId)) {
+      firstSummaryIndexByCallId.set(callId, index);
+    }
+  }
+  if (firstSummaryIndexByCallId.size === 0) return entries;
+
+  const movedBeforeIndex = new Map<number, TimelineEntry[]>();
+  const movedEntries = new Set<TimelineEntry>();
+  for (const [index, entry] of entries.entries()) {
+    const callId = entry.kind === "message" ? entry.message.grokBotVoiceCall?.callId : undefined;
+    const summaryIndex = callId === undefined ? undefined : firstSummaryIndexByCallId.get(callId);
+    if (summaryIndex === undefined || index <= summaryIndex) continue;
+    movedBeforeIndex.set(summaryIndex, [...(movedBeforeIndex.get(summaryIndex) ?? []), entry]);
+    movedEntries.add(entry);
+  }
+  if (movedEntries.size === 0) return entries;
+
+  return entries.flatMap((entry, index) => [
+    ...(movedBeforeIndex.get(index) ?? []),
+    ...(movedEntries.has(entry) ? [] : [entry]),
+  ]);
+}
+
 function timelineRowEntries(entries: ReadonlyArray<TimelineEntry>) {
-  return withoutSubagentDelegationRows(settleSupersededReasoning(entries));
+  return withoutSubagentDelegationRows(
+    settleSupersededReasoning(orderVoiceCallMarkersBeforeSummaries(entries)),
+  );
 }
 
 /** The turn folds the timeline would draw, before applying expansion state. */
 function deriveTimelineTurnFolds(
   input: Pick<
     MessagesTimelineRowsInput,
-    "timelineEntries" | "latestRun" | "isWorking" | "runlessWorkActive" | "runningRunId"
+    | "timelineEntries"
+    | "latestRun"
+    | "isWorking"
+    | "runlessWorkActive"
+    | "runningRunId"
+    | "keepAssistantAttachmentsVisible"
   >,
 ) {
   const timelineEntries = timelineRowEntries(input.timelineEntries);
@@ -1377,6 +1441,7 @@ function deriveTimelineTurnFolds(
     runlessWorkActive: input.isWorking && input.runlessWorkActive === true,
     liveSubagentEntryIds: liveSubagentCardEntryIds(timelineEntries),
     completeSupersededReplyEntryIds: completeSupersededReplyEntryIds(timelineEntries),
+    keepAssistantAttachmentsVisible: input.keepAssistantAttachmentsVisible === true,
   });
 }
 
@@ -1393,6 +1458,8 @@ export function deriveMessagesTimelineRows(input: {
    * runless entries are the current response instead of settled history.
    */
   runlessWorkActive?: boolean;
+  /** Bot threads keep assistant replies that carry files visible inside settled turns. */
+  keepAssistantAttachmentsVisible?: boolean;
   activeTurnStartedAt?: string | null;
   turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
   supportsConversationRollback: boolean;
@@ -1443,6 +1510,7 @@ export function deriveMessagesTimelineRows(input: {
     runlessWorkActive,
     liveSubagentEntryIds,
     completeSupersededReplyEntryIds: completeSupersededReplyIds,
+    keepAssistantAttachmentsVisible: input.keepAssistantAttachmentsVisible === true,
   });
   const collapsedEntryIds = new Set<string>();
   for (const fold of foldsByAnchorEntryId.values()) {
@@ -2091,7 +2159,12 @@ export function timelineEntryTurnFoldRunId(
 export function timelineTurnFoldRunIdsByEntryId(
   input: Pick<
     MessagesTimelineRowsInput,
-    "timelineEntries" | "latestRun" | "isWorking" | "runlessWorkActive" | "runningRunId"
+    | "timelineEntries"
+    | "latestRun"
+    | "isWorking"
+    | "runlessWorkActive"
+    | "runningRunId"
+    | "keepAssistantAttachmentsVisible"
   >,
 ): ReadonlyMap<string, RunId> {
   const byEntryId = new Map<string, RunId>();

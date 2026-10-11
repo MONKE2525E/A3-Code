@@ -23,6 +23,7 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }));
+vi.mock("../../hooks/useNowMinute", () => ({ useNowMinute: () => "2026-10-01T00:00" }));
 vi.mock("../../state/entities", () => ({
   useThreadProjection: () => ({ projection: state.projection }),
   useThreadShells: () => state.shells,

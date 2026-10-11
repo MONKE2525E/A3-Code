@@ -238,6 +238,8 @@ interface ChatMarkdownProps {
   extraRemarkPlugins?: NonNullable<ReactMarkdownOptions["remarkPlugins"]>;
   /** Renders a `t3-context://` link as a chip; without it the link shows its label as text. */
   renderContextReference?: ((reference: ChatMarkdownContextReference) => ReactNode) | undefined;
+  /** Replaces a link with the returned node; a link the callback declines keeps its normal behavior. */
+  renderLinkOverride?: ((link: ChatMarkdownLinkOverride) => ReactNode | undefined) | undefined;
   /** Loads GitHub-hosted media through `cwd`'s GitHub credential, which a private repository's
       uploads need; without it those images and videos load unauthenticated and 404. */
   githubMedia?: boolean | undefined;
@@ -245,6 +247,11 @@ interface ChatMarkdownProps {
       text nests under the heading that introduces it, such as a chat message's
       author. Rendered tags and their styling are unchanged. */
   headingLevelOffset?: number | undefined;
+}
+
+export interface ChatMarkdownLinkOverride {
+  readonly href: string;
+  readonly label: ReactNode;
 }
 
 export interface ChatMarkdownContextReference {
@@ -2317,6 +2324,7 @@ function useChatMarkdownState({
   imageBaseDir,
   onImageExpand,
   renderContextReference,
+  renderLinkOverride,
   headingLevelOffset = 0,
   githubMedia = false,
 }: ChatMarkdownProps) {
@@ -2727,6 +2735,7 @@ function useChatMarkdownState({
       fileLinkChip,
       githubMedia,
       renderContextReference,
+      renderLinkOverride,
       headingLevelOffset,
       imageBaseDir,
       inlineCodeFileLinkMetaByText,
@@ -2760,6 +2769,7 @@ function useChatMarkdownState({
       fileLinkChip,
       githubMedia,
       renderContextReference,
+      renderLinkOverride,
       headingLevelOffset,
       imageBaseDir,
       inlineCodeFileLinkMetaByText,
@@ -2929,8 +2939,12 @@ const CHAT_MARKDOWN_COMPONENTS = {
       updateThreadPullRequestLink,
       fileLinkChip,
       renderContextReference,
+      renderLinkOverride,
       text,
     } = use(ChatMarkdownRendererContext);
+    const overridden =
+      href && renderLinkOverride ? renderLinkOverride({ href, label: children }) : undefined;
+    if (overridden !== undefined) return overridden;
     const citation = href ? parseAssistantCitationHref(href) : null;
     if (citation) return <AssistantCitationChip citation={citation} />;
     // A thread link names a thread in this message's environment and opens it in the app.

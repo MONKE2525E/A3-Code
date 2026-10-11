@@ -1,4 +1,8 @@
-import { resolveEnvironmentMachineKind } from "@t3tools/contracts";
+import {
+  type EnvironmentId,
+  ProviderInstanceId,
+  resolveEnvironmentMachineKind,
+} from "@t3tools/contracts";
 import { useLocation, useNavigate, useSearch } from "@tanstack/react-router";
 import { ChevronDownIcon, LayersIcon } from "lucide-react";
 import { type ReactNode, useMemo } from "react";
@@ -8,9 +12,12 @@ import { useEnvironments, type EnvironmentPresentation } from "../../state/envir
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { GrokBotAvatar } from "../grokBot/GrokBotAvatar";
 import {
-  resolveGrokBotSettingsEnvironment,
+  GROK_BOT_PROVIDER_INTENT,
+  isGrokBotProviderSelected,
   sortGrokBotsForEditor,
 } from "../grokBot/grokBotPresentation";
+import { useEnvironmentSettings } from "../../hooks/useSettings";
+import { GROK_BOT_DRIVER_KIND } from "../chat/ProviderInstanceIcon";
 import { grokBotsListQuery } from "../../state/grokBots";
 import { useEnvironmentQuery } from "../../state/query";
 import { ProjectFavicon } from "../ProjectFavicon";
@@ -25,6 +32,7 @@ import {
   MenuTrigger,
 } from "../ui/menu";
 import { useOptionalSettingsScope } from "./SettingsScopeContext";
+import { useSettingsSearchTargetId } from "./settingsLayout";
 import { resolveSettingsScope, type SettingsScopeSearch } from "./settingsScope";
 import {
   ALL_ENVIRONMENTS_VALUE,
@@ -74,8 +82,8 @@ export function SettingsScopeSentence() {
       {/* Each connective stays with its picker so a wrap never strands "on". */}
       <span className="flex min-w-0 items-center gap-1.5">
         <span className="shrink-0">Applying settings for</span>
-        {pathname === "/settings/grok-bots" ? (
-          <GrokBotScopeMenu {...props} />
+        {pathname === "/settings/providers" && scope.environment ? (
+          <ProvidersFirstAxisMenu {...props} environmentId={scope.environment.environmentId} />
         ) : (
           <ProjectScopeMenu {...props} />
         )}
@@ -235,25 +243,51 @@ function ProjectScopeMenu({ value, groups, onChange }: SettingsScopeMenuProps) {
   );
 }
 
-/** On the Grok Bots page the first axis is the bot being edited, not a project. */
-function GrokBotScopeMenu({ value, groups, environments }: SettingsScopeMenuProps) {
-  const navigate = useNavigate();
-  const botId = useSearch({
+/**
+ * Providers are edited per environment, so the first axis stays a project picker
+ * except while the Grok Bot provider is selected, where it picks the bot to edit.
+ */
+function ProvidersFirstAxisMenu(props: SettingsScopeMenuProps & { environmentId: EnvironmentId }) {
+  const {
+    instanceId: rawInstanceId,
+    botId,
+    provider,
+  } = useSearch({
     strict: false,
-    select: (search) => (search as { botId?: string }).botId,
+    select: (search) => search as { instanceId?: string; botId?: string; provider?: string },
   });
-  const resolved = resolveSettingsScope(value, groups, environments);
-  const target = resolveGrokBotSettingsEnvironment({
-    scopeKind: resolved.kind,
-    scopeEnvironmentId: resolved.kind === "environment" ? resolved.environmentId : null,
-    connectedEnvironmentIds: environments
-      .filter((environment) => environment.connection.phase === "connected")
-      .map((environment) => environment.environmentId),
+  // The merged search can still carry a raw `instanceId=`; an empty one means absent.
+  const instanceId =
+    typeof rawInstanceId === "string" && rawInstanceId.trim() ? rawInstanceId : undefined;
+  const settings = useEnvironmentSettings(props.environmentId);
+  const searchTargetId = useSettingsSearchTargetId();
+  const grokBotSelected = isGrokBotProviderSelected({
+    instanceId,
+    instanceDriver:
+      instanceId === undefined
+        ? undefined
+        : settings.providerInstances?.[ProviderInstanceId.make(instanceId)]?.driver,
+    botId,
+    provider,
+    searchTargetId,
+    grokBotDriver: GROK_BOT_DRIVER_KIND,
   });
-  const environmentId = target.kind === "environment" ? target.environmentId : null;
-  const roster = useEnvironmentQuery(
-    environmentId === null ? null : grokBotsListQuery({ environmentId, input: {} }),
+  return grokBotSelected ? (
+    <GrokBotScopeMenu environmentId={props.environmentId} botId={botId} />
+  ) : (
+    <ProjectScopeMenu {...props} />
   );
+}
+
+function GrokBotScopeMenu({
+  environmentId,
+  botId,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly botId: string | undefined;
+}) {
+  const navigate = useNavigate();
+  const roster = useEnvironmentQuery(grokBotsListQuery({ environmentId, input: {} }));
   const bots = useMemo(() => sortGrokBotsForEditor(roster.data ?? []), [roster.data]);
   const selected = bots.find((bot) => bot.id === botId) ?? bots[0] ?? null;
   return (
@@ -264,15 +298,19 @@ function GrokBotScopeMenu({ value, groups, environments }: SettingsScopeMenuProp
           <GrokBotAvatar bot={selected} size="xs" featured={false} className="-ml-0.5" />
         ) : null
       }
-      label={selected?.name ?? (environmentId === null ? "Pick an environment" : "No bots")}
+      label={selected?.name ?? "No bots"}
     >
       <MenuRadioGroup
         value={selected?.id ?? ""}
         onValueChange={(next) => {
           if (typeof next !== "string" || next.length === 0) return;
           void navigate({
-            to: "/settings/grok-bots",
-            search: (previous) => ({ ...previous, botId: next }),
+            to: "/settings/providers",
+            search: (previous) => ({
+              ...previous,
+              botId: next,
+              provider: GROK_BOT_PROVIDER_INTENT,
+            }),
             hash: "grok-bots-editor",
             replace: true,
           });

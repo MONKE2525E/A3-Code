@@ -86,7 +86,12 @@ export function derivePendingThreadRequests(
           multiSelect: question.multiSelect ?? false,
         })),
         responseCapability,
-        dismissible: item.responseMode === "message" || responseCapability === "message",
+        // Grok Bot's native widget can be dismissed while it is still live; other live questions
+        // need an answer.
+        dismissible:
+          item.responseMode === "message" ||
+          responseCapability === "message" ||
+          (responseCapability === "live" && item.nativeItemRef?.driver === "grok-bot"),
         ...(item.responseMode === "message" || responseCapability === "message"
           ? { responseMode: "message" as const }
           : {}),

@@ -401,6 +401,39 @@ it.effect("retains automation and sender attribution while a message waits in th
   }).pipe(Effect.provide(harness.layer));
 });
 
+it.effect("keeps the voice request marker on a queued message", () => {
+  const harness = makeHarness({ runSetup: () => Effect.never });
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const launched = yield* launches.launch(
+      launchInput({
+        command: "command:voice:queue",
+        thread: "thread:voice:queue",
+        message: "First message",
+      }),
+    );
+    const queued = yield* threads.sendToThread({
+      projectId,
+      commandId: CommandId.make("command:voice:queued"),
+      threadId: launched.threadId,
+      messageId: MessageId.make("message:voice:queued"),
+      voiceRequest: true,
+      text: "[From a voice call]\nFix the login bug",
+      attachments: [],
+      mode: "queue",
+      createdBy: "agent",
+      creationSource: "mcp",
+    });
+    assert.equal(queued.delivery, "queued");
+    const projection = yield* threads.getThreadProjection(launched.threadId);
+    const message = projection.messages.find((item) => item.id === queued.message.id);
+    assert.equal(message?.voiceRequest, true);
+    assert.equal(message?.creationSource, "mcp");
+    assert.equal(message?.text, "[From a voice call]\nFix the login bug");
+  }).pipe(Effect.provide(harness.layer));
+});
+
 it.effect("returns a visible preparing message while provisioning is still blocked", () =>
   Effect.gen(function* () {
     const worktreeEntered = yield* Deferred.make<void>();

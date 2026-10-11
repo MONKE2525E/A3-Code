@@ -4,6 +4,7 @@ import {
   AuthFilesystemReadScope,
   AuthProvidersManageScope,
   AuthSettingsWriteScope,
+  GrokBotError,
   DEFAULT_SERVER_SETTINGS,
   ProviderInstanceId,
   ThreadId,
@@ -37,13 +38,38 @@ describe("RPC authorization scopes", () => {
       WS_METHODS.grokBotsStatus,
       WS_METHODS.grokBotsList,
       WS_METHODS.grokBotsRead,
+      WS_METHODS.grokBotsListRoutines,
+      WS_METHODS.grokBotsListComposerResources,
+      WS_METHODS.grokBotsListMarketplace,
+      WS_METHODS.grokBotsListMarketplacePlugins,
+      WS_METHODS.grokBotsListInstalledMarketplacePlugins,
+      WS_METHODS.grokBotsGetMarketplaceTemplate,
+      WS_METHODS.grokBotsOrchestratorConfig,
     ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
     }
-    for (const method of [WS_METHODS.grokBotsSend, WS_METHODS.grokBotsLink]) {
+    for (const method of [
+      WS_METHODS.grokBotsTeachRead,
+      WS_METHODS.grokBotsTeachStart,
+      WS_METHODS.grokBotsTeachStop,
+      WS_METHODS.grokBotsComputerRead,
+      WS_METHODS.grokBotsComputerStart,
+      WS_METHODS.grokBotsSend,
+      WS_METHODS.grokBotsLink,
+      WS_METHODS.grokBotsOpenThread,
+      WS_METHODS.grokBotsSetRoutineEnabled,
+      WS_METHODS.grokBotsDeleteRoutine,
+    ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
     }
-    for (const method of [WS_METHODS.grokBotsSetup, WS_METHODS.grokBotsUpdate]) {
+    for (const method of [
+      WS_METHODS.grokBotsSetup,
+      WS_METHODS.grokBotsUpdate,
+      WS_METHODS.grokBotsDelete,
+      WS_METHODS.grokBotsImportMarketplaceTemplate,
+      WS_METHODS.grokBotsInstallMarketplacePlugin,
+      WS_METHODS.grokBotsUninstallMarketplacePlugin,
+    ]) {
       expect(requiredScopeForRpcMethod(method)).toBe(AuthSettingsWriteScope);
     }
   });
@@ -215,6 +241,49 @@ describe("RPC authorization scopes", () => {
       );
     }
   });
+});
+
+describe("native bot provider authorization", () => {
+  const group = WsRpcGroup.omit(
+    ...Array.from(WsRpcGroup.requests.keys()).filter(
+      (
+        tag,
+      ): tag is Exclude<
+        keyof typeof RPC_REQUIRED_SCOPES,
+        typeof WS_METHODS.grokBotsOrchestratorConfig
+      > => tag !== WS_METHODS.grokBotsOrchestratorConfig,
+    ),
+  );
+
+  it.effect("permits status reads but refuses setup before invoking its handler", () =>
+    Effect.gen(function* () {
+      const handled: Array<string> = [];
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.grokBotsOrchestratorConfig, (input) =>
+              Effect.sync(() => handled.push(input.action ?? "status")).pipe(
+                Effect.andThen(Effect.fail(new GrokBotError({ reason: "bot_not_found" }))),
+              ),
+            ),
+            RpcAuthorization.layer([AuthOrchestrationReadScope]),
+          ),
+        ),
+      );
+      for (const input of [{}, { action: "status" as const }]) {
+        expect(
+          (yield* client[WS_METHODS.grokBotsOrchestratorConfig](input).pipe(Effect.flip))._tag,
+        ).toBe("GrokBotError");
+      }
+      expect(
+        yield* client[WS_METHODS.grokBotsOrchestratorConfig]({ action: "setup" }).pipe(Effect.flip),
+      ).toMatchObject({
+        _tag: "EnvironmentAuthorizationError",
+        requiredPermission: AuthSettingsWriteScope,
+      });
+      expect(handled).toEqual(["status", "status"]);
+    }).pipe(Effect.scoped),
+  );
 });
 
 it("requires operate permission for host retry while preserving read-only listing", () => {
@@ -466,3 +535,49 @@ it.effect("denies manual cleanup before the handler without settings permission"
     expect(handled).toBe(false);
   }).pipe(Effect.scoped),
 );
+
+describe("persistent bot thread authorization", () => {
+  const group = WsRpcGroup.omit(
+    ...Array.from(WsRpcGroup.requests.keys()).filter(
+      (
+        tag,
+      ): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof WS_METHODS.grokBotsOpenThread> =>
+        tag !== WS_METHODS.grokBotsOpenThread,
+    ),
+  );
+  it.effect.each([
+    { scopes: [AuthOrchestrationReadScope], allowed: false },
+    { scopes: [AuthSettingsWriteScope], allowed: false },
+    { scopes: [AuthOrchestrationOperateScope], allowed: true },
+  ])("opens only with operate permission: $allowed", ({ scopes, allowed }) =>
+    Effect.gen(function* () {
+      let handled = 0;
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.grokBotsOpenThread, () =>
+              Effect.sync(() => {
+                handled++;
+                return {
+                  threadId: ThreadId.make("bot-thread"),
+                  providerInstanceId: ProviderInstanceId.make("grok-bot"),
+                };
+              }),
+            ),
+            RpcAuthorization.layer(scopes),
+          ),
+        ),
+      );
+      const result = yield* client[WS_METHODS.grokBotsOpenThread]({ botId: "bot" }).pipe(
+        Effect.exit,
+      );
+      if (allowed) {
+        expect(result._tag).toBe("Success");
+        expect(handled).toBe(1);
+      } else {
+        expect(result._tag).toBe("Failure");
+        expect(handled).toBe(0);
+      }
+    }).pipe(Effect.scoped),
+  );
+});

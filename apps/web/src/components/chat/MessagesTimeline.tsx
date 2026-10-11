@@ -1,11 +1,14 @@
 import { ThreadFindTimelineContext } from "./ThreadFindProvider";
+import { AgentSenderAttribution, GrokBotPeerMessageLink } from "../grokBot/GrokBotPeerMessageLink";
+import { GrokBotVoiceCallMarkerLabel } from "../grokBot/GrokBotVoiceCallMarkerLabel";
+import { GrokBotWorkflowReferenceChips } from "../grokBot/GrokBotWorkflowReferenceChips";
 import { shouldPreserveAssistantLineBreaks } from "@t3tools/shared/markdownPipeline";
 import { MarkdownFindContext, useFindRevealRef } from "./markdownFindContext";
 import { ComputerUseAppIcon } from "~/components/Icons";
 import { useChatCanvas } from "./ChatCanvasContext";
 import { WorkLogBlock, WorkLogButton, WorkLogDetails, WorkLogList, WorkLogRow } from "./WorkLog";
 import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
-import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
+import { isGrokBotBackingThread, type WorktreeSetupSnapshot } from "@t3tools/contracts";
 import { ReadOnlySourcePreview } from "../files/AttachmentFilePreview";
 import { useRightPanelStore } from "~/rightPanelStore";
 import {
@@ -102,6 +105,7 @@ import {
 } from "../../session-logic";
 import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
 import {
+  type ChatAttachment,
   type ChatMessage,
   type ChatFileAttachment,
   type ChatImageAttachment,
@@ -270,7 +274,8 @@ import { ContextChip, ContextChipLabel, type ContextChipKind } from "../ContextC
 import { createContextPresentationRegistry } from "../contextPresentationRegistry";
 import { useOpenPrLink } from "~/lib/openPullRequestLink";
 import { useClientSettings } from "~/hooks/useSettings";
-import type { ChatMarkdownContextReference } from "../ChatMarkdown";
+import type { ChatMarkdownContextReference, ChatMarkdownLinkOverride } from "../ChatMarkdown";
+import { createGrokBotConnectorAuthLinkOverride } from "../grokBot/GrokBotConnectorAuthAction";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
@@ -320,6 +325,10 @@ interface TimelineRowSharedState {
   resolvedTheme: "light" | "dark";
   workspaceRoot: string | undefined;
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
+  /** Set in a Grok Bot thread, where assistant links may be native connector sign-ins. */
+  grokBotConnectorAuthLinkOverride:
+    | ((link: ChatMarkdownLinkOverride) => ReactNode | undefined)
+    | null;
   /** Provider snapshots for resolving handoff endpoints to icons + model names. */
   providerStatuses: ReadonlyArray<ServerProvider>;
   /** Projection runs, for recovering handoff models on legacy items. */
@@ -504,6 +513,8 @@ interface MessagesTimelineProps {
   onFileOpen?: (attachment: ChatFileAttachment) => void;
   onFileDownload?: (attachment: ChatFileAttachment) => void;
   activeThreadEnvironmentId: EnvironmentId;
+  /** The thread is a Grok Bot conversation, whose assistant links may be connector sign-ins. */
+  isGrokBotThread?: boolean;
   markdownCwd: string | undefined;
   resolvedTheme: "light" | "dark";
   timestampFormat: TimestampFormat;
@@ -609,6 +620,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   onFileOpen = NOOP_OPEN_ATTACHMENT,
   onFileDownload = NOOP_OPEN_ATTACHMENT,
   activeThreadEnvironmentId,
+  isGrokBotThread = false,
   markdownCwd,
   resolvedTheme,
   timestampFormat,
@@ -671,6 +683,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
     setExpandedAttemptIds(paintedExpandedAttemptIds);
   }
   const citationThreadRef = useMemo(() => parseScopedThreadKey(routeThreadKey), [routeThreadKey]);
+  const keepAssistantAttachmentsVisible =
+    citationThreadRef !== null && isGrokBotBackingThread({ id: citationThreadRef.threadId });
   const openPullRequest = useOpenPrLink(citationThreadRef ?? undefined);
   const expandCitedRun = useCallback((runId: RunId) => {
     setExpandedRunIds((current) => (current.has(runId) ? current : new Set([...current, runId])));
@@ -861,9 +875,18 @@ const ConversationTimeline = memo(function ConversationTimeline({
             runningRunId,
             isWorking,
             runlessWorkActive,
+            keepAssistantAttachmentsVisible,
           })
         : null,
-    [findActive, timelineEntries, latestRun, runningRunId, isWorking, runlessWorkActive],
+    [
+      findActive,
+      timelineEntries,
+      latestRun,
+      runningRunId,
+      isWorking,
+      runlessWorkActive,
+      keepAssistantAttachmentsVisible,
+    ],
   );
   const activeFindRunId = activeFindMatch
     ? findFoldRunIds?.get(activeFindMatch.entryId)
@@ -915,6 +938,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
         expandedWorkGroupIds,
         isWorking,
         runlessWorkActive,
+        keepAssistantAttachmentsVisible,
         activeTurnStartedAt,
         turnDiffSummaries,
         supportsConversationRollback,
@@ -938,6 +962,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     expandedWorkGroupIds,
     isWorking,
     runlessWorkActive,
+    keepAssistantAttachmentsVisible,
     activeTurnStartedAt,
     turnDiffSummaries,
     supportsConversationRollback,
@@ -1328,6 +1353,11 @@ const ConversationTimeline = memo(function ConversationTimeline({
     };
   }, [timelineViewportElement, rows.length, reportContentOverflow, chatWidth]);
 
+  const grokBotConnectorAuthLinkOverride = useMemo(
+    () =>
+      isGrokBotThread ? createGrokBotConnectorAuthLinkOverride(activeThreadEnvironmentId) : null,
+    [activeThreadEnvironmentId, isGrokBotThread],
+  );
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
       citationRequest: readyCitationRequest,
@@ -1343,6 +1373,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       providerStatuses,
       runs,
       activeThreadEnvironmentId,
+      grokBotConnectorAuthLinkOverride,
       onRevertToTurnCount,
       onRunShellCommand,
       findActive,
@@ -1381,6 +1412,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       providerStatuses,
       runs,
       activeThreadEnvironmentId,
+      grokBotConnectorAuthLinkOverride,
       onRevertToTurnCount,
       onRunShellCommand,
       findActive,
@@ -1490,6 +1522,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
           runningRunId,
           isWorking,
           runlessWorkActive,
+          keepAssistantAttachmentsVisible,
         });
       const entryById = new Map(timelineEntries.map((entry) => [entry.id, entry]));
       return readThreadFindPosition(
@@ -1537,6 +1570,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     findFoldRunIds,
     findPositionReaderRef,
     isWorking,
+    keepAssistantAttachmentsVisible,
     latestRun,
     rows,
     runlessWorkActive,
@@ -2230,6 +2264,9 @@ function MessageAuthorHeading({ children }: { children: string }) {
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
   const { onImageExpand, onFileOpen } = ctx;
+  // Bot chats are normal chat: a persisted steer intent from before bots restarted runs is not labeled.
+  const isGrokBotChat =
+    ctx.threadRef !== null && isGrokBotBackingThread({ id: ctx.threadRef.threadId });
   const senderThreadId = row.message.senderThreadId;
   const resources = useMemo(
     () => selectMessageImageResources(row.message.attachments),
@@ -2387,9 +2424,26 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
     ],
   );
 
+  // A voice call's request is internal execution text; the chat shows only that it happened.
+  if (userMessage.attribution === "voice") {
+    return (
+      <p
+        className="me-1 flex justify-end text-2xs text-muted-foreground/70"
+        data-user-message-attribution="voice"
+      >
+        Requested during voice call
+      </p>
+    );
+  }
+
   return (
     <div className="group flex flex-col items-end gap-1">
-      {userMessage.attribution === "automation" ? (
+      {row.message.grokBotPeer ? (
+        <GrokBotPeerMessageLink
+          environmentId={ctx.activeThreadEnvironmentId}
+          peer={row.message.grokBotPeer}
+        />
+      ) : userMessage.attribution === "automation" ? (
         <p
           className="me-1 text-2xs text-muted-foreground/70"
           data-user-message-attribution="automation"
@@ -2417,21 +2471,29 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           Sent by T3 Code
         </p>
       ) : userMessage.attribution === "agent" ? (
-        <p className="me-1 text-2xs text-muted-foreground/70" data-user-message-attribution="agent">
-          {senderThreadId ? (
-            <InlineButton
-              onClick={() => ctx.onOpenThread(senderThreadId)}
-              tone="muted"
-              aria-label="Open sending thread"
-            >
-              Sent by another agent
-            </InlineButton>
-          ) : (
-            "Sent by another agent"
-          )}
-        </p>
+        <AgentSenderAttribution
+          environmentId={ctx.activeThreadEnvironmentId}
+          senderThreadId={senderThreadId}
+        >
+          <p
+            className="me-1 text-2xs text-muted-foreground/70"
+            data-user-message-attribution="agent"
+          >
+            {senderThreadId ? (
+              <InlineButton
+                onClick={() => ctx.onOpenThread(senderThreadId)}
+                tone="muted"
+                aria-label="Open sending thread"
+              >
+                Sent by another agent
+              </InlineButton>
+            ) : (
+              "Sent by another agent"
+            )}
+          </p>
+        </AgentSenderAttribution>
       ) : null}
-      {row.message.inputIntent && row.message.inputIntent !== "turn_start" ? (
+      {!isGrokBotChat && row.message.inputIntent && row.message.inputIntent !== "turn_start" ? (
         <UserMessageIntentMarker intent={row.message.inputIntent} />
       ) : null}
       <div className="relative max-w-[80%] rounded-2xl bg-message p-3 text-message-foreground">
@@ -2537,6 +2599,9 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
               </div>
             ))}
           </div>
+        ) : null}
+        {row.message.grokBotWorkflowReferences ? (
+          <GrokBotWorkflowReferenceChips references={row.message.grokBotWorkflowReferences} />
         ) : null}
         <div onCopyCapture={onBodyCopyCapture}>
           <CollapsibleUserMessageBody
@@ -2781,14 +2846,162 @@ function AttemptFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "at
   );
 }
 
+// Bot replies carry attachments (files the bot produced or received). Rendering mirrors the
+// user row's image, video, and file presentation so both sides of a bot chat look alike.
+function AssistantMessageAttachments({
+  attachments,
+}: {
+  readonly attachments: ReadonlyArray<ChatAttachment>;
+}) {
+  const ctx = use(TimelineRowCtx);
+  const resources = useMemo(() => selectMessageImageResources(attachments), [attachments]);
+  const previewUrls = useAssetUrls(ctx.activeThreadEnvironmentId, resources);
+  const images = useMemo(() => {
+    const urlsById = new Map(
+      resources.flatMap((resource, index) => {
+        const url = previewUrls[index];
+        return url ? [[resource.attachmentId, url] as const] : [];
+      }),
+    );
+    return attachments.filter(isImageAttachment).map((image) => {
+      const previewUrl = urlsById.get(image.id) ?? image.previewUrl;
+      return previewUrl ? { ...image, previewUrl } : image;
+    });
+  }, [attachments, previewUrls, resources]);
+  const files = attachments.filter(isFileAttachment);
+  const videos = files.filter(isVideoAttachment);
+  const otherFiles = files.filter((file) => !isVideoAttachment(file));
+  const unknownAttachments = attachments.filter(
+    (attachment) => !isImageAttachment(attachment) && !isFileAttachment(attachment),
+  );
+
+  return (
+    <div className="mt-2 flex flex-col gap-2">
+      {images.length > 0 || videos.length > 0 ? (
+        <div className="grid max-w-[360px] grid-cols-2 gap-2">
+          {images.map((image) => (
+            <div
+              key={image.id}
+              className={cn(
+                "bg-background/70",
+                image.source?.kind === "snap-shot" && image.previewUrl
+                  ? cn(SNAP_SHOT_ATTACHMENT_FRAME_CLASS, "col-span-2")
+                  : "aspect-[4/3] overflow-hidden rounded-lg border border-border/80",
+              )}
+            >
+              {image.previewUrl ? (
+                <button
+                  type="button"
+                  className="block h-full w-full cursor-zoom-in"
+                  aria-label={`Preview ${image.name}`}
+                  onClick={() => {
+                    const preview = buildExpandedImagePreview(images, image.id);
+                    if (preview) ctx.onImageExpand(preview);
+                  }}
+                >
+                  <img
+                    src={image.previewUrl}
+                    alt={image.name}
+                    className="block size-full object-cover"
+                  />
+                </button>
+              ) : (
+                <div className="flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-2xs text-muted-foreground/70">
+                  {image.name}
+                </div>
+              )}
+              {image.previewUrl && image.source?.kind === "snap-shot" ? (
+                <SnapShotAttachmentDetails source={image.source} />
+              ) : null}
+            </div>
+          ))}
+          {videos.map((file) => (
+            <UserVideoAttachment key={file.id} file={file} />
+          ))}
+        </div>
+      ) : null}
+      {otherFiles.map((file) => (
+        <div key={file.id} className="flex min-w-0 items-center gap-1">
+          {file.downloadable !== false ? (
+            <button
+              type="button"
+              aria-label={`Preview ${file.name}`}
+              onClick={() => ctx.onFileOpen(file)}
+              className="focus-visible:ring-ring/70 flex min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md py-1 text-left text-sm hover:underline focus-visible:ring-2 focus-visible:ring-inset focus-visible:outline-none"
+            >
+              <PierreEntryIcon pathValue={file.name} kind="file" theme={ctx.resolvedTheme} />
+              <span className="min-w-0 flex-1 truncate">{file.name}</span>
+              <EyeIcon className="size-4 shrink-0" />
+            </button>
+          ) : (
+            <div className="flex min-w-0 flex-1 items-center gap-2 py-1 text-sm">
+              <PierreEntryIcon pathValue={file.name} kind="file" theme={ctx.resolvedTheme} />
+              <span className="min-w-0 flex-1 truncate">{file.name}</span>
+            </div>
+          )}
+          {file.downloadable !== false ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    size="icon-xs"
+                    variant="ghost-muted"
+                    aria-label={`Download ${file.name}`}
+                    onClick={() => ctx.onFileDownload(file)}
+                  />
+                }
+              >
+                <DownloadIcon />
+              </TooltipTrigger>
+              <TooltipPopup side="top">Download {file.name}</TooltipPopup>
+            </Tooltip>
+          ) : null}
+        </div>
+      ))}
+      {unknownAttachments.map((attachment) => (
+        <div key={attachment.id} className="flex min-w-0 items-center gap-2 py-1 text-sm">
+          <PierreEntryIcon pathValue={attachment.name} kind="file" theme={ctx.resolvedTheme} />
+          <span className="min-w-0 flex-1 truncate">{attachment.name}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
-  const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+  if (row.message.grokBotVoiceCall !== undefined) {
+    return (
+      <div
+        className="flex items-center justify-center gap-1.5 px-1 py-1 text-xs text-muted-foreground"
+        data-voice-call-id={row.message.grokBotVoiceCall.callId}
+      >
+        <GrokBotVoiceCallMarkerLabel marker={row.message.grokBotVoiceCall} />
+      </div>
+    );
+  }
+  // Only a bot's own thread shows assistant attachments; other providers stay text-only.
+  const isGrokBotChat =
+    ctx.threadRef !== null && isGrokBotBackingThread({ id: ctx.threadRef.threadId });
+  const assistantAttachments = isGrokBotChat ? row.message.attachments : undefined;
+  const hasAssistantAttachments = (assistantAttachments?.length ?? 0) > 0;
+  const messageText =
+    row.message.text ||
+    (row.message.streaming || hasAssistantAttachments ? "" : "(empty response)");
 
   return (
     <>
       <div className="relative min-w-0 px-1 py-0.5">
+        {row.message.grokBotPeer ? (
+          <GrokBotPeerMessageLink
+            environmentId={ctx.activeThreadEnvironmentId}
+            peer={row.message.grokBotPeer}
+          />
+        ) : null}
         <MessageAuthorHeading>T3 Code</MessageAuthorHeading>
+        {row.message.grokBotWorkflowReferences ? (
+          <GrokBotWorkflowReferenceChips references={row.message.grokBotWorkflowReferences} />
+        ) : null}
         <div data-thread-find-text="true">
           <AssistantCitationSource
             messageId={row.message.id}
@@ -2808,9 +3021,13 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
               onUseArtifactTemplate={ctx.onUseArtifactTemplate}
               onRunShellCommand={ctx.onRunShellCommand}
               onImageExpand={ctx.onImageExpand}
+              renderLinkOverride={ctx.grokBotConnectorAuthLinkOverride ?? undefined}
             />
           </AssistantCitationSource>
         </div>
+        {assistantAttachments && hasAssistantAttachments ? (
+          <AssistantMessageAttachments attachments={assistantAttachments} />
+        ) : null}
         <AssistantChangedFilesSection
           turnSummary={row.assistantTurnDiffSummary}
           routeThreadKey={ctx.routeThreadKey}

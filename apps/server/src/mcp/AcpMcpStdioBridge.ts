@@ -70,6 +70,10 @@ export interface AcpMcpToolCallOptions {
   readonly tool: string;
   readonly arguments: Readonly<Record<string, unknown>>;
   readonly fetchImplementation?: (url: string, init?: RequestInit) => Promise<Response>;
+  readonly signal?: AbortSignal;
+  readonly redirect?: RequestInit["redirect"];
+  /** One-shot shell callers close their HTTP session; ACP keeps its existing behavior. */
+  readonly terminateSession?: boolean;
 }
 
 /**
@@ -95,6 +99,8 @@ export function callAcpMcpTool(
           try: () =>
             fetchImplementation(options.endpoint, {
               method: "POST",
+              ...(options.signal === undefined ? {} : { signal: options.signal }),
+              ...(options.redirect === undefined ? {} : { redirect: options.redirect }),
               headers: {
                 "content-type": "application/json",
                 accept: "application/json, text/event-stream",
@@ -120,42 +126,72 @@ export function callAcpMcpTool(
         return payloads;
       });
 
-    const initializeId = "t3-acp-cli-initialize";
-    const initialized = yield* send({
-      jsonrpc: "2.0",
-      id: initializeId,
-      method: "initialize",
-      params: {
-        protocolVersion: MCP_PROTOCOL_VERSION,
-        capabilities: {},
-        clientInfo: { name: "t3-code-acp-cli", version: "0.0.0" },
-      },
-    });
-    const initializeResponse = initialized.find((entry) => asEnvelope(entry)?.id === initializeId);
-    if (initializeResponse === undefined || asEnvelope(initializeResponse)?.error !== undefined) {
-      return yield* Effect.fail(
-        new AcpMcpBridgeError("T3 Code MCP endpoint rejected initialization."),
-      );
-    }
-    yield* send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    const finish =
+      options.terminateSession !== true
+        ? Effect.void
+        : Effect.suspend(() =>
+            sessionId === null
+              ? Effect.void
+              : Effect.tryPromise({
+                  try: async () => {
+                    const response = await fetchImplementation(options.endpoint, {
+                      method: "DELETE",
+                      signal: AbortSignal.timeout(2000),
+                      ...(options.redirect === undefined ? {} : { redirect: options.redirect }),
+                      headers: {
+                        authorization: options.authorization,
+                        "mcp-session-id": sessionId!,
+                        ...(protocolVersion === null
+                          ? {}
+                          : { "mcp-protocol-version": protocolVersion }),
+                      },
+                    });
+                    await response.body?.cancel();
+                  },
+                  catch: bridgeError,
+                }).pipe(Effect.timeout("2 seconds"), Effect.ignore),
+          );
 
-    const callId = "t3-acp-cli-tool-call";
-    const responses = yield* send({
-      jsonrpc: "2.0",
-      id: callId,
-      method: "tools/call",
-      params: { name: options.tool, arguments: options.arguments },
-    });
-    const response = responses.find((entry) => asEnvelope(entry)?.id === callId);
-    const envelope = asEnvelope(response);
-    if (envelope === null || envelope.error !== undefined) {
-      return yield* Effect.fail(
-        new AcpMcpBridgeError(
-          `T3 Code MCP tool call failed${envelope?.error === undefined ? "." : `: ${JSON.stringify(envelope.error)}`}`,
-        ),
+    return yield* Effect.gen(function* () {
+      const initializeId = "t3-acp-cli-initialize";
+      const initialized = yield* send({
+        jsonrpc: "2.0",
+        id: initializeId,
+        method: "initialize",
+        params: {
+          protocolVersion: MCP_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: "t3-code-acp-cli", version: "0.0.0" },
+        },
+      });
+      const initializeResponse = initialized.find(
+        (entry) => asEnvelope(entry)?.id === initializeId,
       );
-    }
-    return envelope.result;
+      if (initializeResponse === undefined || asEnvelope(initializeResponse)?.error !== undefined) {
+        return yield* Effect.fail(
+          new AcpMcpBridgeError("T3 Code MCP endpoint rejected initialization."),
+        );
+      }
+      yield* send({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+      const callId = "t3-acp-cli-tool-call";
+      const responses = yield* send({
+        jsonrpc: "2.0",
+        id: callId,
+        method: "tools/call",
+        params: { name: options.tool, arguments: options.arguments },
+      });
+      const response = responses.find((entry) => asEnvelope(entry)?.id === callId);
+      const envelope = asEnvelope(response);
+      if (envelope === null || envelope.error !== undefined || !("result" in envelope)) {
+        return yield* Effect.fail(
+          new AcpMcpBridgeError(
+            `T3 Code MCP tool call failed${envelope?.error === undefined ? "." : `: ${JSON.stringify(envelope.error)}`}`,
+          ),
+        );
+      }
+      return envelope.result;
+    }).pipe(Effect.ensuring(finish));
   });
 }
 

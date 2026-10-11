@@ -24,6 +24,7 @@ import { Route as SettingsScheduledTasksRouteImport } from './routes/settings.sc
 import { Route as SettingsProvidersRouteImport } from './routes/settings.providers'
 import { Route as SettingsProjectsRouteImport } from './routes/settings.projects'
 import { Route as SettingsOpenSourceLicensesRouteImport } from './routes/settings.open-source-licenses'
+import { Route as SettingsMarketplaceRouteImport } from './routes/settings.marketplace'
 import { Route as SettingsKeybindingsRouteImport } from './routes/settings.keybindings'
 import { Route as SettingsIntegrationsRouteImport } from './routes/settings.integrations'
 import { Route as SettingsGrokBotsRouteImport } from './routes/settings.grok-bots'
@@ -113,6 +114,11 @@ const SettingsOpenSourceLicensesRoute =
     path: '/open-source-licenses',
     getParentRoute: () => SettingsRoute,
   } as any)
+const SettingsMarketplaceRoute = SettingsMarketplaceRouteImport.update({
+  id: '/marketplace',
+  path: '/marketplace',
+  getParentRoute: () => SettingsRoute,
+} as any)
 const SettingsKeybindingsRoute = SettingsKeybindingsRouteImport.update({
   id: '/keybindings',
   path: '/keybindings',
@@ -198,6 +204,7 @@ export interface FileRoutesByFullPath {
   '/settings/grok-bots': typeof SettingsGrokBotsRoute
   '/settings/integrations': typeof SettingsIntegrationsRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/marketplace': typeof SettingsMarketplaceRoute
   '/settings/open-source-licenses': typeof SettingsOpenSourceLicensesRoute
   '/settings/projects': typeof SettingsProjectsRoute
   '/settings/providers': typeof SettingsProvidersRoute
@@ -226,6 +233,7 @@ export interface FileRoutesByTo {
   '/settings/grok-bots': typeof SettingsGrokBotsRoute
   '/settings/integrations': typeof SettingsIntegrationsRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/marketplace': typeof SettingsMarketplaceRoute
   '/settings/open-source-licenses': typeof SettingsOpenSourceLicensesRoute
   '/settings/projects': typeof SettingsProjectsRoute
   '/settings/providers': typeof SettingsProvidersRoute
@@ -257,6 +265,7 @@ export interface FileRoutesById {
   '/settings/grok-bots': typeof SettingsGrokBotsRoute
   '/settings/integrations': typeof SettingsIntegrationsRoute
   '/settings/keybindings': typeof SettingsKeybindingsRoute
+  '/settings/marketplace': typeof SettingsMarketplaceRoute
   '/settings/open-source-licenses': typeof SettingsOpenSourceLicensesRoute
   '/settings/projects': typeof SettingsProjectsRoute
   '/settings/providers': typeof SettingsProvidersRoute
@@ -289,6 +298,7 @@ export interface FileRouteTypes {
     | '/settings/grok-bots'
     | '/settings/integrations'
     | '/settings/keybindings'
+    | '/settings/marketplace'
     | '/settings/open-source-licenses'
     | '/settings/projects'
     | '/settings/providers'
@@ -317,6 +327,7 @@ export interface FileRouteTypes {
     | '/settings/grok-bots'
     | '/settings/integrations'
     | '/settings/keybindings'
+    | '/settings/marketplace'
     | '/settings/open-source-licenses'
     | '/settings/projects'
     | '/settings/providers'
@@ -347,6 +358,7 @@ export interface FileRouteTypes {
     | '/settings/grok-bots'
     | '/settings/integrations'
     | '/settings/keybindings'
+    | '/settings/marketplace'
     | '/settings/open-source-licenses'
     | '/settings/projects'
     | '/settings/providers'
@@ -478,6 +490,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsOpenSourceLicensesRouteImport
       parentRoute: typeof SettingsRoute
     }
+    '/settings/marketplace': {
+      id: '/settings/marketplace'
+      path: '/marketplace'
+      fullPath: '/settings/marketplace'
+      preLoaderRoute: typeof SettingsMarketplaceRouteImport
+      parentRoute: typeof SettingsRoute
+    }
     '/settings/keybindings': {
       id: '/settings/keybindings'
       path: '/keybindings'
@@ -599,6 +618,7 @@ interface SettingsRouteChildren {
   SettingsGrokBotsRoute: typeof SettingsGrokBotsRoute
   SettingsIntegrationsRoute: typeof SettingsIntegrationsRoute
   SettingsKeybindingsRoute: typeof SettingsKeybindingsRoute
+  SettingsMarketplaceRoute: typeof SettingsMarketplaceRoute
   SettingsOpenSourceLicensesRoute: typeof SettingsOpenSourceLicensesRoute
   SettingsProjectsRoute: typeof SettingsProjectsRoute
   SettingsProvidersRoute: typeof SettingsProvidersRoute
@@ -617,6 +637,7 @@ const SettingsRouteChildren: SettingsRouteChildren = {
   SettingsGrokBotsRoute: SettingsGrokBotsRoute,
   SettingsIntegrationsRoute: SettingsIntegrationsRoute,
   SettingsKeybindingsRoute: SettingsKeybindingsRoute,
+  SettingsMarketplaceRoute: SettingsMarketplaceRoute,
   SettingsOpenSourceLicensesRoute: SettingsOpenSourceLicensesRoute,
   SettingsProjectsRoute: SettingsProjectsRoute,
   SettingsProvidersRoute: SettingsProvidersRoute,

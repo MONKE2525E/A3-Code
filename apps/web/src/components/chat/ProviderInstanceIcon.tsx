@@ -14,6 +14,9 @@ import {
   resolveOfficialAcpRegistryIconUrl,
 } from "../settings/AcpRegistryIcon";
 
+/** The native Grok Bot provider has no package client; its logo is a static asset. */
+export const GROK_BOT_DRIVER_KIND = ProviderDriverKind.make("grok-bot");
+
 const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>> = {
   [ProviderDriverKind.make("codex")]: OpenAI,
   [ProviderDriverKind.make("claudeAgent")]: ClaudeAI,
@@ -98,6 +101,16 @@ export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {
           className={cn("size-5 rounded-none bg-transparent", props.iconClassName)}
           fallbackClassName="size-full"
           icon={acpRegistryIconUrl}
+        />
+      ) : props.driverKind === GROK_BOT_DRIVER_KIND ? (
+        <img
+          src="/grok-bot-logo.png"
+          alt=""
+          draggable={false}
+          // The artwork covers ~77% of the 256px canvas; scaling the box
+          // (not the layout) matches the optical size of the 16px SVG peers.
+          className={cn("size-5 shrink-0 scale-[1.28] object-contain", props.iconClassName)}
+          aria-hidden
         />
       ) : packageIcon ? (
         <ProviderPackageIcon

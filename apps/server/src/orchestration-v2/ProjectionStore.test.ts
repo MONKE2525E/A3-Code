@@ -54,6 +54,68 @@ const driver = ProviderDriverKind.make("codex");
 const providerInstanceId = modelSelection.instanceId;
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
+const botPullRequestProviderIdentity = Effect.gen(function* () {
+  const store = yield* ProjectionStore.ProjectionStoreV2;
+  const now = yield* DateTime.now;
+  const botInstanceId = ProviderInstanceId.make("persistent-bot");
+  for (const parked of [false, true]) {
+    const threadId = ThreadId.make(`thread:bot-pr-identity:${parked}`);
+    yield* store.apply({
+      id: EventId.make(`event:bot-pr-identity:${parked}`),
+      type: "thread.created",
+      threadId,
+      occurredAt: now,
+      payload: {
+        createdBy: "user",
+        creationSource: "web",
+        id: threadId,
+        projectId: ProjectId.make("project:bot-pr-identity"),
+        title: "Persistent bot",
+        providerInstanceId: botInstanceId,
+        modelSelection: { instanceId: botInstanceId, model: "grok" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        activeProviderThreadId: null,
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+        forkedFrom: null,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: null,
+        deletedAt: null,
+        pinnedAt: parked ? now : null,
+        autoSettleDisabledAt: parked ? now : null,
+        pullRequests: [
+          {
+            host: "github.com",
+            repository: "owner/repository",
+            number: 42,
+            url: "https://github.com/owner/repository/pull/42",
+            source: "manual",
+            linkedAt: DateTime.formatIso(now),
+            snapshot: null,
+            stack: null,
+          },
+        ],
+      },
+    });
+    const linked = yield* store.getThreadsWithPullRequests(threadId);
+    assert.strictEqual(linked.length, 1);
+    assert.strictEqual(linked[0]?.providerInstanceId, botInstanceId);
+    const settlement = yield* store.getSettlementCandidates(threadId);
+    assert.strictEqual(settlement.length, parked ? 0 : 1);
+    if (!parked) assert.strictEqual(settlement[0]?.providerInstanceId, botInstanceId);
+  }
+});
+
+it.effect("memory PR sync includes pinned bots and their provider identity", () =>
+  botPullRequestProviderIdentity.pipe(Effect.provide(ProjectionStore.layerMemory)),
+);
+
 const traceSqlStatements = () => {
   const statements: Array<string> = [];
   const tracer = Tracer.make({
@@ -549,6 +611,162 @@ it.effect("memory shell snapshots scope to one project", () =>
 );
 
 it.layer(layerTest)("ProjectionStoreV2", (it) => {
+  it.effect("retains native question display data outside the bounded history window", () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:bounded-native-question");
+      const nodeId = NodeId.make("node:bounded-native-question");
+      const requestId = RuntimeRequestId.make("request:bounded-native-question");
+      const questionItemId = TurnItemId.make("item:bounded-native-question");
+      const latestItemId = TurnItemId.make("item:bounded-native-question:latest");
+      yield* store.apply({
+        id: EventId.make("event:bounded-native-question:thread"),
+        type: "thread.created",
+        threadId,
+        occurredAt: now,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id: threadId,
+          projectId: ProjectId.make("project:bounded-native-question"),
+          title: "Native question",
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      });
+      const request = {
+        id: requestId,
+        nodeId,
+        providerTurnId: null,
+        nativeRequestRef: null,
+        kind: "user_input" as const,
+        status: "pending" as const,
+        responseCapability: { type: "message" as const },
+        createdAt: now,
+        resolvedAt: null,
+      };
+      yield* store.apply({
+        id: EventId.make("event:bounded-native-question:request"),
+        type: "runtime-request.updated",
+        threadId,
+        driver,
+        occurredAt: now,
+        payload: request,
+      });
+      yield* store.apply({
+        id: EventId.make("event:bounded-native-question:item"),
+        type: "turn-item.updated",
+        threadId,
+        driver,
+        occurredAt: now,
+        payload: {
+          id: questionItemId,
+          threadId,
+          runId: null,
+          nodeId,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 0,
+          status: "waiting",
+          title: null,
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+          type: "user_input_request",
+          requestId,
+          questions: [
+            {
+              id: "native-question",
+              header: "Question",
+              question: "Pick one",
+              options: [{ label: "A", description: "First" }],
+              allowCustomAnswer: true,
+            },
+          ],
+        },
+      });
+      yield* store.apply({
+        id: EventId.make("event:bounded-native-question:latest"),
+        type: "turn-item.updated",
+        threadId,
+        driver,
+        occurredAt: now,
+        payload: {
+          id: latestItemId,
+          threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 10,
+          status: "completed",
+          title: "Later event",
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+          type: "command_execution",
+          input: "echo done",
+          output: "done",
+          exitCode: 0,
+        },
+      });
+      const snapshot = yield* store.getThreadSnapshotWindow(threadId, { rowLimit: 1 });
+      assert.deepStrictEqual(
+        snapshot.projection.turnItems.map((item) => item.id),
+        [questionItemId, latestItemId],
+      );
+      assert.deepStrictEqual(
+        snapshot.projection.runtimeRequests.map((item) => item.id),
+        [requestId],
+      );
+      // Historical pagination does not pull an unrelated live card into each page.
+      const history = yield* store.getThreadSnapshotWindow(threadId, {
+        rowLimit: 1,
+        anchorItemId: latestItemId,
+      });
+      assert.deepStrictEqual(
+        history.projection.turnItems.map((item) => item.id),
+        [latestItemId],
+      );
+      yield* store.apply({
+        id: EventId.make("event:bounded-native-question:resolved"),
+        type: "runtime-request.updated",
+        threadId,
+        driver,
+        occurredAt: now,
+        payload: { ...request, status: "resolved", resolvedAt: now },
+      });
+      const resolved = yield* store.getThreadSnapshotWindow(threadId, { rowLimit: 1 });
+      assert.deepStrictEqual(
+        resolved.projection.turnItems.map((item) => item.id),
+        [latestItemId],
+      );
+    }),
+  );
+
+  it.effect(
+    "PR sync includes pinned bots and their provider identity",
+    () => botPullRequestProviderIdentity,
+  );
   it.effect(
     "SQL recovery selects unfinished runless native subagents",
     () => runlessNativeSubagentNeedsRecovery,

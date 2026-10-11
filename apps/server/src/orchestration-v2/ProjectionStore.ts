@@ -55,6 +55,8 @@ import {
   OrchestrationV2RuntimeRequestJson as OrchestrationV2RuntimeRequestJsonSchema,
   OrchestrationV2SubagentJson as OrchestrationV2SubagentJsonSchema,
   OrchestrationV2TurnItemJson as OrchestrationV2TurnItemJsonSchema,
+  OrchestrationV2LatestVisibleMessageSummaryJson as OrchestrationV2LatestVisibleMessageSummaryJsonSchema,
+  isGrokBotBackingThread,
   orchestrationV2RunWorkStartedAt,
   RunId,
   MessageId,
@@ -171,7 +173,13 @@ export type ProjectionLimitRecoveryCandidate = Pick<
 /** The thread fields pull request sync reads, for a thread with at least one link. */
 export type ProjectionThreadPullRequests = Pick<
   OrchestrationV2AppThread,
-  "id" | "projectId" | "lineage" | "settledOverride" | "settledAt" | "pullRequests"
+  | "id"
+  | "projectId"
+  | "providerInstanceId"
+  | "lineage"
+  | "settledOverride"
+  | "settledAt"
+  | "pullRequests"
 >;
 
 /**
@@ -182,6 +190,7 @@ export type ProjectionSettlementCandidate = Pick<
   OrchestrationV2ThreadShell,
   | "id"
   | "projectId"
+  | "providerInstanceId"
   | "branch"
   | "worktreePath"
   | "pullRequests"
@@ -989,6 +998,7 @@ type ShellThreadRow = {
   readonly blocking_failure_payload_json: string | null;
   readonly pending_request_payload_json: string | null;
   readonly pending_secret_request_payload_json: string | null;
+  readonly latest_visible_message_payload_json: string | null;
   readonly latest_user_message_at: string | null;
   readonly latest_user_authored_message_at: string | null;
   readonly has_actionable_proposed_plan: number;
@@ -1107,6 +1117,9 @@ const decodeRuntimeRequestPayload = Schema.decodeUnknownEffect(
 );
 const decodeMessagePayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2ConversationMessageJsonSchema),
+);
+const decodeLatestVisibleMessagePayload = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(OrchestrationV2LatestVisibleMessageSummaryJsonSchema),
 );
 const decodePlanArtifact = Schema.decodeUnknownEffect(OrchestrationV2PlanArtifactSchema);
 const decodePlanPayload = (json: string) => decodePlanArtifact(parseEncodedPayload(json));
@@ -1509,7 +1522,7 @@ export function threadShellFromProjection(
           },
     // Thread detail owns message bodies. Keeping them out of shell rows makes
     // initial hydration and streaming updates independent of transcript size.
-    latestVisibleMessage: null,
+    latestVisibleMessage: latestCompletedGrokBotMessage(projection),
     latestUserMessageAt: latestUserMessage?.updatedAt ?? null,
     latestUserAuthoredMessageAt:
       userMessages.find((message) => message.createdBy === "user")?.updatedAt ?? null,
@@ -1594,6 +1607,40 @@ function isActivityRunForShell(
   return isInterruptibleRunForShell(run) || run.status === "waiting";
 }
 
+function latestCompletedGrokBotMessage(
+  projection: OrchestrationV2ThreadProjection,
+): OrchestrationV2ThreadShell["latestVisibleMessage"] {
+  if (!isGrokBotBackingThread(projection.thread)) return null;
+  const rolledBackRunIds = new Set(
+    projection.runs.filter((run) => run.status === "rolled_back").map((run) => run.id),
+  );
+  let latest: OrchestrationV2ConversationMessage | undefined;
+  for (const message of projection.messages) {
+    if (
+      message.role !== "assistant" ||
+      message.streaming ||
+      (message.runId !== null && rolledBackRunIds.has(message.runId))
+    )
+      continue;
+    if (
+      latest === undefined ||
+      DateTime.toEpochMillis(message.createdAt) > DateTime.toEpochMillis(latest.createdAt) ||
+      (DateTime.toEpochMillis(message.createdAt) === DateTime.toEpochMillis(latest.createdAt) &&
+        message.id > latest.id)
+    )
+      latest = message;
+  }
+  return latest === undefined
+    ? null
+    : {
+        id: latest.id,
+        role: latest.role,
+        text: "",
+        createdAt: latest.createdAt,
+        updatedAt: latest.updatedAt,
+      };
+}
+
 type ShellThreadState = {
   readonly thread: OrchestrationV2ThreadProjection["thread"];
   readonly latestRunId: RunId | null;
@@ -1608,6 +1655,7 @@ type ShellThreadState = {
   readonly lastErrorClass: OrchestrationV2ThreadShell["lastErrorClass"];
   readonly usageLimitResetAt: OrchestrationV2ThreadShell["usageLimitResetAt"];
   readonly pendingRuntimeRequest: OrchestrationV2ThreadProjection["runtimeRequests"][number] | null;
+  readonly latestVisibleMessage: OrchestrationV2ThreadShell["latestVisibleMessage"];
   readonly latestUserMessageAt: DateTime.Utc | null;
   readonly latestUserAuthoredMessageAt: DateTime.Utc | null;
   readonly hasActionableProposedPlan: boolean;
@@ -1773,7 +1821,7 @@ function shellFromState(input: {
             kind: input.state.pendingRuntimeRequest.kind,
             createdAt: input.state.pendingRuntimeRequest.createdAt,
           },
-    latestVisibleMessage: null,
+    latestVisibleMessage: input.state.latestVisibleMessage,
     latestUserMessageAt: input.state.latestUserMessageAt,
     latestUserAuthoredMessageAt: input.state.latestUserAuthoredMessageAt,
     hasActionableProposedPlan: input.state.hasActionableProposedPlan,
@@ -2845,6 +2893,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   END
                 ), retained AS MATERIALIZED (
                   SELECT item_rowid, ordinal, turn_item_id FROM selected
+                  UNION
+                  -- Native cards can arrive outside a run, with an ordinal older than the
+                  -- history window. Pending requests still need their display items to answer.
+                  SELECT item.rowid AS item_rowid, item.ordinal, item.turn_item_id
+                  FROM orchestration_v2_projection_runtime_requests AS request
+                  INNER JOIN orchestration_v2_projection_turn_items AS item
+                    ON item.thread_id = request.thread_id AND item.node_id = request.node_id
+                  WHERE request.thread_id = ${threadId}
+                    AND request.status IN ('pending','waiting')
+                    AND item.type IN ('approval_request','user_input_request')
+                    AND ${window.anchorItemId ?? null} IS NULL
+                    AND ${window.requiredRunId ?? null} IS NULL
                   UNION
                   SELECT request.rowid AS item_rowid, request.ordinal, request.turn_item_id
                   FROM orchestration_v2_projection_turn_items AS request
@@ -5260,6 +5320,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ORDER BY secret.updated_at DESC, secret.turn_item_id DESC
                 LIMIT 1
               ) AS pending_secret_request_payload_json,
+              CASE WHEN substr(t.thread_id, 1, 9) = 'grok-bot:' THEN (
+                SELECT json_object('id', message.message_id, 'role', message.role,
+                  'text', '', 'createdAt', message.created_at, 'updatedAt', message.updated_at)
+                FROM orchestration_v2_projection_messages message
+                  INDEXED BY orchestration_v2_projection_messages_thread_created_idx
+                LEFT JOIN orchestration_v2_projection_runs r ON r.run_id = message.run_id
+                WHERE message.thread_id = t.thread_id
+                  AND message.role = 'assistant' AND message.streaming = 0
+                  AND (r.status IS NULL OR r.status <> 'rolled_back')
+                ORDER BY message.created_at DESC, message.message_id DESC
+                LIMIT 1
+              ) ELSE NULL END AS latest_visible_message_payload_json,
               (
                 SELECT message.updated_at
                 FROM orchestration_v2_projection_messages message
@@ -5601,6 +5673,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             Effect.map((thread): ProjectionThreadPullRequests => ({
               id: thread.id,
               projectId: thread.projectId,
+              providerInstanceId: thread.providerInstanceId,
               lineage: thread.lineage,
               settledOverride: thread.settledOverride,
               settledAt: thread.settledAt,
@@ -5726,6 +5799,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             row.last_error,
           ),
           pendingRuntimeRequest,
+          latestVisibleMessage:
+            row.latest_visible_message_payload_json === null
+              ? null
+              : yield* decodeLatestVisibleMessagePayload(row.latest_visible_message_payload_json),
           latestUserMessageAt:
             row.latest_user_message_at === null
               ? null
@@ -6114,6 +6191,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               .map((thread): ProjectionThreadPullRequests => ({
                 id: thread.id,
                 projectId: thread.projectId,
+                providerInstanceId: thread.providerInstanceId,
                 lineage: thread.lineage,
                 settledOverride: thread.settledOverride,
                 settledAt: thread.settledAt,

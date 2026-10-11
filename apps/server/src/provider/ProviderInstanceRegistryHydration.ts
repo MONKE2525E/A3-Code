@@ -113,20 +113,26 @@ export const deriveProviderInstanceConfigMap = (
  * configs, so the only way the watcher could fail is a settings stream
  * tear-down, which logs and exits cleanly.
  */
+/** Reconcile from the latest settings under their write lock, including explicit setup. */
+export const reconcileSettings = Effect.gen(function* () {
+  const mutator = yield* ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutator;
+  const settings = yield* Settings.ServerSettingsService;
+  yield* settings.withSettingsSnapshot((current) =>
+    mutator.reconcile(deriveProviderInstanceConfigMap(current)),
+  );
+});
+
 const layerSettingsWatcher = Layer.effectDiscard(
   Effect.gen(function* () {
-    const mutator = yield* ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutator;
     const serverSettings = yield* Settings.ServerSettingsService;
     const settingsChanges = yield* serverSettings.subscribeChanges;
     yield* settingsChanges.pipe(
-      Stream.runForEach((next) =>
-        mutator
-          .reconcile(deriveProviderInstanceConfigMap(next))
-          .pipe(
-            Effect.catchCause((cause) =>
-              Effect.logError("ProviderInstanceRegistry reconcile failed", cause),
-            ),
+      Stream.runForEach(() =>
+        reconcileSettings.pipe(
+          Effect.catchCause((cause) =>
+            Effect.logError("ProviderInstanceRegistry reconcile failed", cause),
           ),
+        ),
       ),
       Effect.forkScoped,
     );
@@ -146,11 +152,12 @@ const layerSettingsWatcher = Layer.effectDiscard(
  *
  * Composing via `Layer.provideMerge` makes the watcher's deps available
  * from the mutable layer while still surfacing the registry as an output.
- * The mutator tag is technically also exposed; only this module imports
- * it, so the visibility leak is harmless in practice.
+ * Explicit provider setup uses the same mutator through `reconcileSettings`
+ * to wait for hydration before reading the new instance's catalog.
  */
 export const layer: Layer.Layer<
-  ProviderInstanceRegistry.ProviderInstanceRegistry,
+  | ProviderInstanceRegistry.ProviderInstanceRegistry
+  | ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutator,
   never,
   ProviderInstanceRegistryHydrationEnv
 > = Layer.unwrap(
@@ -176,7 +183,8 @@ export const layer: Layer.Layer<
     return layerSettingsWatcher.pipe(Layer.provideMerge(layerMutable));
   }),
 ) as Layer.Layer<
-  ProviderInstanceRegistry.ProviderInstanceRegistry,
+  | ProviderInstanceRegistry.ProviderInstanceRegistry
+  | ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutator,
   never,
   ProviderInstanceRegistryHydrationEnv
 >;

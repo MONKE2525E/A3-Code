@@ -175,6 +175,49 @@ it.layer(layerTest)("ThreadSearch", (it) => {
     }),
   );
 
+  it.effect("includes bot conversations alongside their delegated work", () =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const search = yield* ThreadSearch.ThreadSearch;
+      const projectId = ProjectId.make("project:bot-search");
+      yield* createProject(projectId);
+      const backingId = ThreadId.make("grok-bot:backing");
+      const childId = ThreadId.make("thread:delegated-work");
+      const child = thread(childId, projectId);
+      if (child.type !== "thread.created") return yield* Effect.die("Expected a thread fixture.");
+      yield* projections.apply({
+        ...child,
+        payload: {
+          ...child.payload,
+          createdBy: "agent",
+          creationSource: "mcp",
+          lineage: {
+            parentThreadId: backingId,
+            rootThreadId: backingId,
+            relationshipToParent: "subagent",
+          },
+        },
+      });
+      yield* projections.apply(
+        message(childId, "delegated-answer", "assistant", "bot-search-marker delegated answer"),
+      );
+      yield* projections.apply(thread(backingId, projectId));
+      yield* projections.apply(
+        message(backingId, "bot-user-message", "user", "bot-search-marker bot chat", { minute: 3 }),
+      );
+      const result = yield* search.search({ query: "bot-search-marker", limit: 1 });
+      assert.deepEqual(
+        result.matches.map((match) => match.threadId),
+        [backingId],
+      );
+      const all = yield* search.search({ query: "bot-search-marker", limit: 20 });
+      assert.deepEqual(
+        all.matches.map((match) => match.threadId),
+        [backingId, childId],
+      );
+    }),
+  );
+
   it.effect("reports an unreadable match as a decode failure", () =>
     Effect.gen(function* () {
       const projections = yield* ProjectionStore.ProjectionStoreV2;

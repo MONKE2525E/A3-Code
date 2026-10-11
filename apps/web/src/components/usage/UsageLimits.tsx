@@ -3,6 +3,7 @@ import {
   type EnvironmentId,
   type ProviderConsumeResetCreditOutcome,
   ProviderConsumeResetCreditInput,
+  ProviderDriverKind,
   ServerProvider,
   ServerProviderResetCredits,
   ServerProviderUsageWindow,
@@ -339,6 +340,8 @@ export function ResetCredits({
   );
 }
 
+const NO_HIDDEN_DRIVERS: readonly string[] = [];
+
 /**
  * Subscription quota across every connected environment's providers and hubs,
  * pooled per provider. The page advances `now` on explicit refresh rather than
@@ -347,18 +350,22 @@ export function ResetCredits({
 export function UsageLimitsSection({
   selectedEnvironmentIds,
   hiddenProviders,
+  hiddenLimitDrivers = NO_HIDDEN_DRIVERS,
   now,
   cursorPrompt,
 }: {
   readonly selectedEnvironmentIds: ReadonlySet<EnvironmentId> | null;
   readonly hiddenProviders: ReadonlySet<UsageProviderKind>;
+  /** Limits-only driver kinds hidden alongside the cost providers. */
+  readonly hiddenLimitDrivers?: readonly string[];
   readonly now: number;
   readonly cursorPrompt?: ReactNode;
 }) {
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);
-  const hiddenDrivers = new Set<ServerProvider["driver"]>(
-    [...hiddenProviders].map((provider) => PROVIDER_PRESENTATION[provider].driverKind),
-  );
+  const hiddenDrivers = new Set<ServerProvider["driver"]>([
+    ...[...hiddenProviders].map((provider) => PROVIDER_PRESENTATION[provider].driverKind),
+    ...hiddenLimitDrivers.map((driver) => ProviderDriverKind.make(driver)),
+  ]);
   const isVisible = (driver: ServerProvider["driver"]) => !hiddenDrivers.has(driver);
   // Hidden drivers leave both native accounts and hub accounts, so their
   // bars, notices, and external links all drop out together.

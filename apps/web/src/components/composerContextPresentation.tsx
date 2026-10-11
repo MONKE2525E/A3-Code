@@ -5,7 +5,7 @@ import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments"
 import { videoMimeType } from "@t3tools/shared/video";
 import { MessageCircleIcon, MousePointerClickIcon } from "lucide-react";
 import { createContext, type MouseEvent, type ReactElement, type ReactNode, use } from "react";
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, GrokBotComposerResources } from "@t3tools/contracts";
 
 import type { ComposerFileAttachment, ComposerImageAttachment } from "~/composerDraftStore";
 import { composerFileNeedsReattach } from "~/composerDraftStore";
@@ -67,6 +67,9 @@ export type ComposerDraftContextRecord =
 
 /** What a chip can do beyond showing itself; the composer supplies the handlers. */
 export interface ComposerContextActions {
+  grokBotResources?: GrokBotComposerResources | null;
+  /** Catalog logos keyed by connector plugin id; a connector without one shows the plug glyph. */
+  grokBotConnectorLogoUrls?: ReadonlyMap<string, string>;
   environmentId: EnvironmentId | null;
   cwd?: string | undefined;
   expandImage: (imageId: string) => void;
