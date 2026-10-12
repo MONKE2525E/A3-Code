@@ -92,7 +92,34 @@ export const GrokBotOrchestratorStatusInput = Schema.Struct({
 /** Omitted action inspects. Setup explicitly changes local provider settings. */
 export const GrokBotOrchestratorInput = Schema.Struct({
   ...GrokBotOrchestratorStatusInput.fields,
-  action: Schema.optionalKey(Schema.Literals(["status", "setup"])),
+  action: Schema.optionalKey(Schema.Literals(["status", "setup", "send_setup_prompt"])),
+});
+
+export const GrokBotSetupStatus = Schema.Struct({
+  phase: Schema.Literals([
+    "needs_setup",
+    "needs_primary",
+    "needs_prerequisite",
+    "sending",
+    "awaiting_authorization",
+    "verifying",
+    "complete",
+    "stalled",
+    "failed",
+  ]),
+  complete: Schema.Boolean,
+  primaryBot: Schema.NullOr(Schema.Struct({ id: GrokBotId, name: Schema.String })),
+  mcpUrl: Schema.NullOr(Schema.String),
+  terminalCommand: Schema.NullOr(Schema.String),
+  authorizationUrl: Schema.NullOr(Schema.String),
+  error: Schema.NullOr(Schema.String),
+  updatedAtMs: Schema.Number,
+});
+export type GrokBotSetupStatus = typeof GrokBotSetupStatus.Type;
+
+export const GrokBotSetupVerificationInput = Schema.Struct({
+  nonce: Schema.String.check(Schema.isMinLength(32), Schema.isMaxLength(128)),
+  managedSkillHash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
 });
 
 export const GrokBotOrchestratorConfig = Schema.Struct({
@@ -113,6 +140,7 @@ export const GrokBotOrchestratorConfig = Schema.Struct({
     reason: Schema.NullOr(Schema.String),
   }),
   instructions: Schema.String,
+  setupStatus: Schema.optionalKey(GrokBotSetupStatus),
   /** Shared native workflow installation, shown once during provider setup or repair. */
   skillSetup: Schema.optionalKey(
     Schema.Struct({

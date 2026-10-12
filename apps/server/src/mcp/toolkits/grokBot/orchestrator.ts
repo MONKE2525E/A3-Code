@@ -2,6 +2,7 @@ import {
   GrokBotError,
   GrokBotOrchestratorConfig,
   GrokBotOrchestratorError,
+  GrokBotSetupVerificationInput,
   GrokBotOrchestratorStatusInput,
   GrokBotOpenThreadInput,
   GrokBotOpenThreadResult,
@@ -11,6 +12,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
+import * as GuidedSetup from "../../../grokBot/GrokBotSetupService.ts";
 import * as GrokBotOrchestratorService from "../../../grokBot/GrokBotOrchestratorService.ts";
 import * as GrokBotThreadService from "../../../grokBot/GrokBotThreadService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
@@ -25,6 +27,19 @@ const shared = {
   dependencies: [GrokBotOrchestratorService.GrokBotOrchestratorService],
 };
 export const toolkit = Toolkit.make(
+  Tool.make("grok_bot_verify_setup", {
+    parameters: GrokBotSetupVerificationInput,
+    success: Schema.Struct({ verified: Schema.Literal(true) }),
+    failure: Schema.Union([GuidedSetup.GrokBotSetupError, OrchestratorMcpFailure]),
+    failureMode: "return",
+    description:
+      "Verify explicit GrokBot setup through this environment's ordinary OAuth MCP connector. Read back the installed shared skill first, then supply the nonce from the setup request and its protocol hash. Temporary managed-turn or voice-call credentials cannot finish setup.",
+    dependencies: [
+      GuidedSetup.GrokBotSetupService,
+      McpInvocationContext.McpInvocationContext,
+      ThreadManagementService.ThreadManagementService,
+    ],
+  }),
   Tool.make("grok_bot_open_thread", {
     parameters: GrokBotOpenThreadInput,
     success: GrokBotOpenThreadResult,
@@ -61,6 +76,14 @@ export const toolkit = Toolkit.make(
 );
 
 export const layer = McpToolAccess.toLayer(toolkit, {
+  grok_bot_verify_setup: McpToolAccess.writes((input) =>
+    Effect.gen(function* () {
+      const caller = yield* McpInvocationContext.McpInvocationContext;
+      if (!caller.client || caller.client.access === "read-only" || caller.thread || caller.call)
+        return yield* new GuidedSetup.GrokBotSetupError({ stage: "verification" });
+      return yield* (yield* GuidedSetup.GrokBotSetupService).verify(input);
+    }),
+  ),
   grok_bot_open_thread: McpToolAccess.writesEnvironment((input) =>
     Effect.flatMap(GrokBotThreadService.GrokBotThreadService, (service) => service.open(input)),
   ),
