@@ -228,6 +228,12 @@ const make = Effect.gen(function* () {
               : {
                   status: "landed",
                   runStatus: result.status,
+                  ...(result.status === "failed"
+                    ? {
+                        error:
+                          "A delegated task from this call failed. Open its T3 thread for the error. That task has not been completed.",
+                      }
+                    : {}),
                   updates: result.summary === null ? [] : [result.summary.slice(0, 16_000)],
                 },
           },

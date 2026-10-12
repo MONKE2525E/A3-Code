@@ -168,7 +168,12 @@ describe("grok bot voice call", () => {
       fake.sent
         .map((frame) => JSON.parse(frame))
         .filter((frame) => frame.type === "response.create"),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
+    expect(
+      h.sockets[0]!.fake.sent.map((frame) => JSON.parse(frame)).filter(
+        (frame) => frame.item?.type === "force_message",
+      ),
+    ).toHaveLength(1);
     h.call.hangUp();
   });
 
@@ -329,7 +334,7 @@ describe("grok bot voice call", () => {
         type: "conversation.item.create",
         item: { type: "function_call_output", call_id: "launch", output: '{"accepted":true}' },
       },
-      { type: "response.create" },
+      expect.objectContaining({ type: "response.create" }),
     ]);
     next.listeners.message(JSON.stringify({ type: "response.done" }));
     expect(next.sent.slice(-3).map((f) => JSON.parse(f).item?.type ?? JSON.parse(f).type)).toEqual([
@@ -546,7 +551,7 @@ describe("grok bot voice call", () => {
           output: '{"status":"landed","updates":["The build is fixed."]}',
         },
       },
-      { type: "response.create" },
+      expect.objectContaining({ type: "response.create" }),
     ]);
     fake.listeners.message(JSON.stringify({ type: "response.done" }));
     expect(
@@ -726,7 +731,7 @@ describe("grok bot voice call", () => {
     await flush();
     const outputs = fake.sent
       .map((frame) => JSON.parse(frame))
-      .filter((frame) => frame.type === "conversation.item.create")
+      .filter((frame) => frame.item?.type === "function_call_output")
       .map((frame) => frame.item.output);
     expect(outputs).toEqual(['{"ok":true}', '{"error":"unknown_tool"}']);
     expect(h.toolCalls[0]).toMatchObject({

@@ -63,6 +63,7 @@ export function sessionUpdateFrame(input: {
       ...(voice.voiceId === null ? {} : { voice: voice.voiceId }),
       ...(input.reconnecting ? { keep_context: false } : {}),
       instructions: input.instructions,
+      resumption: { enabled: true },
       turn_detection: { type: "server_vad" },
       audio: {
         input: {
@@ -153,6 +154,28 @@ export function responseCreateFrame(instructions: string | null): string {
       ? { type: "response.create" }
       : { type: "response.create", response: { instructions } },
   );
+}
+
+/** A known failure is spoken directly rather than waiting for the model to choose to report it. */
+export function failureSpeechFrame(message: string): string {
+  return JSON.stringify({
+    type: "conversation.item.create",
+    item: {
+      type: "force_message",
+      role: "assistant",
+      interruptible: true,
+      content: [{ type: "output_text", text: message.slice(0, 600) }],
+    },
+  });
+}
+
+export function truncateFrame(cut: { itemId: string; contentIndex: number; audioEndMs: number }) {
+  return JSON.stringify({
+    type: "conversation.item.truncate",
+    item_id: cut.itemId,
+    content_index: cut.contentIndex,
+    audio_end_ms: Math.round(cut.audioEndMs),
+  });
 }
 
 export type VoiceServerEvent =

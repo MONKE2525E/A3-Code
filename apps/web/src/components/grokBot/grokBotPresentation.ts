@@ -38,6 +38,27 @@ export function grokBotFailureMessage(error: unknown): string {
   return "Grok Bot could not complete that request.";
 }
 
+/** A failed background roster read should not replace a recent successful list. */
+export function isGrokBotRosterRecovering(input: {
+  readonly failure: unknown;
+  readonly hasData: boolean;
+  readonly dataUpdatedAt: number;
+  readonly nowMs: number;
+}): boolean {
+  return (
+    input.hasData &&
+    input.dataUpdatedAt > 0 &&
+    input.nowMs >= input.dataUpdatedAt &&
+    input.nowMs - input.dataUpdatedAt < 30_000 &&
+    typeof input.failure === "object" &&
+    input.failure !== null &&
+    "_tag" in input.failure &&
+    input.failure._tag === "GrokBotError" &&
+    "reason" in input.failure &&
+    input.failure.reason === "gateway_failed"
+  );
+}
+
 export function grokBotSurfaceKey(environmentId: string, botId: string): string {
   return `${environmentId}:${botId}`;
 }

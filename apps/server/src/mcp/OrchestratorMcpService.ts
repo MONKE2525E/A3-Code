@@ -303,6 +303,11 @@ function providerConstraints(
     constraints.push("No V2 provider adapter is registered.");
   }
   if (provider === undefined) return constraints;
+  if (provider.driver === "grok-bot") {
+    constraints.push(
+      "Grok Bot runs its canonical bot chat, not coding subagent threads. Choose a coding provider and its advertised model.",
+    );
+  }
   if (!provider.enabled) constraints.push("Provider instance is disabled.");
   if (!provider.installed) constraints.push("Provider executable is not installed.");
   if (!isProviderAvailable(provider)) {
@@ -2199,8 +2204,10 @@ const make = Effect.gen(function* () {
         );
         return {
           parentThreadId: parent?.thread.id ?? null,
-          inheritedProviderInstanceId: parent?.thread.modelSelection.instanceId ?? null,
-          inheritedModel: parent?.thread.modelSelection.model ?? null,
+          inheritedProviderInstanceId:
+            scope.call === undefined ? (parent?.thread.modelSelection.instanceId ?? null) : null,
+          inheritedModel:
+            scope.call === undefined ? (parent?.thread.modelSelection.model ?? null) : null,
           runtimeMode: limits.runtimeMode,
           interactionMode: limits.interactionMode,
           providers: providers.map((provider) => {
@@ -2256,6 +2263,15 @@ const make = Effect.gen(function* () {
             yield* assertCallMayObserveTasks(callerScope);
             const scope = yield* requireDelegationScope(callerScope, "delegate_task");
             if (scope.call !== undefined) yield* validateCallInvocation(scope);
+            if (
+              scope.call !== undefined &&
+              (input.target?.providerInstanceId === undefined || input.target.model === undefined)
+            ) {
+              return yield* failure(
+                "invalid_request",
+                "Voice delegation needs target.providerInstanceId and target.model from orchestrator_capabilities. A call cannot inherit its Grok Bot as a coding provider.",
+              );
+            }
             const parent = yield* loadProjection(delegationThreadId(scope));
             const parentRun =
               scope.call === undefined

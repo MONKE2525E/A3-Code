@@ -238,7 +238,13 @@ export function createGrokBotVoiceCall(options: {
           return;
         }
         if (result.completion.pending) continue;
-        if (state.notice !== null) emit({ ...state, notice: null });
+        const output =
+          result.output !== null && typeof result.output === "object"
+            ? (result.output as Record<string, unknown>)
+            : {};
+        if (typeof output.error === "string")
+          emit({ ...state, notice: output.error.slice(0, 500) });
+        else if (state.notice !== null) emit({ ...state, notice: null });
         current.session?.deliverWork(requestToolCallId, toolOutput(result));
         return;
       }

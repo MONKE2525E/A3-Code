@@ -561,6 +561,21 @@ it.effect(
         const scope = yield* h.service.acquireCallInvocation(identity);
         assert.strictEqual(yield* h.service.acquireCallInvocation(identity), scope);
         assert.isUndefined(scope.thread);
+        const capabilities = yield* h.service.capabilities(scope);
+        assert.isNull(capabilities.inheritedProviderInstanceId);
+        assert.isNull(capabilities.inheritedModel);
+        yield* h.expectDenied(
+          scope,
+          "delegate_task",
+          { task: "Use the requested coding model", mode: "async" },
+          "invalid_request",
+        );
+        yield* h.expectDenied(
+          scope,
+          "delegate_task",
+          { task: "Use the requested coding model", target: { model: selection.model } },
+          "invalid_request",
+        );
         const task = yield* h.delegate(scope);
         assert.equal((yield* h.delegate(scope)).taskId, task.taskId);
         const parent = yield* h.orchestrator.getThreadProjection(parentThreadId);
@@ -617,7 +632,11 @@ it.effect("checked call tools enforce ownership, client ceiling, ended and new-c
       yield* h.expectDenied(
         scope,
         "delegate_task",
-        { task: "Escalate", runtimeMode: "full-access" },
+        {
+          task: "Escalate",
+          runtimeMode: "full-access",
+          target: { providerInstanceId: instanceId, model: selection.model },
+        },
         "runtime_mode_escalation_denied",
       );
       yield* h.expectDenied(

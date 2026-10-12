@@ -95,6 +95,58 @@ const flush = async () => {
 };
 
 describe("work completion and greeting", () => {
+  it("speaks a failed background task directly without asking the model to choose whether to report it", () => {
+    const h = harness();
+    const fake = h.sockets[0]!.fake;
+    configure(fake);
+    h.session.deliverWork(
+      "failed-child",
+      JSON.stringify({
+        runStatus: "failed",
+        error: "The child provider failed to open. Check its sign-in in T3.",
+      }),
+    );
+    const frames = fake.sent.map((frame) => JSON.parse(frame));
+    expect(
+      frames.find((frame) => frame.item?.type === "force_message")?.item.content[0].text,
+    ).toContain("provider failed to open");
+    expect(frames.filter((frame) => frame.type === "response.create")).toHaveLength(0);
+    fake.listeners.message(JSON.stringify({ type: "response.done" }));
+    h.session.deliverWork("failed-child", JSON.stringify({ error: "duplicate" }));
+    expect(
+      fake.sent
+        .map((frame) => JSON.parse(frame))
+        .filter((frame) => frame.item?.type === "force_message"),
+    ).toHaveLength(1);
+    h.session.hangUp();
+  });
+
+  it("speaks a rejected tool directly while preserving its function output", async () => {
+    const h = harness({
+      runTool: async () =>
+        JSON.stringify({ error: "Choose a coding provider and model from the catalog." }),
+    });
+    const fake = h.sockets[0]!.fake;
+    configure(fake);
+    fake.listeners.message(
+      JSON.stringify({
+        type: "response.function_call_arguments.done",
+        call_id: "rejected",
+        name: "delegate_task",
+        arguments: "{}",
+      }),
+    );
+    await flush();
+    const frames = fake.sent.map((frame) => JSON.parse(frame));
+    expect(frames.find((frame) => frame.item?.call_id === "rejected")?.item.output).toContain(
+      "coding provider",
+    );
+    expect(
+      frames.find((frame) => frame.item?.type === "force_message")?.item.content[0].text,
+    ).toContain("coding provider");
+    expect(frames.filter((frame) => frame.type === "response.create")).toHaveLength(0);
+    h.session.hangUp();
+  });
   it("does not sit silently when the server never acknowledges its opening response", async () => {
     vi.useFakeTimers();
     const h = harness({ greeting: "Greet the caller" });
@@ -190,7 +242,7 @@ describe("work completion and greeting", () => {
     const h = harness({
       runTool: async () => {
         executions++;
-        return '{"error":"permission_denied"}';
+        return '{"ok":true}';
       },
     });
     try {
@@ -434,6 +486,7 @@ describe("protocol", () => {
     expect(frame.session).toMatchObject({
       voice: "eve",
       keep_context: false,
+      resumption: { enabled: true },
       turn_detection: { type: "server_vad" },
       audio: {
         input: {
@@ -511,7 +564,7 @@ describe("call session", () => {
         type: "conversation.item.create",
         item: { type: "function_call_output", call_id: "c1", output: '{"ok":true}' },
       },
-      { type: "response.create" },
+      expect.objectContaining({ type: "response.create" }),
     ]);
   });
 
@@ -818,7 +871,7 @@ describe("call-owned reconnect queues", () => {
         type: "conversation.item.create",
         item: { type: "function_call_output", call_id: "launch", output: '{"accepted":true}' },
       },
-      { type: "response.create" },
+      expect.objectContaining({ type: "response.create" }),
     ]);
     expect(notified).toEqual(["launch"]);
     expect(invocations).toBe(1);
@@ -886,7 +939,7 @@ describe("call-owned reconnect queues", () => {
     next.listeners.message(JSON.stringify({ type: "session.updated" }));
     next.listeners.message(JSON.stringify({ type: "session.updated" }));
     expect(frames(next).filter((f) => f.type === "response.create")).toEqual([
-      { type: "response.create" },
+      expect.objectContaining({ type: "response.create" }),
     ]);
     h.session.hangUp();
   });

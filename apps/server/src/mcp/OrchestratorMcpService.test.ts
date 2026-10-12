@@ -1038,6 +1038,11 @@ describe("OrchestratorMcpService provider resolution", () => {
             enabled: false,
           }),
           forkShadow,
+          providerSnapshot({
+            instanceId: ProviderInstanceId.make("native-bot"),
+            driver: ProviderDriverKind.make("grok-bot"),
+            model: "bot-id",
+          }),
         ];
         const layerDependencies = Layer.mergeAll(
           NodeServices.layer,
@@ -1055,6 +1060,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             ProviderInstanceId.make("acpRegistry"),
             antigravityInstanceId,
             disabledAntigravityInstanceId,
+            ProviderInstanceId.make("native-bot"),
           ]),
           Layer.mock(ProjectService.ProjectService)({}),
           Layer.mock(SecretRequests.SecretRequests)({}),
@@ -1067,6 +1073,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           const byId = new Map(
             capabilities.providers.map((provider) => [provider.providerInstanceId, provider]),
           );
+          assert.isFalse(byId.get(ProviderInstanceId.make("native-bot"))?.canRunChildTask);
           for (const provider of providers) {
             assert.deepEqual(
               byId.get(provider.instanceId)?.models.map((model) => model.id),
