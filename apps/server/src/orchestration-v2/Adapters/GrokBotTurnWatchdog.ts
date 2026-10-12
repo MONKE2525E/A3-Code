@@ -2,11 +2,13 @@ import type { RuntimeFrame } from "../../grokBot/GrokBotNativeRuntimeService.ts"
 import type { GrokBotTurnIdentity } from "./GrokBotSettlementProjection.ts";
 
 /** Evaluation cadence. Verdict latency is at most one interval past each threshold. */
-export const GROK_BOT_WATCHDOG_INTERVAL_MS = 15_000;
+export const GROK_BOT_WATCHDOG_INTERVAL_MS = 5_000;
 /** After attach, native live state may still be on its way. Do not judge a restored turn before it. */
 export const GROK_BOT_WATCHDOG_STARTUP_GRACE_MS = 60_000;
 /** Native idle plus a settled answer must hold this long before the turn completes. */
 export const GROK_BOT_IDLE_COMPLETE_MS = 120_000;
+/** A fresh idle observation after the answer needs only a short quiet period. */
+export const GROK_BOT_FRESH_IDLE_COMPLETE_MS = 5_000;
 /** Native idle with no answer must hold this long before the turn fails. */
 export const GROK_BOT_IDLE_FAIL_MS = 300_000;
 /** Without any native live state, only silence on every progress signal this long ends the turn. */
@@ -30,6 +32,7 @@ interface Tracked {
   lastProgressAtMs: number;
   idleSinceMs: number | undefined;
   outputSeen: boolean;
+  answerAtMs: number | undefined;
   failedCode: string | undefined;
 }
 
@@ -48,7 +51,9 @@ const millis = (value: string | number | undefined) => {
  */
 export const makeGrokBotTurnWatchdog = (openedAtMs: number) => {
   const tracked = new Map<string, Tracked>();
-  let live: { readonly running: boolean; readonly staleAtMs: number } | undefined;
+  let live:
+    | { readonly running: boolean; readonly staleAtMs: number; readonly observedAtMs: number }
+    | undefined;
 
   const track = (identity: GrokBotTurnIdentity, nowMs: number) => {
     if (tracked.has(identity.messageId)) return;
@@ -57,6 +62,7 @@ export const makeGrokBotTurnWatchdog = (openedAtMs: number) => {
       lastProgressAtMs: nowMs,
       idleSinceMs: undefined,
       outputSeen: false,
+      answerAtMs: undefined,
       failedCode: undefined,
     });
   };
@@ -69,6 +75,7 @@ export const makeGrokBotTurnWatchdog = (openedAtMs: number) => {
         const state = frame.state;
         const awaiting = state.awaiting !== undefined;
         live = {
+          observedAtMs: frame.observedAtMs,
           running:
             state.isRunning === true ||
             state.hasRunningSubagents === true ||
@@ -102,8 +109,10 @@ export const makeGrokBotTurnWatchdog = (openedAtMs: number) => {
     const turn = tracked.get(messageId);
     if (turn === undefined) return;
     turn.lastProgressAtMs = Math.max(turn.lastProgressAtMs, nowMs);
-    if (!streaming) turn.outputSeen = true;
-    else turn.idleSinceMs = undefined;
+    if (!streaming) {
+      turn.outputSeen = true;
+      turn.answerAtMs = nowMs;
+    } else turn.idleSinceMs = undefined;
   };
   /**
    * `held` names turns with work T3 can see in flight (managed MCP tool, delegated child), which is
@@ -135,7 +144,15 @@ export const makeGrokBotTurnWatchdog = (openedAtMs: number) => {
       turn.idleSinceMs ??= nowMs;
       const idleForMs = nowMs - Math.max(turn.idleSinceMs, turn.lastProgressAtMs);
       if (turn.outputSeen && turn.failedCode === undefined) {
-        if (idleForMs >= GROK_BOT_IDLE_COMPLETE_MS)
+        const freshIdleAfterAnswer =
+          !live.running &&
+          nowMs < live.staleAtMs &&
+          turn.answerAtMs !== undefined &&
+          live.observedAtMs >= turn.answerAtMs;
+        if (
+          idleForMs >=
+          (freshIdleAfterAnswer ? GROK_BOT_FRESH_IDLE_COMPLETE_MS : GROK_BOT_IDLE_COMPLETE_MS)
+        )
           verdicts.push({ identity: turn.identity, outcome: "success" });
       } else if (idleForMs >= GROK_BOT_IDLE_FAIL_MS)
         verdicts.push({

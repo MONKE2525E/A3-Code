@@ -5,6 +5,7 @@ import { grokBotTurnIdentity } from "./GrokBotSettlementProjection.ts";
 import {
   GROK_BOT_BLIND_TIMEOUT_MS,
   GROK_BOT_IDLE_COMPLETE_MS,
+  GROK_BOT_FRESH_IDLE_COMPLETE_MS,
   GROK_BOT_IDLE_FAIL_MS,
   GROK_BOT_RECOVERY_IDLE_CODE,
   GROK_BOT_RECOVERY_NATIVE_FAILED_CODE,
@@ -41,6 +42,36 @@ it.effect("completes a turn only after native idle and an answer hold together",
     assert.deepEqual(watchdog.evaluate(10_000 + GROK_BOT_IDLE_COMPLETE_MS - 1, false), []);
     assert.deepEqual(
       watchdog.evaluate(10_000 + GROK_BOT_IDLE_COMPLETE_MS, false).map((v) => v.outcome),
+      ["success"],
+    );
+  }),
+);
+
+it.effect("quickly completes an owned answer once fresh native idle arrives after it", () =>
+  Effect.gen(function* () {
+    const { identity, watchdog } = yield* setup;
+    watchdog.observeOutput(identity.messageId, false, 10_000);
+    watchdog.observeFrame(live(11_000, { isRunning: false }), 11_000);
+    assert.deepEqual(watchdog.evaluate(11_000, false), []);
+    assert.deepEqual(watchdog.evaluate(11_000 + GROK_BOT_FRESH_IDLE_COMPLETE_MS - 1, false), []);
+    assert.deepEqual(
+      watchdog.evaluate(11_000 + GROK_BOT_FRESH_IDLE_COMPLETE_MS, false).map((v) => v.outcome),
+      ["success"],
+    );
+  }),
+);
+
+it.effect("fresh idle never finishes while tools, children or user input remain pending", () =>
+  Effect.gen(function* () {
+    const { identity, watchdog } = yield* setup;
+    watchdog.observeOutput(identity.messageId, false, 10_000);
+    watchdog.observeFrame(live(11_000, { isRunning: false }), 11_000);
+    const held = new Set([identity.messageId]);
+    assert.deepEqual(watchdog.evaluate(20_000, false, held), []);
+    assert.deepEqual(watchdog.evaluate(21_000, true), []);
+    assert.deepEqual(watchdog.evaluate(22_000, false), []);
+    assert.deepEqual(
+      watchdog.evaluate(22_000 + GROK_BOT_FRESH_IDLE_COMPLETE_MS, false).map((v) => v.outcome),
       ["success"],
     );
   }),
