@@ -108,6 +108,7 @@ import {
   deriveThreadActivityRun,
   deriveLatestThreadRun,
   deriveThreadRuntime,
+  deriveLatestProviderSessionError,
   presentPendingBackgroundWork,
   presentProviderGoal,
 } from "@t3tools/client-runtime/state/thread-execution";
@@ -3660,10 +3661,10 @@ export default function ChatView(props: ChatViewProps) {
     if (serverProjection === null || serverProjection === undefined) {
       return [];
     }
-    const sessionError =
-      serverProjection.providerSessions.findLast(
-        (session) => session.providerInstanceId === serverProjection.thread.providerInstanceId,
-      )?.lastError ?? null;
+    const sessionError = deriveLatestProviderSessionError(
+      serverProjection.providerSessions,
+      serverProjection.thread.providerInstanceId,
+    );
     const latestRun =
       usageLimitRunPresentedAsLatest(
         serverProjection.runs,
