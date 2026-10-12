@@ -50,6 +50,25 @@ const harness = Voice.layer.pipe(
           scope: import("../../mcp/McpInvocationContext.ts").McpInvocationScope,
         ) => Effect.succeed({ ...scope, client: { ...scope.client!, access: "read-only" } }),
         releaseCallInvocation: () => Effect.void,
+        capabilities: () =>
+          Effect.succeed({
+            parentThreadId: null,
+            inheritedProviderInstanceId: null,
+            inheritedModel: null,
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            providers: [],
+            features: {
+              appOwnedSubagents: true,
+              asyncPolling: true,
+              cancellation: true,
+              batchThreadCreation: true,
+              threadManagement: true,
+              incrementalThreadRead: true,
+              scheduledTasks: true,
+              maxBatchThreads: 20,
+            },
+          }),
       } as never),
       Layer.succeed(Metadata.ThreadMetadataMcpService, {} as never),
       Layer.succeed(Threads.ThreadManagementService, {} as never),
@@ -83,6 +102,18 @@ it.effect(
       });
       assert.strictEqual(inactive.result.kind, "invalid_input");
       yield* voice.activate(caller);
+      const capabilities = yield* voice.call({
+        ...caller,
+        access: "read",
+        name: "orchestrator_capabilities",
+        input: {},
+      });
+      assert.strictEqual(capabilities.result.kind, "served");
+      assert.strictEqual(
+        (capabilities.result.output as { features: { appOwnedSubagents: boolean } }).features
+          .appOwnedSubagents,
+        true,
+      );
       const denied = yield* voice.call({
         ...caller,
         access: "read",

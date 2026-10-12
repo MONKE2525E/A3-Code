@@ -34,6 +34,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as ServerConfig from "../config.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as GrokBotNativeService from "./GrokBotNativeService.ts";
+import { grokBotConnectorCard, grokBotConnectorCardLabel } from "./GrokBotConnectorCard.ts";
 import { grokBotWorkflowReferences } from "./GrokBotWorkflowReferences.ts";
 import { grokBotVoiceCallMarker, isGrokBotVoiceCallInstruction } from "./GrokBotVoiceCall.ts";
 import { waitingWidget } from "./GrokBotWidget.ts";
@@ -290,12 +291,15 @@ export function messagesFrom(
       });
       continue;
     }
+    const connectorCard = entry.kind === "send-message" ? grokBotConnectorCard(message) : undefined;
     const text =
-      entry.kind === "send-message" && message?.type === "text"
-        ? message.content
-        : entry.kind === "message"
-          ? entry.content
-          : undefined;
+      connectorCard !== undefined
+        ? grokBotConnectorCardLabel(connectorCard)
+        : entry.kind === "send-message" && message?.type === "text"
+          ? message.content
+          : entry.kind === "message"
+            ? entry.content
+            : undefined;
     if (typeof text !== "string") continue;
     // A peer's message is `role: "user"` on the wire, but it is not the human user's.
     const fromAgent = record(entry.fromAgent)
@@ -315,6 +319,7 @@ export function messagesFrom(
     messages.push({
       id: entry.id,
       ...(workflowReferences.length === 0 ? {} : { grokBotWorkflowReferences: workflowReferences }),
+      ...(connectorCard === undefined ? {} : { connectorCard }),
       role:
         fromAgent !== undefined || entry.role === "user"
           ? ("user" as const)
@@ -611,6 +616,11 @@ const make = Effect.gen(function* () {
       GrokBotNativeReadError: () =>
         cli(["bots", "list", "--gateway", "--json"]).pipe(
           Effect.flatMap((text) => decodeRoster(text).pipe(Effect.mapError(invalidResponse))),
+          // A missing legacy descriptor after a native read failure is a connection failure,
+          // not proof that the user's native account signed out.
+          Effect.mapError((error) =>
+            error.reason === "signed_out" ? new GrokBotError({ reason: "gateway_failed" }) : error,
+          ),
         ),
     }),
   );
@@ -723,6 +733,11 @@ const make = Effect.gen(function* () {
             botId,
           ]).pipe(
             Effect.flatMap((text) => decodeTranscript(text).pipe(Effect.mapError(invalidResponse))),
+            Effect.mapError((error) =>
+              error.reason === "signed_out"
+                ? new GrokBotError({ reason: "gateway_failed" })
+                : error,
+            ),
             Effect.map((result) => ({
               entries: result.transcript.entries,
             })),

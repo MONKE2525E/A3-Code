@@ -198,6 +198,8 @@ const make = Effect.gen(function* () {
   const threads = yield* GrokBotThreadService.GrokBotThreadService;
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
   const direct = yield* Effect.serviceOption(Direct.GrokBotVoiceOrchestration);
+  const callThreads = new Map<string, { binding: string; botId: string; threadId: ThreadId }>();
+  const launchReceipts = new Map<string, { callId: string; result: VoiceToolOutcome }>();
   // Targets come only from accepted MCP results, never from model-supplied ids.
   const pending = new Map<
     string,
@@ -213,6 +215,22 @@ const make = Effect.gen(function* () {
 
   const canonical = (botId: string) =>
     threads.open({ botId }).pipe(Effect.map((opened) => ThreadId.make(opened.threadId)));
+  const canonicalForCall = (input: { binding: string; botId: string; callId: string }) => {
+    const prior = callThreads.get(input.callId);
+    return prior?.binding === input.binding && prior.botId === input.botId
+      ? Effect.succeed(prior.threadId)
+      : canonical(input.botId).pipe(
+          Effect.tap((threadId) =>
+            Effect.sync(() => {
+              callThreads.set(input.callId, {
+                binding: input.binding,
+                botId: input.botId,
+                threadId,
+              });
+            }),
+          ),
+        );
+  };
   const context = (botId: string) =>
     Effect.gen(function* () {
       const threadId = yield* canonical(botId);
@@ -400,11 +418,14 @@ const make = Effect.gen(function* () {
     activate: (input) =>
       Effect.gen(function* () {
         if (Option.isNone(direct)) return;
-        const canonicalThreadId = yield* canonical(input.botId);
+        const canonicalThreadId = yield* canonicalForCall(input);
         yield* direct.value.activate({ ...input, canonicalThreadId });
       }).pipe(Effect.orElseSucceed(() => undefined)),
     forget: (callId) =>
       Effect.sync(() => {
+        callThreads.delete(callId);
+        for (const [id, entry] of launchReceipts)
+          if (entry.callId === callId) launchReceipts.delete(id);
         for (const [id, entry] of pending) if (entry.callId === callId) pending.delete(id);
       }).pipe(Effect.andThen(Option.isSome(direct) ? direct.value.forget(callId) : Effect.void)),
     call: (input) => {
@@ -417,17 +438,32 @@ const make = Effect.gen(function* () {
             } as const;
           const prior = pending.get(key(input));
           if (prior !== undefined) return prior.receipt;
+          const launched = launchReceipts.get(key(input));
+          if (launched !== undefined) return launched.result;
+          if (input.name === "t3_thread_launch" && launchReceipts.size >= 1_000)
+            return spoken(
+              "Too many thread launches are retained by active calls. End an unused call to continue.",
+            );
           const now = yield* Clock.currentTimeMillis;
           for (const [id, entry] of pending)
             if (now - entry.at > 4 * 60 * 60 * 1000) pending.delete(id);
           if (pending.size >= 1_000) return spoken("Too many voice requests are awaiting results.");
-          const threadId = yield* canonical(input.botId).pipe(Effect.option);
+          const threadId = yield* canonicalForCall(input).pipe(Effect.option);
           if (threadId._tag === "None")
             return {
               kind: "invalid_input",
-              output: { error: "canonical bot thread unavailable" },
+              output: {
+                tool: input.name,
+                code: "provider_not_ready",
+                error:
+                  "This bot's T3 provider is not ready. Check GrokBot in Settings → Providers, then try again.",
+              },
             } as const;
+          // A failed first activation must be recoverable while the call remains live.
+          yield* direct.value.activate({ ...input, canonicalThreadId: threadId.value });
           const outcome = yield* direct.value.call({ ...input, canonicalThreadId: threadId.value });
+          if (input.name === "t3_thread_launch" && outcome.result.kind === "served")
+            launchReceipts.set(key(input), { callId: input.callId, result: outcome.result });
           if (outcome.target === undefined) return outcome.result;
           const receipt: VoiceToolOutcome = {
             ...outcome.result,

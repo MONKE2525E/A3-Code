@@ -19,3 +19,13 @@ If T3 Connect is unavailable, fix the connection before sending setup. If the ac
 If this environment was connected before guided setup was added but its MCP address is missing, reconnect this environment in **Settings → Connections** once. Older UI-created connections did not save the public address needed by GrokBot.
 
 The expandable manual prompt installs or repairs the shared skill. It does not replace the MCP authorization and verification steps. If you change accounts, the primary bot, the public endpoint, or the required skill version, setup must be checked again.
+
+## Authorize a connector
+
+When a bot asks you to connect an MCP service, use its connection card in the conversation to open the service's sign-in page. Plugin connections can also be authorized from the Marketplace. Approve access in your browser; T3 sends the returned authorization code to the environment that started the sign-in. If the return page cannot finish automatically, paste its full address into the waiting connection card.
+
+## Use the hosting computer
+
+In **Settings → Providers → GrokBot**, enable network routing to send GrokBot's cloud-computer traffic through the computer hosting this T3 environment. Your phone controls that setting; it does not become the routing host. The host must remain online. If another computer owns the routing tunnel, T3 waits for it to disconnect. Turn routing off to stop it. Signing out or changing GrokBot accounts also disables routing.
+
+The same settings page lists computers registered with GrokBot. You can rename them and choose whether local execution is never allowed, asks each time, or is always allowed. These are GrokBot's native settings, shared with its desktop app. Auto-review still checks local actions, and team restrictions may limit access.

@@ -2,6 +2,31 @@ import * as Schema from "effect/Schema";
 import { GrokBotId } from "./grokBot.ts";
 
 export const GrokBotComputerInput = Schema.Struct({ botId: GrokBotId });
+export const GrokBotLocalPermission = Schema.Literals(["never", "ask", "always"]);
+export const GrokBotHostMachinesInput = Schema.Struct({});
+export const GrokBotNetworkInput = Schema.Struct({ enabled: Schema.Boolean });
+export const GrokBotNetworkState = Schema.Struct({
+  enabled: Schema.Boolean,
+  state: Schema.Literals(["off", "connecting", "connected", "standby", "error"]),
+  activeStreams: Schema.Number,
+  relayedStreams: Schema.Number,
+  error: Schema.NullOr(Schema.String),
+});
+export const GrokBotHostMachines = Schema.Struct({
+  machines: Schema.Array(
+    Schema.Struct({
+      machineId: Schema.String,
+      label: Schema.String,
+      connected: Schema.NullOr(Schema.Boolean),
+      permission: GrokBotLocalPermission,
+    }),
+  ),
+});
+export const GrokBotHostMachineUpdateInput = Schema.Struct({
+  machineId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
+  permission: Schema.optionalKey(GrokBotLocalPermission),
+  label: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128))),
+});
 /** The signed native socket URL is ephemeral and must never be persisted or logged. */
 export const GrokBotComputer = Schema.Struct({
   state: Schema.String,

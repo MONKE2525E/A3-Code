@@ -1,12 +1,17 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Spinner } from "~/components/ui/spinner";
 import { useEnvironmentHttpBaseUrl } from "~/state/environments";
-import { grokBotsPluginAuthenticate, grokBotsPluginCompleteAuth } from "~/state/grokBots";
+import {
+  grokBotsPluginAuthenticate,
+  grokBotsPluginCompleteAuth,
+  grokBotsPluginConnectionsQuery,
+} from "~/state/grokBots";
+import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { PLUGIN_AUTH_STORAGE_PREFIX } from "./GrokBotPluginAccounts";
 import { parseManualCallback } from "./grokBotPluginAuthReturn";
@@ -17,17 +22,40 @@ type Flow = {
   readonly authorizationUrl: string;
   /** The server's loopback listener finishes sign-in; otherwise the user pastes the return address. */
   readonly completesOnServer: boolean;
+  readonly expiresAtMs: number;
 };
+function clearStoredFlow(stateId: string) {
+  try {
+    localStorage.removeItem(PLUGIN_AUTH_STORAGE_PREFIX + stateId);
+  } catch {
+    // Sign-in also works when the browser does not permit local storage.
+  }
+}
 
-/** One human approval for the connector the setup bot created. Never auto-approves. */
+/**
+ * One human approval for a bot's MCP connector, from the setup panel or a bot-sent connector card.
+ * Never auto-approves. `refresh` runs once the connector is known to be authorized.
+ */
 export function GrokBotSetupAuthorize({
   environmentId,
   serverId,
   refresh,
+  label = "Authorize T3 connection",
+  pluginId = "",
+  watchesCompletion = true,
 }: {
   readonly environmentId: EnvironmentId;
   readonly serverId: number;
   readonly refresh: () => void;
+  /** The button's text; a card names the connector it connects. */
+  readonly label?: string;
+  /** The plugin that owns the connector, when the caller knows it. */
+  readonly pluginId?: string;
+  /**
+   * Whether the caller notices on its own when sign-in finishes on the server. Without that, the
+   * waiting text must not promise an update.
+   */
+  readonly watchesCompletion?: boolean;
 }) {
   const allowed = useAtomValue(grokBotsPluginAuthenticate.permissionAtom(environmentId));
   const authenticate = useAtomCommand(grokBotsPluginAuthenticate, { reportFailure: false });
@@ -37,6 +65,43 @@ export function GrokBotSetupAuthorize({
   const [flow, setFlow] = useState<Flow | null>(null);
   const [callbackUrl, setCallbackUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (flow === null) return;
+    const timeout = window.setTimeout(
+      () => {
+        clearStoredFlow(flow.stateId);
+        setFlow(null);
+        setCallbackUrl("");
+        setError("Sign-in timed out. Start authorization again.");
+      },
+      Math.max(0, flow.expiresAtMs - Date.now()),
+    );
+    return () => window.clearTimeout(timeout);
+  }, [flow]);
+  const connection = useEnvironmentQuery(
+    flow !== null
+      ? grokBotsPluginConnectionsQuery({ environmentId, input: { pluginId, serverId } })
+      : null,
+  );
+  useEffect(() => {
+    if (flow === null) return;
+    if (
+      connection.data?.servers.some(
+        (server) =>
+          server.id === serverId &&
+          server.accounts.some(
+            (account) => account.accountKey === "default" && account.authenticated,
+          ),
+      )
+    ) {
+      clearStoredFlow(flow.stateId);
+      setFlow(null);
+      refresh();
+      return;
+    }
+    const timer = window.setTimeout(connection.refresh, 5_000);
+    return () => window.clearTimeout(timer);
+  }, [flow, connection.dataUpdatedAt, connection.refresh, connection.data, serverId, refresh]);
 
   const start = async () => {
     const redirectUri = resolveGrokBotOAuthRedirect(window.location.origin, httpBaseUrl);
@@ -72,7 +137,7 @@ export function GrokBotSetupAuthorize({
     try {
       localStorage.setItem(
         PLUGIN_AUTH_STORAGE_PREFIX + stateId,
-        JSON.stringify({ environmentId, pluginId: "" }),
+        JSON.stringify({ environmentId, pluginId }),
       );
     } catch {
       /* The pasted-address path still works without storage. */
@@ -81,7 +146,12 @@ export function GrokBotSetupAuthorize({
       popup.opener = null;
       popup.location.href = authorizationUrl;
     }
-    setFlow({ stateId, authorizationUrl, completesOnServer: loopbackPort !== null });
+    setFlow({
+      stateId,
+      authorizationUrl,
+      completesOnServer: loopbackPort !== null,
+      expiresAtMs: Date.now() + 15 * 60_000,
+    });
   };
 
   const finish = async (current: Flow) => {
@@ -103,6 +173,7 @@ export function GrokBotSetupAuthorize({
       input: { stateId: current.stateId, code: parsed.code },
     });
     setBusy(false);
+    clearStoredFlow(current.stateId);
     if (result._tag === "Success") {
       setFlow(null);
       setError(null);
@@ -115,11 +186,7 @@ export function GrokBotSetupAuthorize({
 
   /** Abandons the local flow so Authorize returns; the connector itself is untouched. */
   const startOver = (current: Flow) => {
-    try {
-      localStorage.removeItem(PLUGIN_AUTH_STORAGE_PREFIX + current.stateId);
-    } catch {
-      /* Nothing stored, nothing to clear. */
-    }
+    clearStoredFlow(current.stateId);
     setFlow(null);
     setCallbackUrl("");
     setError(null);
@@ -131,10 +198,14 @@ export function GrokBotSetupAuthorize({
         <>
           <p className="flex flex-wrap items-center gap-2 text-xs leading-5 text-muted-foreground">
             {flow.completesOnServer ? (
-              <>
-                <Spinner size="xs" />
-                Approve in the new tab. This updates when it completes.
-              </>
+              watchesCompletion ? (
+                <>
+                  <Spinner size="xs" />
+                  Approve in the new tab. This updates when it completes.
+                </>
+              ) : (
+                "Approve in the new tab. It finishes on its own once you approve."
+              )
             ) : (
               "Approve in the new tab. The page it lands on may not load. Copy its full address and paste it below."
             )}{" "}
@@ -185,7 +256,7 @@ export function GrokBotSetupAuthorize({
         <div>
           <Button size="sm" type="button" disabled={!allowed || busy} onClick={() => void start()}>
             {busy ? <Spinner size="xs" /> : null}
-            Authorize T3 connection
+            {label}
           </Button>
         </div>
       )}

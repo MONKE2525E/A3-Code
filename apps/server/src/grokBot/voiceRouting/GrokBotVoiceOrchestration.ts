@@ -23,6 +23,7 @@ import { ProjectToolkit } from "../../mcp/toolkits/project/tools.ts";
 import * as ProjectHandlers from "../../mcp/toolkits/project/handlers.ts";
 
 const toolkit = Toolkit.merge(OrchestratorToolkit, ProjectToolkit);
+const isOrchestratorFailure = Schema.is(OrchestratorMcpFailure);
 const names = [
   "orchestrator_capabilities",
   "delegate_task",
@@ -145,8 +146,8 @@ const make = Effect.gen(function* () {
           scope: undefined as Invocation.McpInvocationScope | undefined,
         };
         calls.set(input.callId, entry);
-        const environmentId = yield* environment.getEnvironmentId;
         yield* Effect.gen(function* () {
+          const environmentId = yield* environment.getEnvironmentId;
           const scope = yield* orchestrator.acquireCallInvocation({
             environmentId,
             accountId: input.binding,
@@ -163,7 +164,19 @@ const make = Effect.gen(function* () {
             });
           }
           entry.scope = scope;
-        }).pipe(Effect.ensuring(Deferred.succeed(entry.ready, undefined)));
+        }).pipe(
+          Effect.uninterruptible,
+          Effect.onExit((exit) =>
+            Effect.gen(function* () {
+              if (exit._tag === "Failure") {
+                if (calls.get(input.callId) === entry) calls.delete(input.callId);
+                if (entry.scope !== undefined)
+                  yield* orchestrator.releaseCallInvocation(entry.scope).pipe(Effect.ignore);
+              }
+              yield* Deferred.succeed(entry.ready, undefined);
+            }),
+          ),
+        );
       }).pipe(Effect.orElseSucceed(() => undefined)),
     forget: (callId) =>
       Effect.gen(function* () {
@@ -252,11 +265,21 @@ const make = Effect.gen(function* () {
         } as const;
       }).pipe(
         Effect.provide(handlerContext),
-        Effect.orElseSucceed(
-          () =>
-            ({
-              result: { kind: "invalid_input", output: { error: "orchestration tool failed" } },
-            }) as const,
+        Effect.catch((error) =>
+          Effect.succeed({
+            result: {
+              kind: "invalid_input",
+              output: {
+                tool: input.name,
+                code: isOrchestratorFailure(error) ? error.code : "invalid_arguments",
+                error: isOrchestratorFailure(error)
+                  ? error.code === "parent_not_active"
+                    ? "This call's orchestration session is unavailable. Reconnect the call and try again."
+                    : `T3 rejected ${input.name} (${error.code}). Check the call's permissions and try again.`
+                  : `T3 could not run ${input.name}. Check its arguments against the tool's schema and try again.`,
+              },
+            },
+          } as const),
         ),
       ),
   });

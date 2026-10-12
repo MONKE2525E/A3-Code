@@ -21,6 +21,10 @@ import * as Queue from "effect/Queue";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import {
+  grokBotConnectorCard,
+  grokBotConnectorCardLabel,
+} from "../../grokBot/GrokBotConnectorCard.ts";
 import { grokBotWorkflowReferences } from "../../grokBot/GrokBotWorkflowReferences.ts";
 import { grokBotMessagePeer } from "../../grokBot/GrokBotMessagePeer.ts";
 import {
@@ -165,6 +169,10 @@ const NativeTextEntry = Schema.Struct({
       type: Schema.String,
       /** A voice call's summary names its call here, as `voice:<callId>`. */
       channel: Schema.optionalKey(Schema.Unknown),
+      /** A connector card's host, native server id, and variant; decoded by `grokBotConnectorCard`. */
+      connector: Schema.optionalKey(Schema.Unknown),
+      serverId: Schema.optionalKey(Schema.Unknown),
+      variant: Schema.optionalKey(Schema.Unknown),
       content: Schema.optionalKey(Schema.String),
       url: Schema.optionalKey(Schema.String),
       file_name: Schema.optionalKey(Schema.String),
@@ -367,18 +375,23 @@ export const makeGrokBotTranscriptProjection = (input: {
       const voiceCall =
         entry.kind === "voice-call" ? grokBotVoiceCallMarker(entry.call) : undefined;
       if (entry.kind === "voice-call" && voiceCall === undefined) continue;
+      const connectorCard =
+        entry.kind === "send-message" ? grokBotConnectorCard(entry.message) : undefined;
       const text =
         entry.kind === "voice-call"
           ? ""
-          : entry.kind === "send-message" && entry.message?.type === "text"
-            ? entry.message.content
-            : entry.kind === "message"
-              ? entry.role === "user" && grokBotMessagePeer(input.native.botId, entry) === undefined
-                ? entry.content === undefined
-                  ? undefined
-                  : grokBotUserEchoText(entry.content, entry.clientNonce)
-                : entry.content
-              : undefined;
+          : connectorCard !== undefined
+            ? grokBotConnectorCardLabel(connectorCard)
+            : entry.kind === "send-message" && entry.message?.type === "text"
+              ? entry.message.content
+              : entry.kind === "message"
+                ? entry.role === "user" &&
+                  grokBotMessagePeer(input.native.botId, entry) === undefined
+                  ? entry.content === undefined
+                    ? undefined
+                    : grokBotUserEchoText(entry.content, entry.clientNonce)
+                  : entry.content
+                : undefined;
       const media =
         entry.kind !== "send-message"
           ? []
@@ -472,6 +485,7 @@ export const makeGrokBotTranscriptProjection = (input: {
           ? {}
           : { grokBotWorkflowReferences: workflowReferences }),
         ...(voiceCall === undefined ? {} : { grokBotVoiceCall: voiceCall }),
+        ...(connectorCard === undefined ? {} : { grokBotConnectorCard: connectorCard }),
         ...(voiceCallId === undefined ? {} : { grokBotVoiceCallId: voiceCallId }),
         attachments,
         streaming: entry.isStreaming === true,

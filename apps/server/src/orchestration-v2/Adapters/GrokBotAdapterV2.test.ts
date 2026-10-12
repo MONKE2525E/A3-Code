@@ -1457,6 +1457,65 @@ it.effect(
     }).pipe(Effect.provide(IdAllocator.layer)),
 );
 
+// The connector card as the native client persists it: a `send-message` row whose message names the
+// connector host and native's server id, not text.
+const connectorCardRow = (seq: string, id: string, message: Record<string, unknown>) => ({
+  seq,
+  updatedSeq: "1",
+  value: {
+    id,
+    kind: "send-message",
+    requestId: "req-connect",
+    message: { type: "connector", ...message },
+    timestampMs: 5,
+  },
+});
+
+it.effect("imports a connector card with its server id, and survives persistence", () =>
+  Effect.gen(function* () {
+    const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    const projection = makeGrokBotTranscriptProjection({ native: nativeSession, idAllocator });
+    const events = yield* projection.project(
+      transcript([
+        sendText("1", "intro", "I need access to Linear.", "req-connect"),
+        connectorCardRow("2", "card", { connector: "mcp.linear.app", serverId: 7, variant: "x" }),
+        connectorCardRow("3", "done", {
+          connector: "mcp.linear.app",
+          serverId: 7,
+          variant: "connected",
+        }),
+        connectorCardRow("4", "no-server", { connector: "mcp.linear.app", variant: "connect" }),
+        connectorCardRow("5", "bad-server", { connector: "mcp.linear.app", serverId: 0 }),
+      ]),
+    );
+    assert.deepStrictEqual(
+      projection.messages().map((message) => [message.text, message.grokBotConnectorCard]),
+      [
+        ["I need access to Linear.", undefined],
+        [
+          "Connect mcp.linear.app",
+          { connector: "mcp.linear.app", serverId: 7, variant: "connect" },
+        ],
+        [
+          "mcp.linear.app connected",
+          { connector: "mcp.linear.app", serverId: 7, variant: "connected" },
+        ],
+      ],
+    );
+    const cardItem = events
+      .filter((event) => event.type === "turn_item.updated")
+      .map((event) => event.turnItem)
+      .find((item) => item.type === "assistant_message" && item.text === "Connect mcp.linear.app");
+    assert.isTrue(cardItem?.type === "assistant_message");
+    if (cardItem?.type === "assistant_message") {
+      const restored = yield* decodePersistedTurnItem(yield* encodePersistedTurnItem(cardItem));
+      assert.isTrue(restored.type === "assistant_message");
+      if (restored.type === "assistant_message")
+        assert.deepStrictEqual(restored.grokBotConnectorCard, cardItem.grokBotConnectorCard);
+    }
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
 it.effect("links the summary whatever the batch order and never tags foreign or in-call rows", () =>
   Effect.gen(function* () {
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
