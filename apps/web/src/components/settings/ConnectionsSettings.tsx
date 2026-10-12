@@ -159,6 +159,7 @@ import {
   supportsServerUpdateThreadContinuation,
 } from "~/versionSkew";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
+import { useT3ConnectAuthPrompt } from "~/components/clerk/useT3ConnectAuthPrompt";
 import { RemoveT3ConnectEnvironmentDialog } from "../clerk/RemoveT3ConnectEnvironmentDialog";
 import { useCloudLinkController } from "~/cloud/useCloudLinkController";
 import { authEnvironment } from "~/state/auth";
@@ -1824,6 +1825,7 @@ function CloudLinkSwitch({
 }
 
 function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: boolean }) {
+  const { openAuthPrompt } = useT3ConnectAuthPrompt();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const {
     isSignedIn,
@@ -1917,24 +1919,32 @@ function ConfiguredCloudLinkRow({ canManageRelay }: { readonly canManageRelay: b
         <SettingsRow
           title={searchableSetting("t3-connect").title}
           description={
-            managedTunnelActive
-              ? "This environment is available to your other devices through T3 Connect."
-              : "Make this environment available to your other devices through T3 Connect."
+            !isSignedIn
+              ? "Sign in to enable T3 Connect for this environment."
+              : managedTunnelActive
+                ? "This environment is available to your other devices through T3 Connect."
+                : "Make this environment available to your other devices through T3 Connect."
           }
           status={operationError ?? primaryCloudLinkState.error}
           control={
-            <CloudLinkSwitch
-              checked={managedTunnelActive}
-              disabled={
-                !canManageRelay ||
-                !isSignedIn ||
-                primaryCloudLinkState.data === null ||
-                primaryCloudLinkState.isPending ||
-                isBusy
-              }
-              disabledReason={disabledReason}
-              onCheckedChange={(enabled) => void updateManagedTunnel(enabled)}
-            />
+            !isSignedIn ? (
+              <Button size="sm" onClick={openAuthPrompt}>
+                Sign in to T3 Connect
+              </Button>
+            ) : (
+              <CloudLinkSwitch
+                checked={managedTunnelActive}
+                disabled={
+                  !canManageRelay ||
+                  !isSignedIn ||
+                  primaryCloudLinkState.data === null ||
+                  primaryCloudLinkState.isPending ||
+                  isBusy
+                }
+                disabledReason={disabledReason}
+                onCheckedChange={(enabled) => void updateManagedTunnel(enabled)}
+              />
+            )
           }
         />
       ) : null}
