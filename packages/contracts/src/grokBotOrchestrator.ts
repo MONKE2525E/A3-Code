@@ -112,6 +112,7 @@ export const GrokBotSetupStatus = Schema.Struct({
   mcpUrl: Schema.NullOr(Schema.String),
   terminalCommand: Schema.NullOr(Schema.String),
   authorizationUrl: Schema.NullOr(Schema.String),
+  connectorServerId: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))),
   error: Schema.NullOr(Schema.String),
   updatedAtMs: Schema.Number,
 });

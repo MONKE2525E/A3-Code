@@ -576,6 +576,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   GrokBotOrchestratorService.layer.pipe(
     Layer.provideMerge(
       GrokBotSetupService.layer.pipe(
+        Layer.provide(GrokBotNativeRuntimeService.layer),
         Layer.provide(ManagedEndpointAddress.layer.pipe(Layer.provide(ServerSecretStore.layer))),
       ),
     ),
