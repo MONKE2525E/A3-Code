@@ -86,7 +86,10 @@ interface GrokBotAvatarEngineModule {
 const TRUSTED_ENGINE_SHA256 = "76f131c44107bcd25a196ddf5f765cf021ec12d757557591afcf58247c8d07ea";
 
 // Keyed by environment and digest so each connection loads its own verified copy once.
-const loadedEngines = new Map<string, Promise<GrokBotAvatarEngine>>();
+const loadedEngines = new Map<
+  string,
+  { readonly source: string; readonly engine: Promise<GrokBotAvatarEngine> }
+>();
 
 /**
  * Imports only the client-pinned renderer. Environment metadata and source are
@@ -101,17 +104,21 @@ export async function loadGrokBotAvatarEngine(
 ): Promise<GrokBotAvatarEngine> {
   if (expectedSha256 !== TRUSTED_ENGINE_SHA256)
     throw new Error("Grok Bot avatar engine is not a trusted build.");
+  const cached = loadedEngines.get(cacheKey);
+  // Only the exact bytes already verified by this client can skip the hash.
+  if (cached?.source === source) return cached.engine;
   // Plain HTTP origins have no SubtleCrypto, so hash in JS rather than skipping the check.
   const digest = Array.from(sha256(new TextEncoder().encode(source)), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
   if (digest !== TRUSTED_ENGINE_SHA256)
     throw new Error("Grok Bot avatar engine failed verification.");
-  const cached = loadedEngines.get(cacheKey);
-  if (cached) return cached;
   const engine = importVerifiedEngineSource(source);
-  loadedEngines.set(cacheKey, engine);
-  engine.catch(() => loadedEngines.delete(cacheKey));
+  const entry = { source, engine };
+  loadedEngines.set(cacheKey, entry);
+  engine.catch(() => {
+    if (loadedEngines.get(cacheKey) === entry) loadedEngines.delete(cacheKey);
+  });
   return engine;
 }
 

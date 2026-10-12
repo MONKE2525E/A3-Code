@@ -61,6 +61,14 @@ describe("avatar engine trust", () => {
     expect(createUrl).toHaveBeenCalledOnce();
     expect(revokeUrl).toHaveBeenCalledWith(createUrl.mock.results[0]!.value);
 
+    vi.mocked(sha256).mockClear();
+    const repeated = await Promise.all(
+      Array.from({ length: 20 }, () => loadGrokBotAvatarEngine("trusted", trustedSha256, source)),
+    );
+    expect(repeated.every((copy) => copy === engine)).toBe(true);
+    expect(sha256).not.toHaveBeenCalled();
+    expect(createUrl).toHaveBeenCalledOnce();
+
     // Even a key already holding a trusted engine must not authorize new source.
     await expect(loadGrokBotAvatarEngine("trusted", trustedSha256, "tampered")).rejects.toThrow(
       "failed verification",
