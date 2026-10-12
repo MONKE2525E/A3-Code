@@ -1,6 +1,7 @@
 // @effect-diagnostics globalTimers:off - Call lifecycle timers run outside an Effect runtime and are injectable.
 import {
   functionCallOutputFrame,
+  failureSpeechFrame,
   parseServerEvent,
   realtimeProtocols,
   realtimeUrl,
@@ -92,6 +93,18 @@ const boundedOutput = (output: string) =>
           "The tool result exceeds the voice limit. Narrow the query and request a smaller result.",
       });
 
+const failureSpeech = (output: string): string | null => {
+  try {
+    let result = JSON.parse(output);
+    if (typeof result?.output === "string") result = JSON.parse(result.output);
+    return typeof result?.error === "string"
+      ? `The T3 operation failed. ${result.error.slice(0, 500)}`
+      : null;
+  } catch {
+    return null;
+  }
+};
+
 /**
  * One call's realtime lifecycle: handshake, session setup, tool brokering, mute, hang-up, and
  * reconnect onto the same conversation. Audio capture/playback stay outside; callers feed
@@ -175,7 +188,7 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
       }, 500);
     }
   };
-  const requestResponse = (instructions: string | null) => {
+  const requestResponse = (instructions: string | null, failure: string | null = null) => {
     responseInFlight = true;
     clearResponseRequest();
     responseRequestTimer = timers.setTimeout(() => {
@@ -188,7 +201,9 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
       });
       retryResponse();
     }, 10_000);
-    socket?.send(responseCreateFrame(instructions));
+    socket?.send(
+      failure === null ? responseCreateFrame(instructions) : failureSpeechFrame(failure),
+    );
   };
   const flushChat = () => {
     if (!configured || phase !== "live" || !socket?.isOpen) return;
@@ -239,7 +254,10 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
       }
     }
     delivery = { kind: "work", ids, overflow: overflowSent };
-    requestResponse(null);
+    requestResponse(
+      "Briefly tell the caller the newly delivered T3 work result now. Say clearly if it failed or was cancelled. Do not stay silent, launch another task, or claim failed work succeeded.",
+      ids.map((id) => failureSpeech(work.get(id)!)).find((message) => message !== null) ?? null,
+    );
   };
 
   const flushResponses = () => {
@@ -266,7 +284,12 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
       requestResponse(input.greeting?.trim() || null);
     } else if (sentReceipts.size > 0) {
       delivery = { kind: "receipt", ids: [...sentReceipts], overflow: 0 };
-      requestResponse(null);
+      requestResponse(
+        "Answer the caller using these tool outputs. Describe your orchestration capabilities when asked. If work is running, acknowledge that briefly and keep answering the caller. Do not stay silent or repeat the operation.",
+        [...sentReceipts]
+          .map((id) => failureSpeech(receipts.get(id)!))
+          .find((message) => message !== null) ?? null,
+      );
     } else flushWork();
   };
 

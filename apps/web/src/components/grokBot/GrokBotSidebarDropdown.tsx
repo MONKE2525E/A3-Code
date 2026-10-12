@@ -42,6 +42,7 @@ import { grokBotNativeReady } from "./grokBotConnection";
 import {
   grokBotSettingsDestinationSearch,
   isGrokBotEnvironmentConnecting,
+  isGrokBotRosterRecovering,
   grokBotSurfaceKey,
   partitionGrokBotRoster,
   resolveGrokBotSelectedEnvironment,
@@ -122,6 +123,21 @@ function ConfiguredGrokBotSidebarDropdown() {
     () => partitionGrokBotRoster(roster.data ?? []),
     [roster.data],
   );
+  const [expiredRosterAt, setExpiredRosterAt] = useState(0);
+  useEffect(() => {
+    if (roster.failure === null) return;
+    const timer = window.setTimeout(
+      () => setExpiredRosterAt(roster.dataUpdatedAt),
+      Math.max(0, roster.dataUpdatedAt + 30_000 - Date.now()),
+    );
+    return () => window.clearTimeout(timer);
+  }, [roster.failure, roster.dataUpdatedAt]);
+  const recoveringRoster = isGrokBotRosterRecovering({
+    failure: roster.failure,
+    hasData: roster.data !== null,
+    dataUpdatedAt: roster.dataUpdatedAt,
+    nowMs: roster.dataUpdatedAt + (expiredRosterAt === roster.dataUpdatedAt ? 30_000 : 0),
+  });
   const location = useLocation();
   const selectedBotId = location.pathname.startsWith("/grok-bots/")
     ? decodeURIComponent(location.pathname.slice("/grok-bots/".length).split("/")[0] ?? "")
@@ -217,7 +233,7 @@ function ConfiguredGrokBotSidebarDropdown() {
               />
             ) : roster.isPending && roster.data === null ? (
               <GrokBotSidebarLoading />
-            ) : roster.error ? (
+            ) : roster.error && !recoveringRoster ? (
               <GrokBotSidebarNotice
                 message={roster.error}
                 actionLabel="Retry"
@@ -230,17 +246,24 @@ function ConfiguredGrokBotSidebarDropdown() {
                 onAction={() => openSettings()}
               />
             ) : (
-              <GrokBotRosterList
-                environmentId={resolved.environmentId}
-                pinned={pinned}
-                rows={rows}
-                hidden={hidden}
-                selectedBotId={selectedBotId}
-                onOpen={openBot}
-                onEdit={(botId) => openSettings(botId)}
-                onHistory={openHistory}
-                onOpenSettings={() => openSettings()}
-              />
+              <>
+                {recoveringRoster ? (
+                  <p role="status" className="px-2 py-2 text-xs text-sidebar-muted-foreground">
+                    Refreshing Grok Bots…
+                  </p>
+                ) : null}
+                <GrokBotRosterList
+                  environmentId={resolved.environmentId}
+                  pinned={pinned}
+                  rows={rows}
+                  hidden={hidden}
+                  selectedBotId={selectedBotId}
+                  onOpen={openBot}
+                  onEdit={(botId) => openSettings(botId)}
+                  onHistory={openHistory}
+                  onOpenSettings={() => openSettings()}
+                />
+              </>
             )}
           </div>
         </CollapsiblePanel>

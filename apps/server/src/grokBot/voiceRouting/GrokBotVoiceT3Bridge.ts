@@ -403,6 +403,12 @@ const make = Effect.gen(function* () {
           output: {
             status: "landed",
             runStatus: waited.value.run?.status,
+            ...(waited.value.run?.status === "failed"
+              ? {
+                  error:
+                    "A thread run from this call failed. Open its T3 thread for the error. That task has not been completed.",
+                }
+              : {}),
             updates: final === undefined ? [] : [final.text.slice(0, 16_000)],
           },
           completion: { requestToolCallId, pending: false },
