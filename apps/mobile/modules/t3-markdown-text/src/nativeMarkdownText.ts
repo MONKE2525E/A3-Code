@@ -70,7 +70,10 @@ export function contextChipPresentation(
       : // A picture chosen through the file picker is typed `file`, but it is still a
         // picture: it reads as one to the user and should not wear the generic file chip.
         kind === "file" &&
-          imageMimeType({ name: record?.name ?? "", mimeType: record?.mimeType ?? "" }) !== null
+          imageMimeType({
+            name: record?.name ?? "",
+            mimeType: record?.mimeType ?? "",
+          }) !== null
         ? "image"
         : kind === "review-comment" && record?.sectionId?.startsWith("pull-request:")
           ? "pull-request"
@@ -610,7 +613,11 @@ export function nativeMarkdownWithAuthoredWindowsPaths(
   const restore = (current: MarkdownNode): MarkdownNode => {
     const href = current.href && authoredByParsed.get(current.href);
     const children = current.children?.map(restore);
-    return { ...current, ...(href ? { href } : {}), ...(children ? { children } : {}) };
+    return {
+      ...current,
+      ...(href ? { href } : {}),
+      ...(children ? { children } : {}),
+    };
   };
   return restore(node);
 }
@@ -934,13 +941,33 @@ function appendDocumentBlock(
         role: "body",
         depth,
       });
-      return appendBlockTerminator(runs, { ...EMPTY_CONTEXT, role: "body", depth });
+      return appendBlockTerminator(runs, {
+        ...EMPTY_CONTEXT,
+        role: "body",
+        depth,
+      });
     case "math_block":
-      appendRun(runs, nodeTextContent(node), { ...EMPTY_CONTEXT, role: "body", depth });
-      return appendBlockTerminator(runs, { ...EMPTY_CONTEXT, role: "body", depth });
+      appendRun(runs, nodeTextContent(node), {
+        ...EMPTY_CONTEXT,
+        role: "body",
+        depth,
+      });
+      return appendBlockTerminator(runs, {
+        ...EMPTY_CONTEXT,
+        role: "body",
+        depth,
+      });
     default:
-      appendInlineChildren(runs, node, { ...EMPTY_CONTEXT, role: "body", depth });
-      return appendBlockTerminator(runs, { ...EMPTY_CONTEXT, role: "body", depth });
+      appendInlineChildren(runs, node, {
+        ...EMPTY_CONTEXT,
+        role: "body",
+        depth,
+      });
+      return appendBlockTerminator(runs, {
+        ...EMPTY_CONTEXT,
+        role: "body",
+        depth,
+      });
   }
 }
 
@@ -952,7 +979,9 @@ function containsRichBlock(node: MarkdownNode): boolean {
     node.type === "image" ||
     node.type === "horizontal_rule" ||
     node.type === "html_block" ||
-    node.type === "math_block"
+    node.type === "math_block" ||
+    // Task markers are drawn as checkbox views; glyphs like ☑︎ are missing from many Android fonts.
+    node.type === "task_list_item"
   ) {
     return true;
   }

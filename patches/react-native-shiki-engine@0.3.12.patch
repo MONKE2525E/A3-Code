@@ -1,0 +1,16 @@
+diff --git a/android/CMakeLists.txt b/android/CMakeLists.txt
+index 005caaf255529389c2684dbe8fbf0cb099d80e97..0eaa93bc2490b034ac56ff212ffe52ac6c2437af 100644
+--- a/android/CMakeLists.txt
++++ b/android/CMakeLists.txt
+@@ -5,8 +5,10 @@ set(CMAKE_VERBOSE_MAKEFILE ON)
+ 
+ # Find prebuilt oniguruma library
+ find_library(LOG_LIB log)
++unset(ONIG_LIB CACHE)
+ find_library(ONIG_LIB onig
+-    PATHS ${CMAKE_CURRENT_SOURCE_DIR}/src/main/jniLibs/${ANDROID_ABI}
++    PATHS "${CMAKE_CURRENT_SOURCE_DIR}/src/main/jniLibs/${ANDROID_ABI}"
++    NO_DEFAULT_PATH
+     NO_CMAKE_FIND_ROOT_PATH
+     REQUIRED
+ )

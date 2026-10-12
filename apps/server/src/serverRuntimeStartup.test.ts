@@ -73,6 +73,31 @@ it.effect("interrupts the effect worker when awareness relay startup fails", () 
   ),
 );
 
+it.effect("stops startup before agent resumption when recovery fails with ENOSPC", () =>
+  Effect.gen(function* () {
+    const calls = yield* Ref.make<ReadonlyArray<string>>([]);
+    const record = (label: string) => Ref.update(calls, (current) => [...current, label]);
+    const failure = Object.assign(new Error("ENOSPC: no space left on device, write"), {
+      code: "ENOSPC",
+      errno: -28,
+      syscall: "write",
+    });
+
+    const error = yield* ServerRuntimeStartup.runOrderedV2StartupPhases({
+      importLegacyShells: record("import"),
+      recover: record("recover").pipe(Effect.andThen(Effect.fail(failure))),
+      recoverDelegatedTasks: record("delegated"),
+      startEffectWorker: record("worker"),
+      autoBootstrap: record("bootstrap"),
+    }).pipe(Effect.flip);
+
+    assert.strictEqual(error, failure);
+    assert.equal(error.code, "ENOSPC");
+    assert.equal(error.message, "ENOSPC: no space left on device, write");
+    assert.deepEqual(yield* Ref.get(calls), ["import", "recover"]);
+  }),
+);
+
 it.effect("queues commands until startup signals readiness", () =>
   Effect.scoped(
     Effect.gen(function* () {

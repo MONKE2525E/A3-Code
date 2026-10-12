@@ -414,6 +414,48 @@ function NativeMixedParagraph(props: {
   );
 }
 
+/** A read-only checkbox, matching the disabled inputs GitHub and the desktop app render. */
+function TaskCheckbox(props: {
+  readonly checked: boolean;
+  readonly textStyle: NativeMarkdownTextStyle;
+}) {
+  const ink = props.textStyle.linkColor;
+  const size = 14;
+  return (
+    <View
+      accessible
+      accessibilityRole="checkbox"
+      accessibilityLabel={props.checked ? "Completed task" : "Incomplete task"}
+      accessibilityState={{ checked: props.checked, disabled: true }}
+      style={{
+        width: size,
+        height: size,
+        marginTop: Math.max(0, (props.textStyle.lineHeight - size) / 2),
+        borderRadius: 3,
+        borderWidth: 1.5,
+        borderColor: props.checked ? ink : props.textStyle.mutedColor,
+        backgroundColor: props.checked ? ink : "transparent",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      {props.checked ? (
+        <View
+          style={{
+            width: 4,
+            height: 8,
+            marginTop: -2,
+            borderRightWidth: 1.75,
+            borderBottomWidth: 1.75,
+            borderColor: props.textStyle.codeBackgroundColor,
+            transform: [{ rotate: "45deg" }],
+          }}
+        />
+      ) : null}
+    </View>
+  );
+}
+
 function NativeList(props: {
   readonly node: MarkdownNode;
   readonly skills: ReadonlyArray<SelectableMarkdownSkill>;
@@ -434,9 +476,7 @@ function NativeList(props: {
       {(props.node.children ?? []).map((item, index) => {
         const taskMarker = item.type === "task_list_item";
         const marker = taskMarker
-          ? item.checked
-            ? "☑︎"
-            : "☐︎"
+          ? ""
           : ordered
             ? `${start + index}.`
             : props.depth % 3 === 1
@@ -460,18 +500,22 @@ function NativeList(props: {
                 justifyContent: "flex-start",
               }}
             >
-              <Text
-                style={{
-                  color: props.textStyle.color,
-                  fontFamily: props.textStyle.fontFamily,
-                  fontSize: taskMarker ? 14 : props.textStyle.fontSize,
-                  lineHeight: props.textStyle.lineHeight,
-                  fontVariant: ordered ? ["tabular-nums"] : undefined,
-                  transform: [{ translateY: markerOffset }],
-                }}
-              >
-                {marker}
-              </Text>
+              {taskMarker ? (
+                <TaskCheckbox checked={item.checked === true} textStyle={props.textStyle} />
+              ) : (
+                <Text
+                  style={{
+                    color: props.textStyle.color,
+                    fontFamily: props.textStyle.fontFamily,
+                    fontSize: props.textStyle.fontSize,
+                    lineHeight: props.textStyle.lineHeight,
+                    fontVariant: ordered ? ["tabular-nums"] : undefined,
+                    transform: [{ translateY: markerOffset }],
+                  }}
+                >
+                  {marker}
+                </Text>
+              )}
             </View>
             <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
               {nativeMarkdownListItemBlocks(item).map((child, childIndex) => (

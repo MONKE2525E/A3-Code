@@ -46,13 +46,13 @@ export function GrokBotVoiceControl(props: {
             className="relative shrink-0 [-webkit-app-region:no-drag]"
             pressed={inThisCall}
             variant="ghost"
-            size="sm"
+            size="touch-sm"
           />
         }
       >
         <PhoneIcon className="size-4" />
       </PopoverTrigger>
-      <PopoverPopup align="end" className="w-72">
+      <PopoverPopup align="end" width="md">
         <GrokBotVoiceCallPanel
           botName={shown.botName}
           state={shown.state}

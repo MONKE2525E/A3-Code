@@ -398,9 +398,13 @@ it.effect("startup recovers an idle persisted call once without starting a provi
         "running",
       );
       const recovery = yield* Recovery.make.pipe(
-        Effect.provide(h.context),
-        Effect.provide(IdAllocator.layer),
-        Effect.provide(ServerSettings.layerTest()),
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            ServerSettings.layerTest(),
+            Layer.succeedContext(h.context),
+          ),
+        ),
       );
       const events = Context.get(h.context, EventStore.EventStoreV2);
       const beforeSequence = yield* events.latestSequence({ threadId: parentThreadId });
@@ -491,9 +495,13 @@ it.effect(
                   ),
                 ),
           }),
-          Effect.provide(h.context),
-          Effect.provide(IdAllocator.layer),
-          Effect.provide(ServerSettings.layerTest()),
+          Effect.provide(
+            Layer.mergeAll(
+              IdAllocator.layer,
+              ServerSettings.layerTest(),
+              Layer.succeedContext(h.context),
+            ),
+          ),
         );
         yield* recovery.recover;
         yield* h.orchestrator.recoverDelegatedTasks;

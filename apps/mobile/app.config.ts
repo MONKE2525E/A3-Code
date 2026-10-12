@@ -9,6 +9,14 @@ const repoEnv = loadRepoEnv();
 Object.assign(process.env, repoEnv);
 
 const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
+const isCustomAndroidBuild = repoEnv.T3CODE_ANDROID_CUSTOM === "1";
+const forkBuildNumber = Number(repoEnv.T3CODE_MOBILE_BUILD_NUMBER ?? 1);
+if (
+  isCustomAndroidBuild &&
+  (!Number.isSafeInteger(forkBuildNumber) || forkBuildNumber < 1 || forkBuildNumber > 2_100_000_000)
+) {
+  throw new Error("T3CODE_MOBILE_BUILD_NUMBER must be an integer from 1 to 2100000000.");
+}
 const isIosPersonalTeamBuild = repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1";
 const runtimeVersionPolicy =
   process.env.MOBILE_VERSION_POLICY ??
@@ -225,10 +233,10 @@ const sharingPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
 // family names without waiting for runtime font loading.
 
 const config: ExpoConfig = {
-  name: variant.appName,
+  name: isCustomAndroidBuild ? "T3 Code Custom" : variant.appName,
   slug: "t3-code",
   platforms: ["ios", "android"],
-  scheme: variant.scheme,
+  scheme: isCustomAndroidBuild ? "t3code-custom" : variant.scheme,
   version: "2.0.0",
   runtimeVersion: {
     // Development manifests resolve on every launch, so avoid fingerprint's
@@ -240,7 +248,7 @@ const config: ExpoConfig = {
   icon: variant.assets.appIcon,
   userInterfaceStyle: "automatic",
   updates: {
-    enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
+    enabled: !isCustomAndroidBuild && repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
     url: "https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454",
     checkAutomatically: "ON_LOAD",
     fallbackToCacheTimeout: 0,
@@ -298,7 +306,21 @@ const config: ExpoConfig = {
   },
   android: {
     icon: variant.assets.appIcon,
-    package: variant.androidPackage,
+    ...(isCustomAndroidBuild ? { versionCode: forkBuildNumber } : {}),
+    package: isCustomAndroidBuild ? "com.monke2525e.t3code.custom" : variant.androidPackage,
+    intentFilters: [
+      {
+        action: "VIEW",
+        category: ["DEFAULT", "BROWSABLE"],
+        autoVerify: false,
+        data: [{ scheme: "https", host: "*.ts.net", pathPattern: "/.*/.*" }],
+      },
+      {
+        action: "VIEW",
+        category: ["DEFAULT", "BROWSABLE"],
+        data: [{ scheme: "t3code", host: "thread", pathPattern: "/.*/.*" }],
+      },
+    ],
     ...(repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE
       ? { googleServicesFile: repoEnv.T3CODE_ANDROID_GOOGLE_SERVICES_FILE }
       : {}),
@@ -470,6 +492,8 @@ const config: ExpoConfig = {
   ],
   extra: {
     appVariant: APP_VARIANT,
+    customAndroidBuild: isCustomAndroidBuild,
+    ...(isCustomAndroidBuild ? { forkBuildNumber } : {}),
     iosPersonalTeamBuild: isIosPersonalTeamBuild,
     relay: {
       url: repoEnv.T3CODE_RELAY_URL ?? null,

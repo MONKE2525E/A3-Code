@@ -79,7 +79,7 @@ function MenuItem({
   ...props
 }: MenuPrimitive.Item.Props & {
   inset?: boolean;
-  density?: "default" | "touch";
+  density?: "default" | "touch" | "touch-lg";
   variant?: "default" | "destructive" | "ghost";
 }) {
   return (
@@ -93,6 +93,7 @@ function MenuItem({
             className: "h-auto min-h-7 w-full sm:text-xs",
           }),
         density === "touch" && "min-h-10 sm:min-h-10",
+        density === "touch-lg" && "min-h-11 sm:min-h-11",
         className,
       )}
       data-density={density}

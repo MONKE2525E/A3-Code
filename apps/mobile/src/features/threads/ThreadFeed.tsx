@@ -2051,6 +2051,7 @@ type UserMessageContentProps = {
 function UserMessageContent(props: UserMessageContentProps) {
   const [selected, setSelected] = useState<{ contextId: string; label: string } | null>(null);
   const navigation = useNavigation();
+  const openPullRequest = useOpenPullRequest();
   const { selectedThread } = useThreadSelection();
   const liveText = useLiveThreadLinkLabels(props.text, props.environmentId);
   const text = replaceComposerContextReferences(liveText, (ref) => {
@@ -2102,6 +2103,15 @@ function UserMessageContent(props: UserMessageContentProps) {
           environmentId={props.environmentId}
           records={props.context?.records}
           record={props.context?.records.find((record) => record.contextId === selected.contextId)}
+          onOpenPullRequestUrl={(url) => {
+            setSelected(null);
+            return openPullRequest(
+              url,
+              String(props.environmentId),
+              "pull-request",
+              selectedThread ? String(selectedThread.id) : undefined,
+            );
+          }}
           onClose={() => setSelected(null)}
         />
       ) : null}
@@ -2223,8 +2233,8 @@ function ThreadFeedPlaceholder(props: {
 }
 
 export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
-  const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
   const openPullRequest = useOpenPullRequest();
+  const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
   const navigation = useNavigation();
   const { themeAppearance } = useAppearancePreferences();
   const copyFeedbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2442,7 +2452,12 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           );
           return;
         }
-        void openPullRequest(presentation.href);
+        void openPullRequest(
+          presentation.href,
+          String(props.environmentId),
+          "markdown-link",
+          String(props.threadId),
+        );
       }
     },
     [props.environmentId, props.threadId, props.workspaceRoot, navigation, openPullRequest],

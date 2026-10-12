@@ -7,18 +7,24 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { GrokBotSecureInputPanel } from "./GrokBotSecureInputPanel";
-import type { GrokBotSecretRequestItem } from "./grokBotSecretRequest";
+import {
+  useHiddenGrokBotSecretRequests,
+  type GrokBotSecretRequestItem,
+} from "./grokBotSecretRequest";
 
-const { submitSecret, dismissSecret, commands } = vi.hoisted(() => ({
+const { submitSecret, dismissSecret, commands, permissions } = vi.hoisted(() => ({
+  permissions: { dismiss: true },
   submitSecret: vi.fn(),
   dismissSecret: vi.fn(),
   commands: {
     submit: { permissionAtom: () => ({}) },
-    dismiss: { permissionAtom: () => ({}) },
+    dismiss: { permissionAtom: () => "dismiss" },
   },
 }));
 
-vi.mock("@effect/atom-react", () => ({ useAtomValue: () => true }));
+vi.mock("@effect/atom-react", () => ({
+  useAtomValue: (atom: unknown) => (atom === "dismiss" ? permissions.dismiss : true),
+}));
 vi.mock("../../state/grokBots", () => ({
   grokBotsSecretSubmit: commands.submit,
   grokBotsSecretDismiss: commands.dismiss,
@@ -37,6 +43,8 @@ let container: HTMLDivElement;
 let root: Root;
 
 beforeEach(() => {
+  permissions.dismiss = true;
+  useHiddenGrokBotSecretRequests.setState({ keys: [] });
   entrySeq += 1;
   pendingRequest = {
     entryId: `entry-${entrySeq}`,
@@ -57,11 +65,12 @@ afterEach(async () => {
   dismissSecret.mockReset();
 });
 
-function renderPanel(requests: ReadonlyArray<GrokBotSecretRequestItem> = [pendingRequest]) {
+function renderPanel(
+  requests: ReadonlyArray<GrokBotSecretRequestItem> = [pendingRequest],
+  target = { environmentId, botId: "bot-1" },
+) {
   act(() => {
-    root.render(
-      createElement(GrokBotSecureInputPanel, { environmentId, botId: "bot-1", requests }),
-    );
+    root.render(createElement(GrokBotSecureInputPanel, { ...target, requests }));
   });
 }
 
@@ -97,7 +106,6 @@ const hideButtonOrNull = () =>
   Array.from(container.querySelectorAll("button")).find(
     (button) => button.textContent === "Hide on this device",
   ) ?? null;
-const hideButton = () => hideButtonOrNull() as HTMLButtonElement;
 
 const accepted = { _tag: "Success", value: { accepted: true } };
 const failed = (error: unknown) => ({ _tag: "Failure", cause: Cause.fail(error) });
@@ -195,46 +203,69 @@ describe("GrokBotSecureInputPanel", () => {
     expect(container.querySelector("input")).toBeNull();
   });
 
-  it("keeps a dismissal that native refused visible with dismissal copy, so it can be retried", async () => {
-    dismissSecret.mockResolvedValue(failed(new GrokBotSecretError({ reason: "refused" })));
+  it.each(["refused", "unavailable", "unsupported"] as const)(
+    "leaves no card or notice when native returns %s for dismissal",
+    async (reason) => {
+      dismissSecret.mockResolvedValue(failed(new GrokBotSecretError({ reason })));
+      renderPanel();
+      typeSecret("hunter2");
+      const input = field();
+
+      await clickDismiss();
+      renderPanel([{ ...pendingRequest }]);
+
+      expect(container.innerHTML).toBe("");
+      expect(input.value).toBe("");
+      expect(submitSecret).not.toHaveBeenCalled();
+      expect(dismissSecret).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("hides immediately before native acknowledgment and stays hidden after rejection", async () => {
+    let rejectDismiss!: (error: Error) => void;
+    dismissSecret.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectDismiss = reject;
+        }),
+    );
     renderPanel();
+    typeSecret("hunter2");
+    const input = field();
 
     await clickDismiss();
 
-    expect(container.querySelector("input")).not.toBeNull();
-    expect(container.textContent).toContain("Grok Bot did not confirm the dismissal.");
-    expect(container.textContent).not.toContain("could not be delivered");
-    expect(dismissButton().disabled).toBe(false);
+    expect(container.innerHTML).toBe("");
+    expect(input.value).toBe("");
+    expect(localStorage.getItem("t3code:grok-bot-hidden-secret-requests:v1")).not.toContain(
+      "hunter2",
+    );
+    await act(async () => rejectDismiss(new Error("socket closed")));
+    renderPanel([{ ...pendingRequest }]);
+    expect(container.innerHTML).toBe("");
   });
 
-  it("hides a request on this device after native refuses the dismissal, without calling native again", async () => {
-    dismissSecret.mockResolvedValue(failed(new GrokBotSecretError({ reason: "unavailable" })));
+  it("dismisses with touch activation and ignores a duplicate activation before rerender", async () => {
+    dismissSecret.mockResolvedValue(accepted);
     renderPanel();
-    await clickDismiss();
+    typeSecret("hunter2");
+    const input = field();
+    const button = dismissButton();
 
     await act(async () => {
-      hideButton().click();
+      button.dispatchEvent(new Event("touchstart", { bubbles: true }));
+      button.dispatchEvent(new Event("touchend", { bubbles: true }));
+      button.click();
+      button.click();
     });
 
-    expect(container.querySelector("input")).toBeNull();
+    expect(container.innerHTML).toBe("");
+    expect(input.value).toBe("");
     expect(dismissSecret).toHaveBeenCalledTimes(1);
     expect(submitSecret).not.toHaveBeenCalled();
   });
 
-  it("keeps a locally hidden request hidden when a later snapshot still lists it as pending", async () => {
-    dismissSecret.mockResolvedValue(failed(new GrokBotSecretError({ reason: "refused" })));
-    renderPanel();
-    await clickDismiss();
-    await act(async () => {
-      hideButton().click();
-    });
-
-    renderPanel([{ ...pendingRequest }]);
-
-    expect(container.querySelector("input")).toBeNull();
-  });
-
-  it("shows the save error under the save action and clears it once a dismissal fails", async () => {
+  it("clears an existing save error when dismissed even if native refuses", async () => {
     submitSecret.mockResolvedValue(failed(new GrokBotSecretError({ reason: "refused" })));
     dismissSecret.mockResolvedValue(failed(new GrokBotSecretError({ reason: "refused" })));
     renderPanel();
@@ -244,18 +275,27 @@ describe("GrokBotSecureInputPanel", () => {
 
     await clickDismiss();
 
-    expect(container.textContent).not.toContain("Grok Bot declined the secure input.");
-    expect(container.textContent).toContain("Grok Bot did not confirm the dismissal.");
-    expect(field().getAttribute("aria-invalid")).toBeNull();
+    expect(container.innerHTML).toBe("");
   });
 
-  it("offers the local hide only after a dismissal fails, not after a save error", async () => {
+  it("does not offer a fallback hide after a save error", async () => {
     submitSecret.mockResolvedValue(failed(new GrokBotSecretError({ reason: "refused" })));
     renderPanel();
     typeSecret("hunter2");
     await submitForm();
 
     expect(hideButtonOrNull()).toBeNull();
+  });
+
+  it("allows local dismissal without native permission", async () => {
+    permissions.dismiss = false;
+    renderPanel();
+    expect(dismissButton().disabled).toBe(false);
+
+    await clickDismiss();
+
+    expect(container.innerHTML).toBe("");
+    expect(dismissSecret).not.toHaveBeenCalled();
   });
 
   it("lists a request repeated within one snapshot only once", () => {
@@ -287,86 +327,42 @@ describe("GrokBotSecureInputPanel", () => {
     expect(container.querySelector("input")).toBeNull();
   });
 
-  describe("unsupported dismissal", () => {
-    const unsupported = () => failed(new GrokBotSecretError({ reason: "unsupported" }));
-    const buttonByText = (text: string) =>
-      Array.from(container.querySelectorAll("button")).find(
-        (button) => button.textContent === text,
-      ) as HTMLButtonElement | undefined;
-    const hiddenRow = () => container.querySelector("[role=status]");
+  it("persists dismissal across storage rehydration and remount without any hidden row", async () => {
+    dismissSecret.mockResolvedValue(failed(new GrokBotSecretError({ reason: "unsupported" })));
+    renderPanel();
+    await clickDismiss();
+    const persisted = localStorage.getItem("t3code:grok-bot-hidden-secret-requests:v1");
+    expect(persisted).toContain(pendingRequest.entryId);
 
-    it("hides the card locally in one click, clearing the typed value, with no delivery or dismissal copy", async () => {
-      dismissSecret.mockResolvedValue(unsupported());
-      renderPanel();
-      typeSecret("hunter2");
-      const input = field();
+    act(() => root.unmount());
+    // Rehydrate from the saved browser storage, as a page reload would.
+    useHiddenGrokBotSecretRequests.setState({ keys: [] });
+    localStorage.setItem("t3code:grok-bot-hidden-secret-requests:v1", persisted!);
+    await useHiddenGrokBotSecretRequests.persist.rehydrate();
+    root = createRoot(container);
+    renderPanel();
 
-      await clickDismiss();
+    expect(container.innerHTML).toBe("");
+  });
 
-      expect(dismissSecret).toHaveBeenCalledTimes(1);
-      expect(submitSecret).not.toHaveBeenCalled();
-      expect(container.querySelector("input")).toBeNull();
-      expect(input.value).toBe("");
-      expect(hiddenRow()?.textContent).toContain(
-        "Hidden on this device. The bot may still be waiting.",
-      );
-      expect(container.textContent).not.toContain("dismissed");
-      expect(container.textContent).not.toContain("hunter2");
+  it("isolates dismissal by bot, environment, and session while leaving new requests visible", async () => {
+    dismissSecret.mockResolvedValue(accepted);
+    renderPanel();
+    await clickDismiss();
+    expect(container.innerHTML).toBe("");
+
+    renderPanel([pendingRequest], { environmentId, botId: "other-bot" });
+    expect(field()).not.toBeNull();
+    renderPanel([pendingRequest], {
+      environmentId: EnvironmentId.make("other-account"),
+      botId: "bot-1",
     });
-
-    it("moves focus to Undo after the hide so keyboard focus does not fall to the page body", async () => {
-      dismissSecret.mockResolvedValue(unsupported());
-      renderPanel();
-
-      await clickDismiss();
-
-      expect(document.activeElement).toBe(buttonByText("Undo"));
-    });
-
-    it("restores the card on Undo and focuses its field", async () => {
-      dismissSecret.mockResolvedValue(unsupported());
-      renderPanel();
-      await clickDismiss();
-
-      await act(async () => {
-        buttonByText("Undo")?.click();
-      });
-
-      expect(field()).not.toBeNull();
-      expect(document.activeElement).toBe(field());
-      expect(hiddenRow()).toBeNull();
-    });
-
-    it("keeps a hidden request out of the panel after a remount, and shows it again on Show requests", async () => {
-      dismissSecret.mockResolvedValue(unsupported());
-      renderPanel();
-      await clickDismiss();
-
-      // A reload remounts the panel with the same native snapshot; only the count is shown.
-      act(() => root.unmount());
-      root = createRoot(container);
-      renderPanel();
-
-      expect(field()).toBeNull();
-      expect(hiddenRow()?.textContent).toContain("1 secure input hidden on this device.");
-      expect(buttonByText("Undo")).toBeUndefined();
-
-      await act(async () => {
-        buttonByText("Show requests")?.click();
-      });
-
-      expect(field()).not.toBeNull();
-      expect(hiddenRow()).toBeNull();
-    });
-
-    it("counts only hidden requests native still lists as pending", async () => {
-      dismissSecret.mockResolvedValue(unsupported());
-      renderPanel();
-      await clickDismiss();
-
-      renderPanel([{ ...pendingRequest, state: "responded" }]);
-
-      expect(hiddenRow()).toBeNull();
-    });
+    expect(field()).not.toBeNull();
+    renderPanel([{ ...pendingRequest, sessionId: "other-session" }]);
+    expect(field()).not.toBeNull();
+    renderPanel([pendingRequest, { ...pendingRequest, entryId: "new-request" }]);
+    expect(container.querySelectorAll("input")).toHaveLength(1);
+    renderPanel([pendingRequest]);
+    expect(container.innerHTML).toBe("");
   });
 });

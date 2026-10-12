@@ -23,6 +23,7 @@ export type PullRequestParams = {
   readonly repository: string;
   readonly number: number;
   readonly host?: string;
+  readonly threadId?: string;
   readonly initialSummary?: PullRequestListEntry;
 };
 

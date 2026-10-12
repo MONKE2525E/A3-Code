@@ -232,6 +232,54 @@ describe("mobile connection storage", () => {
     expect(fallback.updatedAt).toEqual(expect.any(Number));
   });
 
+  it("remembers PR filters on reload and persists an explicit reset", async () => {
+    const pullRequestList = {
+      state: "closed" as const,
+      involvement: "authored" as const,
+      sort: "oldest" as const,
+      environmentId: "environment-a",
+      projectId: "project-a",
+    };
+    await savePreferencesPatch({ pullRequestList, baseFontSize: 17 });
+    await expect(loadPreferences()).resolves.toEqual({ pullRequestList, baseFontSize: 17 });
+    await savePreferencesPatch({
+      pullRequestList: {
+        state: "open",
+        involvement: "all",
+        sort: "updated",
+        environmentId: "environment-a",
+        projectId: undefined,
+      },
+    });
+    await expect(loadPreferences()).resolves.toEqual({
+      baseFontSize: 17,
+      pullRequestList: {
+        state: "open",
+        involvement: "all",
+        sort: "updated",
+        environmentId: "environment-a",
+      },
+    });
+  });
+
+  it("ignores invalid saved PR filters while keeping valid selections", async () => {
+    mocks.setPreferencesJson(
+      JSON.stringify({
+        pullRequestList: {
+          state: "invalid",
+          involvement: "authored",
+          sort: 42,
+          projectId: [],
+          environmentId: "environment-a",
+        },
+      }),
+      1,
+    );
+    await expect(loadPreferences()).resolves.toEqual({
+      pullRequestList: { involvement: "authored", environmentId: "environment-a" },
+    });
+  });
+
   it("persists thread list shelf preferences", async () => {
     await expect(
       savePreferencesPatch({

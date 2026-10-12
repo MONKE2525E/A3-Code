@@ -4050,6 +4050,74 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("rejects a prompt reusing a different command type's accepted receipt", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const threadId = ThreadId.make("runtime-receipt-type-conflict");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("receipt-type-create"),
+        threadId,
+        projectId: ProjectId.make("receipt-type-project"),
+        title: "Receipt conflict",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: "/tmp/runtime-receipt-type-conflict",
+      });
+      const commandId = CommandId.make("receipt-type-shared");
+      const metadata = {
+        type: "thread.metadata.update" as const,
+        commandId,
+        threadId,
+        title: "Renamed",
+      };
+      const accepted = yield* orchestrator.dispatch(metadata);
+      const prompt = {
+        type: "message.dispatch" as const,
+        createdBy: "user" as const,
+        creationSource: "web" as const,
+        commandId,
+        threadId,
+        messageId: MessageId.make("receipt-type-message"),
+        text: "Do the work",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" as const },
+      };
+      const collision = yield* orchestrator.dispatch(prompt).pipe(Effect.result);
+      assert.equal(collision._tag, "Failure", "an unrelated receipt must not acknowledge a prompt");
+      if (collision._tag === "Failure") {
+        assert.equal(collision.failure._tag, "OrchestratorCommandIdConflictError");
+      }
+      const unchanged = yield* orchestrator.getThreadProjection(threadId);
+      assert.lengthOf(unchanged.messages, 0);
+      assert.lengthOf(unchanged.runs, 0);
+      assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
+      assert.deepEqual(yield* orchestrator.dispatch(metadata), accepted);
+
+      // A new ID admits the prompt; an exact retry returns its original result.
+      const freshPrompt = { ...prompt, commandId: CommandId.make("receipt-type-fresh-prompt") };
+      const first = yield* orchestrator.dispatch(freshPrompt);
+      const effects = yield* outbox.listByCommandId(freshPrompt.commandId);
+      assert.lengthOf(
+        effects.filter((effect) => effect.request.type === "provider-turn.start"),
+        1,
+      );
+      const retried = yield* orchestrator.dispatch(freshPrompt);
+      assert.deepEqual(retried, first);
+      assert.deepEqual(yield* outbox.listByCommandId(freshPrompt.commandId), effects);
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      assert.lengthOf(projection.messages, 1);
+      assert.lengthOf(projection.runs, 1);
+      assert.equal(projection.messages[0]?.text, prompt.text);
+    }),
+  );
+
   it.effect("persists rejected command receipts across retries", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

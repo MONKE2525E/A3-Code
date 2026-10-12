@@ -1,6 +1,7 @@
 import { NATIVE_WORKSPACE_COLUMNS_SUPPORTED } from "../native/NativeWorkspaceColumns";
 import Constants from "expo-constants";
 import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
+import { useState } from "react";
 import { Platform, View } from "react-native";
 
 import { AppText as Text } from "./AppText";
@@ -63,6 +64,33 @@ export function CompactBrandTitle(
         >
           {stageLabel}
         </Text>
+      </View>
+    </View>
+  );
+}
+
+/**
+ * The lockup for an in-flow toolbar whose title slot can be narrower than the lockup, such as
+ * the unfolded sidebar beside three header actions. Shrinking the wordmark, "Code" and the stage
+ * pill separately lets the pill's text spill past its own box on Android, over the actions. Here
+ * the lockup keeps its natural layout and is scaled as one piece to the width the slot has.
+ */
+export function FittedCompactBrandTitle() {
+  const [available, setAvailable] = useState(0);
+  const [natural, setNatural] = useState(0);
+  const fit = available > 0 && natural > available ? available / natural : 1;
+  return (
+    <View
+      className="min-w-0 flex-1 overflow-hidden"
+      onLayout={(event) => setAvailable(event.nativeEvent.layout.width)}
+    >
+      <View
+        className="flex-row self-start"
+        // onLayout reports the untransformed width, so the measurement does not chase the scale.
+        onLayout={(event) => setNatural(event.nativeEvent.layout.width)}
+        style={{ flexShrink: 0, transform: [{ scale: fit }], transformOrigin: "left center" }}
+      >
+        <CompactBrandTitle allowFontScaling={false} />
       </View>
     </View>
   );

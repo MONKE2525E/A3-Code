@@ -239,12 +239,13 @@ export class OrchestratorCommandIdConflictError extends Schema.TaggedError<Orche
   {
     commandId: CommandId,
     commandType: Schema.String,
+    receiptCommandType: Schema.String,
     receiptThreadId: ThreadId,
     commandThreadId: ThreadId,
   },
 ) {
   override get message(): string {
-    return `Command ${this.commandId} was already handled for thread ${this.receiptThreadId} and cannot be replayed for ${this.commandThreadId}.`;
+    return `Command ${this.commandId} was already handled as ${this.receiptCommandType} for thread ${this.receiptThreadId} and cannot be replayed as ${this.commandType} for ${this.commandThreadId}.`;
   }
 }
 
@@ -11230,14 +11231,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           detail: receipt.error ?? "Previously rejected.",
         });
       }
-      // A receipt only proves this exact command was handled for its own
-      // thread. Replaying it for a command aimed at another thread would
-      // report success for work that never happened.
+      // A receipt only acknowledges its command type and thread. Replaying
+      // it for another operation would report success for work that never happened.
       const dispatchThreadId = commandThreadId(command);
-      if (!canReplayCommandReceipt(receipt.threadId, dispatchThreadId)) {
+      if (
+        !canReplayCommandReceipt(receipt.threadId, dispatchThreadId) ||
+        receipt.commandType !== command.type
+      ) {
         return yield* new OrchestratorCommandIdConflictError({
           commandId: command.commandId,
           commandType: command.type,
+          receiptCommandType: receipt.commandType,
           receiptThreadId: receipt.threadId,
           commandThreadId: dispatchThreadId,
         });

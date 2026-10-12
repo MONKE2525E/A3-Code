@@ -1,3 +1,4 @@
+import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
 import { useCallback, useEffect, useRef, useState, type ComponentProps } from "react";
 import {
   BackHandler,
@@ -10,7 +11,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { MenuAction } from "@react-native-menu/menu";
 
 import { AndroidHeaderIconButton } from "../../components/AndroidScreenHeader";
-import { CompactBrandTitle } from "../../components/CompactBrandTitle";
+import { FittedCompactBrandTitle } from "../../components/CompactBrandTitle";
 import { MaterialFloatingActionButton } from "../../components/MaterialFloatingActionButton";
 import { AndroidAnchoredMenu } from "../../components/AndroidAnchoredMenu";
 import { ControlPillMenu } from "../../components/ControlPill";
@@ -34,6 +35,7 @@ export function MaterialThreadListToolbar(props: {
   readonly onLayout?: (event: LayoutChangeEvent) => void;
   readonly onRequestVisibility?: () => void;
 }) {
+  const workspace = useWorkspaceTabs();
   const insets = useSafeAreaInsets();
   const { fabSize } = useAndroidControlSizing();
   const { height: toolbarHeight, ...headerPadding } = useMaterialToolbarLayout();
@@ -101,17 +103,28 @@ export function MaterialThreadListToolbar(props: {
           ) : (
             <>
               {/* Match the visible inset of the trailing 48dp icon button. */}
-              <View className="min-w-0 flex-1 pl-4">
+              <View
+                className={
+                  props.sidebar
+                    ? "min-w-0 flex-1 overflow-hidden pl-1"
+                    : "min-w-0 flex-1 overflow-hidden pl-4"
+                }
+              >
                 <WorkspaceConnectionTitle
                   grow
                   onPress={props.onOpenEnvironments}
-                  brand={<CompactBrandTitle allowFontScaling={false} />}
+                  brand={<FittedCompactBrandTitle />}
                 />
               </View>
               <AndroidHeaderIconButton
                 accessibilityLabel="Search threads"
                 icon="magnifyingglass"
                 onPress={openSearch}
+              />
+              <AndroidHeaderIconButton
+                accessibilityLabel="Open pull requests"
+                icon="arrow.triangle.pull"
+                onPress={() => workspace?.dispatch({ type: "select", tab: "pullRequests" })}
               />
               <AndroidHeaderIconButton
                 accessibilityLabel="Open settings"

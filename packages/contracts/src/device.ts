@@ -402,9 +402,18 @@ export class DeviceBootError extends Schema.TaggedError<DeviceBootError>()("Devi
   hostId: DeviceHostId,
   deviceId: DeviceId,
   reason: Schema.Literals(["disk_space", "timeout", "launch_failed"]),
+  diagnostic: Schema.optional(
+    Schema.Literals(["avd_discovery_failed", "emulator_ports_exhausted"]),
+  ),
   cause: Schema.Defect(),
 }) {
   override get message(): string {
+    if (this.diagnostic === "avd_discovery_failed") {
+      return "Android AVD discovery failed. Check that Android SDK avdmanager and a Java runtime are configured for the device host.";
+    }
+    if (this.diagnostic === "emulator_ports_exhausted") {
+      return "No free Android emulator console port is available. Close an unused emulator on the device host and retry.";
+    }
     const explanation = {
       disk_space: "There is not enough free disk space on the environment server.",
       timeout: "The device did not become ready in time.",

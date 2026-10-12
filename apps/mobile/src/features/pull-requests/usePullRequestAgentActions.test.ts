@@ -1,8 +1,10 @@
+import { ProjectId, ThreadId, type PullRequestLinkedThreadsResult } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { PullRequestDetail } from "@t3tools/contracts";
 import { usePullRequestAgentActions } from "./usePullRequestAgentActions";
 
 const state = vi.hoisted(() => ({
+  threads: [] as PullRequestLinkedThreadsResult["threads"],
   connected: false,
   canAsk: true,
   ask: vi.fn(),
@@ -12,12 +14,13 @@ vi.mock("./usePullRequestConnected", () => ({
 }));
 vi.mock("./usePullRequestThreads", () => ({
   usePullRequestThreads: () => ({
-    threads: [],
+    threads: state.threads,
     canAsk: state.canAsk,
     canWatch: true,
     busy: false,
     isPending: true,
     ask: state.ask,
+    openThread: vi.fn(),
   }),
 }));
 const params = {
@@ -29,6 +32,7 @@ const params = {
 const pr = { state: "open", mergeability: "conflicting" } as PullRequestDetail;
 
 beforeEach(() => {
+  state.threads = [];
   state.connected = false;
   state.canAsk = true;
   state.ask.mockClear();
@@ -43,6 +47,31 @@ describe("PR agent drafts", () => {
     expect(state.ask.mock.calls).toEqual([
       [undefined, "ask"],
       [undefined, "explain"],
+    ]);
+  });
+
+  it("hands a PR back to its originating thread even when other linked threads exist", () => {
+    state.connected = true;
+    state.threads = [
+      {
+        id: ThreadId.make("origin"),
+        projectId: ProjectId.make("project"),
+        title: "Origin",
+        archivedAt: null,
+      },
+      {
+        id: ThreadId.make("linked"),
+        projectId: ProjectId.make("project"),
+        title: "Linked",
+        archivedAt: null,
+      },
+    ];
+    const actions = usePullRequestAgentActions({ ...params, threadId: "origin" }, pr);
+    actions.start("explain");
+    actions.start("ask", "new");
+    expect(state.ask.mock.calls).toEqual([
+      [state.threads[0], "explain"],
+      [undefined, "ask"],
     ]);
   });
 

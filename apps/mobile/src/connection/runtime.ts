@@ -1,6 +1,6 @@
+import { PullRequestDiffLoader } from "@t3tools/client-runtime/state/pull-requests";
 import { Connection } from "@t3tools/client-runtime/connection";
 import { ShellSnapshotLoader } from "@t3tools/client-runtime/state/shell";
-import { PullRequestDiffLoader } from "@t3tools/client-runtime/state/pull-requests";
 import {
   BoundedThreadSnapshotLoader,
   ThreadHistoryController,
@@ -24,6 +24,7 @@ const layerSnapshotLoader = Layer.mergeAll(
   BoundedThreadSnapshotLoader.layer,
   ShellSnapshotLoader.layer,
   ThreadHistoryController.layer,
+  PullRequestDiffLoader.layer,
 );
 
 type ConnectionLayerSource =

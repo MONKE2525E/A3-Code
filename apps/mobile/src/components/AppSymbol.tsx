@@ -1,3 +1,5 @@
+import IconArrowsSort from "@tabler/icons-react-native/IconArrowsSort";
+import IconCircleX from "@tabler/icons-react-native/IconCircleX";
 import type { Icon } from "@tabler/icons-react-native/types";
 /*
  * Keep these as per-icon exports. Importing the package root eagerly registers
@@ -25,6 +27,7 @@ import IconArrowsDiagonal2 from "@tabler/icons-react-native/IconArrowsDiagonal2"
 import IconArrowsMinimize from "@tabler/icons-react-native/IconArrowsMinimize";
 import IconBellRinging from "@tabler/icons-react-native/IconBellRinging";
 import IconBolt from "@tabler/icons-react-native/IconBolt";
+import IconBoltOff from "@tabler/icons-react-native/IconBoltOff";
 import IconBox from "@tabler/icons-react-native/IconBox";
 import IconBrain from "@tabler/icons-react-native/IconBrain";
 import IconCamera from "@tabler/icons-react-native/IconCamera";
@@ -66,8 +69,9 @@ import IconHeadphones from "@tabler/icons-react-native/IconHeadphones";
 import IconFolderPlus from "@tabler/icons-react-native/IconFolderPlus";
 import IconGitPullRequestClosed from "@tabler/icons-react-native/IconGitPullRequestClosed";
 import IconGitPullRequestDraft from "@tabler/icons-react-native/IconGitPullRequestDraft";
-import IconGitCommit from "@tabler/icons-react-native/IconGitCommit";
 import IconGitBranch from "@tabler/icons-react-native/IconGitBranch";
+import IconGitCommit from "@tabler/icons-react-native/IconGitCommit";
+import IconGitCompare from "@tabler/icons-react-native/IconGitCompare";
 import IconGitMerge from "@tabler/icons-react-native/IconGitMerge";
 import IconGitPullRequest from "@tabler/icons-react-native/IconGitPullRequest";
 import IconHammer from "@tabler/icons-react-native/IconHammer";
@@ -87,6 +91,7 @@ import IconMenu2 from "@tabler/icons-react-native/IconMenu2";
 import IconMessageCircleQuestion from "@tabler/icons-react-native/IconMessageCircleQuestion";
 import IconMessage from "@tabler/icons-react-native/IconMessage";
 import IconMessagePlus from "@tabler/icons-react-native/IconMessagePlus";
+import IconMessages from "@tabler/icons-react-native/IconMessages";
 import IconMinus from "@tabler/icons-react-native/IconMinus";
 import IconMoon from "@tabler/icons-react-native/IconMoon";
 import IconNetwork from "@tabler/icons-react-native/IconNetwork";
@@ -104,6 +109,7 @@ import IconRefresh from "@tabler/icons-react-native/IconRefresh";
 import IconSearch from "@tabler/icons-react-native/IconSearch";
 import IconServer from "@tabler/icons-react-native/IconServer";
 import IconSettings from "@tabler/icons-react-native/IconSettings";
+import IconShieldLock from "@tabler/icons-react-native/IconShieldLock";
 import IconSparkles from "@tabler/icons-react-native/IconSparkles";
 import IconStack2 from "@tabler/icons-react-native/IconStack2";
 import IconStar from "@tabler/icons-react-native/IconStar";
@@ -148,6 +154,7 @@ const ANDROID_ICON_BY_SF_SYMBOL = {
   "arrow.triangle.branch": IconGitBranch,
   "arrow.triangle.merge": IconGitMerge,
   "arrow.triangle.pull": IconGitPullRequest,
+  "arrow.triangle.2.circlepath": IconGitCompare,
   "square.3.layers.3d": IconStack2,
   "arrow.turn.left.up": IconArrowBackUp,
   "arrow.up": IconArrowUp,
@@ -163,6 +170,8 @@ const ANDROID_ICON_BY_SF_SYMBOL = {
   "bell.badge": IconBellRinging,
   "bolt.circle": IconBolt,
   "bolt.horizontal.circle": IconBolt,
+  "bolt.slash": IconBoltOff,
+  "bubble.left.and.bubble.right": IconMessages,
   brain: IconBrain,
   "cable.connector": IconPlug,
   camera: IconCamera,
@@ -209,6 +218,7 @@ const ANDROID_ICON_BY_SF_SYMBOL = {
   keyboard: IconKeyboard,
   laptopcomputer: IconDeviceLaptop,
   link: IconLink,
+  "lock.shield": IconShieldLock,
   "list.number": IconListNumbers,
   "line.3.horizontal": IconMenu2,
   "line.3.horizontal.decrease": IconFilter,
@@ -242,6 +252,7 @@ const ANDROID_ICON_BY_SF_SYMBOL = {
   "sidebar.left": IconLayoutSidebar,
   "sidebar.right": IconLayoutSidebarRight,
   "slider.horizontal.3": IconAdjustmentsHorizontal,
+  "smallcircle.filled.circle": IconGitCommit,
   "square.and.pencil": IconEdit,
   "square.on.square": IconCopy,
   "square.grid.2x2": IconApps,
@@ -256,7 +267,6 @@ const ANDROID_ICON_BY_SF_SYMBOL = {
   "text.bubble": IconMessage,
   "questionmark.bubble": IconMessageCircleQuestion,
   "exclamationmark.shield": IconShieldQuestion,
-  "bubble.left.and.bubble.right": IconMessage,
   "bubble.left": IconMessage,
   sparkles: IconSparkles,
   "plus.bubble": IconMessagePlus,
@@ -268,6 +278,8 @@ const ANDROID_ICON_BY_SF_SYMBOL = {
   trash: IconTrash,
   wifi: IconWifi,
   "wifi.slash": IconWifiOff,
+  "arrow.up.arrow.down": IconArrowsSort,
+  "xmark.circle": IconCircleX,
   xmark: IconX,
   "xmark.circle.fill": IconCircleXFilled,
 } satisfies Partial<

@@ -13,6 +13,7 @@ import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import type { ProviderDriverCreateInput } from "@t3tools/provider-core/server/driver";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Option from "effect/Option";
@@ -31,6 +32,7 @@ import {
   GrokBotNativeRuntimeService,
   NativeRuntimeError,
   type RuntimeFrame,
+  type SettlementFrame,
   type RuntimeError,
 } from "../../grokBot/GrokBotNativeRuntimeService.ts";
 import {
@@ -735,44 +737,127 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
               (a, b) => [...a, ...b],
             );
           });
-        // Re-attach after native's CursorTooOld at the announced generation. Consecutive restarts
-        // that import no rows are bounded and backed off, so a server that keeps answering with
-        // CursorTooOld fails the session instead of spinning.
+        const assertAccount = Effect.gen(function* () {
+          if ((yield* native.accountBinding) !== owned.binding)
+            return yield* new GrokBotBindingError({
+              reason: "The selected Grok Bot account or team changed.",
+            });
+        });
+        // Only the owned read stream recovers. Projection failures and writes never enter this path.
+        const recoverRead = <A>(stream: Stream.Stream<A, RuntimeError>) =>
+          stream.pipe(
+            Stream.catchTags({
+              GrokBotNativeReadError: (error) =>
+                error.transient === true ? Stream.empty : Stream.fail(error),
+            }),
+          );
+        // A 30-second attachment is healthy even without chat rows; brief connected frames alone
+        // cannot reset the budget of a transport that repeatedly fails immediately.
+        const backoff = (attempts: number) =>
+          attempts > GROK_BOT_MAX_FRUITLESS_RESTARTS
+            ? Effect.fail(new NativeRuntimeError({ kind: "uncertain" }))
+            : Effect.sleep(Duration.millis(Math.max(1, attempts) * 1000));
+        // Replay from zero retains the projection's row/version dedupe across reattachments.
         const watchFrom = (
           generation: number,
           fruitless: number,
         ): Stream.Stream<
           ProviderAdapter.ProviderAdapterV2Event[],
           GrokBotBindingError | RuntimeError
-        > => {
-          let sawRows = false;
-          return native.watch({ ...owned, generation, afterUpdatedSeq: "0" }).pipe(
-            // Durable cursors must commit with their ingested events, never before yielding them.
-            // Native approvals can predate or outlive any managed turn, so they project independently.
-            Stream.mapEffect((frame) => {
-              if (frame._tag === "Rows" && frame.entries.length > 0) sawRows = true;
-              return projectFrame(frame);
-            }),
-            Stream.takeUntil(() => projection.peekRestart()),
-            Stream.concat(
-              Stream.unwrap(
-                Effect.gen(function* () {
-                  const next = projection.takeRestart();
-                  if (next === undefined)
-                    return Stream.fail(new NativeRuntimeError({ kind: "uncertain" }));
-                  const attempts = sawRows ? 0 : fruitless + 1;
-                  if (attempts > GROK_BOT_MAX_FRUITLESS_RESTARTS)
-                    return Stream.fail(new NativeRuntimeError({ kind: "uncertain" }));
-                  yield* Effect.sleep(Duration.millis(Math.min(attempts, 5) * 1000));
-                  return watchFrom(next, attempts);
-                }),
+        > =>
+          Stream.suspend(() => {
+            let sawRows = false;
+            let replayGeneration = generation;
+            let startedAt = 0;
+            const attempt = Stream.unwrap(
+              Effect.gen(function* () {
+                yield* assertAccount;
+                startedAt = yield* Clock.currentTimeMillis;
+                const scope = yield* Effect.scope;
+                const renewal = yield* Deferred.make<void>();
+                let scheduledRenewal = false;
+                return recoverRead(
+                  native.watch({ ...owned, generation, afterUpdatedSeq: "0" }),
+                ).pipe(
+                  Stream.mapEffect((frame) =>
+                    Effect.gen(function* () {
+                      if (frame._tag === "Connected" && !scheduledRenewal) {
+                        const lifetime = Number(frame.absoluteLifetimeMs);
+                        if (Number.isFinite(lifetime) && lifetime >= 1000) {
+                          scheduledRenewal = true;
+                          yield* Effect.sleep(
+                            Duration.millis(Math.min(270000, Math.max(1000, lifetime * 0.9))),
+                          ).pipe(
+                            Effect.andThen(Deferred.succeed(renewal, undefined)),
+                            Effect.forkIn(scope),
+                          );
+                        }
+                      }
+                      return frame;
+                    }),
+                  ),
+                  Stream.interruptWhen(Deferred.await(renewal)),
+                  // Durable cursors must commit with their ingested events, never before yielding them.
+                  Stream.mapEffect((frame) =>
+                    Effect.gen(function* () {
+                      const batch = yield* projectFrame(frame);
+                      if (frame._tag === "Rows") sawRows ||= frame.entries.length > 0;
+                      if (frame._tag === "Rows" || frame._tag === "Cleared")
+                        replayGeneration = frame.generation;
+                      return batch;
+                    }),
+                  ),
+                  Stream.takeUntil(() => projection.peekRestart()),
+                );
+              }),
+            );
+            // Close each attempt's scope, including its renewal timer, before opening the next watch.
+            return attempt.pipe(
+              Stream.concat(
+                Stream.unwrap(
+                  Effect.gen(function* () {
+                    const next = projection.takeRestart();
+                    const healthy = (yield* Clock.currentTimeMillis) - startedAt >= 30000;
+                    const attempts = (next === undefined ? healthy : sawRows) ? 0 : fruitless + 1;
+                    yield* backoff(attempts);
+                    return watchFrom(next ?? replayGeneration, attempts);
+                  }),
+                ),
               ),
-            ),
-          );
-        };
+            );
+          });
         const transcriptEvents = watchFrom(0, 0);
-        const settlementEvents = settlementWatch.events.pipe(
-          Stream.concat(Stream.fail(new NativeRuntimeError({ kind: "uncertain" }))),
+        const settlementFrom = (
+          events: typeof settlementWatch.events,
+          fruitless: number,
+        ): Stream.Stream<SettlementFrame, GrokBotBindingError | RuntimeError> =>
+          Stream.unwrap(
+            Effect.gen(function* () {
+              const startedAt = yield* Clock.currentTimeMillis;
+              return recoverRead(events).pipe(
+                Stream.concat(
+                  Stream.unwrap(
+                    Effect.gen(function* () {
+                      const healthy = (yield* Clock.currentTimeMillis) - startedAt >= 30000;
+                      const attempts = healthy ? 0 : fruitless + 1;
+                      yield* backoff(attempts);
+                      yield* assertAccount;
+                      // The runtime subscribes before its fresh snapshot; settlement nonces dedupe replay.
+                      return settlementFrom(
+                        Stream.unwrap(
+                          native
+                            .openSettlementWatch(owned)
+                            .pipe(Effect.map((watch) => watch.events)),
+                        ),
+                        attempts,
+                      );
+                    }),
+                  ),
+                ),
+              );
+            }),
+          );
+        const settlementEvents = settlementFrom(settlementWatch.events, 0).pipe(
           Stream.mapEffect(settlements.project),
         );
         const completionEvents = completionWatch.pipe(

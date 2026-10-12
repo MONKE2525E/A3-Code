@@ -25,7 +25,7 @@ import * as Schema from "effect/Schema";
 const SIDEBAR_COOKIE_NAME = "sidebar_state";
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7;
 const SIDEBAR_WIDTH = "16rem";
-const SIDEBAR_WIDTH_MOBILE = "calc(100vw - var(--spacing(3)))";
+const SIDEBAR_WIDTH_MOBILE = "calc(100dvw - 0.75rem)";
 const SIDEBAR_WIDTH_ICON = "3rem";
 const SIDEBAR_RESIZE_DEFAULT_MIN_WIDTH = 16 * 16;
 
@@ -158,7 +158,7 @@ function SidebarProvider({
       <div
         // Inset layouts opt into bg-sidebar through className.
         className={cn(
-          "group/sidebar-wrapper flex min-h-svh w-full max-sm:[--workspace-titlebar-control-size:--spacing(8)]",
+          "group/sidebar-wrapper flex min-h-svh w-full max-sm:[--workspace-titlebar-control-size:--spacing(11)]",
           className,
         )}
         data-sidebar-state={state}
@@ -237,7 +237,7 @@ function Sidebar({
         <Sheet onOpenChange={setOpenMobile} open={openMobile}>
           <SheetPopup
             className={cn(
-              "w-(--sidebar-width) max-w-none bg-sidebar surface-grain p-0 text-sidebar-foreground",
+              "w-(--sidebar-width) shrink-0 max-w-none bg-background p-0 text-sidebar-foreground max-sm:[--workspace-titlebar-control-size:--spacing(11)]",
               className,
             )}
             data-mobile="true"
@@ -248,6 +248,8 @@ function Sidebar({
             style={
               {
                 "--sidebar-width": SIDEBAR_WIDTH_MOBILE,
+                // Portaled flex sheets must retain their width regardless of intrinsic content.
+                width: SIDEBAR_WIDTH_MOBILE,
               } as React.CSSProperties
             }
           >
@@ -257,7 +259,7 @@ function Sidebar({
             </SheetHeader>
             <div
               className={cn(
-                "flex h-full w-full flex-col pb-safe pt-safe",
+                "flex h-full min-w-0 w-full flex-col bg-sidebar surface-grain pb-safe pt-safe",
                 side === "left" ? "pl-safe" : "pr-safe",
               )}
               {...props}

@@ -143,10 +143,10 @@ function GitOverviewSheetContent(props: GitOverviewSheetProps) {
       Alert.alert("No open PR", "This branch does not have an open pull request.");
       return;
     }
-    if (!(await openPullRequest(prUrl))) {
+    if (!(await openPullRequest(prUrl, environmentId, "pull-request", String(threadId)))) {
       Alert.alert("Unable to open PR", "The pull request could not be opened.");
     }
-  }, [gitStatus.data, openPullRequest]);
+  }, [gitStatus.data, openPullRequest, environmentId, threadId]);
 
   const runActionWithPrompt = useCallback(
     async (input: GitActionRequestInput) => {
@@ -387,7 +387,12 @@ function GitOverviewSheetContent(props: GitOverviewSheetProps) {
                     title={`#${link.number} ${link.snapshot?.title ?? "Pull request"}`}
                     subtitle={`${link.repository} · ${link.snapshot === null ? "Status pending" : link.snapshot.isDraft && link.snapshot.state === "open" ? "Draft" : link.snapshot.state}${link.watch === undefined ? "" : " · Watching"}`}
                     onPress={() => {
-                      void openPullRequest(link.url).then((opened) => {
+                      void openPullRequest(
+                        link.url,
+                        environmentId,
+                        "pull-request",
+                        String(threadId),
+                      ).then((opened) => {
                         if (!opened)
                           Alert.alert("Unable to open PR", "The pull request could not be opened.");
                       });

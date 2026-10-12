@@ -69,6 +69,8 @@ const fixture = Effect.fn("fixture")(function* (
   runtimeFailure?: NodeRuntimeUnavailableError | DeviceHost.DeviceHostError,
   inspectError = false,
   installTool?: Parameters<typeof DeviceService.makeWithHosts>[3],
+  bootResponse?: unknown,
+  bootStatus = 200,
 ) {
   const settings = yield* Ref.make(DEFAULT_SERVER_SETTINGS);
   const starts: string[] = [];
@@ -187,7 +189,11 @@ const fixture = Effect.fn("fixture")(function* (
             return HttpClientResponse.fromWeb(
               request,
               Response.json(
-                bootError ? { ok: false, error: bootError } : { ok: true, serial: "emulator-5554" },
+                bootResponse ??
+                  (bootError
+                    ? { ok: false, error: bootError }
+                    : { ok: true, serial: "emulator-5554" }),
+                { status: bootStatus },
               ),
             );
           }
@@ -394,6 +400,127 @@ it.effect.each([
     expect(error.message).toContain(message);
     expect(error.message).not.toContain(diagnostic);
     expect((yield* service.state).bootingDevices).toEqual([]);
+  }).pipe(Effect.scoped),
+);
+
+it.effect.each([
+  {
+    response: {
+      ok: false,
+      error: "Failed to allocate an emulator port for synthetic_avd",
+      errors: [
+        {
+          id: "synthetic-error-id",
+          message: "[android-utils] Failed to run `avdmanager list avd`:",
+          error:
+            "Error: Command failed: /private/synthetic/sdk/avdmanager list avd\nJAVA_HOME=C:\\Users\\synthetic\\jdk\nAuthorization: Bearer synthetic-token\nmise ERROR java is not configured",
+        },
+      ],
+    },
+    diagnostic: "avd_discovery_failed",
+    message: "avdmanager and a Java runtime",
+  },
+  {
+    response: { ok: false, error: "Error: No free emulator console port available", errors: [] },
+    diagnostic: "emulator_ports_exhausted",
+    message: "Close an unused emulator",
+  },
+  {
+    response: {
+      ok: false,
+      id: "/private/synthetic/device",
+      serial: "synthetic-token",
+      error: "Untrusted output /private/synthetic/path token=synthetic-token",
+      errors: [
+        {
+          message: "C:\\Users\\synthetic\\path token=synthetic-token",
+          error: { secret: "synthetic-token" },
+        },
+      ],
+    },
+    diagnostic: undefined,
+    message: "could not start",
+  },
+  {
+    response: {
+      ok: false,
+      errors: [null, { message: { token: "synthetic-token", path: "/private/synthetic" } }],
+    },
+    diagnostic: undefined,
+    message: "could not start",
+  },
+] as const)("sanitizes hub action failures: $diagnostic", ({ response, diagnostic, message }) =>
+  Effect.gen(function* () {
+    const { service } = yield* fixture(
+      Effect.void,
+      undefined,
+      false,
+      undefined,
+      false,
+      undefined,
+      response,
+      diagnostic === "emulator_ports_exhausted" ? 500 : 200,
+    );
+    yield* service.configure({ enabled: true });
+    const error = yield* service
+      .open({
+        threadId: ThreadId.make("safe-boot-failure"),
+        deviceId: "Pixel_API_35",
+        platform: "android",
+      })
+      .pipe(Effect.flip);
+    expect(error._tag).toBe("DeviceBootError");
+    if (error._tag !== "DeviceBootError") throw new Error("Expected boot failure");
+    expect(error.diagnostic).toBe(diagnostic);
+    expect(error.message).toContain(message);
+    expect(error.cause).toEqual({ ok: false, ...(diagnostic ? { diagnostic } : {}) });
+    const exposed = JSON.stringify(error) + error.message;
+    for (const sensitive of [
+      "/private/synthetic",
+      "C:\\Users",
+      "synthetic-token",
+      "synthetic-error-id",
+      "Untrusted output",
+      "mise ERROR",
+    ]) {
+      expect(exposed).not.toContain(sensitive);
+    }
+  }).pipe(Effect.scoped),
+);
+
+it.effect("removes sensitive decode failure causes from malformed action responses", () =>
+  Effect.gen(function* () {
+    const { service } = yield* fixture(Effect.void, undefined, false, undefined, false, undefined, {
+      ok: { token: "synthetic-token", path: "/private/synthetic" },
+      errors: [{ message: "synthetic-token" }],
+    });
+    yield* service.configure({ enabled: true });
+    const error = yield* service
+      .open({ threadId: ThreadId.make("malformed"), deviceId: "Pixel_API_35", platform: "android" })
+      .pipe(Effect.flip);
+    expect(error._tag).toBe("DeviceOperationError");
+    if (error._tag !== "DeviceOperationError") throw new Error("Expected operation failure");
+    expect(error.cause).toBeUndefined();
+    expect(JSON.stringify(error) + error.message).not.toContain("synthetic-token");
+    expect(JSON.stringify(error) + error.message).not.toContain("/private/synthetic");
+  }).pipe(Effect.scoped),
+);
+
+it.effect("accepts success responses with optional detailed errors without exposing them", () =>
+  Effect.gen(function* () {
+    const { service } = yield* fixture(Effect.void, undefined, false, undefined, false, undefined, {
+      ok: true,
+      serial: "emulator-5554",
+      errors: [{ id: "synthetic", message: "synthetic-token", error: "/private/synthetic" }],
+    });
+    yield* service.configure({ enabled: true });
+    const session = yield* service.open({
+      threadId: ThreadId.make("success"),
+      deviceId: "Pixel_API_35",
+      platform: "android",
+    });
+    expect(session.deviceId).toBe("emulator-5554");
+    expect(JSON.stringify(session)).not.toContain("synthetic");
   }).pipe(Effect.scoped),
 );
 

@@ -979,7 +979,9 @@ function ThreadRouteContent(
       <GitActionProgressOverlay
         progress={gitActionProgress}
         onDismiss={dismissGitActionResult}
-        onOpenPullRequest={openPullRequest}
+        onOpenPullRequest={(url) =>
+          void openPullRequest(url, String(environmentId), "pull-request", threadId ?? undefined)
+        }
       />
 
       <ThreadPane>

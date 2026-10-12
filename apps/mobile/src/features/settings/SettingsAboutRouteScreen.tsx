@@ -13,6 +13,8 @@ import {
   runAppUpdateCheck,
 } from "../updates/app-updates";
 import { SettingsRow } from "./components/SettingsRow";
+import { SettingsActionRow } from "./components/SettingsActionRow";
+import { useForkReleaseUpdates, usesForkReleaseUpdates } from "../updates/useForkReleaseUpdates";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsScreen } from "./components/SettingsScreen";
 
@@ -35,6 +37,7 @@ export function SettingsAboutRouteScreen() {
 }
 
 function AppSettingsSection() {
+  const forkUpdates = useForkReleaseUpdates();
   const [updateState, setUpdateState] = useState<AppUpdateCheckState>("idle");
   const updateInFlight = useRef(false);
   const hiddenUpdateTapCount = useRef(0);
@@ -128,6 +131,17 @@ function AppSettingsSection() {
         target="SettingsOpenSourceLicenses"
       />
       <SettingsRow icon="doc.text" label="Legal" fullScreenTarget="SettingsLegal" />
+      {usesForkReleaseUpdates ? (
+        <SettingsActionRow
+          icon="arrow.down.circle"
+          label="Check for mobile updates"
+          loading={forkUpdates.checking}
+          disabled={forkUpdates.checking}
+          onPress={() => {
+            void forkUpdates.check();
+          }}
+        />
+      ) : null}
       {updateCheckAvailable ? (
         <Pressable
           accessibilityLabel={`Version ${versionLabel}`}

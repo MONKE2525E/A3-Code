@@ -18,10 +18,7 @@ import { useAtomCommand } from "~/state/use-atom-command";
 
 import {
   forgetRespondedGrokBotSecretRequests,
-  grokBotHiddenSecretRequestsPersist,
   grokBotPendingSecretRequests,
-  grokBotSecretDismissFailureMessage,
-  grokBotSecretDismissIsUnsupported,
   grokBotSecretFailureEndsRequest,
   grokBotSecretFailureMessage,
   grokBotSecretRequestKey,
@@ -37,7 +34,7 @@ import {
  * Secure inputs a Grok Bot is waiting on. The value lives only in each field's DOM node: it is never
  * React state, a store, a log, or an error, and every settle or unmount clears the field. A request
  * leaves the panel once native accepts its answer, or reports it no longer asked. A request this
- * device hid stays out of the list, and the row below restores it.
+ * device dismissed stays out of the list across reloads, independently of native acknowledgment.
  */
 export function GrokBotSecureInputPanel(props: {
   readonly environmentId: EnvironmentId;
@@ -46,10 +43,6 @@ export function GrokBotSecureInputPanel(props: {
 }) {
   const { environmentId, botId, requests } = props;
   const target = { environmentId, botId };
-  // The request just hidden, so Undo can restore it. Only this session; a reload shows the row.
-  const [justHiddenKey, setJustHiddenKey] = useState<string | null>(null);
-  // Set when Undo or Show restores a card, so its field takes focus once it mounts again.
-  const [restoredKey, setRestoredKey] = useState<string | null>(null);
   useEffect(
     () => forgetRespondedGrokBotSecretRequests({ environmentId, botId }, requests),
     [environmentId, botId, requests],
@@ -61,94 +54,18 @@ export function GrokBotSecureInputPanel(props: {
   const pending = unsettled.filter(
     (request) => !hiddenKeys.includes(grokBotSecretRequestKey(target, request)),
   );
-  // Only hidden requests the bot still lists count; a responded entry is forgotten above.
-  const hidden = unsettled.filter((request) =>
-    hiddenKeys.includes(grokBotSecretRequestKey(target, request)),
-  );
-  if (pending.length === 0 && hidden.length === 0) return null;
-
-  const hiddenKeysForTarget = hidden.map((request) => grokBotSecretRequestKey(target, request));
-  const restore = (keys: ReadonlyArray<string>) => {
-    useHiddenGrokBotSecretRequests.getState().forget(keys);
-    setJustHiddenKey(null);
-    setRestoredKey(keys[0] ?? null);
-  };
+  if (pending.length === 0) return null;
 
   return (
     <div className="flex min-w-0 flex-col gap-3 px-4 pb-3">
-      {pending.map((request) => {
-        const key = grokBotSecretRequestKey(target, request);
-        return (
-          <GrokBotSecureInputForm
-            key={`${request.sessionId}:${request.entryId}`}
-            environmentId={environmentId}
-            botId={botId}
-            request={request}
-            focusOnMount={restoredKey === key}
-            onHidden={() => {
-              setJustHiddenKey(key);
-              setRestoredKey(null);
-            }}
-          />
-        );
-      })}
-      {hidden.length > 0 ? (
-        <GrokBotHiddenSecretRequests
-          count={hidden.length}
-          undoKey={justHiddenKey}
-          persists={grokBotHiddenSecretRequestsPersist}
-          onUndo={(key) => restore([key])}
-          onShow={() => restore(hiddenKeysForTarget)}
+      {pending.map((request) => (
+        <GrokBotSecureInputForm
+          key={grokBotSecretRequestKey(target, request)}
+          environmentId={environmentId}
+          botId={botId}
+          request={request}
         />
-      ) : null}
-    </div>
-  );
-}
-
-/**
- * Compact row for requests this device hid. Right after a hide it offers Undo for that request; on
- * any later visit it is only the count and Show. Focus moves to Undo when a hide happens, since the
- * hidden card just unmounted and would otherwise leave focus on the page body.
- */
-function GrokBotHiddenSecretRequests(props: {
-  readonly count: number;
-  readonly undoKey: string | null;
-  readonly persists: boolean;
-  readonly onUndo: (key: string) => void;
-  readonly onShow: () => void;
-}) {
-  const { count, undoKey, persists, onUndo, onShow } = props;
-  const undoRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (undoKey !== null) undoRef.current?.focus();
-  }, [undoKey]);
-  const durability = persists ? "" : " Hidden until reload.";
-  const message =
-    undoKey !== null
-      ? `Hidden on this device. The bot may still be waiting.${durability}`
-      : `${count === 1 ? "1 secure input" : `${count} secure inputs`} hidden on this device. The bot may still be waiting.${durability}`;
-  return (
-    <div
-      role="status"
-      className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-border/60 px-3 py-2"
-    >
-      <p className="min-w-0 text-xs text-muted-foreground">{message}</p>
-      <div className="flex shrink-0 items-center gap-1">
-        {undoKey !== null ? (
-          <Button
-            ref={undoRef}
-            type="button"
-            size="xs"
-            variant="ghost-muted"
-            onClick={() => onUndo(undoKey)}
-          >
-            Undo
-          </Button>
-        ) : null}
-        <Button type="button" size="xs" variant="ghost-muted" onClick={onShow}>
-          Show requests
-        </Button>
-      </div>
+      ))}
     </div>
   );
 }
@@ -157,10 +74,8 @@ function GrokBotSecureInputForm(props: {
   readonly environmentId: EnvironmentId;
   readonly botId: string;
   readonly request: GrokBotSecretRequestItem;
-  readonly focusOnMount: boolean;
-  readonly onHidden: () => void;
 }) {
-  const { environmentId, botId, request, focusOnMount, onHidden } = props;
+  const { environmentId, botId, request } = props;
   const target = { environmentId, botId };
   const inputId = useId();
   const errorId = useId();
@@ -185,10 +100,8 @@ function GrokBotSecureInputForm(props: {
   const [filled, setFilled] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [closed, setClosed] = useState(false);
-  // One error at a time, tagged by the action that produced it, so a save message never sits under
-  // a failed dismissal and the other action clears it.
   const [error, setError] = useState<{
-    readonly kind: "save" | "dismiss";
+    readonly kind: "save";
     readonly message: string;
   } | null>(null);
 
@@ -199,10 +112,6 @@ function GrokBotSecureInputForm(props: {
     };
   }, []);
 
-  useEffect(() => {
-    if (focusOnMount) inputRef.current?.focus();
-  }, [focusOnMount]);
-
   // Closing marks the key settled, so a snapshot that still lists the request cannot reopen it.
   const close = () => {
     markGrokBotSecretRequestSettled(grokBotSecretRequestKey(target, request));
@@ -212,14 +121,6 @@ function GrokBotSecureInputForm(props: {
   const clearField = () => {
     if (inputRef.current !== null) inputRef.current.value = "";
     setFilled(false);
-  };
-
-  // Local only: the bot is not told and the request is not deleted. The field is cleared before the
-  // card unmounts, and the panel's row offers Undo for it.
-  const hideLocally = () => {
-    clearField();
-    hideGrokBotSecretRequest(grokBotSecretRequestKey(target, request));
-    onHidden();
   };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
@@ -255,34 +156,17 @@ function GrokBotSecureInputForm(props: {
   const dismiss = async () => {
     if (inFlight.current) return;
     inFlight.current = true;
-    setSubmitting(true);
-    setError(null);
+    // Hide and clear before contacting native: acknowledgment never controls local visibility.
+    clearField();
+    hideGrokBotSecretRequest(grokBotSecretRequestKey(target, request));
+    if (!canDismiss) return;
     try {
-      // Native's own dismissal, so the bot stops waiting. A refusal stays visible and retryable.
-      const result = await dismissSecret({
+      await dismissSecret({
         environmentId,
         input: { botId, sessionId: request.sessionId, entryId: request.entryId },
       });
-      if (result._tag === "Success") {
-        close();
-      } else if (!isAtomCommandInterrupted(result)) {
-        const failure = squashAtomCommandFailure(result);
-        if (grokBotSecretFailureEndsRequest(failure)) {
-          close();
-        } else if (grokBotSecretDismissIsUnsupported(failure)) {
-          // Native cannot cancel a secure input, so the card hides on this device in one action.
-          // The bot is still waiting, which the row says; nothing is claimed as dismissed.
-          hideLocally();
-        } else {
-          setError({ kind: "dismiss", message: grokBotSecretDismissFailureMessage() });
-        }
-      }
     } catch {
-      setError({ kind: "dismiss", message: grokBotSecretDismissFailureMessage() });
-    } finally {
-      inFlight.current = false;
-      setSubmitting(false);
-      clearField();
+      // Native dismissal is best effort. A rejection must not restore the card or leave a notice.
     }
   };
 
@@ -335,18 +219,6 @@ function GrokBotSecureInputForm(props: {
           <p id={errorId} role="alert" className="min-w-0 text-xs text-destructive">
             {error.message}
           </p>
-          {error.kind === "dismiss" ? (
-            // The way out when native refused or could not be reached for a dismissal.
-            <Button
-              type="button"
-              size="xs"
-              variant="ghost-muted"
-              disabled={submitting}
-              onClick={hideLocally}
-            >
-              Hide on this device
-            </Button>
-          ) : null}
         </div>
       ) : null}
       <div className="flex min-w-0 items-center justify-between gap-2">
@@ -361,7 +233,7 @@ function GrokBotSecureInputForm(props: {
           type="button"
           size="xs"
           variant="ghost-muted"
-          disabled={submitting || !canDismiss}
+          disabled={submitting}
           onClick={() => void dismiss()}
         >
           Dismiss

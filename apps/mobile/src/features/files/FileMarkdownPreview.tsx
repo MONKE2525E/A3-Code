@@ -39,6 +39,7 @@ interface MarkdownPreviewStyles {
 
 export function useMarkdownPreviewStyles(
   renderImage?: MarkdownImageRenderer,
+  onLinkPress?: (href: string) => void,
 ): MarkdownPreviewStyles {
   const { appearance } = useAppearancePreferences();
   const markdownFontSizes = useMemo(
@@ -68,9 +69,9 @@ export function useMarkdownPreviewStyles(
         <NativeText
           className="font-t3-medium"
           onPress={() => {
-            if (href) {
-              void tryOpenExternalUrl(href, "markdown-link");
-            }
+            if (!href) return;
+            if (onLinkPress) onLinkPress(href);
+            else void tryOpenExternalUrl(href, "markdown-link");
           }}
           style={{
             color: link,
@@ -186,20 +187,24 @@ export function useMarkdownPreviewStyles(
     nativeMarkdownTypography,
     regularFontFamily,
     renderImage,
+    onLinkPress,
     strong,
     boldFontFamily,
   ]);
 }
 
 export function FileMarkdownPreview(props: {
-  readonly cwd: string;
+  readonly cwd?: string;
+  readonly embedded?: boolean;
   readonly captured?: boolean;
-  readonly environmentId: EnvironmentId;
+  readonly environmentId?: EnvironmentId;
   readonly markdown: string;
-  readonly relativePath: string;
+  readonly relativePath?: string;
   /** Absent for a file opened from a project draft, which has no thread yet. */
-  readonly threadId: ThreadId | null;
+  readonly threadId?: ThreadId | null;
   readonly onRefresh?: () => Promise<void> | void;
+  /** Replaces the browser as the target of a link press, e.g. to open a pull request natively. */
+  readonly onLinkPress?: (href: string) => void;
 }) {
   const [isPullRefreshing, setIsPullRefreshing] = useState(false);
   const handlePullToRefresh = useCallback(async () => {
@@ -214,7 +219,8 @@ export function FileMarkdownPreview(props: {
     }
   }, [props.onRefresh]);
   const markdownDirectory = useMemo(
-    () => getBrowseDirectoryPath(resolveWorkspaceFilePath(props.cwd, props.relativePath)),
+    () =>
+      getBrowseDirectoryPath(resolveWorkspaceFilePath(props.cwd ?? "", props.relativePath ?? "")),
     [props.cwd, props.relativePath],
   );
   const renderImage = useCallback<MarkdownImageRenderer>(
@@ -229,6 +235,7 @@ export function FileMarkdownPreview(props: {
       }
       if (
         props.captured ||
+        !props.environmentId ||
         media === null ||
         media.kind !== "image" ||
         media.access === "unavailable"
@@ -247,11 +254,38 @@ export function FileMarkdownPreview(props: {
     },
     [markdownDirectory, props.environmentId, props.threadId, props.captured],
   );
-  const styles = useMarkdownPreviewStyles(renderImage);
-  const onLinkPress = useCallback((href: string) => {
-    void tryOpenExternalUrl(href, "markdown-link");
-  }, []);
+  const customLinkPress = props.onLinkPress;
+  const onLinkPress = useCallback(
+    (href: string) => {
+      if (customLinkPress) customLinkPress(href);
+      else void tryOpenExternalUrl(href, "markdown-link");
+    },
+    [customLinkPress],
+  );
+  const styles = useMarkdownPreviewStyles(renderImage, customLinkPress);
 
+  const content = (
+    <View className="mx-auto w-full max-w-[760px]">
+      {hasNativeSelectableMarkdownText() ? (
+        <SelectableMarkdownText
+          markdown={props.markdown}
+          onLinkPress={onLinkPress}
+          renderImage={renderImage}
+          textStyle={styles.nativeTextStyle}
+        />
+      ) : (
+        <Markdown
+          options={{ gfm: true }}
+          renderers={styles.renderers}
+          styles={styles.styles}
+          theme={styles.theme}
+        >
+          {props.markdown}
+        </Markdown>
+      )}
+    </View>
+  );
+  if (props.embedded) return <View className="p-4">{content}</View>;
   return (
     <ScrollView
       className="flex-1 bg-sheet"
@@ -265,25 +299,7 @@ export function FileMarkdownPreview(props: {
         ) : undefined
       }
     >
-      <View className="mx-auto w-full max-w-[760px]">
-        {hasNativeSelectableMarkdownText() ? (
-          <SelectableMarkdownText
-            markdown={props.markdown}
-            onLinkPress={onLinkPress}
-            renderImage={renderImage}
-            textStyle={styles.nativeTextStyle}
-          />
-        ) : (
-          <Markdown
-            options={{ gfm: true }}
-            renderers={styles.renderers}
-            styles={styles.styles}
-            theme={styles.theme}
-          >
-            {props.markdown}
-          </Markdown>
-        )}
-      </View>
+      {content}
     </ScrollView>
   );
 }

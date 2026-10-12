@@ -2,7 +2,7 @@ import { PermissionUpdateNotice } from "./components/PermissionUpdateNotice";
 import * as Linking from "expo-linking";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
-import { StatusBar } from "react-native";
+import { Platform, StatusBar } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -28,6 +28,7 @@ import { SubscriptionUsageCoordinator } from "./widgets/SubscriptionUsageCoordin
 import { VoiceInputProvider } from "./features/voice-input/VoiceInputProvider";
 import { GlobalVoiceInputControl } from "./features/voice-input/GlobalVoiceInputControl";
 import { NativeLayoutMetricsProvider } from "./native/native-layout-metrics";
+import { interceptAndroidThreadLink } from "./features/threads/thread-link-navigation";
 
 import "../global.css";
 
@@ -40,7 +41,32 @@ void SplashScreen.preventAutoHideAsync().catch(() => {
 });
 
 const appLinking = {
-  prefixes: [Linking.createURL("/"), "t3code://", "t3code-dev://", "t3code-preview://"],
+  prefixes: [
+    Linking.createURL("/"),
+    "t3code://",
+    "t3code-custom://",
+    "t3code-dev://",
+    "t3code-preview://",
+  ],
+  ...(Platform.OS === "android"
+    ? {
+        getInitialURL() {
+          // Preserve React Navigation's Android startup timeout. A late thread
+          // intent still enters the pending queue after navigation has mounted.
+          return Promise.race([
+            Linking.getInitialURL().then(interceptAndroidThreadLink),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 150)),
+          ]);
+        },
+        subscribe(listener: (url: string) => void) {
+          const subscription = Linking.addEventListener("url", ({ url }) => {
+            const appUrl = interceptAndroidThreadLink(url);
+            if (appUrl !== null) listener(appUrl);
+          });
+          return () => subscription.remove();
+        },
+      }
+    : {}),
   // Keep the compact thread list available beneath a directly opened thread.
   config: { initialRouteName: "Home" },
   filter: shouldHandleAppLink,

@@ -17,6 +17,8 @@ import {
 } from "../attachmentStore.ts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect Crypto has no Chromium Safe Storage AES/PBKDF2 support.
 import * as NodeCrypto from "node:crypto";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Native attachment URLs always name POSIX paths, independently of the host filesystem.
+import * as NodePath from "node:path";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -122,6 +124,7 @@ export class NativeReadError extends Schema.TaggedError<NativeReadError>()(
   {
     stage: Schema.Literals(["session", "request", "response"]),
     status: Schema.optionalKey(Schema.Number),
+    transient: Schema.optionalKey(Schema.Boolean),
   },
 ) {
   // Native session/schema/HTTP errors can carry credentials. Only bounded categories leave this adapter.
@@ -844,7 +847,7 @@ const make = Effect.gen(function* () {
             url.search ||
             url.hash ||
             !decoded.startsWith(root) ||
-            path.normalize(decoded) !== decoded ||
+            NodePath.posix.normalize(decoded) !== decoded ||
             decoded.slice(root.length).includes("/")
           )
             throw new Error("invalid attachment path");
@@ -852,9 +855,9 @@ const make = Effect.gen(function* () {
         },
         catch: () => new NativeReadError({ stage: "response" }),
       });
-      const name = (media.name ?? path.basename(filePath)).trim();
+      const name = (media.name ?? NodePath.posix.basename(filePath)).trim();
       if (!name || name.length > 255) return yield* new NativeReadError({ stage: "response" });
-      const extension = path.extname(filePath).toLowerCase();
+      const extension = NodePath.posix.extname(filePath).toLowerCase();
       const mimeType =
         (
           {
@@ -1177,20 +1180,27 @@ const make = Effect.gen(function* () {
             "application/connect+json",
           ),
         );
-        const response = yield* client.execute(rpc).pipe(Effect.timeout("15 seconds"));
+        const response = yield* client.execute(rpc).pipe(
+          Effect.timeout("15 seconds"),
+          Effect.mapError(() => new NativeReadError({ stage: "request", transient: true })),
+        );
         if (
           response.status !== 200 ||
           !response.headers["content-type"]?.startsWith("application/connect+json")
         )
           return yield* Effect.fail(
-            new NativeReadError({ stage: "request", status: response.status }),
+            new NativeReadError({
+              stage: "request",
+              status: response.status,
+              transient: [408, 502, 503, 504].includes(response.status),
+            }),
           );
-        return ConnectJsonStream.decodeMessages(response.stream).pipe(
+        return ConnectJsonStream.decodeMessages(
+          response.stream.pipe(
+            Stream.mapError(() => new NativeReadError({ stage: "response", transient: true })),
+          ),
+        ).pipe(
           Stream.mapEffect((frame) => boundSession(binding).pipe(Effect.as(frame))),
-          Stream.timeoutOrElse({
-            duration: "45 seconds",
-            orElse: () => Stream.fail(new NativeReadError({ stage: "response" })),
-          }),
           Stream.mapError((error) =>
             isNativeReadError(error) || isNativeSignedOutError(error)
               ? error
@@ -1423,20 +1433,24 @@ const make = Effect.gen(function* () {
             accept: "text/event-stream",
           }),
         );
-        const response = yield* client.execute(rpc).pipe(Effect.timeout("15 seconds"));
+        const response = yield* client.execute(rpc).pipe(
+          Effect.timeout("15 seconds"),
+          Effect.mapError(() => new NativeReadError({ stage: "request", transient: true })),
+        );
         if (
           response.status !== 200 ||
           !response.headers["content-type"]?.startsWith("text/event-stream")
         )
-          return yield* new NativeReadError({ stage: "request", status: response.status });
+          return yield* new NativeReadError({
+            stage: "request",
+            status: response.status,
+            transient: [408, 502, 503, 504].includes(response.status),
+          });
         if (onReady !== undefined) yield* onReady;
         return GatewayEventStream.decodeEvents(
           response.stream.pipe(
+            Stream.mapError(() => new NativeReadError({ stage: "response", transient: true })),
             Stream.mapEffect((chunk) => boundSession(binding).pipe(Effect.as(chunk))),
-            Stream.timeoutOrElse({
-              duration: "45 seconds",
-              orElse: () => Stream.fail(new NativeReadError({ stage: "response" })),
-            }),
           ),
         ).pipe(
           Stream.mapEffect((event) => boundSession(binding).pipe(Effect.as(event))),

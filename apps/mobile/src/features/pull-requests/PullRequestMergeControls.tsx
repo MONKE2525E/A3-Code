@@ -1,3 +1,4 @@
+import { usePullRequestAdminMerge } from "./usePullRequestAdminMerge";
 import { useAtomRefresh, useAtomSet, useAtomValue } from "@effect/atom-react";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type { PullRequestDetail, PullRequestMergeMethod } from "@t3tools/contracts";
@@ -28,11 +29,13 @@ export function PullRequestMergeControls(props: {
   readonly stack: PullRequestStackState;
 }) {
   const { pr, stack } = props;
+  const adminMerge = usePullRequestAdminMerge(pullRequestTarget(props.params).environmentId);
   const target = pullRequestTarget(props.params);
   const permissions = usePullRequestPermissions(props.params, pr);
   const preferences = useAtomValue(mobilePreferencesAtom);
   const savePreferences = useAtomSet(updateMobilePreferencesAtom);
   const runAction = useAtomCommand(composerPullRequests.runAction, { reportFailure: false });
+  const invalidate = useAtomCommand(composerPullRequests.invalidate, { reportFailure: false });
   const refreshDetail = useAtomRefresh(composerPullRequests.detail(target));
   const refreshActivity = useAtomRefresh(composerPullRequests.activity(target));
   const [selectedMethod, setSelectedMethod] = useState<PullRequestMergeMethod | null>(null);
@@ -54,6 +57,17 @@ export function PullRequestMergeControls(props: {
     hasStack: stack.stack !== null,
     isFresh: stack.isFresh,
   });
+  const canAdminMerge =
+    !busy &&
+    permissions.connected &&
+    adminMerge.canAdminMerge &&
+    pr.provider === "github" &&
+    pr.state === "open" &&
+    !pr.isDraft &&
+    pr.mergeability !== "conflicting" &&
+    method !== undefined &&
+    canMergeSingle &&
+    !stack.stack;
   const checkingStack =
     permissions.connected && stack.supportsStackActions && !stack.isFresh && !stack.error;
   const reason =
@@ -136,6 +150,49 @@ export function PullRequestMergeControls(props: {
       setBusy(false);
     }
   };
+  const confirmAdminMerge = () => {
+    if (!canAdminMerge || !method || pending.current) return;
+    Alert.alert(
+      "Merge as admin?",
+      `Merge #${pr.number} using ${method}, bypassing branch protection and required checks and reviews. The GitHub CLI runs on your environment.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Merge as admin",
+          style: "destructive",
+          onPress: () => {
+            if (pending.current) return;
+            pending.current = true;
+            setBusy(true);
+            void adminMerge
+              .run(pr, method)
+              .then(async (result) => {
+                if (result.kind === "failed")
+                  Alert.alert("Could not merge as admin", result.message);
+                // Terminal actions bypass the RPC mutation cache invalidation.
+                await invalidate({
+                  environmentId: target.environmentId,
+                  input: { reference: target.input },
+                });
+              })
+              .catch((error) =>
+                Alert.alert(
+                  "Could not merge as admin",
+                  error instanceof Error ? error.message : "Try again.",
+                ),
+              )
+              .finally(() => {
+                refreshDetail();
+                refreshActivity();
+                stack.refresh();
+                pending.current = false;
+                setBusy(false);
+              });
+          },
+        },
+      ],
+    );
+  };
   const confirm = (action: "merge" | "enable-auto-merge" | "disable-auto-merge") => {
     const title =
       action === "merge"
@@ -191,7 +248,7 @@ export function PullRequestMergeControls(props: {
             {busy ? "Working…" : !permissions.connected ? "Reconnect to merge" : label}
           </Text>
         </Pressable>
-        {methods.length > 0 || canAutoMerge ? (
+        {methods.length > 0 || canAutoMerge || canAdminMerge ? (
           <ControlPillMenu
             title="Merge options"
             actions={[
@@ -201,6 +258,9 @@ export function PullRequestMergeControls(props: {
                 state: id === method ? ("on" as const) : ("off" as const),
                 attributes: { disabled: busy },
               })),
+              ...(canAdminMerge
+                ? [{ id: "admin-merge", title: "Merge as admin", image: "lock.shield" }]
+                : []),
               ...(canAutoMerge
                 ? [
                     {
@@ -217,6 +277,7 @@ export function PullRequestMergeControls(props: {
                 setSelectedMethod(selected);
                 savePreferences({ pullRequestMergeMethod: selected });
               } else if (nativeEvent.event === autoAction && canAutoMerge) confirm(autoAction);
+              else if (nativeEvent.event === "admin-merge" && canAdminMerge) confirmAdminMerge();
             }}
           >
             <Pressable

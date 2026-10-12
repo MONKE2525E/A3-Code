@@ -22,10 +22,10 @@ const AnimatedGlassView = Animated.createAnimatedComponent(GlassView);
 export function GitActionProgressOverlay(props: {
   readonly progress: GitActionProgress;
   readonly onDismiss: () => void;
-  readonly onOpenPullRequest?: (url: string) => Promise<boolean>;
+  /** Where a created pull request opens; the browser when the caller has no native viewer. */
+  readonly onOpenPullRequest?: (url: string) => void;
 }) {
-  const { progress, onDismiss } = props;
-  const openPullRequest = props.onOpenPullRequest;
+  const { progress, onDismiss, onOpenPullRequest } = props;
   const insets = useSafeAreaInsets();
   const prevPhaseRef = useRef(progress.phase);
 
@@ -42,15 +42,14 @@ export function GitActionProgressOverlay(props: {
 
   const handlePress = useCallback(() => {
     if (progress.prUrl) {
-      void (openPullRequest
-        ? openPullRequest(progress.prUrl)
-        : tryOpenExternalUrl(progress.prUrl, "pull-request"));
+      if (onOpenPullRequest) onOpenPullRequest(progress.prUrl);
+      else void tryOpenExternalUrl(progress.prUrl, "pull-request");
       return;
     }
     if (progress.phase === "success" || progress.phase === "error") {
       onDismiss();
     }
-  }, [onDismiss, progress.phase, progress.prUrl, openPullRequest]);
+  }, [onDismiss, onOpenPullRequest, progress.phase, progress.prUrl]);
 
   if (progress.phase === "idle") {
     return null;

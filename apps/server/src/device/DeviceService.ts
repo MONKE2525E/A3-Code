@@ -88,12 +88,46 @@ const HubDeviceList = Schema.Struct({
   emulators: Schema.Array(HubDevice),
   errors: Schema.optional(Schema.Array(Schema.Struct({ message: Schema.String }))),
 });
+const isHubErrorMessage = Schema.is(Schema.Struct({ message: Schema.String }));
 const HubActionResult = Schema.Struct({
   ok: Schema.Boolean,
   id: Schema.optional(Schema.String),
   serial: Schema.optional(Schema.String),
   error: Schema.optional(Schema.String),
+  errors: Schema.optional(Schema.Unknown),
 });
+
+// Hub diagnostics can contain subprocess output, paths and credentials. Keep only
+// recognized categories before any response is stored in an error cause.
+const safeHubActionResult = (result: typeof HubActionResult.Type) => {
+  const avdFailure =
+    Array.isArray(result.errors) &&
+    result.errors.some(
+      (entry: unknown) =>
+        isHubErrorMessage(entry) &&
+        entry.message.startsWith("[android-utils] Failed to run `avdmanager list avd`:"),
+    );
+  const diagnostic = avdFailure
+    ? ("avd_discovery_failed" as const)
+    : result.error === "Error: No free emulator console port available" ||
+        result.error === "No free emulator console port available"
+      ? ("emulator_ports_exhausted" as const)
+      : undefined;
+  const error = /insufficient.*(?:disk|space)|not enough.*(?:disk|space)|no space left/i.test(
+    result.error ?? "",
+  )
+    ? "Insufficient disk space"
+    : /timed? out|timeout/i.test(result.error ?? "")
+      ? "Device startup timed out"
+      : undefined;
+  return {
+    ok: result.ok,
+    ...(!result.ok || result.id === undefined ? {} : { id: result.id }),
+    ...(!result.ok || result.serial === undefined ? {} : { serial: result.serial }),
+    ...(error === undefined ? {} : { error }),
+    ...(diagnostic === undefined ? {} : { diagnostic }),
+  };
+};
 
 export interface DeviceScreenshot {
   readonly device: DeviceSummary;
@@ -379,6 +413,38 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       ),
     );
 
+  const hubActionJson = (
+    request: HttpClientRequest.HttpClientRequest,
+    operation: string,
+    timeout: Duration.Input = Duration.seconds(15),
+  ) =>
+    httpClient.execute(request).pipe(
+      // Boot failures, including port exhaustion, can arrive on HTTP 500.
+      Effect.flatMap((response) =>
+        HttpClientResponse.schemaBodyJson(HubActionResult)(response).pipe(
+          Effect.map(safeHubActionResult),
+          Effect.flatMap((result) =>
+            (response.status >= 200 && response.status < 300) ||
+            (operation === "boot" && !result.ok)
+              ? Effect.succeed(result)
+              : Effect.fail(
+                  new DeviceOperationError({
+                    operation,
+                    reason: "request_failed",
+                    cause: undefined,
+                  }),
+                ),
+          ),
+        ),
+      ),
+      Effect.scoped,
+      Effect.timeout(timeout),
+      // Decode and transport failures may carry the raw response or request URL.
+      Effect.mapError(
+        () => new DeviceOperationError({ operation, reason: "request_failed", cause: undefined }),
+      ),
+    );
+
   const fetchDevices = Effect.fn("DeviceService.fetchDevices")(function* (ready: DeviceReadiness) {
     const list = yield* hubJson(
       HttpClientRequest.get(`${ready.hub.origin}/api/devices`),
@@ -612,12 +678,13 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
         (cause) =>
           new DeviceOperationError({ operation: "boot", reason: "invalid_payload", cause }),
       ),
-      Effect.flatMap((request) => hubJson(request, HubActionResult, "boot", BOOT_TIMEOUT)),
+      Effect.flatMap((request) => hubActionJson(request, "boot", BOOT_TIMEOUT)),
     );
     if (!result.ok) {
       return yield* new DeviceBootError({
         hostId: ready.hostId,
         deviceId: device.id,
+        ...(result.diagnostic === undefined ? {} : { diagnostic: result.diagnostic }),
         reason: /insufficient.*(?:disk|space)|not enough.*(?:disk|space)|no space left/i.test(
           result.error ?? "",
         )
@@ -639,9 +706,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           (cause) =>
             new DeviceOperationError({ operation: "boot", reason: "invalid_payload", cause }),
         ),
-        Effect.flatMap((request) =>
-          hubJson(request, HubActionResult, "attach stream", BOOT_TIMEOUT),
-        ),
+        Effect.flatMap((request) => hubActionJson(request, "attach stream", BOOT_TIMEOUT)),
       );
     }
     return result.serial ?? result.id ?? device.id;
@@ -692,9 +757,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           (cause) =>
             new DeviceOperationError({ operation: "open", reason: "invalid_payload", cause }),
         ),
-        Effect.flatMap((request) =>
-          hubJson(request, HubActionResult, "attach stream", BOOT_TIMEOUT),
-        ),
+        Effect.flatMap((request) => hubActionJson(request, "attach stream", BOOT_TIMEOUT)),
       );
     }
     if (hosts.get(host.id) !== host)
@@ -749,7 +812,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           (cause) =>
             new DeviceOperationError({ operation: "shutdown", reason: "invalid_payload", cause }),
         ),
-        Effect.flatMap((request) => hubJson(request, HubActionResult, "shutdown")),
+        Effect.flatMap((request) => hubActionJson(request, "shutdown")),
         Effect.flatMap((result) =>
           result.ok
             ? Effect.void

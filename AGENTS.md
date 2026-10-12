@@ -1,5 +1,12 @@
 # T3 Code
 
+## Mobile fork requirements
+
+- This is `MONKE2525E/t3code`, a mobile client fork. The user's PC runs the newest official `pingdotgg/t3code` nightly desktop/server, never this fork's server.
+- Before each mobile change or release, resolve the newest published upstream nightly from GitHub releases, record its tag and commit in the verification report, and inspect contract/runtime changes since this client's base. Refresh the client when required.
+- Verify pairing, thread loading, sending a message, and the changed feature against an isolated server built from that exact upstream nightly. Do not use the fork's server as compatibility proof or require fork-only RPCs. If the nightly or device is unavailable, report the gap and do not claim compatibility or publish a release.
+- Custom Android updates come only from `MONKE2525E/t3code` GitHub releases. Publish `T3-Code-Custom.apk` under `mobile-build-<versionCode>`, using an increasing `T3CODE_MOBILE_BUILD_NUMBER` and the same signing key/package as previous builds. Keep official Expo OTA updates disabled for custom APKs.
+
 T3 Code is a minimal GUI for coding agents. A Node WebSocket server wraps provider CLIs and agents (Codex, Claude Code, Cursor, Grok, OpenCode, Antigravity) and serves web, desktop, and mobile clients.
 
 You can think of T3 Code as an open source "bring-your-own-subscription" alternative to apps like Claude Desktop, Codex App, Cursor Glass and Conductor.
@@ -29,6 +36,7 @@ T3 Code has 3 key app surfaces: **web**, **desktop**, and **mobile**.
 **Desktop** is the main surface most users install first. It's a full Electron app that bundles the server runner as well. The desktop app can also be used as the host server, allowing remote connections from app.t3.codes or the mobile app.
 
 **Mobile** is a React Native app for both iOS and Android, available on the App Store and Google Play. The mobile app allows for connecting to any T3 Code server to control work remotely.
+Keep mobile interactions responsive and preserve direct, tailnet, and tunnel connections. Shared contracts and runtime must remain compatible with the upstream server.
 
 ## A note from Theo
 

@@ -797,6 +797,37 @@ describe("nativeMarkdownListItemBlocks", () => {
 });
 
 describe("nativeMarkdownDocumentChunks", () => {
+  it("draws task lists as rich blocks so their checkboxes do not depend on font glyphs", () => {
+    const heading: MarkdownNode = {
+      type: "heading",
+      level: 2,
+      beg: 0,
+      children: [{ type: "text", content: "Tasks" }],
+    };
+    const tasks: MarkdownNode = {
+      type: "list",
+      beg: 9,
+      children: [
+        {
+          type: "task_list_item",
+          checked: true,
+          children: [{ type: "paragraph", children: [{ type: "text", content: "Done" }] }],
+        },
+        {
+          type: "task_list_item",
+          checked: false,
+          children: [{ type: "paragraph", children: [{ type: "text", content: "Open" }] }],
+        },
+      ],
+    };
+
+    expect(
+      nativeMarkdownDocumentChunks({ type: "document", children: [heading, tasks] }).map(
+        (chunk) => chunk.kind,
+      ),
+    ).toEqual(["selectable", "rich"]);
+  });
+
   it("renders plain blockquotes as rich blocks so their marker spans wrapped lines", () => {
     const blockquote: MarkdownNode = {
       type: "blockquote",
@@ -843,16 +874,6 @@ describe("nativeMarkdownDocumentChunks", () => {
           type: "list",
           children: [
             {
-              type: "task_list_item",
-              checked: true,
-              children: [
-                {
-                  type: "paragraph",
-                  children: [{ type: "text", content: "Completed" }],
-                },
-              ],
-            },
-            {
               type: "list_item",
               children: [
                 {
@@ -887,7 +908,7 @@ describe("nativeMarkdownDocumentChunks", () => {
       nativeMarkdownDocumentRuns(chunks[0]?.node ?? document)
         .map((run) => run.text)
         .join(""),
-    ).toBe("Tasks\n\n☑︎\tCompleted\n•\tParent\n◦\tNested");
+    ).toBe("Tasks\n\n•\tParent\n◦\tNested");
   });
 
   it("aligns ordered markers while keeping the list in one selectable string", () => {

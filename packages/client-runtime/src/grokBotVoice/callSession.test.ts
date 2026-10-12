@@ -179,14 +179,16 @@ describe("work completion and greeting", () => {
     ).toEqual([]);
   });
 
-  it("holds completed work while muted and delivers it only once after unmute", () => {
+  it("drops muted microphone input while delivering completed work once", () => {
     const h = harness();
     const { fake } = h.sockets[0]!;
     configure(fake);
     h.session.setMuted(true);
     h.session.deliverWork("task-1", '{"updates":["Done"]}');
     h.session.deliverWork("task-1", '{"updates":["Duplicate"]}');
-    expect(fake.sent).toHaveLength(1);
+    h.session.sendAudio("AAAA");
+    expect(fake.sent.some((frame) => frame.includes("input_audio_buffer.append"))).toBe(false);
+    expect(fake.sent.some((frame) => frame.includes("response.create"))).toBe(true);
     h.session.setMuted(false);
     h.session.deliverWork("task-1", '{"updates":["Duplicate"]}');
     expect(
@@ -920,15 +922,15 @@ describe("response-acknowledged delivery and bounded backlog", () => {
     },
   );
 
-  it("bounds a 5,000-result muted backlog and drains bounded batches with an exact overflow notice", () => {
+  it("bounds a 5,000-result speaking backlog and drains bounded batches with an exact overflow notice", () => {
     const h = harness();
     const fake = h.sockets[0]!.fake;
     configure(fake);
-    h.session.setMuted(true);
+    emit(fake, "input_audio_buffer.speech_started");
     const output = JSON.stringify({ updates: ["x".repeat(4000)] });
     for (let i = 0; i < 5000; i += 1) h.session.deliverWork("stress-" + i, output);
     expect(outputs(fake)).toHaveLength(0);
-    h.session.setMuted(false);
+    emit(fake, "input_audio_buffer.speech_stopped");
     expect(outputs(fake)).toHaveLength(8);
     let before = 0;
     let framesBefore = 1;

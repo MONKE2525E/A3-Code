@@ -16,15 +16,12 @@ import {
   usePreventRemove,
   type NavigationAction,
 } from "@react-navigation/native";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Platform, Pressable, ScrollView, View } from "react-native";
-import {
-  KeyboardController,
-  KeyboardStickyView,
-  useKeyboardState,
-} from "react-native-keyboard-controller";
+import { KeyboardController, useKeyboardState } from "react-native-keyboard-controller";
 import Animated from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { HeaderHeightContext } from "@react-navigation/elements";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { useFontFamily } from "../../lib/useFontFamily";
 import {
@@ -67,7 +64,9 @@ import { ProviderIcon } from "../../components/ProviderIcon";
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { hasProviderUsageLimits, isUsageLimitsCommand } from "@t3tools/shared/usageLimits";
+import { ComposerKeyboardDock, useComposerFullscreen } from "./ComposerKeyboardDock";
 import { COMPOSER_LAYOUT_TRANSITION, ComposerSurface } from "./ThreadComposer";
+import { COMPOSER_FULLSCREEN_TRANSITION } from "./composerLayoutTransition";
 import { ComposerCommandPopover } from "./ComposerCommandPopover";
 import { useComposerCommandMenu } from "./use-composer-command-menu";
 import {
@@ -212,6 +211,9 @@ export function NewTaskDraftScreen(props: {
   const isKeyboardVisible = useKeyboardState((state) => state.isVisible);
   const controlsBottomPadding = Math.max(insets.bottom, 10);
   const keyboardOpenedOffset = Math.max(0, controlsBottomPadding - 8);
+  // The iOS native header floats over the screen, so the fullscreen composer starts below it.
+  const navigationHeaderHeight = useContext(HeaderHeightContext);
+  const headerHeight = navigationHeaderHeight || insets.top + 44;
   const { projectScopes, selectedProject, selectedProjectKey, setProject } = flow;
   const { connectedEnvironments } = useRemoteConnectionStatus();
   const selectedEnvironmentServerConfig = useEnvironmentServerConfig(
@@ -318,6 +320,12 @@ export function NewTaskDraftScreen(props: {
   const promptInputRef = useRef<ComposerEditorHandle>(null);
   const loadedBranchesProjectKeyRef = useRef<string | null>(null);
   const [isComposerFocused, setIsComposerFocused] = useState(false);
+  const {
+    isFullscreen: isComposerFullscreen,
+    isAnimating: isComposerFullscreenAnimating,
+    setFullscreen: setComposerFullscreen,
+    toggleFullscreen: toggleComposerFullscreen,
+  } = useComposerFullscreen();
   const [previewVideo, setPreviewVideo] = useState<VideoPreviewSource | null>(null);
   const [previewFile, setPreviewFile] = useState<FilePreviewSource | null>(null);
   const wasFocusedBeforePreviewRef = useRef(false);
@@ -1232,6 +1240,7 @@ export function NewTaskDraftScreen(props: {
     }
     const draft = getComposerDraftSnapshot(draftKey);
     if (appAtomRegistry.get(composerContextImportsAtom)[draftKey]) return;
+    setComposerFullscreen(false);
     // Read the latest explicit pick. Antigravity selections stay unchanged
     // when setup or a catalog change makes them unavailable.
     const modelSelection =
@@ -1398,6 +1407,10 @@ export function NewTaskDraftScreen(props: {
   }
 
   const isAndroid = Platform.OS === "android";
+  // The editor and toolbar ride the same transition as the card during a fullscreen toggle.
+  const childLayoutTransition = isComposerFullscreenAnimating
+    ? COMPOSER_FULLSCREEN_TRANSITION
+    : COMPOSER_LAYOUT_TRANSITION;
   const canStart =
     !isImportingContext &&
     !cloneBlocksStart &&
@@ -1474,11 +1487,11 @@ export function NewTaskDraftScreen(props: {
         placeholder="Ask anything…"
         singleLineCentered={false}
         contentInsetVertical={0}
-        style={{
-          minHeight: 72,
-          maxHeight: 160,
-          paddingVertical: 4,
-        }}
+        style={
+          isComposerFullscreen
+            ? { flex: 1, minHeight: 0, paddingRight: 32, paddingVertical: 4 }
+            : { minHeight: 72, maxHeight: 160, paddingRight: 32, paddingVertical: 4 }
+        }
         textStyle={{ ...bodyText, color: foregroundColor, fontFamily: regularFontFamily }}
       />
     </>
@@ -1633,9 +1646,9 @@ export function NewTaskDraftScreen(props: {
 
   const composerDock = (
     <View
-      className={
+      className={`${
         Platform.OS === "android" ? "bg-sheet-solid px-[12px] pt-1" : "bg-sheet px-[12px] pt-1"
-      }
+      }${isComposerFullscreen ? " flex-1" : ""}`}
       style={{ paddingBottom: controlsBottomPadding }}
     >
       {!voiceInput.isBusy &&
@@ -1695,12 +1708,17 @@ export function NewTaskDraftScreen(props: {
       ) : null}
 
       <ComposerSurface
+        animateLayout={
+          Platform.OS === "android" && isComposerFullscreenAnimating ? true : undefined
+        }
+        fill={isComposerFullscreen}
         style={{
           borderRadius: 26,
           minHeight: 140,
           overflow: "hidden",
           paddingBottom: 6,
           paddingTop: 14,
+          ...(isComposerFullscreen ? { flex: 1 } : null),
         }}
       >
         {stripAttachments.length > 0 ? (
@@ -1736,10 +1754,33 @@ export function NewTaskDraftScreen(props: {
           </View>
         ) : null}
 
-        <View className="px-[14px]">{promptEditor}</View>
+        <Animated.View
+          className={isComposerFullscreen ? "min-h-0 flex-1 px-[14px]" : "px-[14px]"}
+          layout={childLayoutTransition}
+        >
+          {promptEditor}
+        </Animated.View>
+        <Pressable
+          accessibilityLabel={isComposerFullscreen ? "Collapse editor" : "Expand editor"}
+          accessibilityRole="button"
+          className="absolute right-2.5 top-2.5 size-8 items-center justify-center active:opacity-50"
+          hitSlop={8}
+          onPress={() => toggleComposerFullscreen(() => promptInputRef.current?.focus())}
+        >
+          <SymbolView
+            name={
+              isComposerFullscreen
+                ? "arrow.down.right.and.arrow.up.left"
+                : "arrow.up.left.and.arrow.down.right"
+            }
+            size={14}
+            tintColor={foregroundColor}
+            type="monochrome"
+          />
+        </Pressable>
         <View className="h-1" />
 
-        <Animated.View layout={COMPOSER_LAYOUT_TRANSITION} collapsable={false}>
+        <Animated.View layout={childLayoutTransition} collapsable={false}>
           <ComposerDictationToolbar showsDictation={isVoiceInputPresented}>
             <ComposerToolbarRow
               paddingBottom={0}
@@ -1861,12 +1902,14 @@ export function NewTaskDraftScreen(props: {
         <MaterialScreenContent>
           {heroViewport}
 
-          <KeyboardStickyView
+          <ComposerKeyboardDock
+            animateLayout={isComposerFullscreenAnimating}
+            fullscreen={isComposerFullscreen}
+            openedOffset={keyboardOpenedOffset}
             style={{ position: "absolute", bottom: 0, left: 0, right: 0 }}
-            offset={{ closed: 0, opened: keyboardOpenedOffset }}
           >
             {composerDock}
-          </KeyboardStickyView>
+          </ComposerKeyboardDock>
         </MaterialScreenContent>
       </View>
     );
@@ -1890,19 +1933,31 @@ export function NewTaskDraftScreen(props: {
       </NativeHeaderToolbar>
 
       {heroViewport}
-      <KeyboardStickyView
+      <ComposerKeyboardDock
+        animateLayout={isComposerFullscreenAnimating}
+        fullscreen={isComposerFullscreen}
+        openedOffset={keyboardOpenedOffset}
         pointerEvents="box-none"
         style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0 }}
-        offset={{ closed: 0, opened: keyboardOpenedOffset }}
       >
         <Animated.View
-          layout={COMPOSER_LAYOUT_TRANSITION}
+          layout={
+            isComposerFullscreenAnimating
+              ? COMPOSER_FULLSCREEN_TRANSITION
+              : COMPOSER_LAYOUT_TRANSITION
+          }
           pointerEvents="box-none"
-          style={{ position: "absolute", bottom: 0, left: 0, right: 0 }}
+          style={{
+            position: "absolute",
+            bottom: 0,
+            left: 0,
+            right: 0,
+            ...(isComposerFullscreen ? { top: headerHeight } : null),
+          }}
         >
           {composerDock}
         </Animated.View>
-      </KeyboardStickyView>
+      </ComposerKeyboardDock>
     </View>
   );
 }

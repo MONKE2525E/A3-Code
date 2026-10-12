@@ -5,6 +5,7 @@ import * as NodeCrypto from "node:crypto";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -68,6 +69,7 @@ const fixture = Effect.gen(function* () {
     transcript: { entries: [] } as unknown,
     status: 200,
     failTransport: false,
+    watchStatus: 200,
     attempts: 0,
     rawBody: undefined as string | undefined,
     accountAfterResponse: undefined as "other" | "signed_out" | undefined,
@@ -171,6 +173,7 @@ const fixture = Effect.gen(function* () {
                   },
                 }),
               {
+                status: remote.watchStatus,
                 headers: {
                   "content-type":
                     method === "events" ? "text/event-stream" : "application/connect+json",
@@ -346,6 +349,57 @@ it.layer(NodeServices.layer)("Native attachment delivery", (it) => {
 });
 
 it.layer(NodeServices.layer)("Direct Grok Bot read transport", (it) => {
+  it.effect("classifies watch transport loss separately from malformed Connect frames", () =>
+    Effect.gen(function* () {
+      const { service, remote } = yield* fixture;
+      const binding = yield* service.accountBinding;
+      remote.failTransport = true;
+      const transport = yield* service
+        .watchTranscripts(binding, {})
+        .pipe(Stream.runDrain, Effect.flip);
+      assert.equal(transport._tag, "GrokBotNativeReadError");
+      if (transport._tag === "GrokBotNativeReadError") assert.equal(transport.transient, true);
+      remote.failTransport = false;
+      remote.stream = new Uint8Array([255, 0, 0, 0, 0]);
+      const malformed = yield* service
+        .watchTranscripts(binding, {})
+        .pipe(Stream.runDrain, Effect.flip);
+      assert.equal(malformed._tag, "GrokBotNativeReadError");
+      if (malformed._tag === "GrokBotNativeReadError") assert.notEqual(malformed.transient, true);
+      for (const status of [403, 503]) {
+        remote.watchStatus = status;
+        const error = yield* service
+          .watchTranscripts(binding, {})
+          .pipe(Stream.runDrain, Effect.flip);
+        assert.equal(error._tag, "GrokBotNativeReadError");
+        if (error._tag === "GrokBotNativeReadError") assert.equal(error.transient, status === 503);
+      }
+    }),
+  );
+  it.effect("keeps a silent transcript watch open until a later frame arrives", () =>
+    Effect.gen(function* () {
+      const { service, remote } = yield* fixture;
+      const binding = yield* service.accountBinding;
+      const waiting = yield* Deferred.make<void>();
+      const next = yield* Deferred.make<void>();
+      remote.streamSource = Stream.fromEffect(
+        Effect.gen(function* () {
+          yield* Deferred.succeed(waiting, undefined);
+          yield* Deferred.await(next);
+          return Connect.encodeMessage({ heartbeat: {} });
+        }),
+      );
+      const result = yield* service
+        .watchTranscripts(binding, {})
+        .pipe(Stream.take(1), Stream.runCollect, Effect.forkScoped);
+      yield* Deferred.await(waiting);
+      yield* TestClock.adjust("2 minutes");
+      yield* Deferred.succeed(next, undefined);
+      const frames = yield* Fiber.join(result);
+      assert.deepEqual(frames, [{ heartbeat: {} }]);
+    }),
+  );
+
   it.effect("reads account email and plan through the selected dashboard account", () =>
     Effect.gen(function* () {
       const { service, remote, requests } = yield* fixture;

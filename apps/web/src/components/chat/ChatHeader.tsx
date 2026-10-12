@@ -313,7 +313,13 @@ export const ChatHeader = memo(function ChatHeader({
       ref={breadcrumbContainerRef}
       className={cn(
         "flex min-w-0 flex-1 items-center gap-2 sm:gap-3",
-        rightPanelOpen ? "pr-10" : "pr-24",
+        grokBotId !== null
+          ? rightPanelOpen
+            ? "pr-12 sm:pr-10"
+            : "pr-12 sm:pr-24"
+          : rightPanelOpen
+            ? "pr-10"
+            : "pr-24",
       )}
       onContextMenu={handleHeaderContextMenu}
     >
@@ -465,7 +471,7 @@ export const ChatHeader = memo(function ChatHeader({
                   className="relative shrink-0 [-webkit-app-region:no-drag]"
                   pressed={computerOpen}
                   variant="ghost"
-                  size="sm"
+                  size="touch-sm"
                   onClick={onToggleComputer}
                 />
               }

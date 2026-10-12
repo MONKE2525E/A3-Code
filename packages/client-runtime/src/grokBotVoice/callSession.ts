@@ -157,7 +157,6 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
       deliveryPaused ||
       pendingTools.size > 0 ||
       receipts.size > 0 ||
-      muted ||
       responseInFlight ||
       callerSpeaking ||
       phase !== "live" ||
@@ -473,7 +472,7 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
       muted = value;
       if (!value) flushWork();
     },
-    /** Completion belongs to this call, and may wait through a response, mute, or reconnect. */
+    /** Completion belongs to this call, and may wait through a response or reconnect. */
     deliverWork: (requestId: string, output: string) => {
       if (phase === "closed" || deliveredWork.has(requestId) || work.has(requestId)) return;
       if (requestId.length > 512) {

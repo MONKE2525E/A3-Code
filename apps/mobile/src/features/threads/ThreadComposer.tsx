@@ -45,13 +45,20 @@ import {
 import Animated, {
   FadeIn,
   FadeOut,
-  type LayoutAnimationFunction,
   ReduceMotion,
   useAnimatedStyle,
   useSharedValue,
   withTiming,
 } from "react-native-reanimated";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
+import type { ComposerFullscreenController } from "./ComposerKeyboardDock";
+import {
+  COMPOSER_FULLSCREEN_TRANSITION,
+  COMPOSER_HEIGHT_TRANSITION,
+  COMPOSER_TRANSITION_DURATION_MS,
+} from "./composerLayoutTransition";
+import { SymbolView } from "../../components/AppSymbol";
+import { useOpenPullRequest } from "../pull-requests/useOpenPullRequest";
 import { themeColorWithAlpha } from "../../lib/mobileTheme";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { scopedThreadKey } from "../../lib/scopedEntities";
@@ -204,6 +211,8 @@ export interface ThreadComposerProps {
   readonly onUpdateRuntimeMode: (runtimeMode: RuntimeMode) => void;
   readonly onUpdateInteractionMode: (interactionMode: ProviderInteractionMode) => void;
   readonly onExpandedChange?: (expanded: boolean) => void;
+  /** Fullscreen state lives in the host, which has to give the editor the whole viewport. */
+  readonly fullscreen: ComposerFullscreenController;
   /** Fires on editor focus/blur; hosts use it to vet stale keyboard state. */
   readonly onEditorFocusChange?: (focused: boolean) => void;
 }
@@ -219,38 +228,15 @@ export interface ThreadComposerProps {
 // KeyboardStickyView (frame-synced to the IME), and a time-based morph
 // running alongside that translate reads as jitter. Snapping the layout and
 // letting the keyboard-synced slide be the only motion looks native there.
-export const COMPOSER_TRANSITION_DURATION_MS = 220;
-// Side panes already animate the dock's width. Nested horizontal layout
-// transitions would leave the surface trailing its toolbar's new position.
-// Keep the vertical pill/card morph while horizontal layout follows the dock.
-const composerHeightTransition: LayoutAnimationFunction = (values) => {
-  "worklet";
-  const timing = {
-    duration: COMPOSER_TRANSITION_DURATION_MS,
-    reduceMotion: ReduceMotion.System,
-  };
-  return {
-    initialValues: {
-      originX: values.targetOriginX,
-      originY: values.currentOriginY,
-      width: values.targetWidth,
-      height: values.currentHeight,
-    },
-    animations: {
-      originX: values.targetOriginX,
-      originY: withTiming(values.targetOriginY, timing),
-      width: values.targetWidth,
-      height: withTiming(values.targetHeight, timing),
-    },
-  };
-};
 export const COMPOSER_LAYOUT_TRANSITION =
-  Platform.OS === "android" ? undefined : composerHeightTransition;
+  Platform.OS === "android" ? undefined : COMPOSER_HEIGHT_TRANSITION;
 
 const COMPOSER_ATTACHMENT_ENTERING =
   Platform.OS === "android"
     ? FadeIn.duration(160)
     : FadeIn.delay(COMPOSER_TRANSITION_DURATION_MS).duration(160).reduceMotion(ReduceMotion.System);
+
+export { COMPOSER_TRANSITION_DURATION_MS };
 
 const AnimatedGlassSurface = Animated.createAnimatedComponent(GlassSurface);
 
@@ -315,14 +301,20 @@ function SendActionButton(props: {
 export function ComposerSurface(props: {
   readonly children: ReactNode;
   readonly style: ViewStyle;
-  /** Morphs between the compact and expanded composer layouts. */
+  /**
+   * Morphs between the compact and expanded composer layouts. Android snaps by default; `true`
+   * opts it into the morph, which hosts do only for the fullscreen toggle.
+   */
   readonly animateLayout?: boolean;
+  /** Stretches the surface to fill a flex parent (fullscreen draft editor). */
+  readonly fill?: boolean;
 }) {
   const colors = useUniwindTheme();
   const targetBorderRadius =
     typeof props.style.borderRadius === "number" ? props.style.borderRadius : 0;
   const animatedBorderRadius = useSharedValue(targetBorderRadius);
-  const shouldAnimate = props.animateLayout !== false && Platform.OS !== "android";
+  const shouldAnimate =
+    props.animateLayout === true || (props.animateLayout !== false && Platform.OS !== "android");
   useLayoutEffect(() => {
     animatedBorderRadius.value = shouldAnimate
       ? withTiming(targetBorderRadius, {
@@ -334,7 +326,24 @@ export function ComposerSurface(props: {
   const animatedShapeStyle = useAnimatedStyle(() => ({
     borderRadius: animatedBorderRadius.value,
   }));
-  const layoutTransition = shouldAnimate ? COMPOSER_LAYOUT_TRANSITION : undefined;
+  const layoutTransition =
+    props.animateLayout === true
+      ? COMPOSER_FULLSCREEN_TRANSITION
+      : shouldAnimate
+        ? COMPOSER_HEIGHT_TRANSITION
+        : undefined;
+
+  // Android has no glass or blur, so the fill and border live on the clipping view itself. A
+  // separate absolutely positioned backdrop would snap to the final size while this view is still
+  // mid-transition, leaving a small card floating inside a transparent frame.
+  const androidFillStyle: ViewStyle | null =
+    Platform.OS === "android"
+      ? {
+          backgroundColor: themeColorWithAlpha(String(colors["--color-composer-surface"]), 1),
+          borderColor: String(colors["--color-composer-border"]),
+          borderWidth: 1,
+        }
+      : null;
 
   // Each native frame follows the same transition. Animating only the outer
   // clip leaves the glass and content at their final height on the first frame.
@@ -349,22 +358,26 @@ export function ComposerSurface(props: {
         {
           overflow: "hidden",
         },
+        androidFillStyle,
+        props.fill ? { flex: 1 } : null,
       ]}
     >
-      <AnimatedGlassSurface
-        chrome="none"
-        fallbackColor={colors["--color-composer-surface"]}
-        fallbackClassName="border border-composer-border"
-        glassEffectStyle="regular"
-        // The composer is a passive material containing interactive controls.
-        // Keep native glass out of the interactive content's layout path.
-        pointerEvents="none"
-        tintColor="transparent"
-        layout={layoutTransition}
-        style={[{ position: "absolute", inset: 0 }, animatedShapeStyle]}
-      >
-        {null}
-      </AnimatedGlassSurface>
+      {Platform.OS === "android" ? null : (
+        <AnimatedGlassSurface
+          chrome="none"
+          fallbackColor={colors["--color-composer-surface"]}
+          fallbackClassName="border border-composer-border"
+          glassEffectStyle="regular"
+          // The composer is a passive material containing interactive controls.
+          // Keep native glass out of the interactive content's layout path.
+          pointerEvents="none"
+          tintColor="transparent"
+          layout={layoutTransition}
+          style={[{ position: "absolute", inset: 0 }, animatedShapeStyle]}
+        >
+          {null}
+        </AnimatedGlassSurface>
+      )}
       <Animated.View
         collapsable={false}
         layout={layoutTransition}
@@ -381,6 +394,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const { themeVariables: materialTheme } = useAppearancePreferences();
   const composerPanel = materialTheme["--color-composer-panel"];
   const navigation = useNavigation();
+  const openPullRequest = useOpenPullRequest();
   const foregroundColor = useUniwindTheme()["--color-foreground"];
   const bodyText = useScaledTextRole("body");
   const fallbackInputRef = useRef<ComposerEditorHandle>(null);
@@ -530,7 +544,23 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   );
   const isVoiceInputPresented = voicePresentation.statusLabel !== null;
   // An open draft stays visible; only a collapsed composer becomes a voice strip.
-  const isExpanded = isFocused || settingsSheetPresentation.keepsComposerExpanded;
+  const {
+    isFullscreen,
+    isAnimating: isFullscreenAnimating,
+    setFullscreen,
+    toggleFullscreen,
+  } = props.fullscreen;
+  // A different thread starts with a small composer.
+  const threadId = props.selectedThread.id;
+  useEffect(() => {
+    setFullscreen(false, false);
+  }, [threadId, setFullscreen]);
+  // The editor and toolbar ride the same transition as the card during a fullscreen toggle, or they
+  // would jump to their final spots while the card is still mid-morph.
+  const childLayoutTransition = isFullscreenAnimating
+    ? COMPOSER_FULLSCREEN_TRANSITION
+    : COMPOSER_LAYOUT_TRANSITION;
+  const isExpanded = isFocused || settingsSheetPresentation.keepsComposerExpanded || isFullscreen;
   const showsCompactDictation = isVoiceInputPresented && !isExpanded;
   const isToolbarVisible = isExpanded || isVoiceInputPresented;
   const attachmentBlockReason = composerAttachmentUploadBlockReason({
@@ -558,7 +588,6 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   useEffect(() => {
     onExpandedChange?.(isExpanded);
   }, [isExpanded, onExpandedChange]);
-
   const onPressPreview = useCallback(
     (source: FilePreviewSource) => {
       wasExpandedBeforePreviewRef.current = isFocused;
@@ -623,6 +652,8 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       const threadKey = scopedThreadKey(props.environmentId, props.selectedThread.id);
       if (inFlightThreadIdsRef.current.has(threadKey)) return;
       inFlightThreadIdsRef.current.add(threadKey);
+      // The message is on its way; the composer shrinks back while the feed takes over.
+      setFullscreen(false);
       try {
         const messageId = await onSendMessage(followUp);
         if (messageId === null) {
@@ -642,6 +673,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       }
     },
     [
+      setFullscreen,
       props.draftMessage,
       props.draftAttachments.length,
       onChangeDraftMessage,
@@ -780,7 +812,10 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
         paddingTop: isExpanded ? 8 : 6,
         paddingBottom: (props.bottomInset ?? 0) + (isExpanded ? 8 : 6),
         backgroundColor:
-          Platform.OS === "android" ? themeColorWithAlpha(composerPanel, 1) : undefined,
+          Platform.OS === "android" || isFullscreen
+            ? themeColorWithAlpha(composerPanel, 1)
+            : undefined,
+        ...(isFullscreen ? { flex: 1 } : null),
       }}
     >
       {/* The backdrop gradient lives on a plain View: Reanimated's Animated.View
@@ -796,7 +831,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       />
       <Animated.View
         className="relative w-full self-center"
-        style={{ maxWidth: props.contentMaxWidth }}
+        style={{ maxWidth: props.contentMaxWidth, ...(isFullscreen ? { flex: 1 } : null) }}
       >
         {!voiceInput.isBusy &&
         composerMenu.trigger &&
@@ -840,6 +875,8 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
         ) : null}
 
         <ComposerSurface
+          animateLayout={Platform.OS === "android" && isFullscreenAnimating ? true : undefined}
+          fill={isFullscreen}
           style={
             isExpanded
               ? {
@@ -848,6 +885,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                   overflow: "hidden" as const,
                   paddingBottom: 6,
                   paddingTop: 14,
+                  ...(isFullscreen ? { flex: 1 } : null),
                 }
               : {
                   // Keep the numeric radius close to the expanded card so the
@@ -859,7 +897,9 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
           }
         >
           <ComposerDictationDraftContent
-            className={isExpanded ? undefined : "flex-row items-center"}
+            className={
+              isExpanded ? (isFullscreen ? "min-h-0 flex-1" : undefined) : "flex-row items-center"
+            }
             compact={!isExpanded}
             hidden={showsCompactDictation}
           >
@@ -913,8 +953,14 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
               </Animated.View>
             ) : null}
             <Animated.View
-              className={isExpanded ? "px-[14px]" : "min-w-0 flex-1 px-[4px]"}
-              layout={COMPOSER_LAYOUT_TRANSITION}
+              className={
+                isExpanded
+                  ? isFullscreen
+                    ? "min-h-0 flex-1 px-[14px]"
+                    : "px-[14px]"
+                  : "min-w-0 flex-1 px-[4px]"
+              }
+              layout={childLayoutTransition}
             >
               <ComposerEditor
                 draftKey={composerDraftKey}
@@ -927,6 +973,14 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                     path: fileRoutePathSegments(path),
                   });
                 }}
+                onOpenPullRequest={(url) =>
+                  openPullRequest(
+                    url,
+                    String(props.environmentId),
+                    "pull-request",
+                    String(props.selectedThread.id),
+                  )
+                }
                 onOpenAttachment={openDraftDocument}
                 // A rested composer full of chips left almost nowhere to tap to start typing:
                 // every chip opened its file instead. Collapsed, they focus the editor.
@@ -1035,11 +1089,9 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                 contentInsetVertical={isExpanded || Platform.OS === "android" ? 0 : 6}
                 style={
                   isExpanded
-                    ? {
-                        minHeight: 72,
-                        maxHeight: 160,
-                        paddingVertical: 4,
-                      }
+                    ? isFullscreen
+                      ? { flex: 1, minHeight: 0, paddingRight: 32, paddingVertical: 4 }
+                      : { minHeight: 72, maxHeight: 160, paddingRight: 32, paddingVertical: 4 }
                     : {
                         height: 36,
                       }
@@ -1101,11 +1153,31 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
             ) : null}
             {isExpanded ? <View className="h-1" /> : null}
           </ComposerDictationDraftContent>
+          {isExpanded ? (
+            <Pressable
+              accessibilityLabel={isFullscreen ? "Collapse editor" : "Expand editor"}
+              accessibilityRole="button"
+              className="absolute right-2.5 top-2.5 size-8 items-center justify-center active:opacity-50"
+              hitSlop={8}
+              onPress={() => toggleFullscreen(() => inputRef.current?.focus())}
+            >
+              <SymbolView
+                name={
+                  isFullscreen
+                    ? "arrow.down.right.and.arrow.up.left"
+                    : "arrow.up.left.and.arrow.down.right"
+                }
+                size={14}
+                tintColor={foregroundColor}
+                type="monochrome"
+              />
+            </Pressable>
+          ) : null}
           <Animated.View
             accessibilityElementsHidden={!isToolbarVisible}
             collapsable={false}
             importantForAccessibility={isToolbarVisible ? "auto" : "no-hide-descendants"}
-            layout={COMPOSER_LAYOUT_TRANSITION}
+            layout={childLayoutTransition}
             pointerEvents={isToolbarVisible ? "auto" : "none"}
             style={
               isExpanded

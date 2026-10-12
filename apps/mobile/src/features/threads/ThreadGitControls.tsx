@@ -170,10 +170,12 @@ function useThreadGitControlModel(props: ThreadGitMenuProps) {
       Alert.alert("No open PR", "This branch does not have an open pull request.");
       return;
     }
-    if (!(await openPullRequest(prUrl))) {
+    if (
+      !(await openPullRequest(prUrl, String(props.environmentId), "pull-request", String(threadId)))
+    ) {
       Alert.alert("Unable to open PR", "The pull request could not be opened.");
     }
-  }, [gitStatus, openPullRequest]);
+  }, [gitStatus, openPullRequest, props.environmentId, threadId]);
 
   const runActionWithPrompt = useCallback(
     async (input: GitActionRequestInput) => {

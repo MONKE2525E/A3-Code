@@ -180,8 +180,8 @@ function MarketplaceHome({
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="relative min-w-0 flex-1">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2">
+        <div className="relative col-span-3 min-w-0 sm:col-span-1">
           <Input
             placeholder="Search plugins and Bots"
             aria-label="Search the marketplace"
@@ -189,9 +189,11 @@ function MarketplaceHome({
             onChange={(event) => setSearch(event.target.value)}
           />
         </div>
-        <ImportFromLinkPopover onPreview={(shareId) => setView({ kind: "sharedBot", shareId })} />
+        <div className="col-start-2">
+          <ImportFromLinkPopover onPreview={(shareId) => setView({ kind: "sharedBot", shareId })} />
+        </div>
         <Button
-          size="sm"
+          size="touch-sm"
           variant="ghost-muted"
           onClick={() => {
             bots.refresh();
@@ -227,7 +229,7 @@ function MarketplaceHome({
         <>
           {botData.featured.length > 0 ? (
             <Section title="Featured Bots">
-              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
                 {botData.featured.map((listing) => (
                   <FeaturedBotCard
                     key={listing.shareId}
@@ -297,7 +299,7 @@ function MarketplaceHome({
   );
 }
 
-/** A square add button that opens a share-link field, so the toolbar stays one row. */
+/** Opens a share-link field without crowding the marketplace search on phones. */
 function ImportFromLinkPopover({ onPreview }: { readonly onPreview: (shareId: string) => void }) {
   const [open, setOpen] = useState(false);
   const [shareLink, setShareLink] = useState("");
@@ -311,7 +313,9 @@ function ImportFromLinkPopover({ onPreview }: { readonly onPreview: (shareId: st
       }}
     >
       <PopoverTrigger
-        render={<Button size="icon" variant="outline" aria-label="Import from a share link" />}
+        render={
+          <Button size="icon-touch-sm" variant="outline" aria-label="Import from a share link" />
+        }
       >
         <PlusIcon />
       </PopoverTrigger>
@@ -353,7 +357,7 @@ function ImportFromLinkPopover({ onPreview }: { readonly onPreview: (shareId: st
             </p>
           ) : null}
           <div className="flex justify-end">
-            <Button type="submit" size="sm" variant="outline" disabled={!shareLink.trim()}>
+            <Button type="submit" size="touch-sm" variant="outline" disabled={!shareLink.trim()}>
               Preview Bot
             </Button>
           </div>
@@ -456,14 +460,16 @@ function FeaturedBotCard({
     <button
       type="button"
       onClick={() => onOpen(listing)}
-      className={`${CARD_CLASS} flex flex-col items-center gap-3 px-3 py-5 text-center`}
+      className={`${CARD_CLASS} flex flex-col items-center gap-2 px-2 py-3 text-center sm:gap-3 sm:px-3 sm:py-5`}
     >
       <ListingAvatar environmentId={environmentId} listing={listing} size="card" />
-      <span className="min-w-0 text-sm leading-5">
+      <span className="w-full min-w-0 text-sm leading-5">
         {listing.creatorName ? (
           <span className="block truncate text-muted-foreground">{listing.creatorName}&apos;s</span>
         ) : null}
-        <span className="block truncate font-medium text-foreground">{listing.name}</span>
+        <span className="line-clamp-2 wrap-anywhere font-medium text-foreground sm:block sm:truncate">
+          {listing.name}
+        </span>
       </span>
     </button>
   );

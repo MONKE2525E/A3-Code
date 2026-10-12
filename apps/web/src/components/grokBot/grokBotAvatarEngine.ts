@@ -77,39 +77,45 @@ interface GrokBotAvatarEngineModule {
   ) => GrokBotAvatarEngine;
 }
 
+// Client-owned pin for Grok Bot 0.68.1, reproduced with
+// scripts/install-grok-bot-avatar-engine.ts from index.eager-platform-AatQIEPx.js.
+// Bundle SHA-256: fe8439822c8085411a1cbae5fb38964fde8234c22f6a7f79c28b3ffe5ec059d9
+// grok-bot_0.68.1_amd64.deb SHA-256:
+// b2be8106d2b3eae07d983d5f1ca77b657accde666dc440db2a409421ecff3359
+// Only this derived module is trusted; new versions require a reviewed client update.
+const TRUSTED_ENGINE_SHA256 = "76f131c44107bcd25a196ddf5f765cf021ec12d757557591afcf58247c8d07ea";
+
 // Keyed by environment and digest so each connection loads its own verified copy once.
 const loadedEngines = new Map<string, Promise<GrokBotAvatarEngine>>();
 
 /**
- * Evaluates engine source as a module after its bytes match the digest the
- * environment declared. The blob URL only exists for the import, so the source
- * never becomes a page-level script or a durable URL.
- *
- * The digest is checked here rather than trusted from the metadata response,
- * because the source arrives in a separate request.
+ * Imports only the client-pinned renderer. Environment metadata and source are
+ * both untrusted: matching a server-supplied digest alone cannot authorize code
+ * running in the client's realm. Unknown builds reject into the existing avatar
+ * fallback. The accepted renderer keeps its native animation and host React.
  */
-export function loadGrokBotAvatarEngine(
+export async function loadGrokBotAvatarEngine(
   cacheKey: string,
   expectedSha256: string,
   source: string,
 ): Promise<GrokBotAvatarEngine> {
+  if (expectedSha256 !== TRUSTED_ENGINE_SHA256)
+    throw new Error("Grok Bot avatar engine is not a trusted build.");
+  // Plain HTTP origins have no SubtleCrypto, so hash in JS rather than skipping the check.
+  const digest = Array.from(sha256(new TextEncoder().encode(source)), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  if (digest !== TRUSTED_ENGINE_SHA256)
+    throw new Error("Grok Bot avatar engine failed verification.");
   const cached = loadedEngines.get(cacheKey);
   if (cached) return cached;
-  const engine = importVerifiedEngineSource(expectedSha256, source);
+  const engine = importVerifiedEngineSource(source);
   loadedEngines.set(cacheKey, engine);
   engine.catch(() => loadedEngines.delete(cacheKey));
   return engine;
 }
 
-async function importVerifiedEngineSource(
-  expectedSha256: string,
-  source: string,
-): Promise<GrokBotAvatarEngine> {
-  // Plain HTTP origins have no SubtleCrypto, so hash in JS rather than skipping the check.
-  const digest = Array.from(sha256(new TextEncoder().encode(source)), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
-  if (digest !== expectedSha256) throw new Error("Grok Bot avatar engine failed verification.");
+async function importVerifiedEngineSource(source: string): Promise<GrokBotAvatarEngine> {
   const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
   try {
     const module = (await import(/* @vite-ignore */ url)) as GrokBotAvatarEngineModule;

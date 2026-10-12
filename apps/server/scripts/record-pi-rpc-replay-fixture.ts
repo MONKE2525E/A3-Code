@@ -281,7 +281,7 @@ const record = Effect.gen(function* () {
       },
       {
         driver: PI_PROVIDER,
-        decodeTranscript: Effect.succeed,
+        decodeTranscript: () => Effect.succeed(placeholder),
         makeProviderAdapterRegistryLayer: () =>
           PiAdapterV2Testkit.layer({
             scenario: fixture.name,

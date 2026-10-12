@@ -15,7 +15,7 @@ import { Alert } from "react-native";
 import { pullRequestComposerContext } from "../../lib/composerContext";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { uuidv4 } from "../../lib/uuid";
-import { useEnvironmentServerConfig } from "../../state/entities";
+import { useThreadShell, useEnvironmentServerConfig } from "../../state/entities";
 import { composerPullRequests } from "../../state/pull-requests";
 import { useEnvironmentQuery } from "../../state/query";
 import { useEnvironmentScope } from "../../state/session";
@@ -44,6 +44,11 @@ export function usePullRequestThreads(
   filePath?: string,
 ) {
   const target = pullRequestTarget(params);
+  const origin = useThreadShell(
+    params.threadId
+      ? { environmentId: target.environmentId, threadId: ThreadId.make(params.threadId) }
+      : null,
+  );
   const config = useEnvironmentServerConfig(target.environmentId);
   const supported = threadPullRequestLinkMode(config?.environment.capabilities) === "multiple";
   const parsed = pr ? parseChangeRequestUrl(pr.url) : null;
@@ -62,8 +67,20 @@ export function usePullRequestThreads(
   const [lastRelations, setLastRelations] = useState({ key, data: relations.data });
   if (relations.data && (lastRelations.key !== key || relations.data !== lastRelations.data))
     setLastRelations({ key, data: relations.data });
-  const threads =
+  const linkedThreads =
     (relations.data ?? (lastRelations.key === key ? lastRelations.data : null))?.threads ?? [];
+  const threads: readonly LinkedThread[] =
+    origin && !linkedThreads.some((thread) => thread.id === origin.id)
+      ? [
+          {
+            id: origin.id,
+            projectId: origin.projectId,
+            title: origin.title,
+            archivedAt: origin.archivedAt,
+          },
+          ...linkedThreads,
+        ]
+      : linkedThreads;
   const connected = usePullRequestConnected(params.environmentId);
   const canOperate = useEnvironmentScope(target.environmentId, AuthOrchestrationOperateScope);
   // Composing offline only writes a local draft. The outbox checks grants on delivery.

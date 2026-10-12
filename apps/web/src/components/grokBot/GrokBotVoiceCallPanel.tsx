@@ -36,7 +36,7 @@ export function GrokBotVoiceCallPanel(props: {
   return (
     <div className="flex min-w-0 flex-col gap-3">
       <div className="flex min-w-0 flex-col gap-0.5">
-        <p className="truncate text-sm font-medium text-foreground">Call {botName}</p>
+        <p className="break-words text-sm font-medium text-foreground">Call {botName}</p>
         <p className="text-xs text-muted-foreground" aria-live="polite">
           {voiceCallStatusLabel(state)}
         </p>
@@ -48,24 +48,29 @@ export function GrokBotVoiceCallPanel(props: {
       ) : null}
       {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
       {inCall ? (
-        <div className="flex items-center gap-2">
+        <p className="text-xs text-muted-foreground">
+          {state.muted ? "Microphone off" : "Microphone on"}. Bot audio stays on.
+        </p>
+      ) : null}
+      {inCall ? (
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="outline"
-            size="sm"
+            size="touch-sm"
             aria-pressed={state.muted}
             onClick={() => onSetMuted(!state.muted)}
           >
             {state.muted ? <MicOffIcon /> : <MicIcon />}
-            {state.muted ? "Unmute" : "Mute"}
+            {state.muted ? "Unmute mic" : "Mute mic"}
           </Button>
-          <Button variant="destructive" size="sm" onClick={onHangUp}>
+          <Button variant="destructive" size="touch-sm" onClick={onHangUp}>
             <PhoneOffIcon />
             Hang up
           </Button>
         </div>
       ) : start ? (
         <Button
-          size="sm"
+          size="touch-sm"
           disabled={!start.canStart || starting}
           onClick={start.onStart}
           className="self-start"

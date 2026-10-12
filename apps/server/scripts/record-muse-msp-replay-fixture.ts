@@ -266,7 +266,7 @@ const record = Effect.gen(function* () {
       },
       {
         driver: MuseOrchestratorReplayHarness.driver,
-        decodeTranscript: Effect.succeed,
+        decodeTranscript: () => Effect.succeed(placeholder),
         makeProviderAdapterRegistryLayer: () =>
           museReplayLayer({
             scenario: fixture.name,

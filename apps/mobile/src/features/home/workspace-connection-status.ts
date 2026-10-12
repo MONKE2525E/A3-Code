@@ -1,46 +1,98 @@
-import type { WorkspaceState } from "../../state/workspaceModel";
+import {
+  connectionStatusText,
+  type NetworkStatus,
+  type SupervisorConnectionPhase,
+} from "@t3tools/client-runtime/connection";
+import type { EnvironmentId, EnvironmentMachineKind } from "@t3tools/contracts";
 
-export interface WorkspaceConnectionStatusPresentation {
+import type { WorkspaceEnvironment } from "../../state/workspaceModel";
+
+export type WorkspaceDeviceBadge = "none" | "connecting" | "failed";
+
+export interface WorkspaceDeviceStatus {
+  readonly environmentId: EnvironmentId;
   readonly label: string;
-  /** True while actively working (connecting/syncing) — render a spinner. False for offline/error/idle states — render a wifi-slash icon. */
-  readonly showsProgress: boolean;
+  readonly machineKind: EnvironmentMachineKind;
+  readonly isConnected: boolean;
+  readonly badge: WorkspaceDeviceBadge;
+  /** Untruncated, for the tap reveal. */
+  readonly statusLabel: string;
+  readonly traceId: string | null;
 }
 
-function shouldShowWorkspaceConnectionStatus(state: WorkspaceState): boolean {
-  return (
-    state.networkStatus === "offline" ||
-    state.connectionError !== null ||
-    state.hasConnectingEnvironment ||
-    state.hasPendingShellSnapshot ||
-    (state.hasLoadedShellSnapshot && !state.hasReadyEnvironment)
-  );
+type DeviceState = Pick<WorkspaceDeviceStatus, "badge" | "statusLabel" | "traceId">;
+
+/**
+ * The shared phase collapses an active retry and backoff into "reconnecting", so
+ * the supervisor phase is needed to tell a spinning attempt from a failed one.
+ */
+function deviceState(
+  environment: WorkspaceEnvironment,
+  phase: SupervisorConnectionPhase | undefined,
+  networkStatus: NetworkStatus,
+): DeviceState {
+  const { connectionState, connectionError, connectionErrorTraceId } = environment;
+
+  if (
+    networkStatus === "offline" &&
+    (connectionState === "connected" ||
+      connectionState === "connecting" ||
+      connectionState === "reconnecting")
+  ) {
+    return { badge: "failed", statusLabel: "Offline", traceId: null };
+  }
+
+  switch (connectionState) {
+    case "connected":
+      return { badge: "none", statusLabel: "Connected", traceId: null };
+    case "connecting":
+      return { badge: "connecting", statusLabel: "Connecting", traceId: null };
+    case "reconnecting":
+      return {
+        badge: phase === "connecting" ? "connecting" : "failed",
+        statusLabel: connectionStatusText({
+          phase: "reconnecting",
+          error: connectionError,
+          traceId: connectionErrorTraceId,
+        }),
+        traceId: connectionErrorTraceId,
+      };
+    case "offline":
+      return { badge: "failed", statusLabel: "Offline", traceId: null };
+    case "error":
+      return {
+        badge: "failed",
+        statusLabel: connectionError ?? "Connection failed",
+        traceId: connectionErrorTraceId,
+      };
+    case "unsupported":
+      return {
+        badge: "failed",
+        statusLabel: connectionError ?? "Unsupported",
+        traceId: connectionErrorTraceId,
+      };
+    case "available":
+      return { badge: "none", statusLabel: "Not connected", traceId: null };
+  }
 }
 
-function workspaceConnectionStatusLabel(state: WorkspaceState): string {
-  if (state.networkStatus === "offline") return "You are offline";
-  if (state.connectingEnvironments.length === 1) {
-    return `Reconnecting to ${state.connectingEnvironments[0]!.environmentLabel}`;
-  }
-  if (state.connectingEnvironments.length > 1) {
-    return `Reconnecting ${state.connectingEnvironments.length} environments`;
-  }
-  if (state.connectionError !== null) return state.connectionError;
-  if (state.hasPendingShellSnapshot) {
-    return state.hasLoadedShellSnapshot ? "Syncing threads..." : "Loading threads...";
-  }
-  return "Not connected";
-}
-
-/** Header-title presentation of the connection state, or null while connected. */
-export function workspaceConnectionStatusPresentation(
-  state: WorkspaceState,
-): WorkspaceConnectionStatusPresentation | null {
-  if (!shouldShowWorkspaceConnectionStatus(state)) return null;
-  return {
-    label: workspaceConnectionStatusLabel(state),
-    showsProgress:
-      state.networkStatus !== "offline" &&
-      state.connectionError === null &&
-      (state.connectingEnvironments.length > 0 || state.hasPendingShellSnapshot),
-  };
+export function workspaceDeviceStatuses(
+  environments: ReadonlyArray<WorkspaceEnvironment>,
+  machineByEnvironmentId: ReadonlyMap<EnvironmentId, EnvironmentMachineKind>,
+  phaseByEnvironmentId: ReadonlyMap<EnvironmentId, SupervisorConnectionPhase>,
+  networkStatus: NetworkStatus = "online",
+): ReadonlyArray<WorkspaceDeviceStatus> {
+  return environments
+    .filter((environment) => environment.isEnabled)
+    .map((environment) => ({
+      environmentId: environment.environmentId,
+      label: environment.environmentLabel,
+      machineKind: machineByEnvironmentId.get(environment.environmentId) ?? "server",
+      isConnected: networkStatus !== "offline" && environment.connectionState === "connected",
+      ...deviceState(
+        environment,
+        phaseByEnvironmentId.get(environment.environmentId),
+        networkStatus,
+      ),
+    }));
 }

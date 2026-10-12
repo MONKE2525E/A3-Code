@@ -686,7 +686,7 @@ describe("grok bot voice call", () => {
     expect(h.audio.clears).toBe(1);
   });
 
-  it("stops forwarding microphone frames while muted and reports the mute state", async () => {
+  it("drops muted microphone frames while playing received bot audio", async () => {
     const h = harness();
     await h.call.start();
     const { fake } = h.sockets[0]!;
@@ -697,6 +697,14 @@ describe("grok bot voice call", () => {
     h.sendFrame(new Float32Array(480));
     const appended = fake.sent.filter((frame) => frame.includes("input_audio_buffer.append"));
     expect(appended).toHaveLength(1);
+    fake.listeners.message(
+      JSON.stringify({
+        type: "response.output_audio.delta",
+        item_id: "muted-audio",
+        delta: btoa(String.fromCharCode(0, 0, 0, 0)),
+      }),
+    );
+    expect(h.audio.enqueued).toHaveLength(1);
   });
 
   it("hands the server the transcript once when a connected call ends, however it ends", async () => {
@@ -825,7 +833,7 @@ describe("voice environment authority and subscription recovery", () => {
     reason: { _tag: "SocketCloseError", code: 1006 },
   };
 
-  it.each(["muted", "active response"])(
+  it.each(["caller speaking", "active response"])(
     "ends the exact denied call and clears work/audio buffered behind %s",
     async (buffer) => {
       const update = deferred<Result>();
@@ -852,8 +860,8 @@ describe("voice environment authority and subscription recovery", () => {
       configure(fake);
       fake.listeners.message(launch);
       await flush();
-      if (buffer === "muted") {
-        h.call.setMuted(true);
+      if (buffer === "caller speaking") {
+        fake.listeners.message(JSON.stringify({ type: "input_audio_buffer.speech_started" }));
         fake.listeners.message(JSON.stringify({ type: "response.done" }));
       }
       work.resolve(completed);
@@ -871,7 +879,7 @@ describe("voice environment authority and subscription recovery", () => {
       await flush();
       expect(h.call.state.phase).toBe("idle");
       expect(fake.socket.isOpen).toBe(false);
-      expect(h.audio.clears).toBe(1);
+      expect(h.audio.clears).toBe(buffer === "caller speaking" ? 2 : 1);
       expect(h.audio.closes).toBe(1);
       expect(fake.sent).toHaveLength(before);
       expect(workWaits).toBe(1);

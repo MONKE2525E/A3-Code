@@ -35,6 +35,8 @@ export type ComposerEditorProps = NativeComposerEditorProps & {
   readonly draftKey?: string | null;
   readonly environmentId?: EnvironmentId;
   readonly onOpenMention?: (path: string) => void;
+  /** Opens a pull request link from a chip, in the native viewer where the environment allows. */
+  readonly onOpenPullRequest?: (url: string) => Promise<boolean>;
   /** Documents open in the file screen; pictures, video and PDF keep their native viewers. */
   readonly onOpenAttachment?: (attachment: ComposerDocumentAttachment) => void;
   /**
@@ -51,6 +53,7 @@ export function ComposerEditor({
   draftKey,
   environmentId,
   onOpenMention,
+  onOpenPullRequest,
   onOpenAttachment,
   chipsInert,
   onInertChipPress,
@@ -238,6 +241,14 @@ export function ComposerEditor({
               threadId: String(thread.threadId),
             });
           }}
+          {...(onOpenPullRequest
+            ? {
+                onOpenPullRequestUrl: (url: string) => {
+                  setSelected(null);
+                  return onOpenPullRequest(url);
+                },
+              }
+            : {})}
           environmentId={environmentId ?? draft.project?.environmentId}
           projectId={draft.project?.projectId}
           records={draft.context?.records}

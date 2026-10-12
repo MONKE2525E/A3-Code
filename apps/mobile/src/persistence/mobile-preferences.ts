@@ -13,6 +13,10 @@ import type {
 import type { ComposerEnterBehavior } from "../lib/composerEnterBehavior";
 import type { FollowUpBehavior } from "../lib/followUpBehavior";
 import { isMicrophoneKind, type MicrophoneEntry } from "../lib/microphonePriority";
+import {
+  sanitizePullRequestListPreferences,
+  type PullRequestListPreferences,
+} from "../lib/pullRequestListPreferences";
 import { MOBILE_THEME_IDS, type MobileThemeId, type MobileThemeMode } from "../lib/mobileTheme";
 import * as MobileDatabase from "./mobile-database";
 import * as MobileSecureStorage from "./mobile-secure-storage";
@@ -24,6 +28,7 @@ const PREFERENCES_FALLBACK_KEY = "t3code.preferences.fallback";
 export interface Preferences {
   readonly pullRequestHideTestFiles?: boolean;
   readonly pullRequestMergeMethod?: PullRequestMergeMethod;
+  readonly pullRequestList?: PullRequestListPreferences;
   readonly liveActivitiesEnabled?: boolean;
   readonly themeId?: MobileThemeId;
   readonly lightThemeId?: MobileThemeId;
@@ -104,6 +109,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   const preferences: {
     pullRequestHideTestFiles?: boolean;
     pullRequestMergeMethod?: PullRequestMergeMethod;
+    pullRequestList?: PullRequestListPreferences;
     liveActivitiesEnabled?: boolean;
     themeId?: MobileThemeId;
     lightThemeId?: MobileThemeId;
@@ -139,6 +145,10 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     parsed.pullRequestMergeMethod === "rebase"
   ) {
     preferences.pullRequestMergeMethod = parsed.pullRequestMergeMethod;
+  }
+
+  if (parsed.pullRequestList !== undefined) {
+    preferences.pullRequestList = sanitizePullRequestListPreferences(parsed.pullRequestList);
   }
 
   if (typeof parsed.liveActivitiesEnabled === "boolean") {

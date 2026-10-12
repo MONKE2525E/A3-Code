@@ -1,3 +1,5 @@
+import { usePullRequestDetailActions } from "./usePullRequestDetailActions";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { pullRequestTabOffset } from "./pullRequestTabScroll";
 import { guideFocusedRows, type GuideDiffFocus } from "./guide/guideDiffFocus";
 import { PullRequestGuideContent } from "./guide/PullRequestGuideScreen";
@@ -336,6 +338,25 @@ export function PullRequestRouteScreen({ route }: StaticScreenProps<PullRequestP
     refreshActivity();
     filesContent.refresh();
   };
+  const activity = useEnvironmentQuery(composerPullRequests.activity(requestTarget(params)));
+  const originActions = usePullRequestDetailActions({
+    environmentId: EnvironmentId.make(params.environmentId),
+    reference: requestTarget(params).input,
+    detail: pr,
+    activity: activity.data,
+    originThreadId: params.threadId ? ThreadId.make(params.threadId) : null,
+    refreshFromHost: async () => {
+      refresh();
+    },
+    onSelectMergeMethod: () => {},
+  });
+  const originLink = originActions.thread;
+  const linkLabel = originLink?.linked ? "Unlink from this thread" : "Link to this thread";
+  const showOriginLink = originLink !== null && (originLink.linked || originLink.canLink);
+  const changeOriginLink = () => {
+    if (originLink && !originActions.linkPending)
+      originActions.run({ kind: "link", linked: originLink.linked });
+  };
   const jumpToFiles = () => {
     scrollViews.current.overview?.scrollToOffset({
       offset: bodyY.current + filesY.current - insets.top,
@@ -371,6 +392,15 @@ export function PullRequestRouteScreen({ route }: StaticScreenProps<PullRequestP
             title={`#${params.number}${connected ? "" : " · Offline"}`}
             onBack={() => navigation.goBack()}
             actions={[
+              ...(showOriginLink
+                ? [
+                    {
+                      accessibilityLabel: linkLabel,
+                      icon: "link" as const,
+                      onPress: changeOriginLink,
+                    },
+                  ]
+                : []),
               ...(permissions.verdicts.length
                 ? [
                     {
@@ -409,6 +439,15 @@ export function PullRequestRouteScreen({ route }: StaticScreenProps<PullRequestP
             accessibilityLabel="Pull request actions"
             icon="ellipsis"
           >
+            {showOriginLink ? (
+              <NativeHeaderToolbar.MenuAction
+                icon="link"
+                disabled={originActions.linkPending}
+                onPress={changeOriginLink}
+              >
+                <NativeHeaderToolbar.Label>{linkLabel}</NativeHeaderToolbar.Label>
+              </NativeHeaderToolbar.MenuAction>
+            ) : null}
             {permissions.verdicts.length ? (
               <NativeHeaderToolbar.MenuAction
                 icon="text.bubble"
@@ -643,6 +682,12 @@ export function PullRequestRouteScreen({ route }: StaticScreenProps<PullRequestP
               </View>
             ))}
         </View>
+        {originActions.status ? (
+          <Text accessibilityRole="alert" className="px-4 py-2 text-sm text-foreground-muted">
+            {originActions.status.title}
+            {originActions.status.detail ? `: ${originActions.status.detail}` : ""}
+          </Text>
+        ) : null}
         <PullRequestActionToolbar pr={pr} params={params} onOpenFiles={openFiles} />
       </View>
     </PullRequestMarkdownRepository>
