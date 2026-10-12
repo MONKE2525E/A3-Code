@@ -12,6 +12,7 @@ import {
   ConnectionBlockedError,
   ConnectionTransientError,
   RelayConnectionTarget,
+  PrimaryConnectionTarget,
   type SupervisorConnectionState,
 } from "./model.ts";
 import {
@@ -75,6 +76,30 @@ describe("connection presentation", () => {
 
   it("preserves profile display information without exposing credentials", () => {
     expect(connectionCatalogDisplayUrl(ENTRY)).toBe("https://environment.example.test");
+  });
+
+  it("prefers this environment's published MCP endpoint and falls back to its local address", () => {
+    const entry: ConnectionCatalogEntry = {
+      target: new PrimaryConnectionTarget({
+        environmentId: TARGET.environmentId,
+        label: "Local environment",
+        httpBaseUrl: "http://127.0.0.1:16657/",
+        wsBaseUrl: "ws://127.0.0.1:16657/",
+      }),
+      profile: Option.none(),
+      enabled: true,
+    };
+    expect(
+      environmentMcpUrl({
+        entry,
+        preferRelay: true,
+        relayHttpBaseUrl: "https://dev.example.test/",
+      }),
+    ).toBe("https://dev.example.test/mcp");
+    expect(environmentMcpUrl({ entry, preferRelay: true })).toBe("http://127.0.0.1:16657/mcp");
+    expect(environmentMcpUrl({ entry, preferRelay: true, relayHttpBaseUrl: "invalid" })).toBe(
+      "http://127.0.0.1:16657/mcp",
+    );
   });
 
   it("copies the MCP address of the route this device is connected over", () => {
