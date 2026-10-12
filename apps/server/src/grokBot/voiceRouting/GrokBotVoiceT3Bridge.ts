@@ -51,7 +51,7 @@ export const T3_VOICE_TOOLS: ReadonlyArray<VoiceToolDescriptor> = [
     type: "function",
     name: "recall_text_messages",
     description:
-      "Read recent written messages in this bot's canonical T3 chat, including messages imported from its native chat. This reads current history, including messages sent during this call.",
+      "Read recent written messages and attachment references in this bot's canonical T3 chat, including messages sent during this call. Pass screenshot attachment IDs to delegate_task.attachmentIds to forward them to a child.",
     parameters: { type: "object", properties: {} },
   },
   {
@@ -91,7 +91,7 @@ export const routeSessionTools = (
 ];
 
 export const withT3Instructions = (instructions: string) =>
-  `${instructions}\n\n${T3_VOICE_INSTRUCTIONS}`;
+  `${instructions}\n\n${T3_VOICE_INSTRUCTIONS}\nGive delegated tasks a short descriptive title. For a screenshot already sent in chat, call recall_text_messages to find its attachment reference, then pass that ID in delegate_task.attachmentIds. Do not ask the user to upload it again when the reference is present.`;
 
 /**
  * Whether the voice service must answer a tool locally. `send_task` is included so a model that
@@ -150,6 +150,7 @@ type ChatContext = typeof GrokBotVoiceChatContext.Type;
 const chatMessage = (
   message: OrchestrationV2ConversationMessage,
 ): ChatContext["messages"][number] | undefined => {
+  const attachments = message.attachments ?? [];
   if (
     (message.role !== "user" && message.role !== "assistant") ||
     message.grokBotPeer !== undefined ||
@@ -161,10 +162,25 @@ const chatMessage = (
     message.scheduledTaskId !== undefined ||
     message.notification !== undefined ||
     message.streaming ||
-    !message.text.trim()
+    (!message.text.trim() && attachments.length === 0)
   )
     return undefined;
-  return { id: message.id, role: message.role, text: message.text.slice(0, 4_000) };
+  return {
+    id: message.id,
+    role: message.role,
+    text: message.text.slice(0, 4_000),
+    ...(attachments.length === 0
+      ? {}
+      : {
+          attachments: attachments
+            .filter(({ type }) => type === "image" || type === "file")
+            .map(({ id, name, type }) => ({
+              id,
+              name,
+              type: type === "image" ? ("image" as const) : ("file" as const),
+            })),
+        }),
+  };
 };
 const boundedChat = (messages: readonly OrchestrationV2ConversationMessage[]) => {
   const visible: ChatContext["messages"][number][] = [];
@@ -211,6 +227,7 @@ const make = Effect.gen(function* () {
       at: number;
       receipt: VoiceToolOutcome;
       settled: boolean;
+      title?: string;
     }
   >();
   const key = (input: VoiceToolCall, toolCallId = input.toolCallId) =>
@@ -353,6 +370,16 @@ const make = Effect.gen(function* () {
           if (!result.pending) target.settled = true;
           return {
             ...result.result,
+            ...(result.result.kind === "served" &&
+            result.result.output !== null &&
+            typeof result.result.output === "object"
+              ? {
+                  output: {
+                    ...result.result.output,
+                    ...(target.title === undefined ? {} : { title: target.title }),
+                  },
+                }
+              : {}),
             ...(result.result.kind === "served"
               ? { completion: { requestToolCallId, pending: result.pending } }
               : {}),
@@ -402,6 +429,7 @@ const make = Effect.gen(function* () {
           kind: "served",
           output: {
             status: "landed",
+            title: shell.value.title,
             runStatus: waited.value.run?.status,
             ...(waited.value.run?.status === "failed"
               ? {
@@ -492,6 +520,12 @@ const make = Effect.gen(function* () {
             at,
             receipt,
             settled: false,
+            ...(typeof input.input === "object" &&
+            input.input !== null &&
+            "title" in input.input &&
+            typeof input.input.title === "string"
+              ? { title: input.input.title.slice(0, 100) }
+              : {}),
           });
           return receipt;
         });

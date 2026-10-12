@@ -624,6 +624,68 @@ it.effect(
     ),
 );
 
+it.effect(
+  "a call forwards only chat-owned screenshot references into its child's first provider turn",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* setup;
+        const attachment = {
+          type: "image" as const,
+          id: "call-screenshot",
+          name: "screenshot.png",
+          mimeType: "image/png",
+          sizeBytes: 42,
+        };
+        yield* h.orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("record-screenshot"),
+          threadId: parentThreadId,
+          messageId: MessageId.make("image-only-message"),
+          text: "",
+          attachments: [attachment],
+          dispatchMode: { type: "defer_start" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const scope = yield* h.service.acquireCallInvocation(identity);
+        yield* h.expectDenied(
+          scope,
+          "delegate_task",
+          {
+            task: "Inspect this screenshot",
+            target: { providerInstanceId: instanceId, model: selection.model },
+            attachmentIds: ["another-threads-file"],
+          },
+          "invalid_request",
+        );
+        const result = yield* h.invoke(scope, "delegate_task", {
+          task: "Inspect this screenshot",
+          title: "Inspect screenshot",
+          mode: "async",
+          clientRequestId: "forward-image",
+          target: { providerInstanceId: instanceId, model: selection.model },
+          attachmentIds: [attachment.id, attachment.id],
+        });
+        assert.isFalse(result.isFailure);
+        const task = yield* decodeTask(result.encodedResult);
+        const child = yield* h.orchestrator.getThreadProjection(task.childThreadId);
+        assert.deepStrictEqual(child.messages[0]?.attachments, [attachment]);
+        const turn = yield* h.start(task);
+        assert.deepStrictEqual(turn.turn.message.attachments, [attachment]);
+        const replay = yield* h.invoke(scope, "delegate_task", {
+          task: "Inspect this screenshot",
+          title: "Inspect screenshot",
+          mode: "async",
+          clientRequestId: "forward-image",
+          target: { providerInstanceId: instanceId, model: selection.model },
+          attachmentIds: [attachment.id],
+        });
+        assert.deepStrictEqual((replay.encodedResult as { taskId: string }).taskId, task.taskId);
+      }),
+    ),
+);
+
 it.effect("checked call tools enforce ownership, client ceiling, ended and new-call denial", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -982,7 +1044,7 @@ it.effect(
         const observed = yield* decodeFrames(frames);
         assert.deepEqual(
           observed.map((frame) => frame.type),
-          ["conversation.item.create", "conversation.item.create", "response.create"],
+          ["conversation.item.create", "conversation.item.create", "conversation.item.create"],
         );
         assert.equal(observed[0]?.item?.name, "work_landed");
         assert.equal(observed[1]?.item?.type, "function_call_output");

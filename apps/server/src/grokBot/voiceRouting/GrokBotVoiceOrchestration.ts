@@ -300,6 +300,16 @@ const make = Effect.gen(function* () {
             target = yield* decodeTaskTarget(last.value.encodedResult).pipe(Effect.option);
           else if (input.name === "t3_thread_launch" || input.name === "t3_thread_send")
             target = yield* decodeRunTarget(last.value.encodedResult).pipe(Effect.option);
+          else if (input.name === "t3_thread_wait") {
+            const waited = last.value.encodedResult;
+            if (
+              typeof waited === "object" &&
+              waited !== null &&
+              "timedOut" in waited &&
+              waited.timedOut === true
+            )
+              target = yield* decodeRunTarget(waited).pipe(Effect.option);
+          }
         }
         return {
           result: {

@@ -21,6 +21,7 @@ import * as Voice from "./GrokBotVoiceOrchestration.ts";
 
 // Real checked MCP handlers; external services would fail if either refusal reached execution.
 let acquisitionFailure: OrchestratorMcpFailure | undefined;
+let threadWaitTimedOut = true;
 const harness = Voice.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -53,6 +54,13 @@ const harness = Voice.layer.pipe(
           scope: import("../../mcp/McpInvocationContext.ts").McpInvocationScope,
         ) => Effect.succeed({ ...scope, client: { ...scope.client!, access: "read-only" } }),
         releaseCallInvocation: () => Effect.void,
+        waitForThread: () =>
+          Effect.succeed({
+            threadId: "observed-thread",
+            runId: "observed-run",
+            status: threadWaitTimedOut ? "running" : "completed",
+            timedOut: threadWaitTimedOut,
+          }),
         capabilities: () =>
           Effect.succeed({
             parentThreadId: null,
@@ -91,6 +99,37 @@ const caller = {
   toolCallId: "tool",
   canonicalThreadId: "canonical-bot-thread",
 };
+
+it.effect("keeps watching a checked thread wait that timed out, but not a completed run", () =>
+  Effect.gen(function* () {
+    const voice = yield* Voice.GrokBotVoiceOrchestration;
+    yield* voice.activate(caller);
+    for (const pending of [true, false]) {
+      threadWaitTimedOut = pending;
+      const result = yield* voice.call({
+        ...caller,
+        access: "read",
+        name: "t3_thread_wait",
+        input: { threadId: "observed-thread" },
+      });
+      assert.equal(result.result.kind, "served");
+      if (pending)
+        assert.deepStrictEqual(result.target, {
+          threadId: "observed-thread",
+          runId: "observed-run",
+        });
+      else assert.isUndefined(result.target);
+    }
+    yield* voice.forget(caller.callId);
+  }).pipe(
+    Effect.provide(harness),
+    Effect.ensuring(
+      Effect.sync(() => {
+        threadWaitTimedOut = true;
+      }),
+    ),
+  ),
+);
 
 it.effect("preserves an authority acquisition failure and can acquire again after recovery", () =>
   Effect.gen(function* () {

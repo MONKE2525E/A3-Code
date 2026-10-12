@@ -480,7 +480,12 @@ describe("grok bot voice call", () => {
       fake.sent
         .map((frame) => JSON.parse(frame))
         .filter((frame) => frame.type === "response.create"),
-    ).toEqual([{ type: "response.create", response: { instructions: "Greet the caller." } }]);
+    ).toEqual([
+      {
+        type: "response.create",
+        response: { instructions: expect.stringContaining("Greet the caller.") },
+      },
+    ]);
     h.call.hangUp();
   });
 
@@ -551,14 +556,22 @@ describe("grok bot voice call", () => {
           output: '{"status":"landed","updates":["The build is fixed."]}',
         },
       },
-      expect.objectContaining({ type: "response.create" }),
+      expect.objectContaining({
+        type: "conversation.item.create",
+        item: expect.objectContaining({ type: "force_message" }),
+      }),
     ]);
     fake.listeners.message(JSON.stringify({ type: "response.done" }));
     expect(
       fake.sent
         .map((frame) => JSON.parse(frame))
         .filter((frame) => frame.type === "response.create"),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
+    expect(
+      fake.sent
+        .map((frame) => JSON.parse(frame))
+        .filter((frame) => frame.item?.type === "force_message"),
+    ).toHaveLength(1);
     expect(calls).toHaveLength(2);
     h.call.hangUp();
   });

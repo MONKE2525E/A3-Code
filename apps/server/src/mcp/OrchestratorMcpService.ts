@@ -2273,6 +2273,20 @@ const make = Effect.gen(function* () {
               );
             }
             const parent = yield* loadProjection(delegationThreadId(scope));
+            const attachmentIds = new Set(input.attachmentIds ?? []);
+            const availableAttachments = new Map(
+              attachmentIds.size === 0
+                ? []
+                : parent.messages.flatMap((message) =>
+                    message.attachments.map((attachment) => [attachment.id, attachment] as const),
+                  ),
+            );
+            const attachments = [...attachmentIds].map((id) => availableAttachments.get(id));
+            if (attachments.some((attachment) => attachment === undefined))
+              return yield* failure(
+                "invalid_request",
+                "An attachment is not in this call or thread's chat. Read its chat attachment references before delegating.",
+              );
             const parentRun =
               scope.call === undefined
                 ? parent.runs
@@ -2342,6 +2356,7 @@ const make = Effect.gen(function* () {
                 parentNodeId: scope.call?.parentNodeId ?? parentRun!.rootNodeId!,
                 ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
                 task: taskPrompt(input),
+                attachments: attachments.filter((attachment) => attachment !== undefined),
                 ...(input.title === undefined ? {} : { title: input.title }),
                 modelSelection: target.modelSelection,
                 runtimeMode,

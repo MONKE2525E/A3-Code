@@ -7,6 +7,9 @@ const VOICE_REALTIME_ORIGIN = "wss://api.x.ai/";
 export const VOICE_SAMPLE_RATE = 24_000;
 const VOICE_TRANSCRIPTION_MODEL = "grok-transcribe";
 
+const speechInstructions =
+  "Keep spoken replies to one or two short sentences by default. Give longer explanations only when the caller asks. Refer to threads and delegated tasks by their title or a short descriptive name. Never read or spell internal thread, task, run, provider, or model IDs, UUIDs, paths, or URLs aloud; those are tool arguments, not spoken content. If a name is unavailable, say 'that task' or 'that thread'. Acknowledge background work once, then speak again only for a meaningful result, failure, approval needed, or a direct question. Do not narrate tool calls or repeat status updates.";
+
 export interface VoiceRealtimeCredential {
   readonly clientSecret: string;
   readonly model: string;
@@ -62,7 +65,7 @@ export function sessionUpdateFrame(input: {
     session: {
       ...(voice.voiceId === null ? {} : { voice: voice.voiceId }),
       ...(input.reconnecting ? { keep_context: false } : {}),
-      instructions: input.instructions,
+      instructions: `${input.instructions}\n${speechInstructions}`,
       resumption: { enabled: true },
       turn_detection: { type: "server_vad" },
       audio: {
@@ -152,19 +155,34 @@ export function responseCreateFrame(instructions: string | null): string {
   return JSON.stringify(
     instructions === null
       ? { type: "response.create" }
-      : { type: "response.create", response: { instructions } },
+      : {
+          type: "response.create",
+          response: { instructions: `${instructions}\n${speechInstructions}` },
+        },
   );
 }
 
-/** A known failure is spoken directly rather than waiting for the model to choose to report it. */
-export function failureSpeechFrame(message: string): string {
+/** A concise work notification is spoken without a model continuation. */
+export function spokenMessageFrame(message: string): string {
+  // Preserve tool errors in the UI; scripted speech must not spell internal identifiers.
+  const spoken = message
+    .replace(
+      /\b(?:node:delegated-task|thread:|provider-session:|provider-instance:)[^\s,;]+/gi,
+      "that task",
+    )
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "that task")
+    .replace(/https?:\/\/[^\s]+/gi, "the link in T3")
+    .trim()
+    .split(/\s+/)
+    .slice(0, 35)
+    .join(" ");
   return JSON.stringify({
     type: "conversation.item.create",
     item: {
       type: "force_message",
       role: "assistant",
       interruptible: true,
-      content: [{ type: "output_text", text: message.slice(0, 600) }],
+      content: [{ type: "output_text", text: spoken.slice(0, 300) }],
     },
   });
 }
