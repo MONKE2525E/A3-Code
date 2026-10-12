@@ -3,6 +3,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import {
   AuthSettingsWriteScope,
   AuthOrchestrationOperateScope,
+  GrokBotError,
   GrokBotOrchestratorConfig,
   GrokBotOrchestratorError,
   WS_METHODS,
@@ -30,69 +31,84 @@ import * as Service from "./GrokBotOrchestratorService.ts";
 
 const account = "a".repeat(64);
 const decodeConfig = Schema.decodeEffect(GrokBotOrchestratorConfig);
-const fixture = Effect.gen(function* () {
-  const selected = yield* Ref.make(account);
-  const ready = yield* Ref.make(false);
-  const turn = yield* makeTurn;
-  const skillWrites: unknown[] = [];
-  const native = makeNative({
-    accountBinding: Ref.get(selected),
-    ensureSkill: (input) =>
-      Effect.sync(() => {
-        skillWrites.push(input);
-        return { skillId: "saved-native-skill", changed: true };
-      }),
-  });
-  const binding = makeBindings(turn, {
-    availability: Ref.get(ready).pipe(
-      Effect.map((value) =>
-        value ? { ready: true } : { ready: false, reason: "Link this environment to T3 Connect." },
-      ),
-    ),
-  });
-  // Use the real provider probe and registry. Execution is outside this setup test.
-  const driver = {
-    ...GrokBotDriver,
-    create: (options: Parameters<typeof GrokBotDriver.create>[0]) =>
-      Effect.sync(() => {
-        const refresh = checkGrokBotProvider(options).pipe(
-          Effect.provideService(Native.GrokBotNativeRuntimeService, native),
-          Effect.provideService(Binding.GrokBotManagedBinding, binding),
-        );
-        return {
-          instanceId: options.instanceId,
-          driverKind: GrokBotDriver.driverKind,
-          snapshot: { refresh, getSnapshot: refresh, streamChanges: Stream.empty },
-        } as never;
-      }),
-  };
-  const registry = Instances.layer({ drivers: [driver], configMap: {} });
-  const serviceLayer = Service.layer.pipe(
-    Layer.provide(NodeCrypto.layer),
-    Layer.provideMerge(registry),
-    Layer.provideMerge(
-      Layer.mergeAll(
-        Settings.layerTest(),
-        Layer.succeed(Native.GrokBotNativeRuntimeService, native),
-        Layer.succeed(Binding.GrokBotManagedBinding, binding),
-        Layer.mock(GrokBotService.GrokBotService)({
-          status: Effect.succeed({ installed: true, managed: true, sessionPresent: true }),
+const fixture = (bridgeInstalled = true, installFails = false) =>
+  Effect.gen(function* () {
+    const installs = yield* Ref.make(0);
+    const selected = yield* Ref.make(account);
+    const ready = yield* Ref.make(false);
+    const turn = yield* makeTurn;
+    const skillWrites: unknown[] = [];
+    const native = makeNative({
+      accountBinding: Ref.get(selected),
+      ensureSkill: (input) =>
+        Effect.sync(() => {
+          skillWrites.push(input);
+          return { skillId: "saved-native-skill", changed: true };
         }),
+    });
+    const binding = makeBindings(turn, {
+      availability: Ref.get(ready).pipe(
+        Effect.map((value) =>
+          value
+            ? { ready: true }
+            : { ready: false, reason: "Link this environment to T3 Connect." },
+        ),
       ),
-    ),
-  );
-  const context = yield* Layer.build(serviceLayer);
-  const service = Context.get(context, Service.GrokBotOrchestratorService);
-  const settings = Context.get(context, Settings.ServerSettingsService);
-  const instances = Context.get(context, Instances.ProviderInstanceRegistry);
-  return { context, service, settings, instances, selected, ready, skillWrites };
-});
+    });
+    // Use the real provider probe and registry. Execution is outside this setup test.
+    const driver = {
+      ...GrokBotDriver,
+      create: (options: Parameters<typeof GrokBotDriver.create>[0]) =>
+        Effect.sync(() => {
+          const refresh = checkGrokBotProvider(options).pipe(
+            Effect.provideService(Native.GrokBotNativeRuntimeService, native),
+            Effect.provideService(Binding.GrokBotManagedBinding, binding),
+          );
+          return {
+            instanceId: options.instanceId,
+            driverKind: GrokBotDriver.driverKind,
+            snapshot: { refresh, getSnapshot: refresh, streamChanges: Stream.empty },
+          } as never;
+        }),
+    };
+    const registry = Instances.layer({ drivers: [driver], configMap: {} });
+    const serviceLayer = Service.layer.pipe(
+      Layer.provide(NodeCrypto.layer),
+      Layer.provideMerge(registry),
+      Layer.provideMerge(
+        Layer.mergeAll(
+          Settings.layerTest(),
+          Layer.succeed(Native.GrokBotNativeRuntimeService, native),
+          Layer.succeed(Binding.GrokBotManagedBinding, binding),
+          Layer.mock(GrokBotService.GrokBotService)({
+            status: Effect.succeed({
+              installed: bridgeInstalled,
+              managed: true,
+              sessionPresent: true,
+            }),
+            setup: Ref.update(installs, (count) => count + 1).pipe(
+              Effect.flatMap(() =>
+                installFails
+                  ? Effect.fail(new GrokBotError({ reason: "setup_failed" }))
+                  : Effect.succeed({ installed: true, managed: true, sessionPresent: true }),
+              ),
+            ),
+          }),
+        ),
+      ),
+    );
+    const context = yield* Layer.build(serviceLayer);
+    const service = Context.get(context, Service.GrokBotOrchestratorService);
+    const settings = Context.get(context, Settings.ServerSettingsService);
+    const instances = Context.get(context, Instances.ProviderInstanceRegistry);
+    return { context, service, settings, instances, selected, ready, skillWrites, installs };
+  });
 
 it.effect(
   "inspection is read-only and explicit setup creates one native instance with actual bot models",
   () =>
     Effect.gen(function* () {
-      const { service, settings, instances, ready, skillWrites } = yield* fixture;
+      const { service, settings, instances, ready, skillWrites } = yield* fixture();
       const before = yield* service.inspect({});
       assert.equal(before.state, "not_configured");
       assert.isNull(before.provider);
@@ -135,7 +151,7 @@ it.effect(
 
 it.effect("refuses account changes without modifying the existing binding or instance", () =>
   Effect.gen(function* () {
-    const { service, settings, instances, selected } = yield* fixture;
+    const { service, settings, instances, selected } = yield* fixture();
     const configured = yield* service.setup({});
     const before = yield* settings.getSettings;
     const id = configured.provider!.instanceId;
@@ -157,7 +173,7 @@ it.effect(
   "rejects a missing bot before changing settings and re-enables the same bound instance",
   () =>
     Effect.gen(function* () {
-      const { service, settings, instances } = yield* fixture;
+      const { service, settings, instances } = yield* fixture();
       const missing = yield* Effect.flip(service.setup({ botId: "missing" }));
       assert.equal(missing.reason, "bot_not_found");
       assert.deepStrictEqual((yield* settings.getSettings).providerInstances, {});
@@ -180,7 +196,7 @@ it.effect(
   "hydration always reads the newest settings rather than applying stale queued snapshots",
   () =>
     Effect.gen(function* () {
-      const { context, service, settings, instances } = yield* fixture;
+      const { context, service, settings, instances } = yield* fixture();
       const configured = yield* service.setup({});
       const id = configured.provider!.instanceId;
       yield* settings.updateProviderInstance({ operation: "remove", instanceId: id });
@@ -198,3 +214,25 @@ it("keeps setup behind the existing environment settings scope", () => {
     AuthOrchestrationOperateScope,
   ]);
 });
+
+it.effect("explicit setup installs a missing bridge while inspection stays read-only", () =>
+  Effect.gen(function* () {
+    const { service, installs } = yield* fixture(false);
+    yield* service.inspect({});
+    assert.equal(yield* Ref.get(installs), 0);
+    const configured = yield* service.setup({});
+    assert.equal(yield* Ref.get(installs), 1);
+    assert.isNotNull(configured.provider);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("an optional bridge installation failure does not block native provider setup", () =>
+  Effect.gen(function* () {
+    const { service, ready, installs } = yield* fixture(false, true);
+    yield* Ref.set(ready, true);
+    const configured = yield* service.setup({});
+    assert.equal(yield* Ref.get(installs), 1);
+    assert.equal(configured.state, "ready");
+    assert.equal(configured.bridge.installed, false);
+  }).pipe(Effect.scoped),
+);

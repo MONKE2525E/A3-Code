@@ -489,11 +489,12 @@ const make = Effect.gen(function* () {
   const platform = yield* HostProcess.Platform;
   const env = yield* HostProcess.Environment;
   const appData =
-    platform === "win32"
+    env.T3CODE_GROK_BOT_APP_DATA_DIR?.trim() ||
+    (platform === "win32"
       ? path.join(env.APPDATA ?? path.join(home, "AppData", "Roaming"), "Grok Bot")
       : platform === "darwin"
         ? path.join(home, "Library", "Application Support", "Grok Bot")
-        : path.join(env.XDG_CONFIG_HOME ?? path.join(home, ".config"), "Grok Bot");
+        : path.join(env.XDG_CONFIG_HOME ?? path.join(home, ".config"), "Grok Bot"));
   const secretCommand = Effect.fnUntraced(function* (
     command: string,
     args: readonly string[],

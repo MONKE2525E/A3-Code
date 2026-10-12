@@ -32,6 +32,7 @@ const encodeSecret = (value: string) => {
   );
 };
 const fixture = Effect.gen(function* () {
+  const isolated = (yield* HostProcess.Environment).T3CODE_TEST_ISOLATED_PROFILE === "1";
   const fs = yield* FileSystem.FileSystem;
   const root = yield* fs.makeTempDirectoryScoped({ prefix: "grok-native-test-" });
   const appData = `${root}/.config/Grok Bot`;
@@ -200,11 +201,34 @@ const fixture = Effect.gen(function* () {
       }),
     ),
     Layer.provide(Layer.succeed(HostProcess.HomeDirectory, root)),
-    Layer.provide(Layer.succeed(HostProcess.Environment, {})),
+    Layer.provide(
+      Layer.succeed(
+        HostProcess.Environment,
+        isolated
+          ? {
+              XDG_CONFIG_HOME: `${root}/isolated-config`,
+              T3CODE_GROK_BOT_APP_DATA_DIR: appData,
+            }
+          : {},
+      ),
+    ),
     Layer.provide(Layer.succeed(HostProcess.Platform, "linux")),
   );
   const service = Context.get(yield* Layer.build(layer), Native.GrokBotNativeService);
   return { service, requests, remote, fs, secretFile, secrets, root };
+});
+
+it.layer(NodeServices.layer)("Independent desktop profile", (it) => {
+  it.effect("reads the existing Grok Bot account without sharing the T3 profile", () =>
+    Effect.gen(function* () {
+      const { service } = yield* fixture.pipe(
+        Effect.provideService(HostProcess.Environment, { T3CODE_TEST_ISOLATED_PROFILE: "1" }),
+      );
+      const binding = yield* service.accountBinding;
+      assert.isString(binding);
+      assert.equal((yield* service.listForBinding(binding))[0]?.id, "bot-1");
+    }).pipe(Effect.scoped),
+  );
 });
 
 const attachmentFixture = Effect.gen(function* () {

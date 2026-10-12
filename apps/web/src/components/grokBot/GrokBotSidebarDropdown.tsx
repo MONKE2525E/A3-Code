@@ -32,7 +32,7 @@ import {
   refreshGrokBotRoster,
 } from "~/state/grokBots";
 import { useEnvironmentQuery } from "~/state/query";
-import { serverEnvironment } from "~/state/server";
+import { environmentServerConfigsAtom, serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "~/state/use-atom-command";
 
 import { GrokBotAvatar } from "./GrokBotAvatar";
@@ -59,6 +59,16 @@ import { useGrokBotToolActivities, useGrokBotUnreadBotIds } from "./useGrokBotTh
 const GROK_BOTS_OPEN_STORAGE_KEY = "t3code:grok-bots-sidebar-open";
 
 export function GrokBotSidebarDropdown() {
+  const environmentId = useSelectedGrokBotEnvironmentId();
+  const configs = useAtomValue(environmentServerConfigsAtom);
+  const config = environmentId === null ? undefined : configs.get(environmentId);
+  const configured = Object.values(config?.settings.providerInstances ?? {}).some(
+    (instance) => instance.driver === "grok-bot",
+  );
+  return configured ? <ConfiguredGrokBotSidebarDropdown /> : null;
+}
+
+function ConfiguredGrokBotSidebarDropdown() {
   const selectedEnvironmentId = useSelectedGrokBotEnvironmentId();
   const connectedEnvironmentIds = useConnectedEnvironmentIds();
   const resolved = resolveGrokBotSelectedEnvironment({

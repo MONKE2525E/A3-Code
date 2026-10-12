@@ -156,6 +156,10 @@ const make = Effect.gen(function* () {
           )) !== selection.accountBinding
         )
           return yield* new GrokBotOrchestratorError({ reason: "account_changed" });
+        // The bridge adds bot management, but its installation must not block native chats.
+        if (!(yield* bots.status).installed) {
+          yield* bots.setup.pipe(Effect.ignore);
+        }
         if (matching === undefined || matching.instance.enabled === false) {
           yield* settings
             .updateProviderInstance({
