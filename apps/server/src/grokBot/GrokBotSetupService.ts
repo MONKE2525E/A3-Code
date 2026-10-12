@@ -176,6 +176,7 @@ const make = Effect.gen(function* () {
     return {
       binding,
       bot: bot ? { id: bot.agentId, name: bot.name } : null,
+      hasPrimary: Boolean(settings.settings.mainAgentId),
       mcpUrl: published ? new URL("/mcp", published.httpBaseUrl).href : null,
     };
   }).pipe(
@@ -187,17 +188,25 @@ const make = Effect.gen(function* () {
     value: typeof current extends Effect.Effect<infer A, infer _E, infer _R> ? A : never,
     now: number,
   ): GrokBotSetupStatus => ({
-    phase: !value.bot ? "needs_primary" : !value.mcpUrl ? "needs_prerequisite" : "needs_setup",
+    phase:
+      !value.bot && !value.hasPrimary
+        ? "needs_primary"
+        : !value.bot || !value.mcpUrl
+          ? "needs_prerequisite"
+          : "needs_setup",
     complete: false,
     primaryBot: value.bot,
     mcpUrl: value.mcpUrl,
     terminalCommand: value.mcpUrl ? terminalCommand : null,
     authorizationUrl: null,
-    error: !value.bot
-      ? "Choose a primary bot in GrokBot first."
-      : !value.mcpUrl
-        ? "Enable T3 Connect for this environment, then check again."
-        : null,
+    error:
+      !value.bot && value.hasPrimary
+        ? "Your starred primary bot was not found in the bot list. Refresh the list in GrokBot, then check again."
+        : !value.bot
+          ? "Choose a primary bot in GrokBot first."
+          : !value.mcpUrl
+            ? "Enable T3 Connect for this environment, then check again."
+            : null,
     updatedAtMs: now,
   });
   const matches = (
@@ -319,7 +328,9 @@ const make = Effect.gen(function* () {
           "This is an explicit one-time setup request for the ordinary, account-wide T3 Code MCP connector, separate from the temporary t3-code-managed connection.",
           `Connect the account's shared HTTP MCP connector to exactly ${value.mcpUrl}. Give it a name that identifies this environment (${new URL(value.mcpUrl).hostname}). Reuse a connector only if its URL matches exactly. Do not replace another T3 environment's connector. Do not name it t3-code-managed.`,
           "Use your native connector management and OAuth tools. If authorization is required, send me the OAuth link in this chat and wait for me to approve it. Do not run commands on my computer to approve your own access.",
-          "If the T3 OAuth page asks for a pairing code, tell me to use the command shown in T3 provider setup on the hosting computer. Never approve your own connection or ask me to paste the code into this chat.",
+          terminalCommand
+            ? "If the T3 OAuth page asks for a pairing code, tell me to use the command shown in T3 provider setup on the hosting computer. Never approve your own connection or ask me to paste the code into this chat."
+            : "If the T3 OAuth page asks for a pairing code, tell me to create a pairing link in this environment's Settings → Connections and enter its code on the authorization page. No terminal command is available for this environment; do not invent one. Never approve your own connection or ask me to paste the code into this chat.",
           `After saving and reading back the account-shared skill and authorizing this connector, discover grok_bot_verify_setup on this ordinary T3 connector and call it with nonce ${nonce} and managedSkillHash ${skillHash}. This call is the setup test. Use the hash from the installed skill's description, and do not report success if the skill or MCP call fails. Do not use any temporary injected MCP connection for this test.`,
           "Reply in this normal conversation with what completed or the exact step needing my help. Leave other skills, bots, connectors, and sharing unchanged.",
         ].join("\n\n");

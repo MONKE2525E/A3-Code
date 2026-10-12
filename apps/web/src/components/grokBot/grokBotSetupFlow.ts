@@ -16,7 +16,13 @@ export function grokBotSetupPollMs(phase: Phase): number {
 
 /** Only an explicit Retry may resend once a run has failed or stalled; no repeats while one is active. */
 export function grokBotSetupSendDisabled(status: GrokBotSetupStatus | undefined): boolean {
-  return status !== undefined && ACTIVE_PHASES.has(status.phase);
+  return (
+    status !== undefined &&
+    (ACTIVE_PHASES.has(status.phase) ||
+      status.phase === "needs_primary" ||
+      (status.phase === "needs_prerequisite" && status.primaryBot === null) ||
+      status.retryable === true)
+  );
 }
 
 /** The terminal fallback only matters while setup is unfinished. */
@@ -45,7 +51,10 @@ export interface GrokBotSetupView {
 /** Copy and affordances derived only from the server's setupStatus, never from provider readiness. */
 export function grokBotSetupView(status: GrokBotSetupStatus): GrokBotSetupView {
   const bot = status.primaryBot?.name ?? "your primary bot";
-  const base = { active: ACTIVE_PHASES.has(status.phase), showSend: !status.complete };
+  const base = {
+    active: ACTIVE_PHASES.has(status.phase) || status.retryable === true,
+    showSend: !status.complete,
+  };
   switch (status.phase) {
     case "complete":
       return {
@@ -107,8 +116,10 @@ export function grokBotSetupView(status: GrokBotSetupStatus): GrokBotSetupView {
     case "failed":
       return {
         ...base,
-        title: "Setup failed",
-        description: status.error ?? "Setup could not finish.",
+        title: status.retryable ? "Setup temporarily unavailable" : "Setup failed",
+        description: status.retryable
+          ? "Could not read setup status. T3 will check again automatically; the setup message will not be resent."
+          : (status.error ?? "Setup could not finish."),
         sendLabel: "Retry setup",
         tone: "error",
       };
