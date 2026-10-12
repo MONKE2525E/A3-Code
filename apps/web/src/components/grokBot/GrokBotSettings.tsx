@@ -299,10 +299,16 @@ function GrokBotSettingsBody({
             {providerError ? (
               <SettingsRow title="Provider setup could not finish" description={providerError} />
             ) : null}
-            {skillSetupPrompt !== undefined ? (
+            {skillSetupPrompt !== undefined || providerConfig.data.setupStatus !== undefined ? (
               <SettingsRow title={skill.title}>
                 <div className="pt-2">
-                  <GrokBotSkillSetupPanel prompt={skillSetupPrompt} />
+                  <GrokBotSkillSetupPanel
+                    environmentId={environmentId}
+                    prompt={skillSetupPrompt}
+                    setupStatus={providerConfig.data.setupStatus}
+                    refresh={providerConfig.refresh}
+                    refreshing={providerConfig.isPending}
+                  />
                 </div>
               </SettingsRow>
             ) : null}

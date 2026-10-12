@@ -91,6 +91,7 @@ import * as GrokBotManagedStateStore from "./grokBot/GrokBotManagedStateStore.ts
 import * as GrokBotMcpAuthority from "./grokBot/GrokBotMcpAuthority.ts";
 import * as McpRemoteCredentialStore from "./mcp/McpRemoteCredentialStore.ts";
 import * as GrokBotOrchestratorService from "./grokBot/GrokBotOrchestratorService.ts";
+import * as GrokBotSetupService from "./grokBot/GrokBotSetupService.ts";
 import * as GrokBotThreadService from "./grokBot/GrokBotThreadService.ts";
 import * as GrokBotRoutineService from "./grokBot/GrokBotRoutineService.ts";
 import * as GrokBotMarketplaceService from "./grokBot/GrokBotMarketplaceService.ts";
@@ -573,6 +574,11 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
 
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   GrokBotOrchestratorService.layer.pipe(
+    Layer.provideMerge(
+      GrokBotSetupService.layer.pipe(
+        Layer.provide(ManagedEndpointAddress.layer.pipe(Layer.provide(ServerSecretStore.layer))),
+      ),
+    ),
     Layer.provideMerge(GrokBotService.layer),
     Layer.provide(GrokBotNativeService.layer),
     Layer.provide(layerPullRequestService),

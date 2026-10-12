@@ -90,7 +90,12 @@ export function clientRpcRequiredScopes(
   // Status is a read. Only explicit setup changes the environment's provider.
   // An omitted input still asks for write availability on the setup command.
   if (method === WS_METHODS.grokBotsOrchestratorConfig && input !== undefined) {
-    return decodeBotOrchestrator(input).action === "setup" ? [AuthSettingsWriteScope] : [];
+    const action = decodeBotOrchestrator(input).action;
+    return action === "send_setup_prompt"
+      ? [AuthSettingsWriteScope, AuthOrchestrationOperateScope]
+      : action === "setup"
+        ? [AuthSettingsWriteScope]
+        : [];
   }
   if (method === WS_METHODS.gitPreparePullRequestThread && input !== undefined) {
     const payload = decodePrepareThread(input);

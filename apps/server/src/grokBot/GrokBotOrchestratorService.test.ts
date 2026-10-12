@@ -28,6 +28,7 @@ import * as Settings from "../serverSettings.ts";
 import * as Native from "./GrokBotNativeRuntimeService.ts";
 import * as GrokBotService from "./GrokBotService.ts";
 import * as Service from "./GrokBotOrchestratorService.ts";
+import * as GuidedSetup from "./GrokBotSetupService.ts";
 
 const account = "a".repeat(64);
 const decodeConfig = Schema.decodeEffect(GrokBotOrchestratorConfig);
@@ -77,6 +78,9 @@ const fixture = (bridgeInstalled = true, installFails = false) =>
       Layer.provideMerge(registry),
       Layer.provideMerge(
         Layer.mergeAll(
+          Layer.mock(GuidedSetup.GrokBotSetupService)({
+            status: Effect.fail(new GuidedSetup.GrokBotSetupError({ stage: "account" })),
+          }),
           Settings.layerTest(),
           Layer.succeed(Native.GrokBotNativeRuntimeService, native),
           Layer.succeed(Binding.GrokBotManagedBinding, binding),
@@ -236,3 +240,10 @@ it.effect("an optional bridge installation failure does not block native provide
     assert.equal(configured.bridge.installed, false);
   }).pipe(Effect.scoped),
 );
+
+it("requires both settings and orchestration permissions to send setup", () => {
+  assert.deepEqual(
+    clientRpcRequiredScopes(WS_METHODS.grokBotsOrchestratorConfig, { action: "send_setup_prompt" }),
+    [AuthSettingsWriteScope, AuthOrchestrationOperateScope],
+  );
+});

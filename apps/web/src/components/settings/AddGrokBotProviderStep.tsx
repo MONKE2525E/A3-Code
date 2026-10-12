@@ -159,8 +159,15 @@ export function AddGrokBotProviderStep({
           {error}
         </p>
       ) : null}
-      {stage.kind === "ready" && skillSetupPrompt !== undefined ? (
-        <GrokBotSkillSetupPanel prompt={skillSetupPrompt} />
+      {(stage.kind === "ready" || stage.kind === "endpoint") &&
+      (skillSetupPrompt !== undefined || activeConfig?.setupStatus !== undefined) ? (
+        <GrokBotSkillSetupPanel
+          environmentId={environmentId}
+          prompt={skillSetupPrompt}
+          setupStatus={activeConfig?.setupStatus}
+          refresh={config.refresh}
+          refreshing={config.isPending}
+        />
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
         {stage.kind === "install" ? (
