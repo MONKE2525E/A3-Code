@@ -229,7 +229,11 @@ function GrokBotSetupStatuses({
   const items = [
     {
       ...grokBotCliCopy(bridge),
-      status: bridge.installed ? "Ready" : nativeSignedIn ? "Optional" : "Needs attention",
+      status: bridge.installed
+        ? "Ready"
+        : bridge.nativeAvailable !== undefined
+          ? "Optional"
+          : "Needs attention",
     },
     {
       ...grokBotAccountCopy({ sessionPresent: nativeSignedIn }),

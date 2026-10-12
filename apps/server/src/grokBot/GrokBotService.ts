@@ -471,11 +471,12 @@ const make = Effect.gen(function* () {
   const managedCli = path.join(root, "node_modules", "grok-bot-cli", "dist", "bin", "gbot.mjs");
   const preferencesPath = path.join(config.stateDir, "grok-bots.json");
   const appData =
-    platform === "win32"
+    env.T3CODE_GROK_BOT_APP_DATA_DIR?.trim() ||
+    (platform === "win32"
       ? path.join(env.APPDATA ?? path.join(home, "AppData", "Roaming"), "Grok Bot")
       : platform === "darwin"
         ? path.join(home, "Library", "Application Support", "Grok Bot")
-        : path.join(env.XDG_CONFIG_HOME ?? path.join(home, ".config"), "Grok Bot");
+        : path.join(env.XDG_CONFIG_HOME ?? path.join(home, ".config"), "Grok Bot"));
   const storageError = () => new GrokBotError({ reason: "storage_failed" });
   const invalidResponse = () => new GrokBotError({ reason: "invalid_response" });
   const load = Effect.gen(function* () {
