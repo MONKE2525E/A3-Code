@@ -25,6 +25,7 @@ import {
   grokBotTerminalHint,
 } from "./grokBotSetupFlow";
 import { grokBotFailureMessage } from "./grokBotPresentation";
+import { GrokBotSetupAuthorize } from "./GrokBotSetupAuthorize";
 
 function CopyField({ label, value }: { readonly label: string; readonly value: string }) {
   const [copied, setCopied] = useState(false);
@@ -132,6 +133,15 @@ export function GrokBotSkillSetupPanel({
             >
               Open authorization page
             </a>
+          ) : null}
+          {setupStatus.phase === "awaiting_authorization" &&
+          setupStatus.connectorServerId !== undefined ? (
+            <GrokBotSetupAuthorize
+              key={`${environmentId}:${setupStatus.connectorServerId}`}
+              environmentId={environmentId}
+              serverId={setupStatus.connectorServerId}
+              refresh={refresh}
+            />
           ) : null}
           {grokBotSetupShowsTerminal(setupStatus) && setupStatus.terminalCommand ? (
             <>

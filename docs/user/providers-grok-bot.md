@@ -5,8 +5,8 @@ GrokBot uses the account signed in to the GrokBot desktop app on the computer ho
 1. Sign in to the GrokBot desktop app and choose your primary bot there. T3 sends setup to the bot marked with the star.
 2. Enable T3 Connect for this environment in **Settings → Connections**. Sign in and publish the environment if prompted. Each T3 installation needs its own connection.
 3. In **Settings → Providers**, add or select GrokBot and click **Send setup prompt**. T3 configures the provider and installs its optional CLI bridge if needed. The prompt appears in your primary bot's normal chat.
-4. The bot installs the shared T3 skill and connects the account-wide T3 MCP connector. Open the authorization link it returns and approve the access you want it to have. Choose access that allows orchestration; read-only access cannot finish setup.
-5. If the authorization page asks for a pairing code, run the command shown in setup on the **hosting computer**, then enter the resulting code on that page. The command targets this T3 installation's data directory. Do not paste the code into the bot chat.
+4. The bot installs the shared T3 skill and connects the account-wide T3 MCP connector. Click **Authorize T3 connection** in setup, or open the authorization link the bot returns, and approve the access you want it to have. Choose access that allows orchestration; read-only access cannot finish setup.
+5. If the authorization page asks for a pairing code, run the command shown in setup on the **hosting computer**, then enter the resulting code on that page. The command targets this T3 installation's data directory and uses the standard scopes. Do not add restrictive scope flags or paste the code into the bot chat. A failed approval consumes the code; run the command again to create a fresh one.
 
 Setup completes when the bot calls back through the authorized T3 MCP connection with the current setup challenge. A chat reply saying “done” does not complete the check. The setup button disappears after that check passes. The shared skill applies to every bot in the account; it keeps temporary managed-turn credentials out of saved instructions.
 

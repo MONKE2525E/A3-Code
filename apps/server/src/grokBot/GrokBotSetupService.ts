@@ -14,6 +14,7 @@ import * as Endpoint from "../cloud/ManagedEndpointAddress.ts";
 import { resolveHostCliCommand } from "../cli/invocation.ts";
 import * as Binding from "../orchestration-v2/Adapters/GrokBotManagedBinding.ts";
 import * as Native from "./GrokBotNativeService.ts";
+import * as Runtime from "./GrokBotNativeRuntimeService.ts";
 import * as Bots from "./GrokBotService.ts";
 
 const Settings = Schema.Struct({
@@ -36,6 +37,19 @@ const decodeSaved = Schema.decodeUnknownEffect(Schema.fromJsonString(Saved));
 const encodeSaved = Schema.encodeEffect(Schema.fromJsonString(Saved));
 const decodeSettings = Schema.decodeUnknownEffect(Settings);
 const decodeRoster = Schema.decodeUnknownEffect(Roster);
+const decodeConnectors = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    servers: Schema.optionalKey(
+      Schema.Array(
+        Schema.Struct({
+          id: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+          url: Schema.optionalKey(Schema.String),
+          userHasAccessToken: Schema.optionalKey(Schema.Boolean),
+        }),
+      ),
+    ),
+  }),
+);
 const SETUP_TIMEOUT_MS = 15 * 60_000;
 
 /** Only accept a same-environment authorization link after this setup's native user-message echo. */
@@ -97,6 +111,7 @@ export class GrokBotSetupService extends Context.Service<
 
 const make = Effect.gen(function* () {
   const native = yield* Native.GrokBotNativeService;
+  const runtime = yield* Runtime.GrokBotNativeRuntimeService;
   const bots = yield* Bots.GrokBotService;
   const endpoint = yield* Endpoint.ManagedEndpointAddress;
   const fs = yield* FileSystem.FileSystem;
@@ -234,8 +249,27 @@ const make = Effect.gen(function* () {
       saved.nonce,
       saved.endpoint,
     );
-    if (!authorizationUrl || authorizationUrl === saved.status.authorizationUrl)
-      return snapshot.view;
+    if (!authorizationUrl) {
+      const connectors = yield* native
+        .readMcp(value.binding, { method: "GetAvailableMcpServers", input: {} })
+        .pipe(Effect.flatMap(decodeConnectors), Effect.option);
+      if ((yield* accountBinding) !== value.binding)
+        return yield* new GrokBotSetupError({ stage: "account" });
+      const connector =
+        connectors._tag === "Some"
+          ? connectors.value.servers?.find(
+              (server) => server.url === saved.endpoint && server.userHasAccessToken !== true,
+            )
+          : undefined;
+      return connector
+        ? {
+            ...snapshot.view,
+            phase: "awaiting_authorization" as const,
+            connectorServerId: connector.id,
+          }
+        : snapshot.view;
+    }
+    if (authorizationUrl === saved.status.authorizationUrl) return snapshot.view;
     return yield* lock.withPermits(1)(
       Effect.gen(function* () {
         const latest = yield* read;
@@ -290,24 +324,14 @@ const make = Effect.gen(function* () {
           "Reply in this normal conversation with what completed or the exact step needing my help. Leave other skills, bots, connectors, and sharing unchanged.",
         ].join("\n\n");
         yield* Effect.gen(function* () {
-          if (!(yield* bots.status).installed) {
-            yield* lock.withPermits(1)(
-              Effect.gen(function* () {
-                const latest = yield* read;
-                if (latest?.nonce !== nonce) return;
-                latest.status = {
-                  ...latest.status,
-                  phase: "failed",
-                  error:
-                    "The setup sender needs the CLI bridge, and automatic installation did not finish. Use Set up CLI bridge, then retry setup.",
-                  updatedAtMs: yield* Clock.currentTimeMillis,
-                };
-                yield* write(latest);
-              }),
-            );
-            return;
-          }
-          yield* bots.send({ botId: value.bot!.id, message: prompt });
+          yield* runtime.startTurn({
+            binding: value.binding,
+            botId: value.bot!.id,
+            sessionId: "",
+            messageId: `t3-setup-${nonce}`,
+            sentAtMs: now,
+            text: prompt,
+          });
           yield* lock.withPermits(1)(
             Effect.gen(function* () {
               const latest = yield* read;

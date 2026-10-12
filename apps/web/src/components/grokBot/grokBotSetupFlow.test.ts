@@ -5,6 +5,7 @@ import {
   grokBotSetupShowsTerminal,
   grokBotSetupView,
   grokBotTerminalHint,
+  resolveGrokBotOAuthRedirect,
 } from "./grokBotSetupFlow";
 
 const status = (phase: Parameters<typeof grokBotSetupView>[0]["phase"], complete = false) => ({
@@ -52,5 +53,24 @@ describe("grokBotSetupView", () => {
   it("identifies generated PowerShell commands", () => {
     expect(grokBotTerminalHint('& "C:\\a b\\t3.exe" x')).toContain("PowerShell");
     expect(grokBotTerminalHint("t3 x")).not.toContain("PowerShell");
+  });
+});
+
+describe("resolveGrokBotOAuthRedirect", () => {
+  it("never passes the Electron app origin", () => {
+    expect(resolveGrokBotOAuthRedirect("t3code://app", "http://127.0.0.1:3773/")).toBe(
+      "http://127.0.0.1:3773/settings/marketplace?grokBotOAuth=1",
+    );
+  });
+  it("prefers the destination environment over a different page origin", () => {
+    expect(resolveGrokBotOAuthRedirect("https://app.t3.codes", "https://box.ts.net")).toBe(
+      "https://box.ts.net/settings/marketplace?grokBotOAuth=1",
+    );
+  });
+  it("falls back to the page origin and rejects non-web origins", () => {
+    expect(resolveGrokBotOAuthRedirect("https://box.ts.net", null)).toBe(
+      "https://box.ts.net/settings/marketplace?grokBotOAuth=1",
+    );
+    expect(resolveGrokBotOAuthRedirect("t3code://app", null)).toBeNull();
   });
 });

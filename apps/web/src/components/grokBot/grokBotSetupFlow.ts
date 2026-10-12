@@ -122,3 +122,29 @@ export function grokBotSetupView(status: GrokBotSetupStatus): GrokBotSetupView {
       };
   }
 }
+
+export const GROK_BOT_OAUTH_PATH = "/settings/marketplace?grokBotOAuth=1";
+
+/**
+ * The OAuth return must be an http(s) page of the environment that owns the pending flow. The
+ * page's own origin is used only when it is that environment; otherwise (Electron's t3code://app,
+ * or a client paired to another host) the environment's HTTP base wins.
+ */
+export function resolveGrokBotOAuthRedirect(
+  pageOrigin: string,
+  environmentHttpBaseUrl: string | null,
+): string | null {
+  const web = (value: string | null) => {
+    if (value === null) return null;
+    try {
+      const url = new URL(value);
+      return url.protocol === "http:" || url.protocol === "https:" ? url.origin : null;
+    } catch {
+      return null;
+    }
+  };
+  const environment = web(environmentHttpBaseUrl);
+  const page = web(pageOrigin);
+  const origin = environment !== null ? environment : page;
+  return origin === null ? null : new URL(GROK_BOT_OAUTH_PATH, origin).href;
+}

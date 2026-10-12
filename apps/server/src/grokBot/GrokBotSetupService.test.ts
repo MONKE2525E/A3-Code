@@ -12,12 +12,19 @@ import * as TestClock from "effect/testing/TestClock";
 import * as Config from "../config.ts";
 import * as Endpoint from "../cloud/ManagedEndpointAddress.ts";
 import * as Native from "./GrokBotNativeService.ts";
+import * as Runtime from "./GrokBotNativeRuntimeService.ts";
 import * as Bots from "./GrokBotService.ts";
 import * as Setup from "./GrokBotSetupService.ts";
 import * as Binding from "../orchestration-v2/Adapters/GrokBotManagedBinding.ts";
 
 const fixtureWith = (
-  options: { installed?: boolean; sendFails?: boolean; conversation?: boolean } = {},
+  options: {
+    installed?: boolean;
+    sendFails?: boolean;
+    conversation?: boolean;
+    connector?: boolean;
+    connectorAuthenticated?: boolean;
+  } = {},
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -45,6 +52,19 @@ const fixtureWith = (
       Layer.provide(
         Layer.mock(Native.GrokBotNativeService)({
           accountBinding: Ref.get(account),
+          readMcp: () =>
+            Effect.succeed({
+              servers: options.connector
+                ? [
+                    { id: 8, url: "https://other.example.test/mcp", userHasAccessToken: false },
+                    {
+                      id: 7,
+                      url: "https://dev.example.test/mcp",
+                      userHasAccessToken: options.connectorAuthenticated ?? false,
+                    },
+                  ]
+                : [],
+            }),
           runtimeRequest: (_binding, method) =>
             Effect.succeed(
               method === "GetGrokBotUserRuntimeSettings"
@@ -70,21 +90,29 @@ const fixtureWith = (
         }),
       ),
       Layer.provide(
+        Layer.mock(Runtime.GrokBotNativeRuntimeService)({
+          startTurn: (input) =>
+            Effect.gen(function* () {
+              sends++;
+              assert.equal(input.botId, "actual-primary");
+              assert.equal(input.sessionId, "");
+              assert.isUndefined(input.mcpConfig);
+              assert.isUndefined(input.taskId);
+              yield* Deferred.succeed(sent, input.text);
+              if (options.sendFails)
+                return yield* new Runtime.NativeRuntimeError({ kind: "uncertain" });
+              return { delivery: "accepted" as const };
+            }),
+        }),
+      ),
+      Layer.provide(
         Layer.mock(Bots.GrokBotService)({
           status: Effect.succeed({
             installed: options.installed ?? true,
             managed: true,
             sessionPresent: true,
           }),
-          send: (input) =>
-            Effect.gen(function* () {
-              sends++;
-              assert.equal(input.botId, "actual-primary");
-              yield* Deferred.succeed(sent, input.message);
-              if (options.sendFails)
-                return yield* new GrokBotError({ reason: "native_unavailable" });
-              return { accepted: true };
-            }),
+          send: () => Effect.die("Setup must not require the desktop gateway"),
           read: () =>
             options.conversation
               ? Effect.map(Deferred.await(sent), (prompt) => ({
@@ -116,7 +144,9 @@ const fixtureWith = (
                       sender: { kind: "bot" as const, id: "actual-primary", name: "Primary" },
                       timestampMs: 1,
                       streaming: false,
-                      text: "https://dev.example.test/oauth/mcp/authorize?state=setup",
+                      text: options.connector
+                        ? "Approve the new connector card."
+                        : "https://dev.example.test/oauth/mcp/authorize?state=setup",
                     },
                   ],
                 }))
@@ -131,6 +161,33 @@ const fixtureWith = (
 const fixture = fixtureWith();
 
 it.layer(NodeServices.layer)("guided GrokBot setup", (it) => {
+  it.effect("offers authorization only for this environment's native connector", () =>
+    Effect.gen(function* () {
+      const f = yield* fixtureWith({ conversation: true, connector: true });
+      yield* f.service.send;
+      yield* Deferred.await(f.persisted);
+      const status = yield* f.service.status;
+      assert.equal(status.phase, "awaiting_authorization");
+      assert.equal(status.connectorServerId, 7);
+      assert.equal(status.authorizationUrl, null);
+      assert.equal(status.complete, false);
+    }),
+  );
+  it.effect("waits for verification after connector authorization", () =>
+    Effect.gen(function* () {
+      const f = yield* fixtureWith({
+        conversation: true,
+        connector: true,
+        connectorAuthenticated: true,
+      });
+      yield* f.service.send;
+      yield* Deferred.await(f.persisted);
+      const status = yield* f.service.status;
+      assert.equal(status.phase, "verifying");
+      assert.equal(status.connectorServerId, undefined);
+      assert.equal(status.complete, false);
+    }),
+  );
   it.effect("finds this setup's OAuth reply through Check again", () =>
     Effect.gen(function* () {
       const f = yield* fixtureWith({ conversation: true });
@@ -145,15 +202,15 @@ it.layer(NodeServices.layer)("guided GrokBot setup", (it) => {
       assert.equal(status.complete, false);
     }),
   );
-  it.effect("reports bridge installation failure without sending a message", () =>
+  it.effect("sends setup directly without an installed CLI bridge", () =>
     Effect.gen(function* () {
       const f = yield* fixtureWith({ installed: false });
       yield* f.service.send;
       yield* Deferred.await(f.persisted);
       const status = yield* f.service.status;
-      assert.equal(status.phase, "failed");
-      assert.include(status.error!, "CLI bridge");
-      assert.equal(f.sends(), 0);
+      assert.equal(status.phase, "verifying");
+      assert.equal(status.error, null);
+      assert.equal(f.sends(), 1);
     }),
   );
   it.effect("reports an unconfirmed native send", () =>
