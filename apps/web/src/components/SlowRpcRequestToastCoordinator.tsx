@@ -34,18 +34,27 @@ function SlowRequestDetails({ requests }: { requests: ReadonlyArray<SlowRpcAckRe
 export function SlowRpcRequestToastCoordinator() {
   const slowRequests = useSlowRpcAckRequests();
   const toastIdRef = useRef<ReturnType<typeof toastManager.add> | null>(null);
+  const dismissedRequestsRef = useRef(new Set<string>());
 
   useEffect(() => {
     if (slowRequests.length === 0) {
+      dismissedRequestsRef.current.clear();
       if (toastIdRef.current !== null) {
         toastManager.close(toastIdRef.current);
         toastIdRef.current = null;
       }
       return;
     }
+    if (slowRequests.every((request) => dismissedRequestsRef.current.has(request.requestId)))
+      return;
 
     const nextToast = {
       data: {
+        dismissOnOutsidePointer: true,
+        onClose: () => {
+          for (const request of slowRequests) dismissedRequestsRef.current.add(request.requestId);
+          toastIdRef.current = null;
+        },
         expandableContent: <SlowRequestDetails requests={slowRequests} />,
         expandableDescriptionTrigger: true,
         expandableLabels: { collapse: "Hide requests", expand: "Show requests" },

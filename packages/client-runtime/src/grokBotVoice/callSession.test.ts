@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import {
   createVoiceCallSession,
   type VoiceSocket,
@@ -95,6 +95,77 @@ const flush = async () => {
 };
 
 describe("work completion and greeting", () => {
+  it("acknowledges slow tools so the call can answer while the action runs, then speaks the result once", async () => {
+    vi.useFakeTimers();
+    const result = deferred<string>();
+    let executions = 0;
+    const h = harness({
+      runTool: () => {
+        executions++;
+        return result.promise;
+      },
+    });
+    try {
+      const { fake } = h.sockets[0]!;
+      configure(fake);
+      const tool = JSON.stringify({
+        type: "response.function_call_arguments.done",
+        call_id: "slow",
+        name: "t3_thread_read",
+        arguments: "{}",
+      });
+      fake.listeners.message(tool);
+      await vi.advanceTimersByTimeAsync(1000);
+      const frames = () => fake.sent.map((frame) => JSON.parse(frame));
+      const receipt = frames().find((frame) => frame.item?.call_id === "slow");
+      expect(JSON.parse(receipt.item.output).status).toBe("running");
+      expect(frames().filter((frame) => frame.type === "response.create")).toHaveLength(1);
+      fake.listeners.message(JSON.stringify({ type: "response.done" }));
+      fake.listeners.message(JSON.stringify({ type: "input_audio_buffer.speech_started" }));
+      fake.listeners.message(JSON.stringify({ type: "input_audio_buffer.speech_stopped" }));
+      fake.listeners.message(tool);
+      expect(executions).toBe(1);
+      h.session.deliverWork("independent", "Another task finished");
+      expect(frames().filter((frame) => frame.item?.name === "work_landed")).toHaveLength(1);
+      fake.listeners.message(JSON.stringify({ type: "response.done" }));
+      result.resolve('{"title":"Found thread"}');
+      await flush();
+      expect(frames().filter((frame) => frame.item?.call_id === "slow")).toHaveLength(1);
+      expect(frames().filter((frame) => frame.item?.name === "work_landed")).toHaveLength(2);
+      expect(JSON.stringify(frames())).toContain("Found thread");
+      expect(executions).toBe(1);
+    } finally {
+      h.session.hangUp();
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops progress timers and late results when a caller hangs up during a slow tool", async () => {
+    vi.useFakeTimers();
+    const result = deferred<string>();
+    const h = harness({ runTool: () => result.promise });
+    try {
+      const { fake } = h.sockets[0]!;
+      configure(fake);
+      fake.listeners.message(
+        JSON.stringify({
+          type: "response.function_call_arguments.done",
+          call_id: "slow",
+          name: "t3_thread_read",
+          arguments: "{}",
+        }),
+      );
+      h.session.hangUp();
+      const count = fake.sent.length;
+      await vi.advanceTimersByTimeAsync(1000);
+      result.resolve("late result");
+      await flush();
+      expect(fake.sent).toHaveLength(count);
+    } finally {
+      h.session.hangUp();
+      vi.useRealTimers();
+    }
+  });
   it("waits for an active response before speaking a tool receipt, then delivers completed work", async () => {
     const h = harness();
     const { fake } = h.sockets[0]!;
@@ -670,7 +741,7 @@ describe("call-owned reconnect queues", () => {
     await attached.promise;
     const next = h.sockets[1]!.fake;
     next.listeners.message(ready);
-    expect(frames(next)[0].session.instructions).toBe("be brief");
+    expect(frames(next)[0].session.instructions).toMatch(/^be brief\nA tool result/);
     next.listeners.message(JSON.stringify({ type: "session.updated" }));
     next.listeners.message(JSON.stringify({ type: "session.updated" }));
     expect(frames(next).filter((f) => f.type === "response.create")).toEqual([

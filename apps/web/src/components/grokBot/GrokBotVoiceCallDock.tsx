@@ -29,12 +29,12 @@ function LiveCallDock(props: {
   const [open, setOpen] = useState(false);
   const { state } = call;
 
-  // The shell reserves this footer below the route, so the composer and tool panels shrink with it.
+  // On phones the shell reserves a header row, above the area resized by the keyboard.
   return (
     <div
       role="region"
       aria-label="Active voice call"
-      className="flex min-w-0 shrink-0 justify-end border-t border-border bg-background px-2 pb-safe"
+      className="order-first flex min-w-0 shrink-0 justify-end border-b border-border bg-background px-2 sm:order-last sm:border-t sm:border-b-0 sm:pb-safe"
     >
       <div className="flex min-h-11 min-w-0 w-full items-center gap-2 py-1 sm:min-h-0 sm:w-auto sm:max-w-full sm:gap-1 [-webkit-app-region:no-drag]">
         <Popover open={open} onOpenChange={setOpen}>
@@ -63,7 +63,7 @@ function LiveCallDock(props: {
               </span>
             </span>
           </PopoverTrigger>
-          <PopoverPopup align="end" side="top" width="sm">
+          <PopoverPopup align="end" width="sm">
             <div className="flex min-w-0 flex-col gap-3">
               <div className="flex min-w-0 flex-col gap-1">
                 <PopoverTitle className="break-words">Call {call.botName}</PopoverTitle>

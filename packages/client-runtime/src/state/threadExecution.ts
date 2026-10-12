@@ -16,6 +16,8 @@ import {
   type OrchestrationV2ThreadProjection,
   orchestrationV2RunWorkStartedAt,
   type ThreadId,
+  type ProviderInstanceId,
+  type OrchestrationV2ProviderSession,
 } from "@t3tools/contracts";
 import {
   backgroundWorkHoldsCompletion,
@@ -34,6 +36,23 @@ import { formatSubagentDisplayTitle } from "./subagentDisplay.ts";
 
 const ACTIVITY_RUN_STATUSES = new Set(["preparing", "starting", "running", "waiting"]);
 const INTERRUPTIBLE_RUN_STATUSES = new Set(["preparing", "starting", "running"]);
+
+/** Session updates replace rows in place, so array position does not establish recency. */
+export function deriveLatestProviderSessionError(
+  sessions: ReadonlyArray<
+    Pick<OrchestrationV2ProviderSession, "id" | "providerInstanceId" | "updatedAt" | "lastError">
+  >,
+  instanceId: ProviderInstanceId,
+): string | null {
+  let latest: (typeof sessions)[number] | undefined;
+  for (const session of sessions) {
+    if (session.providerInstanceId !== instanceId) continue;
+    const at = DateTime.toEpochMillis(session.updatedAt);
+    const previous = latest === undefined ? -Infinity : DateTime.toEpochMillis(latest.updatedAt);
+    if (at > previous || (at === previous && session.id > latest!.id)) latest = session;
+  }
+  return latest?.lastError ?? null;
+}
 
 function latestMatchingRun(
   projection: OrchestrationV2ThreadProjection,
@@ -69,13 +88,13 @@ function summarizeThreadRun(
 function presentedUsageLimitRun(
   projection: OrchestrationV2ThreadProjection,
 ): OrchestrationV2ThreadProjection["runs"][number] | null {
-  const providerSession = projection.providerSessions.findLast(
-    (session) => session.providerInstanceId === projection.thread.providerInstanceId,
-  );
   return usageLimitRunPresentedAsLatest(
     projection.runs,
     projection.turnItems,
-    providerSession?.lastError ?? null,
+    deriveLatestProviderSessionError(
+      projection.providerSessions,
+      projection.thread.providerInstanceId,
+    ),
   );
 }
 
@@ -271,7 +290,10 @@ export function deriveThreadRuntime(
     providerName: providerSession?.driver ?? null,
     ...threadErrorSummary(
       latestRootProviderFailure(latestRunProjection, projection.turnItems),
-      providerSession?.lastError ?? null,
+      deriveLatestProviderSessionError(
+        projection.providerSessions,
+        projection.thread.providerInstanceId,
+      ),
     ),
     updatedAt: DateTime.formatIso(projection.updatedAt),
   };

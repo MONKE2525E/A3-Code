@@ -129,6 +129,9 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
   const deliveredWork = new Set<string>();
   const seenTools = new Set<string>();
   const pendingTools = new Set<string>();
+  const acknowledgedTools = new Set<string>();
+  const toolProgressTimers = new Set<unknown>();
+  let toolResultSerial = 0;
   const receipts = new Map<string, string>();
   const sentReceipts = new Set<string>();
   const chat = new Map<string, { text: string; atMs: number }>();
@@ -155,7 +158,7 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
     if (
       !configured ||
       deliveryPaused ||
-      pendingTools.size > 0 ||
+      [...pendingTools].some((id) => !acknowledgedTools.has(id)) ||
       receipts.size > 0 ||
       responseInFlight ||
       callerSpeaking ||
@@ -239,6 +242,8 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
     if (phase === "closed") return;
     generation += 1;
     work.clear();
+    for (const timer of toolProgressTimers) timers.clearTimeout(timer);
+    toolProgressTimers.clear();
     receipts.clear();
     chat.clear();
     clearTimers();
@@ -284,7 +289,7 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
         if (phase !== "live") {
           next.send(
             sessionUpdateFrame({
-              instructions: input.instructions,
+              instructions: `${input.instructions}\nA tool result with status running is an acknowledgement, not completion. Keep answering the caller while it runs. The completed result arrives automatically; do not repeat the operation just to check its status.`,
               tools: input.tools,
               voice: input.voice,
               reconnecting,
@@ -436,13 +441,51 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
     );
   };
 
+  const enqueueWork = (requestId: string, output: string) => {
+    if (phase === "closed" || deliveredWork.has(requestId) || work.has(requestId)) return;
+    if (requestId.length > 512) {
+      overflowCount += 1;
+      flushWork();
+      return;
+    }
+    output = boundedOutput(output);
+    if (work.size >= MAX_QUEUED_RESULTS || queuedWorkBytes + bytes(output) > MAX_QUEUED_BYTES) {
+      remember(deliveredWork, requestId);
+      overflowCount += 1;
+    } else {
+      work.set(requestId, output);
+      queuedWorkBytes += bytes(output);
+    }
+    flushWork();
+  };
+
   const runTool = async (call: { callId: string; name: string; argumentsJson: string }) => {
+    let acknowledged = false;
+    // Complete the realtime function receipt promptly, without cancelling or reissuing its action.
+    const progressTimer = timers.setTimeout(() => {
+      toolProgressTimers.delete(progressTimer);
+      if (phase === "closed") return;
+      acknowledged = true;
+      acknowledgedTools.add(call.callId);
+      const progress = JSON.stringify({
+        status: "running",
+        tool: call.name,
+        message:
+          "This operation is still running. Its result will arrive automatically. Keep talking with the caller; do not repeat this operation or claim it has finished.",
+      });
+      receipts.set(call.callId, progress);
+      queuedReceiptBytes += bytes(progress);
+      flushResponses();
+    }, 1000);
+    toolProgressTimers.add(progressTimer);
     let output: string;
     try {
       output = await ports.runTool(call);
     } catch {
       output = JSON.stringify({ error: "tool_failed" });
     }
+    timers.clearTimeout(progressTimer);
+    toolProgressTimers.delete(progressTimer);
     // Socket generations share the call's tool identity; only ending the call invalidates it.
     if (phase === "closed") return;
     output = boundedOutput(output);
@@ -452,10 +495,22 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
     if (queuedReceiptBytes + bytes(output) > MAX_QUEUED_BYTES) {
       output = JSON.stringify({ status: "landed", updates: [availableInT3] });
     }
+    pendingTools.delete(call.callId);
+    acknowledgedTools.delete(call.callId);
+    input.onToolResult?.(call.callId);
+    if (acknowledged) {
+      enqueueWork(
+        `tool-result-${++toolResultSerial}`,
+        JSON.stringify({
+          tool: call.name,
+          toolCallId: call.callId,
+          output,
+        }),
+      );
+      return;
+    }
     receipts.set(call.callId, output);
     queuedReceiptBytes += bytes(output);
-    pendingTools.delete(call.callId);
-    input.onToolResult?.(call.callId);
     flushResponses();
   };
 
@@ -473,23 +528,7 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
       if (!value) flushWork();
     },
     /** Completion belongs to this call, and may wait through a response or reconnect. */
-    deliverWork: (requestId: string, output: string) => {
-      if (phase === "closed" || deliveredWork.has(requestId) || work.has(requestId)) return;
-      if (requestId.length > 512) {
-        overflowCount += 1;
-        flushWork();
-        return;
-      }
-      output = boundedOutput(output);
-      if (work.size >= MAX_QUEUED_RESULTS || queuedWorkBytes + bytes(output) > MAX_QUEUED_BYTES) {
-        remember(deliveredWork, requestId);
-        overflowCount += 1;
-      } else {
-        work.set(requestId, output);
-        queuedWorkBytes += bytes(output);
-      }
-      flushWork();
-    },
+    deliverWork: enqueueWork,
     deliverChat: (message: {
       readonly id: string;
       readonly text: string;

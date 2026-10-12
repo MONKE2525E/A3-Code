@@ -37,6 +37,7 @@ export type ThreadToastData = {
   leadingIcon?: ReactNode;
   tooltipStyle?: boolean;
   onClose?: (() => void) | undefined;
+  dismissOnOutsidePointer?: boolean;
   dismissAfterVisibleMs?: number;
   hideCopyButton?: boolean;
   additionalActions?: ReadonlyArray<{
@@ -536,6 +537,24 @@ function Toasts({ position }: { position: ToastPosition }) {
   const visibleToastLayout = buildVisibleToastLayout(visibleToasts);
 
   useEffect(() => {
+    const dismissOutside = (event: PointerEvent) => {
+      if (!(event.target instanceof Element)) return;
+      const targetId = event.target.closest("[data-toast-id]")?.getAttribute("data-toast-id");
+      for (const toast of visibleToasts) {
+        if (
+          toast.data?.dismissOnOutsidePointer &&
+          targetId !== toast.id &&
+          toast.transitionStatus !== "ending"
+        ) {
+          handleToastDismissClick(toastManager, toast.id, toast.data.onClose);
+        }
+      }
+    };
+    document.addEventListener("pointerdown", dismissOutside);
+    return () => document.removeEventListener("pointerdown", dismissOutside);
+  }, [visibleToasts]);
+
+  useEffect(() => {
     const activeToastIds = new Set(toasts.map((toast) => toast.id));
     for (const toastId of threadToastVisibleTimeoutRemainingMs.keys()) {
       if (!activeToastIds.has(toastId)) {
@@ -548,7 +567,7 @@ function Toasts({ position }: { position: ToastPosition }) {
     <Toast.Portal data-slot="toast-portal">
       <Toast.Viewport
         className={cn(
-          "fixed z-100 mx-auto flex w-[calc(100%-var(--toast-inset)*2)] max-w-90 [--toast-header-offset:var(--workspace-topbar-height)] [--toast-inset:--spacing(4)] sm:[--toast-inset:--spacing(8)]",
+          "fixed z-100 mx-auto flex w-[calc(100%_-_var(--toast-inset)*2)] max-w-90 [--toast-header-offset:var(--workspace-topbar-height)] [--toast-inset:--spacing(4)] sm:[--toast-inset:--spacing(8)]",
           // Vertical positioning
           "data-[position*=top]:top-[calc(var(--toast-inset)+var(--toast-header-offset))]",
           "data-[position*=bottom]:bottom-(--toast-inset)",
@@ -629,6 +648,7 @@ function Toasts({ position }: { position: ToastPosition }) {
                 "data-expanded:data-ending-style:data-[swipe-direction=down]:transform-[translateY(calc(var(--toast-swipe-movement-y)+100%+var(--toast-inset)))]",
               )}
               data-position={position}
+              data-toast-id={toast.id}
               key={toast.id}
               style={
                 {
