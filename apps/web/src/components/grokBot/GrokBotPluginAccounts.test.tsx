@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 const mocks = vi.hoisted(() => ({
   status: "needsAuth" as "connected" | "needsAuth",
+  httpBaseUrl: "http://100.64.0.2:3773" as string | null,
   refresh: vi.fn(),
   authenticate: vi.fn(),
   complete: vi.fn(),
@@ -18,6 +19,7 @@ vi.mock("~/state/grokBots", () => ({
   grokBotsPluginCompleteAuth: { label: "complete" },
   grokBotsPluginConnectionsQuery: () => null,
 }));
+vi.mock("~/state/environments", () => ({ useEnvironmentHttpBaseUrl: () => mocks.httpBaseUrl }));
 vi.mock("~/state/query", () => ({
   useEnvironmentQuery: () => ({
     data: {
@@ -95,6 +97,7 @@ describe("GrokBotPluginAccounts sign-in", () => {
     vi.useFakeTimers();
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     mocks.status = "needsAuth";
+    mocks.httpBaseUrl = "http://100.64.0.2:3773";
     mocks.refresh.mockReset();
     mocks.authenticate.mockReset();
     mocks.complete.mockReset();
@@ -134,6 +137,37 @@ describe("GrokBotPluginAccounts sign-in", () => {
     expect(bodyText(renderer)).toContain("Connector connected.");
     expect(bodyText(renderer)).not.toContain("Finish signing in");
     expect(localStorage.getItem(`${PLUGIN_AUTH_STORAGE_PREFIX}flow.tgd`)).toBeNull();
+  });
+
+  it("returns sign-in to the environment's web address, not the page that started it", async () => {
+    // Electron's page origin is not a web address the provider can redirect to.
+    vi.stubGlobal("location", new URL("t3code://app/settings/marketplace"));
+    mocks.authenticate.mockResolvedValue({
+      _tag: "Success",
+      value: { authenticated: false, authorizationUrl, stateId: "flow.tgd", loopbackPort: null },
+    });
+    renderer = await render();
+    await clickAuthenticate(renderer);
+
+    expect(mocks.authenticate).toHaveBeenCalledWith({
+      environmentId,
+      input: {
+        serverId: 7,
+        accountKey: "work",
+        redirectUri: "http://100.64.0.2:3773/settings/marketplace?grokBotOAuth=1",
+      },
+    });
+  });
+
+  it("does not open a sign-in tab when the environment has no web address", async () => {
+    vi.stubGlobal("location", new URL("t3code://app/settings/marketplace"));
+    mocks.httpBaseUrl = null;
+    renderer = await render();
+    await clickAuthenticate(renderer);
+
+    expect(mocks.authenticate).not.toHaveBeenCalled();
+    expect(window.open).not.toHaveBeenCalled();
+    expect(renderer.root.findAllByType("p").map(textOf).join("\n")).toContain("no web address");
   });
 
   it("ends with a retry message when the sign-in tab closes before the account connects", async () => {

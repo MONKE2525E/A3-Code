@@ -666,6 +666,9 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
         ...(item.type === "assistant_message" && item.grokBotVoiceCallId !== undefined
           ? { grokBotVoiceCallId: item.grokBotVoiceCallId }
           : {}),
+        ...(item.type === "assistant_message" && item.grokBotConnectorCard !== undefined
+          ? { grokBotConnectorCard: item.grokBotConnectorCard }
+          : {}),
         id: item.messageId,
         role: item.type === "user_message" ? "user" : "assistant",
         text: item.text,

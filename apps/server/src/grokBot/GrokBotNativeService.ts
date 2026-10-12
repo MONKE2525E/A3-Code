@@ -20,6 +20,8 @@ import * as NodeCrypto from "node:crypto";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Native attachment URLs always name POSIX paths, independently of the host filesystem.
 import * as NodePath from "node:path";
 import * as Context from "effect/Context";
+import * as Cache from "effect/Cache";
+import * as Exit from "effect/Exit";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -41,6 +43,20 @@ import { grokBotUsageLimits } from "./grokBotUsageLimits.ts";
 
 const OptionalString = Schema.optionalKey(Schema.String);
 const OptionalBoolean = Schema.optionalKey(Schema.Boolean);
+const decodeEgressTeam = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    sandLocalEgressControls: Schema.optionalKey(Schema.Struct({ allowed: OptionalBoolean })),
+  }),
+);
+const decodeEgressPolicy = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    restricted: OptionalBoolean,
+    allowedDomains: Schema.optionalKey(Schema.Array(Schema.String)),
+    allowedTcpDestinations: Schema.optionalKey(
+      Schema.Array(Schema.Struct({ cidr: Schema.String, port: Schema.Number })),
+    ),
+  }),
+);
 const Millis = Schema.Union([Schema.String, Schema.Number]);
 const encodeUploadIdentity = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 const NativeAgent = Schema.Struct({
@@ -134,6 +150,10 @@ export class NativeReadError extends Schema.TaggedError<NativeReadError>()(
 }
 
 const isNativeReadError = Schema.is(NativeReadError);
+export const isTransientEgressRefreshError = (error: unknown): boolean =>
+  isNativeReadError(error) &&
+  error.stage === "request" &&
+  (error.status === undefined || [429, 502, 503, 504].includes(error.status));
 export class NativeSignedOutError extends Schema.TaggedError<NativeSignedOutError>()(
   "GrokBotNativeSignedOutError",
   {},
@@ -145,6 +165,11 @@ export class NativeSignedOutError extends Schema.TaggedError<NativeSignedOutErro
 const isNativeSignedOutError = Schema.is(NativeSignedOutError);
 
 export type NativeRuntimeMethod =
+  | "ListSandMachines"
+  | "UpdateSandMachineLocalToolPermission"
+  | "UpdateSandMachineLabel"
+  | "GetGrokBotEgressPolicy"
+  | "GetTeamAdminSettings"
   | "GetGrokBotUserRuntimeSettings"
   | "UpdateGrokBotUserRuntimeSettings"
   | "ListGrokBotAgentAutomations"
@@ -337,6 +362,23 @@ type NativeBotProfile = {
 export class GrokBotNativeService extends Context.Service<
   GrokBotNativeService,
   {
+    /** Ephemeral host routing credentials; never cross a client transport or persist them. */
+    readonly egressConnection: (binding: string) => Effect.Effect<
+      {
+        readonly url: string;
+        readonly headers: Record<string, string>;
+        readonly allowed: boolean;
+        readonly policy: {
+          readonly restricted: boolean;
+          readonly allowedDomains: readonly string[];
+          readonly allowedTcpDestinations: readonly {
+            readonly cidr: string;
+            readonly port: number;
+          }[];
+        };
+      },
+      NativeReadError | NativeSignedOutError
+    >;
     readonly receiveAttachments: (
       input: NativeReceivedAttachmentsInput,
     ) => Effect.Effect<readonly ChatAttachment[], NativeReadError | NativeSignedOutError>;
@@ -516,7 +558,7 @@ const make = Effect.gen(function* () {
       );
     return result.stdout.trimEnd();
   });
-  const decrypt = Effect.fnUntraced(function* (wrapped: string) {
+  const decryptUncached = Effect.fnUntraced(function* (wrapped: string) {
     let value = wrapped;
     if (value.startsWith("scoped:v1:")) {
       const split = value.indexOf(":", "scoped:v1:".length);
@@ -604,6 +646,13 @@ const make = Effect.gen(function* () {
     });
   });
   // Read only the selected account. Never refresh tokens, migrate the store, or expose profiles.
+  // Cache only immutable ciphertext decryptions. Every session still rereads the selected account
+  // and encrypted values, so sign-out, account changes and token rotation take effect immediately.
+  const decrypted = yield* Cache.makeWith(decryptUncached, {
+    capacity: 16,
+    timeToLive: (exit) => (Exit.isSuccess(exit) ? "1 minute" : 0),
+  });
+  const decrypt = (wrapped: string) => Cache.get(decrypted, wrapped);
   const session = Effect.gen(function* () {
     const secrets = yield* decodeSecrets(
       yield* fs.readFileString(path.join(appData, "sand-secrets.json")),
@@ -630,9 +679,17 @@ const make = Effect.gen(function* () {
     }
     if (!token) return yield* Effect.fail(new NativeReadError({ stage: "session" }));
     const accessToken = yield* decrypt(token);
-    const teamId = team === undefined ? 0 : Number(yield* decrypt(team));
+    const machineId =
+      typeof secrets["cursor-machine-id"] === "string"
+        ? yield* decrypt(secrets["cursor-machine-id"]).pipe(Effect.orElseSucceed(() => undefined))
+        : undefined;
+    const teamValue = team === undefined ? undefined : yield* decrypt(team);
+    const teamId = teamValue === undefined ? 0 : Number(teamValue);
+    if (teamValue !== undefined && (!/^\d+$/.test(teamValue) || !Number.isSafeInteger(teamId)))
+      return yield* new NativeReadError({ stage: "session" });
     return {
       accessToken,
+      ...(machineId === undefined ? {} : { machineId }),
       ...(accountSlot === undefined ? {} : { accountSlot }),
       ...(Number.isSafeInteger(teamId) && teamId > 0 ? { teamId } : {}),
     };
@@ -644,7 +701,7 @@ const make = Effect.gen(function* () {
     ),
   );
   const request = Effect.fnUntraced(function* (
-    auth: { readonly accessToken: string; readonly teamId?: number },
+    auth: { readonly accessToken: string; readonly teamId?: number; readonly machineId?: string },
     method:
       | "ListGrokBotAgents"
       | "ListGrokBotAgentStatuses"
@@ -673,6 +730,7 @@ const make = Effect.gen(function* () {
         "x-cursor-client-os": platform,
         "x-sand-box-namespace": "prod",
         "x-ghost-mode": "true",
+        ...(auth.machineId === undefined ? {} : { "x-cursor-machine-id": auth.machineId }),
         ...(auth.teamId === undefined ? {} : { "x-cursor-team-id": String(auth.teamId) }),
       }),
       HttpClientRequest.bearerToken(auth.accessToken),
@@ -695,6 +753,13 @@ const make = Effect.gen(function* () {
       Effect.mapError((cause) =>
         isNativeReadError(cause) ? cause : new NativeReadError({ stage: "request" }),
       ),
+      Effect.retry({
+        times: 1,
+        while: (error) =>
+          /^(Get|List|Read)/.test(method) &&
+          error.stage === "request" &&
+          (error.status === undefined || [429, 502, 503, 504].includes(error.status)),
+      }),
     );
   });
   const statuses = (
@@ -816,7 +881,19 @@ const make = Effect.gen(function* () {
     method: NativeRuntimeMethod,
     input: object,
   ) {
-    const result = yield* request(yield* boundSession(binding), method, input);
+    const result = yield* request(
+      yield* boundSession(binding),
+      method,
+      input,
+      [
+        "ListSandMachines",
+        "UpdateSandMachineLocalToolPermission",
+        "UpdateSandMachineLabel",
+        "GetTeamAdminSettings",
+      ].includes(method)
+        ? "DashboardService"
+        : "GrokBotService",
+    );
     yield* boundSession(binding).pipe(
       Effect.catchTags({
         GrokBotNativeReadError: () => Effect.fail(new NativeReadError({ stage: "response" })),
@@ -1278,6 +1355,48 @@ const make = Effect.gen(function* () {
     authorization: "Bearer " + connection.token,
     ...(connection.networkToken ? { "x-anyrun-network-token": connection.networkToken } : {}),
   });
+  const egressConnection = Effect.fnUntraced(function* (binding: string) {
+    const auth = yield* boundSession(binding);
+    const team =
+      auth.teamId === undefined
+        ? {}
+        : yield* request(auth, "GetTeamAdminSettings", { teamId: auth.teamId }, "DashboardService");
+    const member = yield* decodeEgressTeam(team).pipe(
+      Effect.mapError(() => new NativeReadError({ stage: "response" })),
+    );
+    const rawPolicy = yield* request(auth, "GetGrokBotEgressPolicy", {}).pipe(
+      Effect.catchTags({
+        GrokBotNativeReadError: (error) =>
+          // The installed personal-account desktop predates this policy RPC. A missing route is its
+          // legacy unrestricted mode; team-policy or authentication failures must never use it.
+          error.status === 404 && auth.teamId === undefined
+            ? Effect.succeed({ restricted: false })
+            : Effect.fail(error),
+      }),
+    );
+    const decoded = yield* decodeEgressPolicy(rawPolicy).pipe(
+      Effect.mapError(() => new NativeReadError({ stage: "response" })),
+    );
+    const connection = yield* describeGateway(binding);
+    const url = new URL(connection.baseUrl);
+    const labels = url.hostname.split(".");
+    if (/-\d+$/.test(labels[0] ?? "")) {
+      labels[0] = labels[0]!.replace(/-\d+$/, "-8790");
+      url.hostname = labels.join(".");
+    } else url.port = "8790";
+    url.protocol = "wss:";
+    url.pathname = "/";
+    return {
+      url: url.href,
+      headers: gatewayHeaders(connection),
+      allowed: member.sandLocalEgressControls?.allowed !== false,
+      policy: {
+        restricted: decoded.restricted ?? false,
+        allowedDomains: decoded.allowedDomains ?? [],
+        allowedTcpDestinations: decoded.allowedTcpDestinations ?? [],
+      },
+    };
+  });
   const gatewaySkills = Effect.fnUntraced(function* (binding: string, botId: string) {
     const connection = yield* describeGateway(binding);
     const body = yield* HttpClientRequest.bodyJson(
@@ -1490,6 +1609,7 @@ const make = Effect.gen(function* () {
     teachRecording,
     voiceGateway,
     gatewaySkills,
+    egressConnection,
     gatewayRoster,
     gatewayEvents,
   });

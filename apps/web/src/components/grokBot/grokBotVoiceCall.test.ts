@@ -787,6 +787,23 @@ describe("voice call messages and tool output", () => {
   it("keeps the server's tool output and bounds everything else", () => {
     expect(toolOutput({ kind: "served", output: { a: 1 } })).toBe('{"a":1}');
     expect(toolOutput({ kind: "invalid_input", output: null })).toBe('{"error":"invalid_input"}');
+    expect(
+      JSON.parse(
+        toolOutput({
+          kind: "invalid_input",
+          output: {
+            tool: "orchestrator_capabilities",
+            code: "provider_not_ready",
+            error: "Check GrokBot in Settings, then try again.",
+            privateDetail: "discard this",
+          },
+        }),
+      ),
+    ).toEqual({
+      tool: "orchestrator_capabilities",
+      code: "provider_not_ready",
+      error: "Check GrokBot in Settings, then try again.",
+    });
   });
 
   it("maps unknown failures to a generic message instead of the raw error", () => {

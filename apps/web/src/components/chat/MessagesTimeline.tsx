@@ -276,6 +276,8 @@ import { useOpenPrLink } from "~/lib/openPullRequestLink";
 import { useClientSettings } from "~/hooks/useSettings";
 import type { ChatMarkdownContextReference, ChatMarkdownLinkOverride } from "../ChatMarkdown";
 import { createGrokBotConnectorAuthLinkOverride } from "../grokBot/GrokBotConnectorAuthAction";
+import { GrokBotConnectorCardView } from "../grokBot/GrokBotConnectorCardView";
+import { settledConnectorCardIds } from "../grokBot/grokBotConnectorCards";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
@@ -329,6 +331,8 @@ interface TimelineRowSharedState {
   grokBotConnectorAuthLinkOverride:
     | ((link: ChatMarkdownLinkOverride) => ReactNode | undefined)
     | null;
+  /** Connector cards the bot has since confirmed connected, so they stop offering a connection. */
+  grokBotSettledConnectorCardIds: ReadonlySet<string>;
   /** Provider snapshots for resolving handoff endpoints to icons + model names. */
   providerStatuses: ReadonlyArray<ServerProvider>;
   /** Projection runs, for recovering handoff models on legacy items. */
@@ -1358,6 +1362,11 @@ const ConversationTimeline = memo(function ConversationTimeline({
       isGrokBotThread ? createGrokBotConnectorAuthLinkOverride(activeThreadEnvironmentId) : null,
     [activeThreadEnvironmentId, isGrokBotThread],
   );
+  const grokBotSettledConnectorCardIds = useMemo(
+    () =>
+      settledConnectorCardIds(rows.flatMap((row) => (row.kind === "message" ? [row.message] : []))),
+    [rows],
+  );
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
       citationRequest: readyCitationRequest,
@@ -1374,6 +1383,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       runs,
       activeThreadEnvironmentId,
       grokBotConnectorAuthLinkOverride,
+      grokBotSettledConnectorCardIds,
       onRevertToTurnCount,
       onRunShellCommand,
       findActive,
@@ -1413,6 +1423,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       runs,
       activeThreadEnvironmentId,
       grokBotConnectorAuthLinkOverride,
+      grokBotSettledConnectorCardIds,
       onRevertToTurnCount,
       onRunShellCommand,
       findActive,
@@ -2977,6 +2988,17 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
         data-voice-call-id={row.message.grokBotVoiceCall.callId}
       >
         <GrokBotVoiceCallMarkerLabel marker={row.message.grokBotVoiceCall} />
+      </div>
+    );
+  }
+  if (row.message.grokBotConnectorCard !== undefined) {
+    return (
+      <div className="min-w-0 px-1 py-1">
+        <GrokBotConnectorCardView
+          environmentId={ctx.activeThreadEnvironmentId}
+          card={row.message.grokBotConnectorCard}
+          settled={ctx.grokBotSettledConnectorCardIds.has(row.message.id)}
+        />
       </div>
     );
   }

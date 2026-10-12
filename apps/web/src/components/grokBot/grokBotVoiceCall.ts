@@ -455,7 +455,17 @@ function parseToolArguments(argumentsJson: string): unknown | null {
 
 /** A served tool returns its own JSON; anything else is a bounded error the model can speak about. */
 export function toolOutput(result: VoiceToolResult): string {
-  if (result.kind !== "served") return JSON.stringify({ error: result.kind });
+  if (result.kind !== "served") {
+    const output =
+      result.output !== null && typeof result.output === "object"
+        ? (result.output as Record<string, unknown>)
+        : {};
+    return JSON.stringify({
+      error: typeof output.error === "string" ? output.error.slice(0, 500) : result.kind,
+      ...(typeof output.code === "string" ? { code: output.code.slice(0, 100) } : {}),
+      ...(typeof output.tool === "string" ? { tool: output.tool.slice(0, 100) } : {}),
+    });
+  }
   return JSON.stringify(result.output) ?? "{}";
 }
 

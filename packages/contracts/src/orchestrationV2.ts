@@ -1,4 +1,5 @@
 import {
+  GrokBotConnectorCard,
   GrokBotVoiceCallId,
   GrokBotVoiceCallMarker,
   GrokBotWorkflowReferences,
@@ -1254,6 +1255,8 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   grokBotVoiceCall: Schema.optionalKey(GrokBotVoiceCallMarker),
   /** The call a summary belongs to; set only on native's `voice:<callId>` summaries. */
   grokBotVoiceCallId: Schema.optionalKey(GrokBotVoiceCallId),
+  /** A connector sign-in card the bot sent; `text` is its plain label. */
+  grokBotConnectorCard: Schema.optionalKey(GrokBotConnectorCard),
   notification: Schema.optional(OrchestrationV2Notification),
   ...OrchestrationV2CreationFields,
   scheduledTaskId: Schema.optional(ScheduledTaskId),
@@ -1541,6 +1544,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
     grokBotVoiceCall: Schema.optionalKey(GrokBotVoiceCallMarker),
     grokBotVoiceCallId: Schema.optionalKey(GrokBotVoiceCallId),
+    grokBotConnectorCard: Schema.optionalKey(GrokBotConnectorCard),
     messageId: MessageId,
     text: Schema.String,
     attachments: Schema.optional(Schema.Array(ChatAttachment)),
@@ -2328,6 +2332,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
     grokBotVoiceCall: Schema.optionalKey(GrokBotVoiceCallMarker),
     grokBotVoiceCallId: Schema.optionalKey(GrokBotVoiceCallId),
+    grokBotConnectorCard: Schema.optionalKey(GrokBotConnectorCard),
     messageId: MessageId,
     text: Schema.String,
     attachments: Schema.optional(Schema.Array(ChatAttachment)),

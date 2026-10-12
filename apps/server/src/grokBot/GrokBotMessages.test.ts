@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import { grokBotConnectorCard } from "./GrokBotConnectorCard.ts";
 import { messagesFrom } from "./GrokBotService.ts";
 
 const self = { id: "bot-self", name: "UniFi Manager" };
@@ -204,5 +205,46 @@ describe("voice call history", () => {
       roster,
     );
     expect(messages.map((message) => message.id)).toEqual(["vc3"]);
+  });
+});
+
+describe("connector cards", () => {
+  // The shape native writes when the bot asks to connect an MCP server.
+  const card = { type: "connector", connector: "mcp.linear.app", serverId: 7, variant: "connect" };
+
+  it("shows a connector card as a message the client can act on", () => {
+    const [message] = messagesFrom(
+      [{ kind: "send-message", id: "c1", message: card, timestampMs: 1 }],
+      self,
+      roster,
+    );
+    expect(message).toMatchObject({
+      text: "Connect mcp.linear.app",
+      sender: self,
+      connectorCard: { connector: "mcp.linear.app", serverId: 7, variant: "connect" },
+    });
+  });
+
+  it("reads any variant but connected as still needing a connection", () => {
+    expect(grokBotConnectorCard({ ...card, variant: "connected" })?.variant).toBe("connected");
+    expect(grokBotConnectorCard({ ...card, variant: "reconnect" })?.variant).toBe("connect");
+    expect(grokBotConnectorCard({ ...card, variant: undefined })?.variant).toBe("connect");
+  });
+
+  it("rejects cards without a usable connector or server id", () => {
+    expect(grokBotConnectorCard({ ...card, serverId: 0 })).toBeUndefined();
+    expect(grokBotConnectorCard({ ...card, serverId: 1.5 })).toBeUndefined();
+    expect(grokBotConnectorCard({ ...card, serverId: "7" })).toBeUndefined();
+    expect(grokBotConnectorCard({ ...card, connector: "  " })).toBeUndefined();
+    expect(grokBotConnectorCard({ ...card, connector: "x".repeat(257) })).toBeUndefined();
+    expect(grokBotConnectorCard({ ...card, type: "connectors" })).toBeUndefined();
+    expect(grokBotConnectorCard(null)).toBeUndefined();
+    expect(
+      messagesFrom(
+        [{ kind: "send-message", id: "c2", message: { ...card, serverId: 0 } }],
+        self,
+        roster,
+      ),
+    ).toEqual([]);
   });
 });

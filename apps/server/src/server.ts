@@ -1,4 +1,5 @@
 import * as GrokBotComputerService from "./grokBot/GrokBotComputerService.ts";
+import * as GrokBotNetworkService from "./grokBot/GrokBotNetworkService.ts";
 import * as GrokBotSecretService from "./grokBot/GrokBotSecretService.ts";
 import * as GrokBotVoiceBackendLive from "./grokBot/voice/GrokBotVoiceBackendLive.ts";
 import * as GrokBotVoiceT3Bridge from "./grokBot/voiceRouting/GrokBotVoiceT3Bridge.ts";
@@ -731,6 +732,7 @@ const layerRuntimeDependencies = GrokBotThreadService.layer.pipe(
   Layer.provide(ProjectionStoreV2.layer),
   Layer.provideMerge(layerRuntimeCoreDependencies),
   Layer.provideMerge(GrokBotComputerService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime))),
+  Layer.provideMerge(GrokBotNetworkService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime))),
   Layer.provideMerge(GrokBotSecretService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime))),
   Layer.provideMerge(GrokBotRoutineService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime))),
   Layer.provideMerge(

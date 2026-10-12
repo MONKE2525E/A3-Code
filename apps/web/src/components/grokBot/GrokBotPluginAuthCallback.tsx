@@ -1,15 +1,16 @@
 import { EnvironmentId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "~/components/ui/button";
-import { useConnectedEnvironmentIds } from "~/state/environments";
+import { useConnectedEnvironmentIds, usePrimaryEnvironmentId } from "~/state/environments";
 import { grokBotsPluginCompleteAuth } from "~/state/grokBots";
 import { useAtomCommand } from "~/state/use-atom-command";
 import {
   clearPluginAuthReturn,
   finishPluginAuthReturn,
+  pluginAuthStateId,
   readPluginAuthReturn,
 } from "./grokBotPluginAuthReturn";
 import { PLUGIN_AUTH_STORAGE_PREFIX } from "./GrokBotPluginAccounts";
@@ -26,7 +27,9 @@ function readCallback() {
   const params =
     url.searchParams.get("grokBotOAuth") === "1" ? url.searchParams : readPluginAuthReturn();
   if (!params) return null;
-  const stateId = params.get("state");
+  // The relayed state may carry a loopback port; the id this page stored and the server issued does not.
+  const state = params.get("state");
+  const stateId = state ? pluginAuthStateId(state) : null;
   const code = params.get("code");
   const denied = params.has("error");
   const result = params.get("t3AuthResult");
@@ -44,9 +47,25 @@ function readCallback() {
   }
 }
 
-/** Deliver only the one-time code to the environment that started this flow. */
+/**
+ * Deliver only the one-time code to the environment that started this flow. The flow is remembered
+ * in this origin's storage, so a return that lands in another browser (Electron or a phone started
+ * it, this page is the environment's own web address) has none. That page is served by the
+ * environment the sign-in returned to, so the code goes to its own primary environment, which still
+ * checks the state it issued.
+ */
 export function GrokBotPluginAuthCallback() {
   const [callback] = useState(readCallback);
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const storedFlow = callback?.flow ?? null;
+  const flow = useMemo(
+    () =>
+      storedFlow ??
+      (primaryEnvironmentId === null
+        ? null
+        : { environmentId: primaryEnvironmentId, pluginId: "" }),
+    [storedFlow, primaryEnvironmentId],
+  );
   const [message, setMessage] = useState(() =>
     callback?.result === "connected"
       ? connectedMessage
@@ -54,7 +73,7 @@ export function GrokBotPluginAuthCallback() {
         ? failedMessage
         : callback?.denied
           ? "Sign-in was canceled. Return to the plugin to try again."
-          : callback && (!callback.stateId || !callback.code || !callback.flow)
+          : callback && (!callback.stateId || !callback.code)
             ? "This sign-in link has expired. Return to the plugin to start again."
             : "Finishing connector authentication…",
   );
@@ -67,8 +86,9 @@ export function GrokBotPluginAuthCallback() {
   }, [callback]);
   useEffect(() => {
     if (!callback || started.current) return;
-    const { stateId, code, denied, flow } = callback;
-    if (flow && !denied && stateId && code && !connected.includes(flow.environmentId)) return;
+    const { stateId, code, denied } = callback;
+    // Without a stored flow the primary environment is still resolving; the code is not spent yet.
+    if (!denied && stateId && code && (!flow || !connected.includes(flow.environmentId))) return;
     started.current = true;
 
     if (callback.result || denied || !stateId || !code || !flow) {
@@ -91,7 +111,7 @@ export function GrokBotPluginAuthCallback() {
       if (success) localStorage.removeItem(PLUGIN_AUTH_STORAGE_PREFIX + stateId);
       setMessage(success ? connectedMessage : failedMessage);
     });
-  }, [callback, complete, connected]);
+  }, [callback, complete, connected, flow]);
   if (!callback) return null;
   return (
     <section className="space-y-3 rounded-xl border p-4" aria-label="Connector authentication">

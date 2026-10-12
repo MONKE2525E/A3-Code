@@ -1167,12 +1167,12 @@ it.layer(NodeServices.layer)("Grok Bot bridge", (it) => {
       assert.strictEqual((yield* service.read(bot.id)).messages[0]?.id, "delivered");
     }),
   );
-  it.effect("rejects unsigned sessions before invoking the CLI", () =>
+  it.effect("does not report a failed native read as sign-out when no legacy gateway exists", () =>
     Effect.gen(function* () {
       const { service, fs, descriptor, calls } = yield* fixture;
       yield* fs.remove(descriptor);
       const error = yield* service.list.pipe(Effect.flip);
-      assert.strictEqual(error.reason, "signed_out");
+      assert.strictEqual(error.reason, "gateway_failed");
       assert.deepStrictEqual(calls, []);
     }),
   );

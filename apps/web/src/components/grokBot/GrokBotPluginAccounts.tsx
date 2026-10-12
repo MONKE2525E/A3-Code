@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Spinner } from "~/components/ui/spinner";
+import { useEnvironmentHttpBaseUrl } from "~/state/environments";
 import {
   grokBotsPluginAuthenticate,
   grokBotsPluginCompleteAuth,
@@ -13,6 +14,7 @@ import {
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { parseManualCallback } from "./grokBotPluginAuthReturn";
+import { resolveGrokBotOAuthRedirect } from "./grokBotSetupFlow";
 
 export const PLUGIN_AUTH_STORAGE_PREFIX = "t3:grok-plugin-auth:";
 const POLL_INTERVAL_MS = 2_000;
@@ -49,6 +51,7 @@ export function GrokBotPluginAccounts({
   const allowed = useAtomValue(grokBotsPluginAuthenticate.permissionAtom(environmentId));
   const authenticate = useAtomCommand(grokBotsPluginAuthenticate, { reportFailure: false });
   const complete = useAtomCommand(grokBotsPluginCompleteAuth, { reportFailure: false });
+  const httpBaseUrl = useEnvironmentHttpBaseUrl(environmentId);
   const [pending, setPending] = useState<string | null>(null);
   const [flow, setFlow] = useState<SignInFlow | null>(null);
   const [callbackUrl, setCallbackUrl] = useState("");
@@ -121,14 +124,20 @@ export function GrokBotPluginAccounts({
 
   const run = async (serverId: number, accountKey: string) => {
     if (pending !== null) return;
+    // The sign-in returns to the environment's own web address. Electron's page origin and a client
+    // paired to another host are not it.
+    const redirectUri = resolveGrokBotOAuthRedirect(window.location.origin, httpBaseUrl);
+    setFlow(null);
+    setNotice(null);
+    if (redirectUri === null) {
+      setError("This environment has no web address to return to. Reconnect and try again.");
+      return;
+    }
     const key = `${serverId}:${accountKey}`;
+    // Opened synchronously so the click still counts as a user gesture.
     const popup = window.open("about:blank", "_blank");
     setPending(key);
-    setFlow(null);
     setError(null);
-    setNotice(null);
-    const redirectUri = new URL("/settings/marketplace?grokBotOAuth=1", window.location.origin)
-      .href;
     const result = await authenticate({
       environmentId,
       input: { serverId, accountKey, redirectUri },

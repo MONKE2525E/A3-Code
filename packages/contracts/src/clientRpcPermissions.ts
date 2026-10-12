@@ -32,6 +32,8 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.grokBotsComputerStart]: AuthOrchestrationOperateScope,
   [WS_METHODS.grokBotsComputerRecreate]: AuthSettingsWriteScope,
   [WS_METHODS.grokBotsComputerReset]: AuthSettingsWriteScope,
+  [WS_METHODS.grokBotsHostMachineUpdate]: AuthSettingsWriteScope,
+  [WS_METHODS.grokBotsNetworkSet]: AuthSettingsWriteScope,
   [WS_METHODS.grokBotsSecretSubmit]: AuthOrchestrationOperateScope,
   [WS_METHODS.grokBotsSecretDismiss]: AuthOrchestrationOperateScope,
   [WS_METHODS.grokBotsVoiceStart]: AuthOrchestrationOperateScope,

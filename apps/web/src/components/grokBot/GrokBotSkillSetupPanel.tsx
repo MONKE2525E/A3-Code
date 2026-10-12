@@ -9,7 +9,7 @@ import {
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { CopyIcon } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import { Spinner } from "~/components/ui/spinner";
@@ -82,6 +82,12 @@ export function GrokBotSkillSetupPanel({
   const send = useAtomCommand(grokBotsOrchestratorSetup, { reportFailure: false });
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const manualId = useId();
+  const complete = setupStatus?.complete === true;
+  // The manual prompt is shown for the install state it was opened in, so finishing the install
+  // closes it and it stays one button away.
+  const [manualOpenWhenComplete, setManualOpenWhenComplete] = useState<boolean | null>(null);
+  const manualOpen = manualOpenWhenComplete === complete;
   const view = setupStatus ? grokBotSetupView(setupStatus) : null;
   const active = view?.active === true;
 
@@ -180,14 +186,30 @@ export function GrokBotSkillSetupPanel({
           {refreshing ? <Spinner size="xs" /> : null}
           Check again
         </Button>
+        {prompt !== undefined ? (
+          <Button
+            size="sm"
+            variant="secondary"
+            type="button"
+            aria-expanded={manualOpen}
+            aria-controls={manualId}
+            onClick={() => setManualOpenWhenComplete(manualOpen ? null : complete)}
+          >
+            {manualOpen
+              ? "Hide manual install"
+              : complete
+                ? "Reinstall skill manually"
+                : "Install skill manually"}
+          </Button>
+        ) : null}
       </div>
-      {prompt !== undefined ? <ManualPrompt prompt={prompt} /> : null}
+      {prompt !== undefined && manualOpen ? <ManualPrompt id={manualId} prompt={prompt} /> : null}
     </div>
   );
 }
 
-/** Collapsed fallback for copying the prompt into a bot by hand. */
-function ManualPrompt({ prompt }: { readonly prompt: string }) {
+/** Fallback for copying the shared-skill prompt into a bot by hand. */
+function ManualPrompt({ id, prompt }: { readonly id: string; readonly prompt: string }) {
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState<string | null>(null);
@@ -217,45 +239,40 @@ function ManualPrompt({ prompt }: { readonly prompt: string }) {
   }, [revealPrompt]);
 
   return (
-    <details className="group grid gap-2 text-xs">
-      <summary className="w-fit cursor-pointer text-muted-foreground select-none hover:text-foreground">
-        Install the shared skill manually
-      </summary>
-      <div className="mt-2 grid gap-2">
-        <p className="leading-5 text-muted-foreground">
-          This copies only the shared-skill installation prompt, not the full OAuth setup. Paste it
-          into one GrokBot and approve if asked; all bots share the skill.
-        </p>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" variant="outline" type="button" onClick={() => void copyPrompt()}>
-            <CopyIcon />
-            {copied ? "Copied" : "Copy shared skill prompt"}
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost-muted"
-            type="button"
-            onClick={() => setRevealPrompt((open) => !open)}
-          >
-            {revealPrompt ? "Hide prompt" : "Show prompt"}
-          </Button>
-        </div>
-        {copyError ? (
-          <p role="alert" className="text-destructive">
-            {copyError}
-          </p>
-        ) : null}
-        {revealPrompt ? (
-          <textarea
-            ref={promptRef}
-            readOnly
-            value={prompt}
-            aria-label="Shared skill prompt"
-            onFocus={(event) => event.currentTarget.select()}
-            className="max-h-40 min-h-24 w-full resize-y rounded-lg border border-input bg-background px-2.5 py-1.5 font-mono text-xs leading-relaxed text-foreground select-text"
-          />
-        ) : null}
+    <div id={id} className="grid gap-2 rounded-xl border border-border/60 bg-card/40 p-3 text-xs">
+      <p className="leading-5 text-muted-foreground">
+        This copies only the shared-skill installation prompt, not the full OAuth setup. Paste it
+        into one GrokBot and approve if asked; all bots share the skill.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" variant="outline" type="button" onClick={() => void copyPrompt()}>
+          <CopyIcon />
+          {copied ? "Copied" : "Copy shared skill prompt"}
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost-muted"
+          type="button"
+          onClick={() => setRevealPrompt((open) => !open)}
+        >
+          {revealPrompt ? "Hide prompt" : "Show prompt"}
+        </Button>
       </div>
-    </details>
+      {copyError ? (
+        <p role="alert" className="text-destructive">
+          {copyError}
+        </p>
+      ) : null}
+      {revealPrompt ? (
+        <textarea
+          ref={promptRef}
+          readOnly
+          value={prompt}
+          aria-label="Shared skill prompt"
+          onFocus={(event) => event.currentTarget.select()}
+          className="max-h-40 min-h-24 w-full resize-y rounded-lg border border-input bg-background px-2.5 py-1.5 font-mono text-xs leading-relaxed text-foreground select-text"
+        />
+      ) : null}
+    </div>
   );
 }

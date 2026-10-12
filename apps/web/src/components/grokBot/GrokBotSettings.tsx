@@ -33,6 +33,7 @@ import { GrokBotCreateDraft } from "./GrokBotCreateDraft";
 import { GrokBotLimitations } from "./GrokBotLimitations";
 import { GrokBotProfileEditor } from "./GrokBotProfileEditor";
 import { GrokBotSkillSetupPanel } from "./GrokBotSkillSetupPanel";
+import { GrokBotHostSettings } from "./GrokBotHostSettings";
 import {
   grokBotAccountCopy,
   grokBotCliCopy,
@@ -339,6 +340,7 @@ function GrokBotSettingsBody({
           />
         </SettingsSection>
       ) : null}
+      <GrokBotHostSettings environmentId={environmentId} />
 
       <SettingsSection
         {...searchableSetting("grok-bots-editor")}
