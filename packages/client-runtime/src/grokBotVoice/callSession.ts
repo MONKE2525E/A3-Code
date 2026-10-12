@@ -1,7 +1,7 @@
 // @effect-diagnostics globalTimers:off - Call lifecycle timers run outside an Effect runtime and are injectable.
 import {
   functionCallOutputFrame,
-  failureSpeechFrame,
+  spokenMessageFrame,
   parseServerEvent,
   realtimeProtocols,
   realtimeUrl,
@@ -105,6 +105,23 @@ const failureSpeech = (output: string): string | null => {
   }
 };
 
+const completionSpeech = (output: string): string | null => {
+  try {
+    const result = JSON.parse(output);
+    if (result?.status !== "landed") return null;
+    const name =
+      typeof result.title === "string" && result.title.trim()
+        ? result.title.trim().slice(0, 100)
+        : "That task";
+    if (result.runStatus === "interrupted")
+      return `${name} was interrupted. Check its result in T3.`;
+    if (result.runStatus === "cancelled") return `${name} was cancelled.`;
+    return `${name} finished. Its result is ready in T3.`;
+  } catch {
+    return null;
+  }
+};
+
 /**
  * One call's realtime lifecycle: handshake, session setup, tool brokering, mute, hang-up, and
  * reconnect onto the same conversation. Audio capture/playback stay outside; callers feed
@@ -188,7 +205,7 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
       }, 500);
     }
   };
-  const requestResponse = (instructions: string | null, failure: string | null = null) => {
+  const requestResponse = (instructions: string | null, notification: string | null = null) => {
     responseInFlight = true;
     clearResponseRequest();
     responseRequestTimer = timers.setTimeout(() => {
@@ -202,7 +219,7 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
       retryResponse();
     }, 10_000);
     socket?.send(
-      failure === null ? responseCreateFrame(instructions) : failureSpeechFrame(failure),
+      notification === null ? responseCreateFrame(instructions) : spokenMessageFrame(notification),
     );
   };
   const flushChat = () => {
@@ -256,7 +273,11 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
     delivery = { kind: "work", ids, overflow: overflowSent };
     requestResponse(
       "Briefly tell the caller the newly delivered T3 work result now. Say clearly if it failed or was cancelled. Do not stay silent, launch another task, or claim failed work succeeded.",
-      ids.map((id) => failureSpeech(work.get(id)!)).find((message) => message !== null) ?? null,
+      ids.map((id) => failureSpeech(work.get(id)!)).find((message) => message !== null) ??
+        (ids.length > 1 && ids.every((id) => completionSpeech(work.get(id)!) !== null)
+          ? `${ids.length} tasks finished. Their results are ready in T3.`
+          : (ids.map((id) => completionSpeech(work.get(id)!)).find((message) => message !== null) ??
+            null)),
     );
   };
 
@@ -619,11 +640,22 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
       readonly id: string;
       readonly text: string;
       readonly atMs: number;
+      readonly attachments?: readonly {
+        readonly id: string;
+        readonly name: string;
+        readonly type: string;
+      }[];
     }) => {
       if (phase === "closed" || seenChat.has(message.id)) return;
       if (message.id.length > 512) return;
       remember(seenChat, message.id);
-      chat.set(message.id, { text: message.text.slice(0, 2000), atMs: message.atMs });
+      const attachments = message.attachments
+        ?.slice(0, 100)
+        .map(({ id, name, type }) => ({ id, name, type }));
+      chat.set(message.id, {
+        text: `${message.text.slice(0, 2000)}${attachments?.length ? `\nChat attachment references: ${JSON.stringify(attachments)}` : ""}`,
+        atMs: message.atMs,
+      });
       let chatBytes = [...chat.values()].reduce((total, item) => total + bytes(item.text), 0);
       while (chat.size > MAX_QUEUED_RESULTS || chatBytes > MAX_QUEUED_BYTES) {
         const oldest = chat.entries().next().value!;

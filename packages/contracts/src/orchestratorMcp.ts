@@ -25,6 +25,7 @@ import {
 import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 import { ThreadLinkedPullRequest } from "./threadPullRequest.ts";
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
+import { ChatAttachmentId, PROVIDER_SEND_TURN_MAX_ATTACHMENTS } from "./chatAttachment.ts";
 import {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
@@ -177,6 +178,14 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   task: OrchestratorMcpPrompt.annotate({
     description: "Self-contained task for one delegated child agent/subagent.",
   }),
+  attachmentIds: Schema.optional(
+    Schema.Array(ChatAttachmentId)
+      .check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS))
+      .annotate({
+        description:
+          "Attachments already in the calling thread's chat to include in the child's first message. Use the attachment IDs from chat context; do not invent paths or re-upload files.",
+      }),
+  ),
   target: Schema.optional(OrchestratorMcpTarget),
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),

@@ -177,7 +177,8 @@ it.effect("waits for the accepted managed run and returns only its final text", 
               }),
           } as never),
           Layer.succeed(ThreadManagementService.ThreadManagementService, {
-            getThreadShell: () => Effect.succeed({ projectId: "bot-project" }),
+            getThreadShell: () =>
+              Effect.succeed({ projectId: "bot-project", title: "Fix project icons" }),
             waitForThread: (input: unknown) =>
               Effect.gen(function* () {
                 waits.push(input);
@@ -268,6 +269,7 @@ it.effect("waits for the accepted managed run and returns only its final text", 
         output: {
           status: "landed",
           runStatus: "completed",
+          title: "Fix project icons",
           updates: ["The requested fix passed its tests."],
         },
         completion: { requestToolCallId: "tool", pending: false },
@@ -302,6 +304,22 @@ it.effect("recall and search read the canonical bot chat including imported nati
         createdBy: "user",
         text: "Earlier native chat: use the blue icon.",
         streaming: false,
+      },
+      {
+        id: "screenshot-only",
+        role: "user",
+        createdBy: "user",
+        text: "",
+        streaming: false,
+        attachments: [
+          {
+            type: "image",
+            id: "chat-screenshot",
+            name: "screen.png",
+            mimeType: "image/png",
+            sizeBytes: 42,
+          },
+        ],
       },
       {
         id: "internal",
@@ -360,6 +378,12 @@ it.effect("recall and search read the canonical bot chat including imported nati
         messages: [
           { id: "t3-user", role: "user", text: "The launch date is Friday." },
           { id: "native-user", role: "user", text: "Earlier native chat: use the blue icon." },
+          {
+            id: "screenshot-only",
+            role: "user",
+            text: "",
+            attachments: [{ type: "image", id: "chat-screenshot", name: "screen.png" }],
+          },
         ],
       });
       const result = yield* bridge.call({

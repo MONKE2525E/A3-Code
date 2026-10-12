@@ -95,6 +95,80 @@ const flush = async () => {
 };
 
 describe("work completion and greeting", () => {
+  it("delivers image-only chat references to the voice context without reading files", () => {
+    const h = harness();
+    const fake = h.sockets[0]!.fake;
+    configure(fake);
+    h.session.deliverChat({
+      id: "image-message",
+      text: "",
+      atMs: 100,
+      attachments: [{ id: "chat-screenshot", name: "screen.png", type: "image" }],
+    });
+    const update = fake.sent
+      .map((frame) => JSON.parse(frame))
+      .find((frame) => frame.type === "async_update.add");
+    expect(update.async_update.payload[0].message.content).toContain('"id":"chat-screenshot"');
+    expect(update.async_update.payload[0].message.content).toContain('"name":"screen.png"');
+    h.session.hangUp();
+  });
+  it("wakes on completion with a short task name announcement without a model continuation", () => {
+    const h = harness();
+    const fake = h.sockets[0]!.fake;
+    configure(fake);
+    h.session.deliverWork(
+      "finished",
+      JSON.stringify({
+        status: "landed",
+        runStatus: "completed",
+        title: "Sync project icons",
+        updates: ["Long technical result"],
+      }),
+    );
+    const frames = fake.sent.map((frame) => JSON.parse(frame));
+    expect(frames.find((frame) => frame.item?.type === "force_message")?.item.content[0].text).toBe(
+      "Sync project icons finished. Its result is ready in T3.",
+    );
+    expect(frames.filter((frame) => frame.type === "response.create")).toHaveLength(0);
+    fake.listeners.message(JSON.stringify({ type: "response.done" }));
+    h.session.deliverWork("finished", JSON.stringify({ status: "landed", title: "Duplicate" }));
+    expect(
+      fake.sent
+        .map((frame) => JSON.parse(frame))
+        .filter((frame) => frame.item?.type === "force_message"),
+    ).toHaveLength(1);
+    h.session.hangUp();
+  });
+  it("keeps full tool errors in context but removes internal IDs from scripted speech", async () => {
+    const id = "12345678-1234-1234-1234-123456789abc";
+    const h = harness({
+      runTool: async () =>
+        JSON.stringify({
+          error: `Thread ${id} failed. Check node:delegated-task:private-id in T3.`,
+        }),
+    });
+    const fake = h.sockets[0]!.fake;
+    configure(fake);
+    fake.listeners.message(
+      JSON.stringify({
+        type: "response.function_call_arguments.done",
+        call_id: "error",
+        name: "delegate_task",
+        arguments: "{}",
+      }),
+    );
+    await flush();
+    const frames = fake.sent.map((frame) => JSON.parse(frame));
+    expect(
+      frames.find((frame) => frame.item?.type === "function_call_output").item.output,
+    ).toContain(id);
+    const speech = frames.find((frame) => frame.item?.type === "force_message").item.content[0]
+      .text;
+    expect(speech).not.toContain(id);
+    expect(speech).not.toContain("private-id");
+    expect(speech).toContain("failed");
+    h.session.hangUp();
+  });
   it("speaks a failed background task directly without asking the model to choose whether to report it", () => {
     const h = harness();
     const fake = h.sockets[0]!.fake;
