@@ -102,6 +102,11 @@ export interface ChatMessage {
   readonly creationSource?: OrchestrationV2CreationSource;
   readonly scheduledTaskId?: ScheduledTaskId;
   readonly senderThreadId?: ThreadId;
+  readonly voiceRequest?: true;
+  readonly grokBotPeer?: import("@t3tools/contracts").OrchestrationV2ConversationMessage["grokBotPeer"];
+  readonly grokBotWorkflowReferences?: import("@t3tools/contracts").GrokBotWorkflowReferences;
+  readonly grokBotVoiceCall?: import("@t3tools/contracts").GrokBotVoiceCallMarker;
+  readonly grokBotVoiceCallId?: import("@t3tools/contracts").GrokBotVoiceCallMarker["callId"];
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly inputIntent?: OrchestrationV2UserMessageInputIntent | undefined;

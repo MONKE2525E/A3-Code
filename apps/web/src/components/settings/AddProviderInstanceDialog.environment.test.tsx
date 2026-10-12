@@ -49,6 +49,8 @@ vi.mock("../../state/session", async (importOriginal) => {
   return { ...actual, useEnvironmentScope: hasScope, readEnvironmentScope: hasScope };
 });
 
+vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
+
 vi.mock("../ui/toast", () => ({ toastManager: { add: actions.toast } }));
 
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
@@ -160,6 +162,25 @@ describe("AddProviderInstanceDialog environment routing", () => {
       instanceId: "grok",
       instance: { driver: "grok", enabled: true, displayName: "Grok" },
     });
+  });
+
+  it("offers Grok Bot as an account connection instead of an instance form", () => {
+    let tree = render();
+    const group = visitElements(
+      tree,
+      (element) => element.props["aria-labelledby"] === "add-instance-driver-label",
+    );
+    (group!.props.onValueChange as (value: string) => void)("grok-bot");
+    tree = render();
+
+    const step = visitElements(
+      tree,
+      (element) =>
+        typeof element.type === "function" && element.type.name === "AddGrokBotProviderStep",
+    );
+    expect(step?.props.environmentLabel).toBe("Remote device");
+    expect(visitElements(tree, (element) => element.props.children === "Next")).toBeNull();
+    expect(settingsHooks.mutate).not.toHaveBeenCalled();
   });
 
   it("chooses an unused identity for another account without replacing configured instances", async () => {

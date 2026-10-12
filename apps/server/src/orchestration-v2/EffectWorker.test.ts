@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  NodeId,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
@@ -30,6 +31,8 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import { runMigrations } from "../persistence/Migrations.ts";
 
 const threadId = ThreadId.make("thread:effect-worker-restart");
 const oldSessionId = ProviderSessionId.make("provider-session:effect-worker-restart:old");
@@ -82,6 +85,7 @@ function layerExecutorFor(input: {
   readonly threads?: Partial<ThreadManagementService.ThreadManagementService["Service"]>;
   readonly continueAfterRestart?: boolean;
   readonly interrupt?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["interrupt"];
+  readonly reconnect?: ProviderTurnStartService.ProviderTurnStartServiceV2["Service"]["reconnect"];
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
   const layerDependencies = Layer.mergeAll(
@@ -113,6 +117,7 @@ function layerExecutorFor(input: {
     Layer.succeed(
       ProviderTurnStartService.ProviderTurnStartServiceV2,
       ProviderTurnStartService.ProviderTurnStartServiceV2.of({
+        reconnect: input.reconnect ?? (() => record("reconnect")),
         start: () =>
           Effect.gen(function* () {
             yield* record("start");
@@ -644,6 +649,93 @@ it.effect("keeps a max-attempt replay-safe failure terminal when fail settlement
   }),
 );
 
+it.effect.each(["ready", "unavailable"] as const)(
+  "keeps observer reconnect durable through startup confirmation and bounded when %s",
+  (endpoint) =>
+    Effect.gen(function* () {
+      const events = yield* Ref.make<ReadonlyArray<string>>([]);
+      const started = yield* DateTime.now;
+      const executor = layerExecutorFor({
+        events,
+        reconnect: () =>
+          Effect.gen(function* () {
+            yield* Ref.update(events, (current) => [...current, "reconnect"]);
+            const elapsed =
+              DateTime.toEpochMillis(yield* DateTime.now) - DateTime.toEpochMillis(started);
+            if (endpoint === "unavailable" || elapsed < 30_000)
+              return yield* new ProviderTurnStartService.ProviderTurnStartError({
+                runId,
+                cause: "isolated endpoint awaits startup confirmation",
+              });
+          }),
+      });
+      const outboxLayer = EffectOutbox.layer.pipe(
+        Layer.provideMerge(
+          Layer.effectDiscard(runMigrations()).pipe(
+            Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const effectId = "effect:startup-observer-reconnect";
+        yield* outbox.enqueue([
+          {
+            id: effectId,
+            commandId: CommandId.make("command:startup-observer-reconnect"),
+            threadId,
+            request: { type: "provider-runtime.reconnect", runId },
+          },
+        ]);
+        yield* Effect.gen(function* () {
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          let elapsed = 0;
+          let attempts = 0;
+          for (const delay of [1_000, 2_000, 4_000, 8_000, 16_000]) {
+            assert.isTrue(yield* worker.runOnce);
+            assert.deepEqual(
+              yield* Ref.get(events),
+              Array.from({ length: ++attempts }, () => "reconnect"),
+            );
+            const pending = yield* outbox.get(effectId);
+            assert.isTrue(Option.isSome(pending));
+            if (Option.isNone(pending)) return yield* Effect.die("missing observer effect");
+            assert.equal(pending.value.status, "pending");
+            const deadline = DateTime.add(started, { milliseconds: elapsed + delay });
+            assert.equal(pending.value.availableAt, DateTime.formatIso(deadline));
+            assert.deepEqual(yield* worker.nextClaimableAt, Option.some(deadline));
+            assert.isFalse(yield* worker.runOnce);
+            yield* TestClock.adjust(delay);
+            elapsed += delay;
+          }
+          // Confirmation at 30s can recover on the sixth attempt at 31s.
+          assert.isTrue(yield* worker.runOnce);
+          let current = yield* outbox.get(effectId);
+          if (Option.isNone(current)) return yield* Effect.die("missing observer effect");
+          if (endpoint === "unavailable") {
+            assert.equal(current.value.status, "pending");
+            assert.equal(
+              current.value.availableAt,
+              DateTime.formatIso(DateTime.add(started, { seconds: 61 })),
+            );
+            yield* TestClock.adjust("30 seconds");
+            assert.isTrue(yield* worker.runOnce);
+            current = yield* outbox.get(effectId);
+            if (Option.isNone(current)) return yield* Effect.die("missing observer effect");
+          }
+          assert.equal(current.value.status, endpoint === "ready" ? "succeeded" : "failed");
+          assert.equal(current.value.attemptCount, endpoint === "ready" ? 6 : 7);
+          assert.deepEqual(
+            yield* Ref.get(events),
+            Array.from({ length: current.value.attemptCount }, () => "reconnect"),
+          );
+          assert.isTrue(Option.isNone(yield* worker.nextClaimableAt));
+          assert.isFalse(yield* worker.runOnce);
+        }).pipe(Effect.provide(EffectWorker.layerWithOptions().pipe(Layer.provide(executor))));
+      }).pipe(Effect.provide(outboxLayer));
+    }),
+);
+
 it.effect("uses durable deadlines, notifications, and a slow liveness poll", () =>
   Effect.gen(function* () {
     const attempts = yield* Ref.make(0);
@@ -835,5 +927,34 @@ it.effect("settles a delegated child once its restart continuation fails for goo
       );
       assert.deepEqual(yield* Ref.get(recovered), [threadId]);
     }).pipe(Effect.provide(layer));
+  }),
+);
+
+it.effect("a native subagent stop does not settle its owner's background work", () =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const events = yield* Ref.make<ReadonlyArray<string>>([]);
+    const layer = layerExecutorFor({
+      events,
+      interrupt: (input) => {
+        assert.equal(input.subagent?.nativeTaskId, "native-task");
+        return Ref.update(events, (current) => [...current, "stop-child"]);
+      },
+      threads: { dispatch: () => Effect.die("The owner's background work must stay running") },
+    });
+    yield* Effect.gen(function* () {
+      const executor = yield* EffectWorker.OrchestrationEffectExecutorV2;
+      yield* executor.execute({
+        ...restartEffect(now, { type: "detach" }),
+        request: {
+          type: "provider-turn.interrupt",
+          providerSessionId: oldSessionId,
+          providerThreadId,
+          providerTurnId,
+          subagent: { id: NodeId.make("subagent"), nativeTaskId: "native-task" },
+        },
+      });
+    }).pipe(Effect.provide(layer));
+    assert.deepEqual(yield* Ref.get(events), ["stop-child"]);
   }),
 );

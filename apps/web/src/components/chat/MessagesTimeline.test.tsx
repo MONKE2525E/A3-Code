@@ -260,10 +260,11 @@ function stubDomGlobals() {
 }
 
 beforeEach(stubDomGlobals);
+// Cold transformation of the full chat dependency graph needs extra time on slower CI workers.
 beforeAll(async () => {
   Object.defineProperty(window, "matchMedia", { value: matchMedia, configurable: true });
   ({ MessagesTimeline, resolvePreviewAnnotationImage } = await import("./MessagesTimeline"));
-}, 30_000);
+}, 120_000);
 
 const ACTIVE_THREAD_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const MESSAGE_CREATED_AT = "2026-03-17T19:12:28.000Z";
@@ -669,6 +670,77 @@ describe("MessagesTimeline", () => {
     },
   );
 
+  it.each([true, false])(
+    "keeps the end in view when tool output toggles only at the end: %s",
+    async (isAtEnd) => {
+      const frames = new Map<number, FrameRequestCallback>();
+      let nextFrame = 0;
+      vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+        frames.set(++nextFrame, callback);
+        return nextFrame;
+      });
+      vi.stubGlobal("cancelAnimationFrame", (frame: number) => frames.delete(frame));
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const flushFrame = () =>
+        act(() => {
+          const callbacks = [...frames.values()];
+          frames.clear();
+          callbacks.forEach((callback) => callback(0));
+        });
+      const viewport = { scrollTop: 400, scrollHeight: 1000 };
+      const props = buildProps();
+      props.listRef.current = {
+        getState: () => ({ isAtEnd }),
+        getScrollableNode: () => viewport,
+      } as unknown as LegendListRef;
+      let renderer: ReactTestRenderer | undefined;
+      try {
+        await act(() => {
+          renderer = create(
+            <MessagesTimeline
+              {...props}
+              timelineEntries={[
+                {
+                  id: "tool",
+                  kind: "work",
+                  createdAt: MESSAGE_CREATED_AT,
+                  entry: {
+                    id: "tool",
+                    createdAt: MESSAGE_CREATED_AT,
+                    label: "Run command",
+                    tone: "tool",
+                    toolLifecycleStatus: "completed",
+                    detail: "Command output",
+                  },
+                },
+              ]}
+            />,
+          );
+        });
+        const toggle = renderer!.root.findByProps({ "aria-expanded": false });
+        const list = renderer!.root.find(
+          (node) => node.props.ListFooterComponent !== undefined && node.props.onItemSizeChanged,
+        );
+        for (const scrollHeight of [1300, 900]) {
+          await act(() => toggle.props.onClick());
+          // The rows grow or shrink once the list measures them.
+          viewport.scrollHeight = scrollHeight;
+          await flushFrame();
+          expect(viewport.scrollTop).toBe(isAtEnd ? scrollHeight : 400);
+          // Tool output that renders late is pinned before the next frame.
+          viewport.scrollHeight = scrollHeight + 200;
+          await act(() => list.props.onItemSizeChanged());
+          expect(viewport.scrollTop).toBe(isAtEnd ? scrollHeight + 200 : 400);
+          await flushFrame();
+          await flushFrame();
+          viewport.scrollTop = 400;
+        }
+      } finally {
+        await act(() => renderer?.unmount());
+      }
+    },
+  );
+
   it("preserves arbitrary XML-like tags and comparisons in rendered user messages", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const markup = renderToStaticMarkup(
@@ -802,6 +874,43 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("javascript:");
     expect(markup).not.toContain("globalThis.__t3Xss");
   });
+  it("replaces native connector sign-in links only in assistant text of a Grok Bot thread", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const signIn =
+      "https://auth.example.test/authorize?client_id=synthetic&redirect_uri=https%3A%2F%2Fwww.cursor.com%2Fagents%2Fmcp%2Foauth%2Fcallback&state=synthetic.tgd";
+    const text = `Sign in with [Linear](${signIn}) or read [docs](https://example.test/docs).`;
+    const render = (
+      entry: ReturnType<typeof buildAssistantTimelineEntry>,
+      isGrokBotThread: boolean,
+    ) =>
+      renderToStaticMarkup(
+        <MessagesTimeline
+          {...buildProps()}
+          isGrokBotThread={isGrokBotThread}
+          timelineEntries={[entry]}
+        />,
+      );
+
+    const botMarkup = render(buildAssistantTimelineEntry(text), true);
+    expect(botMarkup).toContain("Connect in Settings");
+    expect(botMarkup).not.toContain("auth.example.test");
+    expect(botMarkup).toContain('href="https://example.test/docs"');
+
+    const providerMarkup = render(buildAssistantTimelineEntry(text), false);
+    expect(providerMarkup).not.toContain("Connect in Settings");
+    expect(providerMarkup).toContain(`href="${signIn.replaceAll("&", "&amp;")}"`);
+
+    const userMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        isGrokBotThread
+        timelineEntries={[buildUserTimelineEntry(text)]}
+      />,
+    );
+    expect(userMarkup).not.toContain("Connect in Settings");
+    expect(userMarkup).toContain(`href="${signIn.replaceAll("&", "&amp;")}"`);
+  });
+
   it("renders progressive history controls ahead of the bounded timeline", () => {
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -1176,6 +1285,64 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("<a ");
   });
 
+  it("offers a bot reply's attachments for download only in the bot's own thread", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("requestAnimationFrame", () => 0);
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    // File rows draw a Pierre icon, which mounts its sprite into the document when missing.
+    vi.stubGlobal("document", { ...document, getElementById: () => ({}) });
+    // Render the download trigger's own button so its handler can be invoked without a DOM event.
+    activityTestState.subagentTooltips = true;
+    const onFileDownload = vi.fn();
+    const baseEntry = buildAssistantTimelineEntry("");
+    const attachment = {
+      type: "file" as const,
+      id: "attachment-bot-report",
+      name: "bot-report.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: 42,
+    };
+    const entry = { ...baseEntry, message: { ...baseEntry.message, attachments: [attachment] } };
+    const findDownloads = (renderer: ReactTestRenderer) =>
+      renderer.root.findAll((node) => node.props["aria-label"] === "Download bot-report.pdf");
+
+    let other: ReactTestRenderer | undefined;
+    let bot: ReactTestRenderer | undefined;
+    try {
+      await act(() => {
+        other = create(
+          <MessagesTimeline
+            {...buildProps()}
+            routeThreadKey="environment-local:thread-1"
+            onFileDownload={onFileDownload}
+            timelineEntries={[entry]}
+          />,
+        );
+      });
+      expect(findDownloads(other!)).toHaveLength(0);
+      await act(() => other?.unmount());
+
+      await act(() => {
+        bot = create(
+          <MessagesTimeline
+            {...buildProps()}
+            routeThreadKey="environment-local:grok-bot:bot-1"
+            onFileDownload={onFileDownload}
+            timelineEntries={[entry]}
+          />,
+        );
+      });
+      const [download] = findDownloads(bot!);
+      expect(download).toBeDefined();
+      // An attachment-only reply has no text to fall back to, so it must not claim to be empty.
+      expect(JSON.stringify(bot!.toJSON())).not.toContain("(empty response)");
+      await act(() => download!.props.onClick());
+      expect(onFileDownload).toHaveBeenCalledWith(attachment);
+    } finally {
+      await act(() => bot?.unmount());
+    }
+  });
+
   it("does not download an optimistic file before the server supplies its attachment ID", () => {
     const entry = {
       ...buildUserTimelineEntry("Read the report."),
@@ -1379,6 +1546,38 @@ describe("MessagesTimeline", () => {
     expect(userMarkup).not.toContain("Sent by another agent");
   });
 
+  it("shows a voice request as a marker without its internal prompt", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const entry = buildUserTimelineEntry("Fix the login bug");
+    const voiceMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            ...entry,
+            message: {
+              ...entry.message,
+              text: "[From a voice call]\nFix the login bug",
+              createdBy: "agent",
+              creationSource: "mcp",
+              voiceRequest: true,
+            },
+          },
+        ]}
+      />,
+    );
+    const userMarkup = renderToStaticMarkup(
+      <MessagesTimeline {...buildProps()} timelineEntries={[entry]} />,
+    );
+
+    expect(voiceMarkup).toContain("Requested during voice call");
+    expect(voiceMarkup).toContain('data-user-message-attribution="voice"');
+    expect(voiceMarkup).not.toContain("From a voice call");
+    expect(voiceMarkup).not.toContain("Fix the login bug");
+    expect(voiceMarkup).not.toContain("Sent by another agent");
+    expect(userMarkup).toContain("Fix the login bug");
+  });
+
   it("keeps a subagent parent-thread link at the top of an empty timeline", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const markup = renderToStaticMarkup(
@@ -1470,6 +1669,7 @@ describe("MessagesTimeline", () => {
       attemptOrdinal: 1,
       rootNodeId: "node-attempt-1" as never,
       status: "superseded" as const,
+      completedAt: null,
     };
     const activeAttempt = {
       id: "attempt-2" as never,
@@ -1477,6 +1677,7 @@ describe("MessagesTimeline", () => {
       attemptOrdinal: 2,
       rootNodeId: "node-attempt-2" as never,
       status: "running" as const,
+      completedAt: null,
     };
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -1525,7 +1726,7 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain('data-superseded-attempt-id="attempt-1"');
     expect(markup).toContain('aria-expanded="false"');
     expect(markup).toContain("Superseded attempt");
-    expect(markup).toContain("Partial output retained");
+    expect(markup).toContain("Cut off by a steer");
     expect(markup).toContain("Current response remains visible");
     expect(markup).not.toContain("Partial response from the old attempt");
   });

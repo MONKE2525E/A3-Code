@@ -1,11 +1,25 @@
-import { resolveEnvironmentMachineKind } from "@t3tools/contracts";
-import { useLocation } from "@tanstack/react-router";
+import {
+  type EnvironmentId,
+  ProviderInstanceId,
+  resolveEnvironmentMachineKind,
+} from "@t3tools/contracts";
+import { useLocation, useNavigate, useSearch } from "@tanstack/react-router";
 import { ChevronDownIcon, LayersIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, useMemo } from "react";
 
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
+import { GrokBotAvatar } from "../grokBot/GrokBotAvatar";
+import {
+  GROK_BOT_PROVIDER_INTENT,
+  isGrokBotProviderSelected,
+  sortGrokBotsForEditor,
+} from "../grokBot/grokBotPresentation";
+import { useEnvironmentSettings } from "../../hooks/useSettings";
+import { GROK_BOT_DRIVER_KIND } from "../chat/ProviderInstanceIcon";
+import { grokBotsListQuery } from "../../state/grokBots";
+import { useEnvironmentQuery } from "../../state/query";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { InlineButton } from "../ui/button";
 import {
@@ -18,6 +32,7 @@ import {
   MenuTrigger,
 } from "../ui/menu";
 import { useOptionalSettingsScope } from "./SettingsScopeContext";
+import { useSettingsSearchTargetId } from "./settingsLayout";
 import { resolveSettingsScope, type SettingsScopeSearch } from "./settingsScope";
 import {
   ALL_ENVIRONMENTS_VALUE,
@@ -67,7 +82,11 @@ export function SettingsScopeSentence() {
       {/* Each connective stays with its picker so a wrap never strands "on". */}
       <span className="flex min-w-0 items-center gap-1.5">
         <span className="shrink-0">Applying settings for</span>
-        <ProjectScopeMenu {...props} />
+        {pathname === "/settings/providers" && scope.environment ? (
+          <ProvidersFirstAxisMenu {...props} environmentId={scope.environment.environmentId} />
+        ) : (
+          <ProjectScopeMenu {...props} />
+        )}
       </span>
       <span className="flex min-w-0 items-center gap-1.5">
         <span className="shrink-0">
@@ -152,7 +171,7 @@ function EnvironmentScopeMenu({
       >
         {!singleEnvironment ? (
           <>
-            <MenuRadioItem value={ALL_ENVIRONMENTS_VALUE}>
+            <MenuRadioItem value={ALL_ENVIRONMENTS_VALUE} closeOnClick>
               <span className="flex min-w-0 items-center gap-2">
                 <LayersIcon aria-hidden className="size-3.5" />
                 <span className="min-w-0 flex-1 truncate">All environments</span>
@@ -163,7 +182,11 @@ function EnvironmentScopeMenu({
           </>
         ) : null}
         {environments.map((environment) => (
-          <MenuRadioItem key={environment.environmentId} value={environment.environmentId}>
+          <MenuRadioItem
+            key={environment.environmentId}
+            value={environment.environmentId}
+            closeOnClick
+          >
             <span className="flex min-w-0 items-center gap-2">
               <EnvironmentMachineIcon
                 aria-hidden
@@ -199,7 +222,7 @@ function ProjectScopeMenu({ value, groups, onChange }: SettingsScopeMenuProps) {
           if (typeof next === "string") onChange(selectProjectAxis(value, next));
         }}
       >
-        <MenuRadioItem value={ALL_PROJECTS_VALUE}>
+        <MenuRadioItem value={ALL_PROJECTS_VALUE} closeOnClick>
           <span className="flex min-w-0 items-center gap-2">
             <span className="min-w-0 flex-1 truncate">All projects</span>
             <MenuRadioItemIndicator />
@@ -207,10 +230,102 @@ function ProjectScopeMenu({ value, groups, onChange }: SettingsScopeMenuProps) {
         </MenuRadioItem>
         <MenuSeparator />
         {groups.map((group) => (
-          <MenuRadioItem key={group.projectKey} value={group.projectKey}>
+          <MenuRadioItem key={group.projectKey} value={group.projectKey} closeOnClick>
             <span className="flex min-w-0 items-center gap-2">
               <ProjectFavicon project={group} className="size-3.5" />
               <span className="min-w-0 flex-1 truncate">{group.displayName}</span>
+              <MenuRadioItemIndicator />
+            </span>
+          </MenuRadioItem>
+        ))}
+      </MenuRadioGroup>
+    </ScopeMenu>
+  );
+}
+
+/**
+ * Providers are edited per environment, so the first axis stays a project picker
+ * except while the Grok Bot provider is selected, where it picks the bot to edit.
+ */
+function ProvidersFirstAxisMenu(props: SettingsScopeMenuProps & { environmentId: EnvironmentId }) {
+  const {
+    instanceId: rawInstanceId,
+    botId,
+    provider,
+  } = useSearch({
+    strict: false,
+    select: (search) => search as { instanceId?: string; botId?: string; provider?: string },
+  });
+  // The merged search can still carry a raw `instanceId=`; an empty one means absent.
+  const instanceId =
+    typeof rawInstanceId === "string" && rawInstanceId.trim() ? rawInstanceId : undefined;
+  const settings = useEnvironmentSettings(props.environmentId);
+  const searchTargetId = useSettingsSearchTargetId();
+  const grokBotSelected = isGrokBotProviderSelected({
+    instanceId,
+    instanceDriver:
+      instanceId === undefined
+        ? undefined
+        : settings.providerInstances?.[ProviderInstanceId.make(instanceId)]?.driver,
+    botId,
+    provider,
+    searchTargetId,
+    grokBotDriver: GROK_BOT_DRIVER_KIND,
+  });
+  return grokBotSelected ? (
+    <GrokBotScopeMenu environmentId={props.environmentId} botId={botId} />
+  ) : (
+    <ProjectScopeMenu {...props} />
+  );
+}
+
+function GrokBotScopeMenu({
+  environmentId,
+  botId,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly botId: string | undefined;
+}) {
+  const navigate = useNavigate();
+  const roster = useEnvironmentQuery(grokBotsListQuery({ environmentId, input: {} }));
+  const bots = useMemo(() => sortGrokBotsForEditor(roster.data ?? []), [roster.data]);
+  const selected = bots.find((bot) => bot.id === botId) ?? bots[0] ?? null;
+  return (
+    <ScopeMenu
+      ariaLabel="Bot"
+      icon={
+        selected ? (
+          <GrokBotAvatar bot={selected} size="xs" featured={false} className="-ml-0.5" />
+        ) : null
+      }
+      label={selected?.name ?? "No bots"}
+    >
+      <MenuRadioGroup
+        value={selected?.id ?? ""}
+        onValueChange={(next) => {
+          if (typeof next !== "string" || next.length === 0) return;
+          void navigate({
+            to: "/settings/providers",
+            search: (previous) => ({
+              ...previous,
+              botId: next,
+              provider: GROK_BOT_PROVIDER_INTENT,
+            }),
+            hash: "grok-bots-editor",
+            replace: true,
+          });
+        }}
+      >
+        {bots.map((bot) => (
+          <MenuRadioItem key={bot.id} value={bot.id}>
+            <span className="flex min-w-0 items-center gap-2">
+              <GrokBotAvatar bot={bot} size="xs" />
+              <span className="min-w-0 flex-1 truncate">{bot.name}</span>
+              {bot.label.trim().length > 0 ? (
+                <span className="max-w-32 shrink truncate text-xs text-muted-foreground">
+                  {bot.label}
+                </span>
+              ) : null}
               <MenuRadioItemIndicator />
             </span>
           </MenuRadioItem>

@@ -1,6 +1,7 @@
 import {
   MessageId,
   NodeId,
+  RuntimeRequestId,
   RunId,
   ThreadId,
   TurnItemId,
@@ -444,6 +445,70 @@ describe("threadHistoryPaging", () => {
     expect(computeLatestLocalTurnOrdinal([])).toBeNull();
   });
 
+  it("keeps pending native questions actionable after trimming the timeline", () => {
+    const requestId = RuntimeRequestId.make("native-question");
+    const question: OrchestrationV2TurnItem = {
+      id: TurnItemId.make("item:native-question"),
+      threadId: THREAD,
+      runId: null,
+      nodeId: NODE,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 0,
+      title: null,
+      startedAt: NOW,
+      updatedAt: NOW,
+      type: "user_input_request",
+      requestId,
+      questions: [
+        {
+          id: "question",
+          header: "Question",
+          question: "Pick one",
+          options: [{ label: "A", description: "First" }],
+          allowCustomAnswer: true,
+        },
+      ],
+      status: "waiting",
+      completedAt: null,
+    };
+    const base = makeProjection([makeRow(1), makeRow(2)]);
+    const request = {
+      id: requestId,
+      nodeId: NODE,
+      providerTurnId: null,
+      nativeRequestRef: null,
+      kind: "user_input" as const,
+      status: "pending" as const,
+      responseCapability: { type: "message" as const },
+      createdAt: NOW,
+      resolvedAt: null,
+    };
+    const projection = {
+      ...base,
+      turnItems: [question, ...base.turnItems],
+      runtimeRequests: [request],
+    };
+    const bounded = buildBoundedThreadProjection({
+      projection,
+      snapshotSequence: 3,
+      policy: { maxItems: 1, maxEncodedBytes: 10_000_000 },
+    });
+    expect(bounded.projection.turnItems.some((item) => item.id === question.id)).toBe(true);
+    expect(bounded.projection.runtimeRequests).toEqual(projection.runtimeRequests);
+    const resolved = buildBoundedThreadProjection({
+      projection: {
+        ...projection,
+        runtimeRequests: [{ ...request, status: "resolved", resolvedAt: NOW }],
+      },
+      snapshotSequence: 4,
+      policy: { maxItems: 1, maxEncodedBytes: 10_000_000 },
+    });
+    expect(resolved.projection.turnItems.some((item) => item.id === question.id)).toBe(false);
+  });
+
   it("retains an out-of-window run_interrupt_request needed by a visible result", () => {
     // Older request sits outside a 1-row recent window; result is visible alone.
     const request = interruptRow(0, "run_interrupt_request");
@@ -634,7 +699,7 @@ describe("threadHistoryPaging", () => {
   });
 
   it("preserves oversized actionable state and reports the budget exception", () => {
-    const projection = makeProjection([]);
+    const projection = makeProjection([makeRow(0)]);
     const actionable = {
       ...projection,
       plans: [
@@ -654,6 +719,7 @@ describe("threadHistoryPaging", () => {
 
     expect(bounded.payloadBudgetExceeded).toBe(true);
     expect(bounded.projection.plans[0]).toEqual(actionable.plans[0]);
+    expect(bounded.projection.visibleTurnItems).toEqual(actionable.visibleTurnItems);
   });
 
   it("keeps paged historical plan detail in the turn item and only status in its artifact", () => {

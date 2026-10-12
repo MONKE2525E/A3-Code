@@ -6,7 +6,6 @@ import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { useEffect, useState, type ReactNode } from "react";
 import {
-  ActivityIndicator,
   Alert,
   AccessibilityInfo,
   Animated,
@@ -16,6 +15,7 @@ import {
   View,
 } from "react-native";
 
+import { AppActivityIndicator } from "../../components/AppActivityIndicator";
 import { SymbolView } from "../../components/AppSymbol";
 import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
 import { useAndroidControlSizing } from "../../components/useAndroidControlSizing";
@@ -176,7 +176,7 @@ function DeviceStatusBadge(props: {
             type="monochrome"
           />
         ) : (
-          <ActivityIndicator
+          <AppActivityIndicator
             colorClassName="accent-icon"
             size="small"
             style={{ transform: [{ scale: props.diameter / INDICATOR_LAYOUT_SIZE }] }}

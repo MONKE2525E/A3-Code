@@ -21,6 +21,8 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
     readonly label: string;
   }>;
   showInteractionModeToggle: boolean;
+  /** The provider offers one access mode, so there is nothing to choose. */
+  hideRuntimeMode?: boolean;
   traitsMenuContent?: ReactNode;
   size?: "sm" | "xs";
   /**
@@ -35,6 +37,11 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   const composerFloatingLayerProps = useComposerMenuProps();
   const size = props.size ?? "sm";
   const [open, setOpen] = useComposerMenuState(props.hidden);
+  const showAccess = !props.hideRuntimeMode;
+  const hasContent =
+    Boolean(props.traitsMenuContent) || props.showInteractionModeToggle || showAccess;
+  // A hidden mode block with nothing to choose leaves no overflow to open.
+  if (!hasContent) return null;
 
   return (
     <Menu open={open} onOpenChange={setOpen}>
@@ -56,7 +63,7 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
         {props.traitsMenuContent ? (
           <>
             {props.traitsMenuContent}
-            <MenuDivider />
+            {props.showInteractionModeToggle || showAccess ? <MenuDivider /> : null}
           </>
         ) : null}
         {props.showInteractionModeToggle ? (
@@ -72,23 +79,27 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
               <MenuRadioItem value="default">Chat</MenuRadioItem>
               <MenuRadioItem value="plan">Plan</MenuRadioItem>
             </MenuRadioGroup>
-            <MenuDivider />
+            {showAccess ? <MenuDivider /> : null}
           </>
         ) : null}
-        <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Access</div>
-        <MenuRadioGroup
-          value={props.runtimeMode}
-          onValueChange={(value) => {
-            if (!value || value === props.runtimeMode) return;
-            props.onRuntimeModeChange(value as RuntimeMode);
-          }}
-        >
-          {props.runtimeModeOptions.map((option) => (
-            <MenuRadioItem key={option.mode} value={option.mode}>
-              {option.label}
-            </MenuRadioItem>
-          ))}
-        </MenuRadioGroup>
+        {showAccess ? (
+          <>
+            <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Access</div>
+            <MenuRadioGroup
+              value={props.runtimeMode}
+              onValueChange={(value) => {
+                if (!value || value === props.runtimeMode) return;
+                props.onRuntimeModeChange(value as RuntimeMode);
+              }}
+            >
+              {props.runtimeModeOptions.map((option) => (
+                <MenuRadioItem key={option.mode} value={option.mode}>
+                  {option.label}
+                </MenuRadioItem>
+              ))}
+            </MenuRadioGroup>
+          </>
+        ) : null}
       </MenuPopup>
     </Menu>
   );

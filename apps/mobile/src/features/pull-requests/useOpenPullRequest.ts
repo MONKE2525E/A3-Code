@@ -17,7 +17,7 @@ import { resolveNativePullRequestLink } from "./pull-request-link";
  * Projects and capabilities are read when the link is pressed rather than subscribed to, so a
  * thread full of links does not re-render when the project list changes.
  */
-export function useOpenPullRequest() {
+export function useOpenPullRequest(options?: { readonly replace?: boolean }) {
   const navigation = useNavigation();
   return useCallback(
     async (
@@ -38,12 +38,15 @@ export function useOpenPullRequest() {
         // A push, not a navigate: a link inside one pull request opens another on top of it, and
         // Back returns to the first.
         navigation.dispatch(
-          StackActions.push("PullRequestDetail", { ...target, ...(threadId ? { threadId } : {}) }),
+          (options?.replace ? StackActions.replace : StackActions.push)("PullRequest", {
+            ...target,
+            ...(threadId ? { threadId } : {}),
+          }),
         );
         return true;
       }
       return tryOpenExternalUrl(url, external);
     },
-    [navigation],
+    [navigation, options?.replace],
   );
 }

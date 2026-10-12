@@ -3,6 +3,7 @@ import {
   CheckpointScopeId,
   CommandId,
   MessageId,
+  NodeId,
   ProviderSessionId,
   RunAttemptId,
   ProviderApprovalDecision,
@@ -29,6 +30,13 @@ import { forkParked } from "../serverActivation.ts";
 
 export const OrchestrationEffectRequestV2 = Schema.Union([
   Schema.Struct({
+    type: Schema.Literal("provider-runtime.reconnect"),
+    runId: RunId,
+    reconcileAttempt: Schema.optional(
+      Schema.Int.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(5)),
+    ),
+  }),
+  Schema.Struct({
     type: Schema.Literal("provider-runtime.continue"),
     sourceRunId: RunId,
   }),
@@ -48,6 +56,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     providerSessionId: ProviderSessionId,
     providerThreadId: ProviderThreadId,
     providerTurnId: ProviderTurnId,
+    subagent: Schema.optional(Schema.Struct({ id: NodeId, nativeTaskId: Schema.String })),
   }),
   Schema.Struct({
     type: Schema.Literal("provider-turn.steer"),
@@ -95,6 +104,10 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("terminal.cleanup"),
   }),
+  /** Closes a deleted thread's preview sessions, ending their server browser tabs. */
+  Schema.Struct({
+    type: Schema.Literal("preview.cleanup"),
+  }),
   Schema.Struct({
     type: Schema.Literal("attachment.cleanup"),
     attachmentIds: Schema.Array(Schema.String),
@@ -115,11 +128,13 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
 export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.Type;
 
 export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
+  "provider-runtime.reconnect",
   "provider-runtime.continue",
   "provider-session.detach",
   "provider-thread.rollback",
   "checkpoint.capture",
   "terminal.cleanup",
+  "preview.cleanup",
   "attachment.cleanup",
   "thread-title.generate",
   "delegated-tasks.stop",

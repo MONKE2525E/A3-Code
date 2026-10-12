@@ -11,6 +11,10 @@ import { describe, expect, it } from "vite-plus/test";
 import { resolveSettingsScope } from "./settingsScope";
 import { retainSettingsScope, validateSettingsRouteSearch } from "./settingsScopeNavigation";
 
+import {
+  grokBotLegacySettingsRedirect,
+  validateGrokBotSettingsSearch,
+} from "../grokBot/grokBotPresentation";
 import { validateScheduledTasksSearch } from "./scheduledTasksSettings.logic";
 
 const checkoutSearch = {
@@ -46,6 +50,7 @@ function createSettingsRouter(initialEntry = "/settings/general") {
       ...(typeof raw.instanceId === "string" && raw.instanceId.trim()
         ? { instanceId: ProviderInstanceId.make(raw.instanceId) }
         : {}),
+      ...validateGrokBotSettingsSearch(raw),
     }),
   });
   const scheduledTasks = createRoute({
@@ -64,6 +69,22 @@ function createSettingsRouter(initialEntry = "/settings/general") {
       });
     },
   });
+  const legacyGrokBots = createRoute({
+    getParentRoute: () => settings,
+    path: "grok-bots",
+    validateSearch: validateGrokBotSettingsSearch,
+    beforeLoad: ({ search, location }) => {
+      throw redirect({
+        to: "/settings/providers",
+        search: (previous) =>
+          grokBotLegacySettingsRedirect({ previousSearch: previous, search, hash: location.hash })
+            .search,
+        hash: grokBotLegacySettingsRedirect({ previousSearch: {}, search, hash: location.hash })
+          .hash,
+        replace: true,
+      });
+    },
+  });
   return createRouter({
     routeTree: root.addChildren([
       settings.addChildren([
@@ -72,6 +93,7 @@ function createSettingsRouter(initialEntry = "/settings/general") {
         integrations,
         sourceControl,
         providers,
+        legacyGrokBots,
         scheduledTasks,
       ]),
       legacyProject,
@@ -92,6 +114,25 @@ describe("settings scope navigation", () => {
     expect(router.state.location.search).toEqual({ machine: "remote-server" });
     await router.navigate({ to: "/settings/projects", search: { project: "another-project" } });
     expect(router.state.location.search).toEqual({ project: "another-project" });
+  });
+
+  it("redirects the legacy Grok Bots route without a stale provider instance", async () => {
+    const router = createSettingsRouter("/settings/providers?instanceId=codex");
+    await router.load();
+    await router.navigate({
+      to: "/settings/grok-bots",
+      search: { botId: "b1", machine: "env-1", instanceId: "codex" } as never,
+      hash: "grok-bots-pinned",
+    });
+    expect(router.state.redirect).not.toBeUndefined();
+    await router.navigate(router.state.redirect!.options);
+    expect(router.state.location.pathname).toBe("/settings/providers");
+    expect(router.state.location.search).toEqual({
+      botId: "b1",
+      machine: "env-1",
+      provider: "grok-bot",
+    });
+    expect(router.state.location.hash).toBe("grok-bots-pinned");
   });
 
   it("clears a checkout when selecting all environments and all projects", async () => {
@@ -293,5 +334,25 @@ describe("scheduled task scope navigation", () => {
     await router.navigate({ to: "/settings/projects", search: checkoutSearch });
     await router.navigate({ to: "/settings/scheduled-tasks" });
     expect(router.state.matches.at(-1)?.search).toEqual(checkoutSearch);
+  });
+
+  it("keeps the Grok Bot intent after the target hash is cleared", async () => {
+    const router = createSettingsRouter();
+    await router.navigate({
+      to: "/settings/providers",
+      search: { machine: "env-1", provider: "grok-bot" },
+      hash: "grok-bots-editor",
+    });
+    expect(router.state.location.search).toEqual({ machine: "env-1", provider: "grok-bot" });
+    // The settings layout clears the handled highlight hash.
+    await router.navigate({
+      search: true,
+      hash: "",
+      replace: true,
+      resetScroll: false,
+      hashScrollIntoView: false,
+    });
+    expect(router.state.location.hash).toBe("");
+    expect(router.state.location.search).toEqual({ machine: "env-1", provider: "grok-bot" });
   });
 });

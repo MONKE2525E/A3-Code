@@ -103,6 +103,47 @@ describe("v2 thread shell lists", () => {
     registry.dispose();
   });
 
+  it("keeps Grok Bot backing threads out of navigation but in the raw list", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const root = v2ThreadShell;
+    const bot = { ...root, id: ThreadId.make("grok-bot:9f2c") };
+    registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: [root, bot] });
+    const dispose = registry.mount(threads.navigationThreadShellsAtom);
+    expect(registry.get(threads.navigationThreadShellsAtom).map((thread) => thread.id)).toEqual([
+      root.id,
+    ]);
+    expect(registry.get(threads.threadShellsAtom).map((thread) => thread.id)).toEqual([
+      root.id,
+      bot.id,
+    ]);
+    dispose();
+    registry.dispose();
+  });
+
+  it("leaves switched-off environments out of navigation", () => {
+    const { registry, threads, catalogValueAtom } = makeHarness([
+      environmentId,
+      remoteEnvironmentId,
+    ]);
+    const dispose = registry.mount(threads.navigationThreadShellsAtom);
+    const environmentsOf = () =>
+      new Set(registry.get(threads.navigationThreadShellsAtom).map((t) => t.environmentId));
+    expect(environmentsOf()).toEqual(new Set([environmentId, remoteEnvironmentId]));
+
+    const setRemoteEnabled = (enabled: boolean) => {
+      const catalog = registry.get(catalogValueAtom);
+      const entries = new Map(catalog.entries);
+      entries.set(remoteEnvironmentId, { ...entries.get(remoteEnvironmentId)!, enabled });
+      registry.set(catalogValueAtom, { ...catalog, entries });
+    };
+    setRemoteEnabled(false);
+    expect(environmentsOf()).toEqual(new Set([environmentId]));
+    setRemoteEnabled(true);
+    expect(environmentsOf()).toEqual(new Set([environmentId, remoteEnvironmentId]));
+    dispose();
+    registry.dispose();
+  });
+
   it("shares point and list values without retaining an atom for every listed thread", () => {
     const harness = makeHarness();
     const snapshot = {

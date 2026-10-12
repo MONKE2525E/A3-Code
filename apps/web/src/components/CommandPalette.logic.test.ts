@@ -9,6 +9,7 @@ import {
   buildProjectActionItems,
   buildThreadActionItems,
   buildLinkedThreadActionItems,
+  buildGrokBotSearchItems,
   enumerateCommandPaletteItems,
   filterPinnedBrowseEntries,
   filterCommandPaletteGroups,
@@ -892,5 +893,49 @@ describe("virtualized command palette rows", () => {
     expect(findHighlightedCommandPaletteItem(groups, "thread-b")?.value).toBe("thread-b");
     expect(findHighlightedCommandPaletteItem(groups, "offline")).toBeNull();
     expect(findHighlightedCommandPaletteItem(groups, null)).toBeNull();
+  });
+});
+
+describe("buildGrokBotSearchItems", () => {
+  it("lists each bot once, titled with its name and routed through the caller", async () => {
+    const environmentId = EnvironmentId.make("env-a");
+    const bot = { id: "bot-1", name: "Ledger", avatarShape: "round", avatarColor: "teal" };
+    const run = vi.fn(async () => {});
+    const items = buildGrokBotSearchItems({
+      query: "invoice",
+      hits: [
+        { environmentId, bot, source: "user", snippet: "invoice due" },
+        { environmentId, bot, source: "assistant", snippet: "invoice paid" },
+      ],
+      icon: () => null,
+      run,
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]?.title).toBe("Ledger");
+    expect(items[0]?.searchTerms).toContain("invoice");
+    expect(items[0]?.threadContentMatch).toEqual({
+      source: "user",
+      snippet: "invoice due",
+      query: "invoice",
+    });
+    await items[0]?.run();
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ bot }));
+  });
+
+  it("keeps the same bot id in different environments as separate items", () => {
+    const bot = { id: "bot-1", name: "Ledger", avatarShape: "round", avatarColor: "teal" };
+    const items = buildGrokBotSearchItems({
+      query: "invoice",
+      hits: [
+        { environmentId: EnvironmentId.make("env-a"), bot, source: "user", snippet: "a" },
+        { environmentId: EnvironmentId.make("env-b"), bot, source: "user", snippet: "b" },
+      ],
+      icon: () => null,
+      run: async () => {},
+    });
+    expect(items.map((item) => item.value)).toEqual([
+      "grok-bot:env-a:bot-1",
+      "grok-bot:env-b:bot-1",
+    ]);
   });
 });

@@ -1,5 +1,8 @@
 import {
   CommandId,
+  type AuthMcpClientAccess,
+  type EnvironmentId,
+  type OrchestrationV2CallParent,
   type RunId,
   isProviderAvailable,
   MessageId,
@@ -58,10 +61,13 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
+import * as Deferred from "effect/Deferred";
+import * as Semaphore from "effect/Semaphore";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -74,19 +80,25 @@ import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterReg
 import {
   subagentResultForRun,
   delegatedTaskProgress,
-} from "../orchestration-v2/SubagentProjection.ts";
+} from "@t3tools/provider-core/server/subagentProjection";
 import {
   DispatchModeLimit,
   type DispatchModeRefusal,
 } from "../orchestration-v2/DispatchModeLimit.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import {
   clientRuntimeModeCeiling,
+  matchesRemoteRun,
   type McpInvocationScope,
   type McpThreadInvocationScope,
+  type McpDelegationInvocationScope,
+  delegationThreadId,
+  requireDelegationScope,
   requireThreadScope,
 } from "./McpInvocationContext.ts";
 import * as Metrics from "../observability/Metrics.ts";
@@ -111,6 +123,7 @@ const DEFAULT_THREAD_ITEM_MAX_CHARS = 20_000;
 
 interface ResolvedTarget {
   readonly modelSelection: ModelSelection;
+  readonly supportedRuntimeModes: ReadonlyArray<RuntimeMode> | undefined;
 }
 
 type TerminalTaskStatus = Extract<
@@ -119,6 +132,30 @@ type TerminalTaskStatus = Extract<
 >;
 
 export interface OrchestratorMcpServiceShape {
+  /** Trusted adapter boundary: acquire once per LIVE call, release on every end path. */
+  readonly acquireCallInvocation: (input: {
+    readonly environmentId: EnvironmentId;
+    readonly accountId: string;
+    readonly botId: string;
+    readonly callId: string;
+    readonly threadId: ThreadId;
+    readonly access: AuthMcpClientAccess;
+  }) => Effect.Effect<McpInvocationScope, OrchestratorMcpFailure>;
+  readonly restrictCallInvocation: (
+    scope: McpInvocationScope,
+    access: AuthMcpClientAccess,
+  ) => Effect.Effect<McpInvocationScope, OrchestratorMcpFailure>;
+  readonly releaseCallInvocation: (
+    scope: McpInvocationScope,
+  ) => Effect.Effect<void, OrchestratorMcpFailure>;
+  readonly validateCallInvocation: (
+    scope: McpInvocationScope,
+  ) => Effect.Effect<void, OrchestratorMcpFailure>;
+  readonly waitForTask: (
+    scope: McpInvocationScope,
+    taskId: NodeId,
+    timeoutMs: number,
+  ) => Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure>;
   readonly capabilities: (
     scope: McpInvocationScope,
   ) => Effect.Effect<OrchestratorMcpCapabilitiesResult, OrchestratorMcpFailure>;
@@ -211,6 +248,8 @@ function threadManagementFailure(error: unknown): OrchestratorMcpFailure {
     case "ThreadManagementProjectThreadsListError":
     case "ThreadManagementDurableRunProjectionError":
       return failure("orchestration_error", error.message);
+    case "ThreadManagementProviderInstanceDisabledError":
+      return failure("invalid_request", error.message);
   }
 }
 
@@ -349,6 +388,8 @@ export function delegatedTaskRun(
   childProjection: Pick<OrchestrationV2ThreadProjection, "runs" | "contextTransfers">,
   task: OrchestrationV2Subagent,
 ): OrchestrationV2Run | undefined {
+  const taskRun = childProjection.runs.find((run) => run.delegatedTaskId === task.id);
+  if (taskRun !== undefined) return taskRun;
   const spawnTransfer = childProjection.contextTransfers.find(
     (transfer) =>
       transfer.type === "subagent_spawn" &&
@@ -368,9 +409,11 @@ export function hasPendingChildRuns(
   childProjection: Pick<OrchestrationV2ThreadProjection, "runs">,
   delegatedRun: OrchestrationV2Run | undefined,
 ): boolean {
+  // Held queued runs wait for the user to resume the child; task_cancel holds them.
   return childProjection.runs.some(
     (run) =>
       !ThreadManagementService.isTerminalRunStatus(run.status) &&
+      !(run.status === "queued" && run.queueHeld === true) &&
       (delegatedRun === undefined || run.ordinal > delegatedRun.ordinal),
   );
 }
@@ -386,21 +429,61 @@ function isTerminalTaskStatus(
   );
 }
 
-function directAppOwnedChildTask(
+function directAppOwnedChildTasks(
   parent: Pick<OrchestrationV2ThreadProjection, "thread" | "subagents">,
-  target: Pick<OrchestrationV2ThreadProjection, "thread">,
-): OrchestrationV2Subagent | undefined {
+  target: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+  returnedRunIds: ReadonlySet<RunId | null>,
+): ReadonlyArray<OrchestrationV2Subagent> {
   if (
     target.thread.lineage.parentThreadId !== parent.thread.id ||
     target.thread.lineage.relationshipToParent !== "subagent"
   ) {
-    return undefined;
+    return [];
   }
-  return parent.subagents.find(
+  const original = parent.subagents.find(
     (task) =>
       task.origin === "app_owned" &&
       task.threadId === parent.thread.id &&
+      task.id ===
+        (target.thread.forkedFrom?.type === "node" ? target.thread.forkedFrom.nodeId : undefined) &&
       task.childThreadId === target.thread.id,
+  );
+  const taskIds = new Set(
+    target.runs
+      .filter((run) => returnedRunIds.has(run.id))
+      .map((run) => run.delegatedTaskId ?? original?.id),
+  );
+  return parent.subagents.filter(
+    (task) =>
+      taskIds.has(task.id) &&
+      task.origin === "app_owned" &&
+      task.childThreadId === target.thread.id,
+  );
+}
+
+function taskResultTransfer(
+  parent: Pick<OrchestrationV2ThreadProjection, "thread" | "contextTransfers">,
+  child: Pick<OrchestrationV2ThreadProjection, "runs" | "contextTransfers">,
+  task: OrchestrationV2Subagent,
+) {
+  const originalRun = delegatedTaskRun(child, task);
+  const resultRunIds = new Set(
+    child.runs
+      .filter(
+        (run) =>
+          run.delegatedTaskId === task.id ||
+          (originalRun?.delegatedTaskId === undefined && run.delegatedTaskId === undefined),
+      )
+      .map((run) => run.id),
+  );
+  if (originalRun !== undefined) resultRunIds.add(originalRun.id);
+  return parent.contextTransfers.find(
+    (transfer) =>
+      transfer.type === "subagent_result" &&
+      transfer.sourceThreadId === task.childThreadId &&
+      transfer.targetThreadId === parent.thread.id &&
+      ((transfer.sourcePoint.runId !== undefined && resultRunIds.has(transfer.sourcePoint.runId)) ||
+        (transfer.sourcePoint.runId === undefined && originalRun?.delegatedTaskId === undefined)),
   );
 }
 
@@ -414,12 +497,7 @@ function pageIncludesTerminalTaskResult(input: {
   >;
   readonly maxChars: number;
 }): boolean {
-  const transfer = input.parent.contextTransfers.find(
-    (transfer) =>
-      transfer.type === "subagent_result" &&
-      transfer.sourceThreadId === input.target.thread.id &&
-      transfer.targetThreadId === input.parent.thread.id,
-  );
+  const transfer = taskResultTransfer(input.parent, input.target, input.task);
   if (transfer === undefined) return false;
   const run =
     transfer.sourcePoint.runId === undefined
@@ -490,19 +568,46 @@ function interactionModeRank(mode: ProviderInteractionMode): number {
   return mode === "plan" ? 0 : 1;
 }
 
+/**
+ * The mode a new thread runs in: the requested mode, else the parent's, never
+ * broader than the parent's. Pass `target` when the thread runs on a known
+ * provider. A provider runs a mode it does not offer as Supervised, so an
+ * explicit request for one is refused, and an inherited one steps down to the
+ * broadest mode the provider offers.
+ */
 export function resolveRuntimeMode(
   parentMode: RuntimeMode,
   requested: OrchestratorMcpRuntimeMode | undefined,
+  target?: Pick<ResolvedTarget, "modelSelection" | "supportedRuntimeModes">,
 ): Effect.Effect<RuntimeMode, OrchestratorMcpFailure> {
-  const resolved = requested === undefined || requested === "inherit" ? parentMode : requested;
-  return runtimeModeRank(resolved) > runtimeModeRank(parentMode)
-    ? Effect.fail(
-        failure(
-          "runtime_mode_escalation_denied",
-          `Child runtime mode ${resolved} is broader than parent mode ${parentMode}.`,
-        ),
-      )
-    : Effect.succeed(resolved);
+  const inherited = requested === undefined || requested === "inherit";
+  const resolved = inherited ? parentMode : requested;
+  if (runtimeModeRank(resolved) > runtimeModeRank(parentMode)) {
+    return Effect.fail(
+      failure(
+        "runtime_mode_escalation_denied",
+        `Child runtime mode ${resolved} is broader than parent mode ${parentMode}.`,
+      ),
+    );
+  }
+  const supported = target?.supportedRuntimeModes;
+  if (supported === undefined || supported.length === 0 || supported.includes(resolved)) {
+    return Effect.succeed(resolved);
+  }
+  if (!inherited) {
+    return Effect.fail(
+      failure(
+        "invalid_request",
+        `Provider ${target?.modelSelection.instanceId} does not offer runtime mode ${resolved}, so it would run as approval-required. Use one of: ${supported.join(", ")}.`,
+      ),
+    );
+  }
+  return Effect.succeed(
+    supported
+      .filter((mode) => runtimeModeRank(mode) <= runtimeModeRank(resolved))
+      .toSorted((left, right) => runtimeModeRank(right) - runtimeModeRank(left))[0] ??
+      "approval-required",
+  );
 }
 
 export function resolveInteractionMode(
@@ -617,7 +722,22 @@ function threadSettlement(
   };
 }
 
-function listItemFromShell(shell: OrchestrationV2ThreadShell): OrchestratorMcpThreadListItem {
+function threadSnooze(
+  thread: Parameters<typeof isSnoozed>[0],
+  nowMs: number,
+): Pick<OrchestratorMcpThreadListItem, "snoozed" | "snoozedUntil"> {
+  const snoozed = isSnoozed(thread, nowMs);
+  return {
+    snoozed,
+    snoozedUntil:
+      snoozed && thread.snoozedUntil != null ? DateTime.formatIso(thread.snoozedUntil) : null,
+  };
+}
+
+function listItemFromShell(
+  shell: OrchestrationV2ThreadShell,
+  nowMs: number,
+): OrchestratorMcpThreadListItem {
   return {
     threadId: shell.id,
     title: shell.title,
@@ -631,6 +751,7 @@ function listItemFromShell(shell: OrchestrationV2ThreadShell): OrchestratorMcpTh
     interactionMode: shell.interactionMode,
     linkedPullRequest: shell.linkedPullRequest ?? null,
     ...threadSettlement(shell),
+    ...threadSnooze(shell, nowMs),
     parentThreadId: shell.lineage.parentThreadId,
     relationshipToParent: shell.lineage.relationshipToParent,
     itemCount: shell.visibleItemCount,
@@ -642,6 +763,8 @@ function listItemFromShell(shell: OrchestrationV2ThreadShell): OrchestratorMcpTh
 function threadDetail(
   projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs" | "runtimeRequests">,
   itemCount: number,
+  shell: OrchestrationV2ThreadShell,
+  nowMs: number,
 ): OrchestratorMcpThreadDetail {
   const latest = ThreadManagementService.latestRun(projection);
   const active = ThreadManagementService.latestActiveRun(projection);
@@ -678,6 +801,8 @@ function threadDetail(
     ).length,
     archived: projection.thread.archivedAt !== null,
     ...threadSettlement(projection.thread),
+    // From the shell, like the list, so read and list agree on snooze state.
+    ...threadSnooze(shell, nowMs),
     createdAt: DateTime.formatIso(projection.thread.createdAt),
     updatedAt: DateTime.formatIso(projection.thread.updatedAt),
   };
@@ -790,6 +915,7 @@ function timelineItem(input: {
     visibility: input.row.visibility,
     sourceThreadId: input.row.sourceThreadId,
     itemId: input.row.sourceItemId,
+    ...(input.row.item.type === "subagent" ? { subagentId: input.row.item.subagentId } : {}),
     runId: input.row.item.runId,
     messageId,
     createdBy: message?.createdBy ?? null,
@@ -811,6 +937,211 @@ const make = Effect.gen(function* () {
   const providerAdapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
   const scheduledTasks = yield* ScheduledTaskService.ScheduledTaskService;
   const projects = yield* ProjectService.ProjectService;
+  const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const callLock = yield* Semaphore.make(1);
+  const calls = new Map<
+    McpInvocationScope,
+    {
+      readonly ended: Deferred.Deferred<void>;
+      readonly identity: string;
+      readonly aliases: Map<AuthMcpClientAccess, McpInvocationScope>;
+      live: boolean;
+    }
+  >();
+  let shuttingDown = false;
+  const staleCall = () =>
+    failure("parent_not_active", "This call no longer owns a live delegation parent.");
+
+  const validateCallInvocation = (scope: McpInvocationScope) =>
+    Effect.gen(function* () {
+      const entry = calls.get(scope);
+      if (shuttingDown || scope.call === undefined || !entry?.live || scope.thread !== undefined) {
+        return yield* staleCall();
+      }
+      const projection = yield* threadManagement
+        .getThreadRecords(scope.call.threadId, ["nodes"])
+        .pipe(Effect.mapError(threadManagementFailure));
+      const node = projection.nodes.find((node) => node.id === scope.call?.parentNodeId);
+      if (
+        projection.thread.deletedAt !== null ||
+        projection.thread.archivedAt !== null ||
+        node?.kind !== "call_parent" ||
+        node.status !== "running" ||
+        node.callParent?.authorityId !== scope.call.authorityId ||
+        node.callParent.environmentId !== scope.environmentId
+      )
+        return yield* staleCall();
+    });
+
+  const withCallAuthority = <A, E, R>(scope: McpInvocationScope, effect: Effect.Effect<A, E, R>) =>
+    scope.call === undefined
+      ? effect
+      : callLock.withPermits(1)(validateCallInvocation(scope).pipe(Effect.andThen(effect)));
+
+  const restrictCallInvocation: OrchestratorMcpServiceShape["restrictCallInvocation"] = (
+    scope,
+    access,
+  ) =>
+    withCallAuthority(
+      scope,
+      Effect.gen(function* () {
+        const entry = calls.get(scope);
+        if (entry === undefined || scope.client === undefined) return yield* staleCall();
+        const accessRank = (value: AuthMcpClientAccess) =>
+          value === "read-only"
+            ? -1
+            : runtimeModeRank(clientRuntimeModeCeiling({ ...scope.client!, access: value }));
+        if (accessRank(access) > accessRank(scope.client.access))
+          return yield* failure(
+            "capability_denied",
+            "A narrowed call credential cannot raise its access.",
+          );
+        const prior = entry.aliases.get(access);
+        if (prior !== undefined) return prior;
+        const alias: McpInvocationScope = Object.freeze({
+          ...scope,
+          client: Object.freeze({ ...scope.client, access }),
+        });
+        calls.set(alias, entry);
+        entry.aliases.set(access, alias);
+        return alias;
+      }),
+    );
+
+  const assertCallMayObserveTasks = (scope: McpInvocationScope) =>
+    scope.call !== undefined && scope.client?.access === "read-only"
+      ? Effect.fail(
+          failure("capability_denied", "Delegation tools require a call approved to operate."),
+        )
+      : Effect.void;
+
+  const releaseCallInvocation = (scope: McpInvocationScope) =>
+    callLock.withPermits(1)(
+      Effect.gen(function* () {
+        const entry = calls.get(scope);
+        if (entry === undefined || scope.call === undefined) return yield* staleCall();
+        // Revoke first, including when the persistence write fails. A waiter wakes immediately.
+        entry.live = false;
+        yield* Deferred.succeed(entry.ended, undefined);
+        yield* threadManagement
+          .dispatch({
+            type: "call-parent.release",
+            commandId: CommandId.make(`call-release:${scope.call.authorityId}`),
+            threadId: scope.call.threadId,
+            nodeId: scope.call.parentNodeId,
+            authorityId: scope.call.authorityId,
+          })
+          .pipe(Effect.mapError(threadManagementFailure), Effect.asVoid);
+      }),
+    );
+
+  yield* Effect.addFinalizer(() =>
+    Effect.gen(function* () {
+      shuttingDown = true;
+      yield* Effect.forEach(
+        [...calls.keys()].filter((scope) => calls.get(scope)?.live),
+        (scope) =>
+          releaseCallInvocation(scope).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("mcp.call-parent.release-failed", { cause }),
+            ),
+          ),
+        { discard: true },
+      );
+    }),
+  );
+
+  const acquireCallInvocation: OrchestratorMcpServiceShape["acquireCallInvocation"] = (input) =>
+    callLock.withPermits(1)(
+      Effect.gen(function* () {
+        if (
+          shuttingDown ||
+          [input.accountId, input.botId, input.callId].some(
+            (id) => id.trim().length === 0 || id.length > 512,
+          )
+        ) {
+          return yield* failure("invalid_request", "The call authority identity is unavailable.");
+        }
+        const identity = [
+          input.environmentId,
+          input.accountId,
+          input.botId,
+          input.callId,
+          input.threadId,
+        ]
+          .map(encodeURIComponent)
+          .join(":");
+        for (const [scope, entry] of calls) {
+          if (entry.identity === identity) {
+            if (!entry.live || scope.client?.access !== input.access) return yield* staleCall();
+            yield* validateCallInvocation(scope);
+            return scope;
+          }
+          if (
+            entry.live &&
+            scope.environmentId === input.environmentId &&
+            scope.call?.threadId === input.threadId
+          ) {
+            return yield* failure(
+              "parent_not_active",
+              "Release the previous call before acquiring a new call for this conversation.",
+            );
+          }
+        }
+        const shell = yield* threadManagement
+          .getThreadShell(input.threadId)
+          .pipe(Effect.mapError(threadManagementFailure));
+        if (shell === null || shell.deletedAt !== null || shell.archivedAt !== null)
+          return yield* failure("thread_not_found", "The call conversation is unavailable.");
+        const authorityId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+        const parentNodeId = NodeId.make(`call-parent:${authorityId}`);
+        const runtimeMode = yield* resolveRuntimeMode(shell.runtimeMode, undefined);
+        const ceiling = clientRuntimeModeCeiling({
+          access: input.access,
+          sessionId: input.callId,
+          label: "Voice call",
+        });
+        const authority: OrchestrationV2CallParent = {
+          authorityId,
+          environmentId: input.environmentId,
+          accountId: input.accountId,
+          botId: input.botId,
+          callId: input.callId,
+          runtimeMode:
+            runtimeModeRank(runtimeMode) <= runtimeModeRank(ceiling) ? runtimeMode : ceiling,
+          interactionMode: shell.interactionMode,
+        };
+        yield* threadManagement
+          .dispatch({
+            type: "call-parent.acquire",
+            commandId: CommandId.make(`call-acquire:${authorityId}`),
+            threadId: input.threadId,
+            nodeId: parentNodeId,
+            authority,
+          })
+          .pipe(Effect.mapError(threadManagementFailure));
+        const scope: McpInvocationScope = Object.freeze({
+          environmentId: input.environmentId,
+          issuedAt: yield* Clock.currentTimeMillis,
+          capabilities: new Set(["orchestration"] as const),
+          requestNamespace: `call:${authorityId}`,
+          thread: undefined,
+          call: Object.freeze({ ...authority, threadId: input.threadId, parentNodeId }),
+          client: Object.freeze({
+            sessionId: input.callId,
+            label: "Voice call",
+            access: input.access,
+          }),
+        });
+        calls.set(scope, {
+          ended: yield* Deferred.make<void>(),
+          identity,
+          live: true,
+          aliases: new Map([[input.access, scope]]),
+        });
+        return scope;
+      }),
+    );
 
   /** A caller-named project, which must exist before anything is recorded against it. */
   const requireProject = (projectId: ProjectId) =>
@@ -884,6 +1215,7 @@ const make = Effect.gen(function* () {
       .getProjectThreadRecords(
         { projectId, threadId },
         [
+          "nodes",
           "runs",
           "messages",
           "subagents",
@@ -897,6 +1229,27 @@ const make = Effect.gen(function* () {
       )
       .pipe(Effect.mapError(threadManagementFailure));
 
+  const callLimits = (
+    scope: McpInvocationScope,
+    thread: Pick<OrchestrationV2ThreadShell, "runtimeMode" | "interactionMode">,
+  ) =>
+    Effect.sync(() => {
+      const call = scope.call;
+      if (call === undefined)
+        return { runtimeMode: thread.runtimeMode, interactionMode: thread.interactionMode };
+      return {
+        runtimeMode: [
+          call.runtimeMode,
+          thread.runtimeMode,
+          clientRuntimeModeCeiling(scope.client),
+        ].toSorted((a, b) => runtimeModeRank(a) - runtimeModeRank(b))[0]!,
+        interactionMode:
+          interactionModeRank(call.interactionMode) <= interactionModeRank(thread.interactionMode)
+            ? call.interactionMode
+            : thread.interactionMode,
+      };
+    });
+
   /**
    * The caller's own thread and the most it may hand to threads it targets. A
    * thread caller is capped by its own modes; an OAuth client by the ceiling
@@ -905,6 +1258,11 @@ const make = Effect.gen(function* () {
   const loadCaller = (scope: McpInvocationScope) =>
     Effect.gen(function* () {
       yield* requireCapability(scope);
+      if (scope.call !== undefined) {
+        yield* validateCallInvocation(scope);
+        const parent = yield* loadProjection(scope.call.threadId);
+        return { parent, limits: yield* callLimits(scope, parent.thread) };
+      }
       if (scope.thread === undefined) {
         return {
           parent: undefined,
@@ -915,6 +1273,7 @@ const make = Effect.gen(function* () {
         } as const;
       }
       const parent = yield* loadProjection(scope.thread.threadId);
+      if (scope.thread.remoteRun !== undefined) yield* assertLiveCaller(scope, parent);
       return {
         parent,
         limits: {
@@ -930,6 +1289,7 @@ const make = Effect.gen(function* () {
       yield* requireCapability(scope);
       const threadScope = yield* requireThreadScope(scope, operation);
       const parent = yield* loadProjection(threadScope.thread.threadId);
+      if (threadScope.thread.remoteRun !== undefined) yield* assertLiveCaller(threadScope, parent);
       return { scope: threadScope, parent } as const;
     });
 
@@ -998,10 +1358,12 @@ const make = Effect.gen(function* () {
     scope: McpInvocationScope,
     parent: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
   ) => {
+    if (scope.call !== undefined) return validateCallInvocation(scope);
     const activeRun = ThreadManagementService.latestActiveRun(parent);
     return parent.thread.archivedAt !== null ||
       activeRun === undefined ||
-      activeRun.providerInstanceId !== scope.thread?.providerInstanceId
+      activeRun.providerInstanceId !== scope.thread?.providerInstanceId ||
+      !matchesRemoteRun(scope.thread, activeRun)
       ? Effect.fail(
           failure("parent_not_active", "The calling provider no longer owns an active thread run."),
         )
@@ -1024,7 +1386,7 @@ const make = Effect.gen(function* () {
           "contextTransfers",
         ])
         .pipe(Effect.mapError(threadManagementFailure));
-      return { parent, target } as const;
+      return { parent, target, shell } as const;
     });
 
   const loadProviders = providerRegistry.getProviders;
@@ -1043,6 +1405,19 @@ const make = Effect.gen(function* () {
    * unattended agent can see a provider as unavailable after it was fixed.
    * Re-probe the requested instance once before refusing it.
    */
+  const assertTargetEnabledForProject = (
+    parent: Pick<OrchestrationV2ThreadProjection, "thread">,
+    commandId: CommandId,
+    target: ResolvedTarget,
+  ) =>
+    threadManagement
+      .assertProviderInstanceEnabled({
+        projectId: parent.thread.projectId,
+        commandId,
+        instanceId: target.modelSelection.instanceId,
+      })
+      .pipe(Effect.mapError(threadManagementFailure));
+
   const resolveTargetRechecking = (input: Parameters<typeof resolveTarget>[0]) => {
     const instanceId =
       input.target?.providerInstanceId ??
@@ -1066,6 +1441,16 @@ const make = Effect.gen(function* () {
     readonly parent: Pick<OrchestrationV2ThreadProjection, "thread">;
     readonly target: OrchestratorMcpTarget | undefined;
     readonly providers: ReadonlyArray<ServerProvider>;
+    /**
+     * Skips the per-candidate project-enablement check in driver-only
+     * resolution. Set only when the command that will dispatch this target
+     * already has a receipt: that dispatch can only replay the recorded
+     * result, never start anything new, so filtering candidates by the
+     * project's current settings would just refuse a retry that does no new
+     * work. Never set this for a resolution whose dispatch uses a different
+     * command id than the one checked for a receipt.
+     */
+    readonly skipProjectEnablementFilter?: boolean;
   }): Effect.Effect<ResolvedTarget, OrchestratorMcpFailure> =>
     Effect.gen(function* () {
       const requestedInstanceId = input.target?.providerInstanceId;
@@ -1087,20 +1472,37 @@ const make = Effect.gen(function* () {
         }
         // Inherit the parent's instance only when it can actually serve the
         // child; an unavailable parent yields to a healthy instance of the
-        // requested driver rather than failing the delegation.
-        const inheritedCandidate = candidates.find(
-          (candidate) =>
-            candidate.instanceId === input.parent.thread.modelSelection.instanceId &&
-            providerConstraints(candidate, true).length === 0,
-        );
-        const availableCandidate = candidates.find(
+        // requested driver rather than failing the delegation. An instance
+        // the project turned off cannot serve either, so selection skips it
+        // for the next candidate instead of failing the enablement check.
+        const healthyCandidates = candidates.filter(
           (candidate) => providerConstraints(candidate, true).length === 0,
         );
-        instanceId = inheritedCandidate?.instanceId ?? availableCandidate?.instanceId;
+        const inheritedCandidate = healthyCandidates.find(
+          (candidate) => candidate.instanceId === input.parent.thread.modelSelection.instanceId,
+        );
+        const orderedCandidates = [
+          ...(inheritedCandidate === undefined ? [] : [inheritedCandidate]),
+          ...healthyCandidates.filter((candidate) => candidate !== inheritedCandidate),
+        ];
+        for (const candidate of orderedCandidates) {
+          const enabledForProject =
+            input.skipProjectEnablementFilter === true ||
+            (yield* threadManagement.isProviderInstanceEnabledForProject({
+              projectId: input.parent.thread.projectId,
+              instanceId: candidate.instanceId,
+            }));
+          if (enabledForProject) {
+            instanceId = candidate.instanceId;
+            break;
+          }
+        }
         if (instanceId === undefined) {
           return yield* failure(
             "provider_unavailable",
-            `No available V2 provider instance for driver ${requestedDriver}.`,
+            healthyCandidates.length === 0
+              ? `No available V2 provider instance for driver ${requestedDriver}.`
+              : `No instance of driver ${requestedDriver} is enabled for this project.`,
           );
         }
       }
@@ -1177,6 +1579,7 @@ const make = Effect.gen(function* () {
             : requestedOptions === undefined
               ? { instanceId, model }
               : { instanceId, model, options: requestedOptions },
+        supportedRuntimeModes: provider.supportedRuntimeModes,
       };
     });
 
@@ -1186,7 +1589,7 @@ const make = Effect.gen(function* () {
       : Effect.succeed(clientRequestId);
 
   const readTask = (
-    scope: McpThreadInvocationScope,
+    scope: McpDelegationInvocationScope,
     taskId: NodeId,
     waitTimedOut = false,
     acknowledgeTerminal = false,
@@ -1194,17 +1597,19 @@ const make = Effect.gen(function* () {
   ): Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure> =>
     Effect.gen(function* () {
       yield* requireCapability(scope);
-      const parentProjection = yield* loadProjection(scope.thread.threadId);
+      if (scope.call !== undefined) yield* validateCallInvocation(scope);
+      const parentProjection = yield* loadProjection(delegationThreadId(scope));
       const task = parentProjection.subagents.find(
         (candidate) =>
           candidate.id === taskId &&
           candidate.origin === "app_owned" &&
-          candidate.threadId === scope.thread.threadId,
+          candidate.threadId === delegationThreadId(scope) &&
+          (scope.call === undefined || candidate.parentNodeId === scope.call.parentNodeId),
       );
       if (task === undefined || task.childThreadId === null) {
         return yield* failure(
           "task_not_found",
-          `Delegated task ${taskId} does not belong to thread ${scope.thread.threadId}.`,
+          `Delegated task ${taskId} does not belong to thread ${delegationThreadId(scope)}.`,
         );
       }
       const childControls = yield* threadManagement
@@ -1217,9 +1622,21 @@ const make = Effect.gen(function* () {
       const childRun = delegatedTaskRun(childControls, task);
       const terminalRun = latestTerminalResultRun(childControls, childRun);
       const progress = delegatedTaskProgress(childControls);
+      const taskResultRun =
+        childRun?.delegatedTaskId === task.id
+          ? childControls.runs
+              .filter((run) => run.delegatedTaskId === task.id)
+              .toSorted((a, b) => b.ordinal - a.ordinal)[0]
+          : progress.resultRun;
+      const taskWorkState =
+        childRun?.delegatedTaskId === task.id
+          ? isTerminalTaskStatus(taskStatusForRun(taskResultRun))
+            ? "result_available"
+            : "working"
+          : progress.state;
       const resultRunIds = [
         ...new Set(
-          [progress.resultRun?.id, terminalRun?.id].filter((id): id is RunId => id !== undefined),
+          [taskResultRun?.id, terminalRun?.id].filter((id): id is RunId => id !== undefined),
         ),
       ];
       const resultRecords = yield* threadManagement
@@ -1239,12 +1656,12 @@ const make = Effect.gen(function* () {
       // the child started working again after this read.
       const heldForRestart =
         task.result === null &&
-        progress.state === "result_available" &&
+        taskWorkState === "result_available" &&
         (yield* threadManagement
-          .delegatedTaskResultPending(task.childThreadId)
+          .delegatedTaskResultPending(task.childThreadId, childRun?.delegatedTaskId)
           .pipe(Effect.mapError(threadManagementFailure)));
       const workState =
-        task.result !== null ? "result_available" : heldForRestart ? "working" : progress.state;
+        task.result !== null ? "result_available" : heldForRestart ? "working" : taskWorkState;
       const status =
         task.result !== null
           ? taskStatusForRun(
@@ -1256,21 +1673,21 @@ const make = Effect.gen(function* () {
                 : childRun,
             )
           : workState === "result_available"
-            ? taskStatusForRun(progress.resultRun ?? childRun)
-            : taskStatusForRun(childRun) === "queued"
+            ? taskStatusForRun(taskResultRun ?? childRun)
+            : taskStatusForRun(taskResultRun ?? childRun) === "queued"
               ? "queued"
               : "running";
       const derivedResult =
         task.result !== null
           ? task.result
-          : progress.resultRun !== undefined && isTerminalTaskStatus(status)
-            ? subagentResultForRun(childProjection, progress.resultRun).text
+          : taskResultRun !== undefined && isTerminalTaskStatus(status)
+            ? subagentResultForRun(childProjection, taskResultRun).text
             : null;
       const resultTransfers = parentProjection.contextTransfers.filter(
         (transfer) =>
           transfer.type === "subagent_result" &&
           transfer.sourceThreadId === task.childThreadId &&
-          transfer.targetThreadId === scope.thread.threadId,
+          transfer.targetThreadId === delegationThreadId(scope),
       );
       const resultTransferForRun = (run: OrchestrationV2Run | undefined) =>
         !canExposeTaskRunResult(run)
@@ -1280,7 +1697,7 @@ const make = Effect.gen(function* () {
               ? resultTransfers.find((transfer) => transfer.sourcePoint.runId === undefined)
               : undefined) ??
             null);
-      const resultTransfer = resultTransfers[0] ?? null;
+      const resultTransfer = taskResultTransfer(parentProjection, childProjection, task) ?? null;
       const terminalStatus = terminalRun === undefined ? null : taskStatusForRun(terminalRun);
       const response = {
         taskId: task.id,
@@ -1321,10 +1738,12 @@ const make = Effect.gen(function* () {
               requestKey: acknowledgementRequestKey,
               operation: acknowledgementOperation,
             }),
-            parentThreadId: scope.thread.threadId,
+            parentThreadId: delegationThreadId(scope),
             taskId,
             observedByRunId:
-              observingRun?.providerInstanceId === scope.thread.providerInstanceId
+              scope.call === undefined &&
+              observingRun !== undefined &&
+              observingRun.providerInstanceId === scope.thread?.providerInstanceId
                 ? observingRun.id
                 : null,
           })
@@ -1342,7 +1761,7 @@ const make = Effect.gen(function* () {
 
   // Re-read the task only when an event on the parent or child thread can
   // change its status, instead of polling the projections every 50 ms.
-  const waitForTask = (scope: McpThreadInvocationScope, taskId: NodeId, timeoutMs: number) =>
+  const waitForTask = (scope: McpDelegationInvocationScope, taskId: NodeId, timeoutMs: number) =>
     Effect.gen(function* () {
       const streamError = (error: unknown) =>
         failure(
@@ -1352,15 +1771,15 @@ const make = Effect.gen(function* () {
       // Sequences are global, so one cursor taken before the first read
       // replays anything either thread records after it.
       const afterSequence = yield* threadManagement
-        .getThreadEventSequence(scope.thread.threadId)
+        .getThreadEventSequence(delegationThreadId(scope))
         .pipe(Effect.mapError(streamError));
-      const initial = yield* readTask(scope, taskId, false, true);
+      const initial = yield* withCallAuthority(scope, readTask(scope, taskId, false, true));
       if (isTerminalTaskStatus(initial.status)) return Option.some(initial);
       // One stream per event type, so transcript events never fill a buffer.
-      return yield* Stream.mergeAll(
+      const waiting = Stream.mergeAll(
         TASK_WAKE_EVENTS.map(({ thread, eventType }) =>
           threadManagement.streamStoredEventsFrom({
-            threadId: thread === "parent" ? scope.thread.threadId : initial.childThreadId,
+            threadId: thread === "parent" ? delegationThreadId(scope) : initial.childThreadId,
             afterSequence,
             eventType,
           }),
@@ -1368,10 +1787,17 @@ const make = Effect.gen(function* () {
         { concurrency: "unbounded" },
       ).pipe(
         Stream.mapError(streamError),
-        Stream.mapEffect(() => readTask(scope, taskId, false, true)),
+        Stream.mapEffect(() => withCallAuthority(scope, readTask(scope, taskId, false, true))),
         Stream.filter((result) => isTerminalTaskStatus(result.status)),
         Stream.runHead,
       );
+      const entry = calls.get(scope);
+      return yield* entry === undefined
+        ? waiting
+        : Effect.raceFirst(
+            waiting,
+            Deferred.await(entry.ended).pipe(Effect.andThen(Effect.fail(staleCall()))),
+          );
     }).pipe(Effect.timeoutOption(Duration.millis(timeoutMs)), Effect.map(Option.flatten));
 
   /**
@@ -1464,6 +1890,24 @@ const make = Effect.gen(function* () {
     });
 
   return OrchestratorMcpService.of({
+    acquireCallInvocation,
+    releaseCallInvocation,
+    restrictCallInvocation,
+    validateCallInvocation,
+    waitForTask: (callerScope, taskId, timeoutMs) =>
+      Effect.gen(function* () {
+        const scope = yield* requireDelegationScope(callerScope, "task_status");
+        yield* assertCallMayObserveTasks(scope);
+        const result = yield* waitForTask(
+          scope,
+          taskId,
+          Math.min(MAX_WAIT_TIMEOUT_MS, Math.max(1, timeoutMs)),
+        );
+        yield* scope.call === undefined ? Effect.void : validateCallInvocation(scope);
+        return Option.isSome(result)
+          ? result.value
+          : yield* withCallAuthority(scope, readTask(scope, taskId, true, true));
+      }),
     scheduleTask: (scope, input) =>
       Effect.gen(function* () {
         const { parent, limits } = yield* loadCaller(scope);
@@ -1748,6 +2192,11 @@ const make = Effect.gen(function* () {
         const { parent, limits } = yield* loadCaller(scope);
         const providers = yield* loadProviders;
         const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();
+        // Models the user hid from pickers stay out of the catalog agents choose from.
+        const modelPreferences = yield* serverSettings.getSettings.pipe(
+          Effect.map((settings) => settings.providerModelPreferences ?? {}),
+          Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
+        );
         return {
           parentThreadId: parent?.thread.id ?? null,
           inheritedProviderInstanceId: parent?.thread.modelSelection.instanceId ?? null,
@@ -1764,13 +2213,23 @@ const make = Effect.gen(function* () {
               driverKind: provider.driver,
               displayName: provider?.displayName ?? null,
               models:
-                provider?.models.map((model) => ({
-                  id: model.slug,
-                  label: model.name ?? null,
-                  ...(model.capabilities?.optionDescriptors === undefined
-                    ? {}
-                    : { options: model.capabilities.optionDescriptors }),
-                })) ?? [],
+                provider?.models
+                  .filter(
+                    (model) =>
+                      model.isCustom ||
+                      !modelPreferences[provider.instanceId]?.hiddenModels.includes(model.slug),
+                  )
+                  .map((model) => ({
+                    id: model.slug,
+                    label: model.name ?? null,
+                    ...(model.capabilities?.optionDescriptors === undefined
+                      ? {}
+                      : { options: model.capabilities.optionDescriptors }),
+                  })) ?? [],
+              ...(provider.supportedRuntimeModes === undefined ||
+              provider.supportedRuntimeModes.length === 0
+                ? {}
+                : { runtimeModes: [...provider.supportedRuntimeModes] }),
               canRunChildTask: constraints.length === 0,
               canRunCrossProviderChildTask: constraints.length === 0,
               constraints: [...constraints],
@@ -1790,78 +2249,119 @@ const make = Effect.gen(function* () {
       }),
     delegateTask: (callerScope, input) =>
       Effect.gen(function* () {
-        const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
-        const parentRun = parent.runs
-          .filter(ThreadManagementService.isActiveRun)
-          .toSorted((left, right) => right.ordinal - left.ordinal)[0];
-        if (
-          parentRun === undefined ||
-          parentRun.rootNodeId === null ||
-          parentRun.providerInstanceId !== scope.thread.providerInstanceId
-        ) {
-          return yield* failure(
-            "parent_not_active",
-            "Delegated tasks require an active run owned by this MCP provider session.",
-          );
-        }
-        const providers = yield* loadProviders;
-        const target = yield* resolveTargetRechecking({
-          parent,
-          target: input.target,
-          providers,
-        });
-        const runtimeMode = yield* resolveRuntimeMode(parent.thread.runtimeMode, input.runtimeMode);
-        const interactionMode = yield* resolveInteractionMode(
-          parent.thread.interactionMode,
-          input.interactionMode,
-        );
-        const key = yield* requestKey(input.clientRequestId);
-        const commandId = stableCommandId({
-          scope,
-          requestKey: key,
-          operation: "delegate-task",
-        });
-        const result = yield* threadManagement
-          .dispatch({
-            type: "delegated_task.request",
-            createdBy: "agent",
-            creationSource: "mcp",
-            commandId,
-            parentThreadId: scope.thread.threadId,
-            parentRunId: parentRun.id,
-            parentNodeId: parentRun.rootNodeId,
-            task: taskPrompt(input),
-            ...(input.title === undefined ? {} : { title: input.title }),
-            modelSelection: target.modelSelection,
-            runtimeMode,
-            interactionMode,
-            // Async delegations wake the parent on every child terminal; wait
-            // delegations deliver through the blocking tool call, so a wake is
-            // only needed if the parent settled first (timeout, disconnect).
-            completionWake: input.mode === "wait" ? "settled_only" : "always",
-          })
-          .pipe(
-            Effect.mapError((error) =>
-              failure(
+        const { scope, taskId, key } = yield* withCallAuthority(
+          callerScope,
+          Effect.gen(function* () {
+            yield* requireCapability(callerScope);
+            yield* assertCallMayObserveTasks(callerScope);
+            const scope = yield* requireDelegationScope(callerScope, "delegate_task");
+            if (scope.call !== undefined) yield* validateCallInvocation(scope);
+            const parent = yield* loadProjection(delegationThreadId(scope));
+            const parentRun =
+              scope.call === undefined
+                ? parent.runs
+                    .filter(ThreadManagementService.isActiveRun)
+                    .toSorted((left, right) => right.ordinal - left.ordinal)[0]
+                : undefined;
+            if (
+              scope.call === undefined &&
+              (parentRun === undefined ||
+                parentRun.rootNodeId === null ||
+                parentRun.providerInstanceId !== scope.thread?.providerInstanceId ||
+                !matchesRemoteRun(scope.thread, parentRun))
+            ) {
+              return yield* failure(
+                "parent_not_active",
+                "Delegated tasks require an active run owned by this MCP provider session.",
+              );
+            }
+            if (input.projectId !== undefined) {
+              yield* assertLiveCallerForOtherProject(scope, parent, input.projectId);
+              yield* requireProject(input.projectId);
+            }
+            const providers = yield* loadProviders;
+            // Computed before resolving the target so a retry of an already
+            // accepted delegation can be recognized: dispatching under the same
+            // command id only replays the recorded result, so candidate
+            // selection must not refuse it over the project's current settings.
+            const key = yield* requestKey(input.clientRequestId);
+            const commandId = stableCommandId({
+              scope,
+              requestKey: key,
+              operation: "delegate-task",
+            });
+            const isRetryOfAcceptedDelegation = yield* threadManagement.hasReceipt(commandId);
+            const target = yield* resolveTargetRechecking({
+              parent,
+              target: input.target,
+              providers,
+              skipProjectEnablementFilter: isRetryOfAcceptedDelegation,
+            });
+            const limits = yield* callLimits(scope, parent.thread);
+            const runtimeMode = yield* resolveRuntimeMode(
+              limits.runtimeMode,
+              input.runtimeMode,
+              target,
+            );
+            const interactionMode = yield* resolveInteractionMode(
+              limits.interactionMode,
+              input.interactionMode,
+            );
+            // ThreadManagementService.dispatch is the chokepoint for this command
+            // type's own enablement check, using the same command id and its
+            // receipt-replay exemption, so no separate assert runs here.
+            const result = yield* threadManagement
+              .dispatch({
+                ...(scope.call === undefined
+                  ? { type: "delegated_task.request" as const, parentRunId: parentRun!.id }
+                  : {
+                      type: "call.delegated_task.request" as const,
+                      parentRunId: null,
+                      authority: scope.call,
+                    }),
+                createdBy: "agent",
+                creationSource: "mcp",
+                commandId,
+                parentThreadId: delegationThreadId(scope),
+                parentNodeId: scope.call?.parentNodeId ?? parentRun!.rootNodeId!,
+                ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+                task: taskPrompt(input),
+                ...(input.title === undefined ? {} : { title: input.title }),
+                modelSelection: target.modelSelection,
+                runtimeMode,
+                interactionMode,
+                // Async delegations wake the parent on every child terminal; wait
+                // delegations deliver through the blocking tool call, so a wake is
+                // only needed if the parent settled first (timeout, disconnect).
+                completionWake: input.mode === "wait" ? "settled_only" : "always",
+              })
+              .pipe(
+                Effect.mapError((error) =>
+                  error._tag === "ThreadManagementProviderInstanceDisabledError"
+                    ? threadManagementFailure(error)
+                    : failure(
+                        "orchestration_error",
+                        `Unable to create delegated task: ${errorMessage(error)}`,
+                      ),
+                ),
+              );
+            const taskEvent = result.storedEvents.find(
+              (stored) =>
+                stored.event.type === "subagent.updated" &&
+                stored.event.payload.origin === "app_owned",
+            );
+            if (taskEvent?.event.type !== "subagent.updated") {
+              return yield* failure(
                 "orchestration_error",
-                `Unable to create delegated task: ${errorMessage(error)}`,
-              ),
-            ),
-          );
-        const taskEvent = result.storedEvents.find(
-          (stored) =>
-            stored.event.type === "subagent.updated" && stored.event.payload.origin === "app_owned",
+                "Delegated task command did not produce a task projection.",
+              );
+            }
+            return { scope, taskId: taskEvent.event.payload.id, key };
+          }),
         );
-        if (taskEvent?.event.type !== "subagent.updated") {
-          return yield* failure(
-            "orchestration_error",
-            "Delegated task command did not produce a task projection.",
-          );
-        }
-        const taskId = taskEvent.event.payload.id;
 
         if (input.mode !== "wait") {
-          return yield* readTask(scope, taskId, false, true);
+          return yield* withCallAuthority(scope, readTask(scope, taskId, false, true));
         }
         const timeoutMs = Math.min(
           MAX_WAIT_TIMEOUT_MS,
@@ -1871,6 +2371,8 @@ const make = Effect.gen(function* () {
         if (Option.isSome(waited)) {
           return waited.value;
         }
+        if (scope.call !== undefined)
+          return yield* withCallAuthority(scope, readTask(scope, taskId, true, true));
         // The blocking wait timed out, so it no longer owns delivery: upgrade
         // the task so a later terminal wakes the parent even mid-turn. Best
         // effort; on failure the settled_only policy still wakes a settled
@@ -1883,7 +2385,7 @@ const make = Effect.gen(function* () {
               requestKey: key,
               operation: "delegate-task-wake-policy",
             }),
-            parentThreadId: scope.thread.threadId,
+            parentThreadId: delegationThreadId(scope),
             taskId,
             completionWake: "always",
           })
@@ -1910,162 +2412,167 @@ const make = Effect.gen(function* () {
               }),
             ),
           );
-        return yield* readTask(scope, taskId, true, true);
+        return yield* withCallAuthority(scope, readTask(scope, taskId, true, true));
       }),
     taskStatus: (callerScope, taskId) =>
       Effect.gen(function* () {
-        const scope = yield* requireThreadScope(callerScope, "task_status");
-        return yield* readTask(scope, taskId, false, true);
+        const scope = yield* requireDelegationScope(callerScope, "task_status");
+        yield* assertCallMayObserveTasks(scope);
+        return yield* withCallAuthority(scope, readTask(scope, taskId, false, true));
       }),
     cancelTask: (callerScope, input) =>
-      Effect.gen(function* () {
-        const scope = yield* requireThreadScope(callerScope, "task_cancel");
-        const current = yield* readTask(scope, input.taskId);
-        const key = yield* requestKey(input.clientRequestId);
-        const parentProjection = yield* loadProjection(scope.thread.threadId);
-        // Cancelling stops the child and every task under it, each a write to a
-        // thread its user may have raised above the parent's modes since it was
-        // delegated. All of them are checked before anything is stopped.
-        const assertStoppable = (threadId: ThreadId): Effect.Effect<void, OrchestratorMcpFailure> =>
-          Effect.gen(function* () {
-            const shell = yield* threadManagement
-              .getThreadShell(threadId)
-              .pipe(Effect.mapError(threadManagementFailure));
-            // A deleted thread takes no stop, but the tasks under it still do.
-            if (shell !== null && shell.deletedAt === null) {
-              yield* resolveRuntimeMode(parentProjection.thread.runtimeMode, shell.runtimeMode);
-              yield* resolveInteractionMode(
-                parentProjection.thread.interactionMode,
-                shell.interactionMode,
-              );
-            }
-            const { subagents } = yield* threadManagement
-              .getThreadRecords(threadId, ["subagents"])
-              .pipe(Effect.mapError(threadManagementFailure));
-            for (const task of subagents) {
-              if (task.origin === "app_owned" && task.childThreadId !== null) {
-                yield* assertStoppable(task.childThreadId);
+      withCallAuthority(
+        callerScope,
+        Effect.gen(function* () {
+          const scope = yield* requireDelegationScope(callerScope, "task_cancel");
+          yield* assertCallMayObserveTasks(scope);
+          const current = yield* readTask(scope, input.taskId);
+          const key = yield* requestKey(input.clientRequestId);
+          const parentProjection = yield* loadProjection(delegationThreadId(scope));
+          const limits = yield* callLimits(scope, parentProjection.thread);
+          // Cancelling stops the child and every task under it, each a write to a
+          // thread its user may have raised above the parent's modes since it was
+          // delegated. All of them are checked before anything is stopped.
+          const assertStoppable = (
+            threadId: ThreadId,
+          ): Effect.Effect<void, OrchestratorMcpFailure> =>
+            Effect.gen(function* () {
+              const shell = yield* threadManagement
+                .getThreadShell(threadId)
+                .pipe(Effect.mapError(threadManagementFailure));
+              // A deleted thread takes no stop, but the tasks under it still do.
+              if (shell !== null && shell.deletedAt === null) {
+                yield* resolveRuntimeMode(limits.runtimeMode, shell.runtimeMode);
+                yield* resolveInteractionMode(limits.interactionMode, shell.interactionMode);
               }
-            }
-          });
-        yield* assertStoppable(current.childThreadId);
-        const parentTask = parentProjection.subagents.find(
-          (task) => task.id === input.taskId && task.origin === "app_owned",
-        );
-        const disposeCompletionDelivery =
-          parentTask?.completionDelivery?.state === "disposed"
-            ? Effect.void
-            : threadManagement
-                .dispatch({
-                  type: "delegated_task.completion-delivery.dispose",
-                  commandId: stableCommandId({
-                    scope,
-                    requestKey: key,
-                    operation: "cancel-task-completion-delivery",
-                  }),
-                  parentThreadId: scope.thread.threadId,
-                  taskId: input.taskId,
-                })
-                .pipe(
-                  Effect.asVoid,
-                  Effect.mapError((error) =>
-                    failure(
-                      "orchestration_error",
-                      `Unable to dispose delegated task ${input.taskId} completion delivery: ${errorMessage(error)}`,
+              const { subagents } = yield* threadManagement
+                .getThreadRecords(threadId, ["subagents"])
+                .pipe(Effect.mapError(threadManagementFailure));
+              for (const task of subagents) {
+                if (task.origin === "app_owned" && task.childThreadId !== null) {
+                  yield* assertStoppable(task.childThreadId);
+                }
+              }
+            });
+          yield* assertStoppable(current.childThreadId);
+          const parentTask = parentProjection.subagents.find(
+            (task) => task.id === input.taskId && task.origin === "app_owned",
+          );
+          const disposeCompletionDelivery =
+            parentTask?.completionDelivery?.state === "disposed"
+              ? Effect.void
+              : threadManagement
+                  .dispatch({
+                    type: "delegated_task.completion-delivery.dispose",
+                    commandId: stableCommandId({
+                      scope,
+                      requestKey: key,
+                      operation: "cancel-task-completion-delivery",
+                    }),
+                    parentThreadId: delegationThreadId(scope),
+                    taskId: input.taskId,
+                  })
+                  .pipe(
+                    Effect.asVoid,
+                    Effect.mapError((error) =>
+                      failure(
+                        "orchestration_error",
+                        `Unable to dispose delegated task ${input.taskId} completion delivery: ${errorMessage(error)}`,
+                      ),
                     ),
+                  );
+          // Cancelling stops the child thread the way Stop does, including work that came
+          // after a published result: follow-up runs, pull request watch wakes, and the
+          // tasks it delegated. The published result stays terminal.
+          const stopChild = Effect.gen(function* () {
+            const commandId = stableCommandId({ scope, requestKey: key, operation: "cancel-task" });
+            const reason = input.reason;
+            yield* threadManagement
+              .dispatch({
+                type: "thread.stop",
+                commandId,
+                threadId: current.childThreadId,
+                ...(reason === undefined ? {} : { reason }),
+              })
+              .pipe(
+                Effect.mapError((error) =>
+                  failure(
+                    "task_not_cancellable",
+                    `Unable to stop delegated task ${input.taskId}: ${errorMessage(error)}`,
                   ),
-                );
-        // Cancelling stops the child thread the way Stop does, including work that came
-        // after a published result: follow-up runs, pull request watch wakes, and the
-        // tasks it delegated. The published result stays terminal.
-        const stopChild = Effect.gen(function* () {
-          const commandId = stableCommandId({ scope, requestKey: key, operation: "cancel-task" });
-          const reason = input.reason;
-          yield* threadManagement
-            .dispatch({
-              type: "thread.stop",
-              commandId,
-              threadId: current.childThreadId,
-              ...(reason === undefined ? {} : { reason }),
-            })
-            .pipe(
-              Effect.mapError((error) =>
-                failure(
-                  "task_not_cancellable",
-                  `Unable to stop delegated task ${input.taskId}: ${errorMessage(error)}`,
                 ),
-              ),
-            );
-          // A retry with the same clientRequestId repeats only the stops that failed.
-          yield* threadManagement
-            .stopDelegatedTasks({ threadId: current.childThreadId, commandId, reason })
-            .pipe(
-              Effect.mapError((error) =>
-                failure(
-                  "task_not_cancellable",
-                  `Stopped delegated task ${input.taskId}, but not every task it delegated: ${errorMessage(error)}`,
+              );
+            // A retry with the same clientRequestId repeats only the stops that failed.
+            yield* threadManagement
+              .stopDelegatedTasks({ threadId: current.childThreadId, commandId, reason })
+              .pipe(
+                Effect.mapError((error) =>
+                  failure(
+                    "task_not_cancellable",
+                    `Stopped delegated task ${input.taskId}, but not every task it delegated: ${errorMessage(error)}`,
+                  ),
                 ),
-              ),
-            );
-        });
-        // Checked above; a user raising one of these threads meanwhile is
-        // caught again under that thread's lock, which leaves it running.
-        const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
-        const stopWithinLimit = stopChild.pipe(
-          Effect.provideService(DispatchModeLimit, {
-            runtimeMode: parentProjection.thread.runtimeMode,
-            interactionMode: parentProjection.thread.interactionMode,
-            refused,
-          }),
-          Effect.catch((error) =>
-            Effect.flatMap(Ref.get(refused), (refusal) =>
-              Effect.fail(
-                refusal === undefined
-                  ? error
-                  : failure(
-                      refusal.mode === "runtime"
-                        ? "runtime_mode_escalation_denied"
-                        : "interaction_mode_escalation_denied",
-                      `Thread ${refusal.threadId} now runs in ${refusal.runtimeMode}/${refusal.interactionMode} mode, above this thread's; its user changed it while the task was being cancelled.`,
-                    ),
+              );
+          });
+          // Checked above; a user raising one of these threads meanwhile is
+          // caught again under that thread's lock, which leaves it running.
+          const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
+          const stopWithinLimit = stopChild.pipe(
+            Effect.provideService(DispatchModeLimit, {
+              runtimeMode: limits.runtimeMode,
+              interactionMode: limits.interactionMode,
+              refused,
+            }),
+            Effect.catch((error) =>
+              Effect.flatMap(Ref.get(refused), (refusal) =>
+                Effect.fail(
+                  refusal === undefined
+                    ? error
+                    : failure(
+                        refusal.mode === "runtime"
+                          ? "runtime_mode_escalation_denied"
+                          : "interaction_mode_escalation_denied",
+                        `Thread ${refusal.threadId} now runs in ${refusal.runtimeMode}/${refusal.interactionMode} mode, above this thread's; its user changed it while the task was being cancelled.`,
+                      ),
+                ),
               ),
             ),
-          ),
-        );
-        if (isTerminalTaskStatus(current.status)) {
+          );
+          if (isTerminalTaskStatus(current.status)) {
+            yield* stopWithinLimit;
+            yield* disposeCompletionDelivery;
+            return {
+              taskId: input.taskId,
+              status: current.status,
+            } satisfies OrchestratorMcpTaskCancelResult;
+          }
+          // A task waiting on its own delegates has work to stop below it. One with neither
+          // a running turn nor delegates (such as one awaiting a restart) keeps its delivery.
+          const child = yield* loadProjection(current.childThreadId);
+          if (
+            current.workState !== "waiting_for_children" &&
+            ThreadManagementService.latestActiveRun(child) === undefined
+          ) {
+            return yield* failure(
+              "task_not_cancellable",
+              `Delegated task ${input.taskId} has no interruptible child run.`,
+            );
+          }
           yield* stopWithinLimit;
-          yield* disposeCompletionDelivery;
+          yield* disposeCompletionDelivery.pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("orchestrator-mcp.cancel-task.delivery-dispose-failed", {
+                taskId: input.taskId,
+                cause,
+              }),
+            ),
+          );
           return {
             taskId: input.taskId,
-            status: current.status,
-          } satisfies OrchestratorMcpTaskCancelResult;
-        }
-        // A task waiting on its own delegates has work to stop below it. One with neither
-        // a running turn nor delegates (such as one awaiting a restart) keeps its delivery.
-        const child = yield* loadProjection(current.childThreadId);
-        if (
-          current.workState !== "waiting_for_children" &&
-          ThreadManagementService.latestActiveRun(child) === undefined
-        ) {
-          return yield* failure(
-            "task_not_cancellable",
-            `Delegated task ${input.taskId} has no interruptible child run.`,
-          );
-        }
-        yield* stopWithinLimit;
-        yield* disposeCompletionDelivery.pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("orchestrator-mcp.cancel-task.delivery-dispose-failed", {
-              taskId: input.taskId,
-              cause,
-            }),
-          ),
-        );
-        return {
-          taskId: input.taskId,
-          status: "cancel_requested",
-        };
-      }),
+            status: "cancel_requested",
+          };
+        }),
+      ),
     createThreads: (callerScope, input) =>
       Effect.gen(function* () {
         const { scope, parent } = yield* loadThreadCaller(callerScope, "create_threads");
@@ -2095,6 +2602,7 @@ const make = Effect.gen(function* () {
               const runtimeMode = yield* resolveRuntimeMode(
                 parent.thread.runtimeMode,
                 request.runtimeMode,
+                target,
               );
               const interactionMode = yield* resolveInteractionMode(
                 parent.thread.interactionMode,
@@ -2105,6 +2613,11 @@ const make = Effect.gen(function* () {
                 requestKey: key,
                 index,
               });
+              yield* assertTargetEnabledForProject(
+                parent,
+                stableCommandId({ scope, requestKey: key, operation: "create-thread", index }),
+                target,
+              );
               const title = threadTitle({
                 parentTitle: parent.thread.title,
                 prompt: request.prompt,
@@ -2226,6 +2739,7 @@ const make = Effect.gen(function* () {
               failure("orchestration_error", `Unable to list threads: ${errorMessage(error)}`),
             ),
           );
+        const nowMs = yield* Clock.currentTimeMillis;
         const statuses = input.statuses === undefined ? null : new Set(input.statuses);
         const titleContains = input.titleContains?.toLocaleLowerCase();
         const filtered = projectThreads
@@ -2236,6 +2750,9 @@ const make = Effect.gen(function* () {
           .filter(
             (thread) =>
               input.settled === undefined || threadSettlement(thread).settled === input.settled,
+          )
+          .filter(
+            (thread) => input.snoozed === undefined || isSnoozed(thread, nowMs) === input.snoozed,
           )
           .filter(
             (thread) =>
@@ -2249,14 +2766,14 @@ const make = Effect.gen(function* () {
         return {
           projectId,
           currentThreadId: parent?.thread.id ?? null,
-          threads: page.map(listItemFromShell),
+          threads: page.map((shell) => listItemFromShell(shell, nowMs)),
           nextCursor,
           total: filtered.length,
         } satisfies OrchestratorMcpThreadListResult;
       }),
     readThread: (scope, input) =>
       Effect.gen(function* () {
-        const { parent, target } = yield* loadReadableThread(scope, input.threadId);
+        const { parent, target, shell } = yield* loadReadableThread(scope, input.threadId);
         const view = input.view ?? "messages";
         const afterPosition = input.afterPosition ?? -1;
         const limit = input.limit ?? DEFAULT_THREAD_READ_LIMIT;
@@ -2287,49 +2804,52 @@ const make = Effect.gen(function* () {
           { concurrency: 1 },
         );
         const messagesByThreadId = new Map(sourceMessages);
-        const task = parent === undefined ? undefined : directAppOwnedChildTask(parent, target);
+        const returnedRunIds = new Set(
+          page
+            .filter((row) => row.sourceThreadId === target.thread.id)
+            .map((row) => row.item.runId),
+        );
+        const tasks =
+          parent === undefined ? [] : directAppOwnedChildTasks(parent, target, returnedRunIds);
         if (
           parent !== undefined &&
           scope.thread !== undefined &&
-          task !== undefined &&
+          tasks.length > 0 &&
           (input.textOffset ?? 0) === 0
         ) {
-          const transfer = parent.contextTransfers.find(
-            (transfer) =>
-              transfer.type === "subagent_result" &&
-              transfer.sourceThreadId === target.thread.id &&
-              transfer.targetThreadId === parent.thread.id,
-          );
-          const resultRunId = transfer?.sourcePoint.runId ?? delegatedTaskRun(target, task)?.id;
-          const resultRunIds = resultRunId === undefined ? [] : [resultRunId];
-          const resultRecords = yield* threadManagement
-            .getThreadRecords(target.thread.id, ["messages", "turnItems"], {
-              messageRoles: ["assistant"],
-              messageRunIds: resultRunIds,
-              turnItemRunIds: resultRunIds,
-              turnItemTypes: ["assistant_message", "error"],
-            })
-            .pipe(Effect.mapError(threadManagementFailure));
-          if (
-            pageIncludesTerminalTaskResult({
-              parent,
-              page,
-              task,
-              target: { ...target, ...resultRecords },
-              maxChars,
-            })
-          ) {
-            yield* readTask(
-              scope as McpThreadInvocationScope,
-              task.id,
-              false,
-              true,
-              "thread-read-acknowledge",
-            );
+          for (const task of tasks) {
+            const transfer = taskResultTransfer(parent, target, task);
+            const resultRunId = transfer?.sourcePoint.runId ?? delegatedTaskRun(target, task)?.id;
+            const resultRunIds = resultRunId === undefined ? [] : [resultRunId];
+            const resultRecords = yield* threadManagement
+              .getThreadRecords(target.thread.id, ["messages", "turnItems"], {
+                messageRoles: ["assistant"],
+                messageRunIds: resultRunIds,
+                turnItemRunIds: resultRunIds,
+                turnItemTypes: ["assistant_message", "error"],
+              })
+              .pipe(Effect.mapError(threadManagementFailure));
+            if (
+              pageIncludesTerminalTaskResult({
+                parent,
+                page,
+                task,
+                target: { ...target, ...resultRecords },
+                maxChars,
+              })
+            ) {
+              yield* readTask(
+                scope as McpThreadInvocationScope,
+                task.id,
+                false,
+                true,
+                "thread-read-acknowledge",
+              );
+            }
           }
         }
         return {
-          thread: threadDetail(target, timeline.totalItems),
+          thread: threadDetail(target, timeline.totalItems, shell, yield* Clock.currentTimeMillis),
           recentRuns: target.runs
             .toSorted((left, right) => right.ordinal - left.ordinal)
             .slice(0, input.runLimit ?? DEFAULT_THREAD_RUN_LIMIT)
@@ -2391,6 +2911,9 @@ const make = Effect.gen(function* () {
           threadId: input.threadId,
           messageId,
           runId: result.run.id,
+          ...(result.run.delegatedTaskId === undefined
+            ? {}
+            : { taskId: result.run.delegatedTaskId }),
           status: result.run.status,
           delivery: result.delivery,
         } satisfies OrchestratorMcpThreadSendResult;
@@ -2472,4 +2995,5 @@ export const layer: Layer.Layer<
   | ScheduledTaskService.ScheduledTaskService
   | ProjectService.ProjectService
   | SecretRequests.SecretRequests
+  | ServerSettings.ServerSettingsService
 > = Layer.effect(OrchestratorMcpService, make);

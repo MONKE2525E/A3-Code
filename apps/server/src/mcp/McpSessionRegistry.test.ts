@@ -1,12 +1,19 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProviderInstanceId,
+  RunId,
+  RunAttemptId,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { HttpServer } from "effect/http";
 import * as NetAddress from "effect/net/NetAddress";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
+import * as McpRemoteRunValidator from "./McpRemoteRunValidator.ts";
 
 const environmentId = EnvironmentId.make("environment-1");
 const makeFakeHttpServer = (hostname: string, port = 43123) =>
@@ -29,8 +36,41 @@ const makeRegistry = (now: () => number, httpServer = fakeHttpServer) =>
     .pipe(
       Effect.provideService(HttpServer.HttpServer, httpServer),
       Effect.provideService(ServerEnvironment.ServerEnvironment, fakeEnvironment),
+      Effect.provideService(McpRemoteRunValidator.McpRemoteRunValidator, {
+        validate: () => Effect.succeed(true),
+      }),
       Effect.provide(NodeServices.layer),
     );
+
+it.effect("preserves remote delegation identity when a run credential rotates", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const request = {
+      threadId: ThreadId.make("thread:remote"),
+      providerInstanceId: ProviderInstanceId.make("grok-bot-test"),
+      remoteRun: { runId: RunId.make("run:remote"), attemptId: RunAttemptId.make("attempt:1") },
+    };
+    const resolve = (issued: McpSessionRegistry.McpIssuedCredential) =>
+      registry.resolve(issued.config.authorizationHeader.replace(/^Bearer\s+/, ""));
+    const first = yield* registry.issue(request);
+    const firstScope = yield* resolve(first);
+    yield* registry.revokeProviderSession(first.config.providerSessionId);
+    expect(yield* resolve(first)).toBeUndefined();
+    const rotated = yield* registry.issue(request);
+    const rotatedScope = yield* resolve(rotated);
+    expect(rotated.config.authorizationHeader).not.toBe(first.config.authorizationHeader);
+    expect(rotated.config.providerSessionId).not.toBe(first.config.providerSessionId);
+    expect(rotatedScope?.thread.remoteRun).toEqual(request.remoteRun);
+    expect(rotatedScope?.requestNamespace).toBe(firstScope?.requestNamespace);
+    for (const remoteRun of [
+      { ...request.remoteRun, runId: RunId.make("run:next") },
+      { ...request.remoteRun, attemptId: RunAttemptId.make("attempt:retry") },
+    ]) {
+      const nextScope = yield* resolve(yield* registry.issue({ ...request, remoteRun }));
+      expect(nextScope?.requestNamespace).not.toBe(firstScope?.requestNamespace);
+    }
+  }),
+);
 
 it.effect("stores only a token hash, resolves the bearer token, and revokes by thread", () =>
   Effect.gen(function* () {

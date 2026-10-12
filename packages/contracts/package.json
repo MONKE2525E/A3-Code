@@ -15,6 +15,14 @@
       "types": "./src/settings.ts",
       "import": "./src/settings.ts"
     },
+    "./grokBotProvider": {
+      "types": "./src/grokBotProvider.ts",
+      "import": "./src/grokBotProvider.ts"
+    },
+    "./grokBotVoice": {
+      "types": "./src/grokBotVoice.ts",
+      "import": "./src/grokBotVoice.ts"
+    },
     "./relay": {
       "types": "./src/relay.ts",
       "import": "./src/relay.ts"

@@ -25,7 +25,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock("react", () => ({ useCallback: (callback: unknown) => callback }));
 vi.mock("@react-navigation/native", () => ({
   useNavigation: () => ({ dispatch: mocks.dispatch }),
-  StackActions: { push: (name: string, params: unknown) => ({ type: "PUSH", name, params }) },
+  StackActions: {
+    push: (name: string, params: unknown) => ({ type: "PUSH", name, params }),
+    replace: (name: string, params: unknown) => ({ type: "REPLACE", name, params }),
+  },
 }));
 vi.mock("../../lib/openExternalUrl", () => ({ tryOpenExternalUrl: mocks.external }));
 vi.mock("../../state/projects", () => ({ environmentProjects: { projectsAtom: "projects" } }));
@@ -50,7 +53,7 @@ describe("opening a PR from chat", () => {
     ).toBe(true);
     expect(mocks.dispatch).toHaveBeenCalledWith({
       type: "PUSH",
-      name: "PullRequestDetail",
+      name: "PullRequest",
       params: {
         environmentId: "env-a",
         projectId: "project-a",
@@ -60,6 +63,18 @@ describe("opening a PR from chat", () => {
         threadId: "thread-a",
       },
     });
+    expect(mocks.external).not.toHaveBeenCalled();
+  });
+  it("replaces a dismissed Git sheet with the shared PR viewer", async () => {
+    const open = useOpenPullRequest({ replace: true });
+    await open("https://github.com/example/app/pull/42", "env-a", "pull-request", "thread-a");
+    expect(mocks.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "REPLACE",
+        name: "PullRequest",
+        params: expect.objectContaining({ threadId: "thread-a" }),
+      }),
+    );
     expect(mocks.external).not.toHaveBeenCalled();
   });
   it("keeps ordinary links external without navigating away from the thread", async () => {

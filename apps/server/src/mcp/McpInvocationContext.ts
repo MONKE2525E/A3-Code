@@ -5,6 +5,11 @@ import {
   OrchestratorMcpFailure,
   PreviewAutomationUnavailableError,
   type ProviderInstanceId,
+  type RunId,
+  type RunAttemptId,
+  type OrchestrationV2Run,
+  type OrchestrationV2CallParent,
+  type NodeId,
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -25,7 +30,39 @@ export interface McpThreadCaller {
   readonly threadId: ThreadId;
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;
+  /** Cloud runtimes can outlive the host session; their authority belongs to one attempt. */
+  readonly remoteRun?: {
+    readonly runId: RunId;
+    readonly attemptId: RunAttemptId;
+  };
 }
+
+/** A rotated cloud credential must never inherit authority from a later run or retry. */
+export const matchesRemoteRun = (
+  caller: McpThreadCaller | undefined,
+  activeRun: Pick<OrchestrationV2Run, "id" | "activeAttemptId" | "providerInstanceId"> | undefined,
+): boolean =>
+  caller?.remoteRun === undefined ||
+  (activeRun?.id === caller.remoteRun.runId &&
+    activeRun.activeAttemptId === caller.remoteRun.attemptId &&
+    activeRun.providerInstanceId === caller.providerInstanceId);
+
+/** Issued by the orchestration service for exactly one live call and persisted parent. */
+export interface McpCallCaller extends OrchestrationV2CallParent {
+  readonly threadId: ThreadId;
+  readonly parentNodeId: NodeId;
+}
+
+export type McpDelegationInvocationScope = McpInvocationScope &
+  ({ readonly thread: McpThreadCaller } | { readonly call: McpCallCaller });
+
+export const delegationThreadId = (scope: McpDelegationInvocationScope): ThreadId =>
+  scope.call?.threadId ?? scope.thread!.threadId;
+
+export const requireDelegationScope = (scope: McpInvocationScope, operation: string) =>
+  scope.call === undefined && scope.thread === undefined
+    ? Effect.fail(threadCallerRequired(operation))
+    : Effect.succeed(scope as McpDelegationInvocationScope);
 
 /** An agent T3 Code did not launch, signed in through MCP OAuth. */
 export interface McpClientCaller {
@@ -58,6 +95,7 @@ export interface McpInvocationScope {
   readonly requestNamespace: string;
   readonly thread: McpThreadCaller | undefined;
   readonly client: McpClientCaller | undefined;
+  readonly call?: McpCallCaller;
 }
 
 export class McpInvocationContext extends Context.Service<

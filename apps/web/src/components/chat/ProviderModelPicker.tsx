@@ -1,6 +1,7 @@
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
   type ProviderInstanceId,
+  type EnvironmentId,
   type ProviderDriverKind,
   type ResolvedKeybindingsConfig,
 } from "@t3tools/contracts";
@@ -27,6 +28,7 @@ import { useComposerMenuProps } from "./composerEventScope";
 import { shortcutLabelForCommand } from "../../keybindings";
 
 export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
+  environmentId: EnvironmentId | null;
   /**
    * The instance currently selected in the composer. Drives the trigger
    * icon, label and the default-highlighted combobox row.
@@ -52,6 +54,8 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   triggerClassName?: string;
   /** Aggregate settings can show a neutral value without claiming one provider is selected. */
   triggerLabel?: string;
+  /** Shows the active provider and model as plain text, with no menu. */
+  staticIdentity?: boolean;
   triggerAriaLabel?: string;
   onOpenChange?: (open: boolean) => void;
   onOpenProviderSetup?: (instanceId: ProviderInstanceId) => void;
@@ -191,6 +195,32 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     ? `${props.triggerLabel ?? allModelNames ?? triggerLabel} · ${shortcutLabel}`
     : (props.triggerLabel ?? allModelNames ?? triggerLabel);
 
+  // Providers with a single fixed model (Grok Bot) show identity, not a menu.
+  if (props.staticIdentity && activeEntry) {
+    return (
+      <span
+        data-chat-provider-model-picker="static"
+        className={cn(
+          "inline-flex min-w-0 shrink items-center whitespace-nowrap text-muted-foreground",
+          size === "xs" ? "gap-1 text-xs" : "gap-1.5 text-sm",
+          props.triggerClassName,
+        )}
+      >
+        <ProviderInstanceIcon
+          driverKind={activeEntry.driverKind}
+          displayName={activeEntry.displayName}
+          accentColor={activeEntry.accentColor}
+          className="size-4"
+          iconClassName={cn("size-4", props.activeProviderIconClassName)}
+          showBadge={false}
+        />
+        <span className="min-w-0 truncate" data-chat-provider-model-picker-label="true">
+          {props.triggerLabel ?? triggerTitle}
+        </span>
+      </span>
+    );
+  }
+
   return (
     <Popover
       open={isMenuOpen}
@@ -291,6 +321,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
         padding="none"
       >
         <ModelPickerContent
+          environmentId={props.environmentId}
           activeInstanceId={activeInstanceId}
           model={props.model}
           {...(props.selectedModels !== undefined ? { selectedModels: props.selectedModels } : {})}

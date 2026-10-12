@@ -8,7 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 const state = vi.hoisted(() => ({
   mode: "off" as ClientSettings["notificationMode"],
   inApp: true,
-  active: { environmentId: "env-1", threadId: "other-thread" },
+  active: { environmentId: "env-1", threadId: "other-thread" } as {
+    environmentId?: string;
+    threadId?: string;
+    botId?: string;
+  },
   focused: true,
   visible: "visible",
   live: true,
@@ -20,6 +24,15 @@ const state = vi.hoisted(() => ({
   turnError: false,
   limited: false,
   subagent: false,
+  nativeBot: false,
+  botNotifications: true,
+  selectedBotEnvironmentId: "env-1",
+  message: null as {
+    id: string;
+    role: "assistant" | "user";
+    createdAt: string;
+    text?: string;
+  } | null,
   background: [] as Array<{ taskId: string; kind: "command" | "monitor" }>,
   add: vi.fn(
     (_toast: { title: string; description: string; actionProps: { onClick: () => void } }) =>
@@ -37,11 +50,11 @@ const SHELL_NOW = DateTime.makeUnsafe("2026-09-13T09:00:00.000Z");
 
 function mockThreadShell() {
   return {
-    id: "thread-1",
+    id: state.nativeBot ? "grok-bot:thread-1" : "thread-1",
     projectId: "project-1",
     title: "Fix the login form",
     providerInstanceId: "codex",
-    modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+    modelSelection: { instanceId: "codex", model: state.nativeBot ? "bot-1" : "gpt-5.4" },
     runtimeMode: "full-access",
     interactionMode: "default",
     branch: null,
@@ -55,20 +68,30 @@ function mockThreadShell() {
     forkedFrom: null,
     createdBy: "user",
     creationSource: "web",
-    latestRunId: "run-1",
+    latestRunId: state.nativeBot && !state.completedAt ? null : "run-1",
     activeRunId: null,
     status: state.completedAt
       ? "completed"
       : state.sessionError || state.turnError || state.limited
         ? "failed"
-        : "running",
+        : state.nativeBot
+          ? "idle"
+          : "running",
     lastErrorClass: state.limited ? "usage_limit" : null,
     pendingRuntimeRequest: state.input
       ? { id: "request-1", kind: "user_input", createdAt: SHELL_NOW }
       : state.approval
         ? { id: "request-1", kind: "command", createdAt: SHELL_NOW }
         : null,
-    latestVisibleMessage: null,
+    latestVisibleMessage:
+      state.message === null
+        ? null
+        : {
+            ...state.message,
+            text: state.message.text ?? "Incoming message",
+            createdAt: DateTime.makeUnsafe(state.message.createdAt),
+            updatedAt: DateTime.makeUnsafe("2026-09-13T11:00:00.000Z"),
+          },
     latestUserMessageAt: null,
     hasActionableProposedPlan: false,
     pendingBackgroundTasks: state.background,
@@ -110,6 +133,15 @@ vi.mock("../state/environments", () => ({
 }));
 vi.mock("../state/shell", () => ({
   environmentShell: { stateValueAtom: vi.fn() },
+}));
+vi.mock("./grokBot/useGrokBotEnvironment", () => ({
+  useSelectedGrokBotEnvironmentId: () => state.selectedBotEnvironmentId,
+}));
+vi.mock("../state/grokBots", () => ({ grokBotsListQuery: vi.fn() }));
+vi.mock("../state/query", () => ({
+  useEnvironmentQuery: () => ({
+    data: [{ id: "bot-1", notificationEnabled: state.botNotifications }],
+  }),
 }));
 vi.mock("../threadNotifications", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../threadNotifications")>()),
@@ -153,6 +185,10 @@ beforeEach(() => {
     turnError: false,
     limited: false,
     subagent: false,
+    nativeBot: false,
+    botNotifications: true,
+    selectedBotEnvironmentId: "env-1",
+    message: null,
     background: [],
   });
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -168,10 +204,132 @@ beforeEach(() => {
   vi.stubGlobal("Notification", Object.assign(state.notification, { permission: "granted" }));
 });
 
+describe("native Grok Bot message notifications", () => {
+  beforeEach(() => {
+    state.nativeBot = true;
+    vi.spyOn(Date, "now").mockReturnValue(DateTime.toEpochMillis(SHELL_NOW));
+  });
+
+  async function receive(id = "message-1", createdAt = "2026-09-13T10:00:00.000Z") {
+    state.message = { id, role: "assistant", createdAt };
+    await render();
+  }
+
+  it("notifies once for a runless native message and opens its bot in the right environment", async () => {
+    state.mode = "notifications-and-sound";
+    await render();
+    await receive();
+    state.message = { ...state.message!, text: "Edited message" };
+    await render();
+    await complete();
+    expect(state.add).toHaveBeenCalledTimes(1);
+    expect(state.add).toHaveBeenCalledWith(expect.objectContaining({ title: "New message" }));
+    expect(state.sound).toHaveBeenCalledTimes(1);
+    expect(state.sound).toHaveBeenCalledWith("completion", expect.any(Function));
+    state.add.mock.calls[0]?.[0].actionProps.onClick();
+    expect(state.navigate).toHaveBeenCalledWith({
+      to: "/grok-bots/$botId",
+      params: { botId: "bot-1" },
+      search: { environmentId: "env-1" },
+    });
+  });
+
+  it("ignores user messages, history imports, first load, and reconnect snapshots", async () => {
+    await receive();
+    await receive("old-history", "2026-09-13T08:00:00.000Z");
+    state.message = { id: "user", role: "user", createdAt: "2026-09-13T10:01:00.000Z" };
+    await render();
+    state.live = false;
+    await render();
+    state.message = {
+      id: "reconnect-history",
+      role: "assistant",
+      createdAt: "2026-09-13T10:02:00.000Z",
+    };
+    state.live = true;
+    await render();
+    expect(state.add).not.toHaveBeenCalled();
+    await receive("live-message", "2026-09-13T10:03:00.000Z");
+    expect(state.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("deduplicates edits and history replacements while retaining distinct messages at the same timestamp", async () => {
+    await render();
+    await receive("first");
+    await receive("second");
+    await receive("first");
+    await receive("older", "2026-09-13T09:30:00.000Z");
+    expect(state.add).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores history newer than stale thread metadata but older than connection time", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(
+      DateTime.toEpochMillis(DateTime.makeUnsafe("2026-09-13T10:00:00.000Z")),
+    );
+    await render();
+    await receive("late-history", "2026-09-13T09:30:00.000Z");
+    expect(state.add).not.toHaveBeenCalled();
+    await receive("incoming", "2026-09-13T10:01:00.000Z");
+    expect(state.add).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["bot", "thread"])(
+    "silences foreground native messages when the active %s is open",
+    async (route) => {
+      state.mode = "notifications-and-sound";
+      state.active =
+        route === "thread"
+          ? { environmentId: "env-1", threadId: "grok-bot:thread-1" }
+          : { botId: "bot-1" };
+      await render();
+      await receive();
+      expect(state.add).not.toHaveBeenCalled();
+      expect(state.sound).not.toHaveBeenCalled();
+      expect(state.notification).not.toHaveBeenCalled();
+    },
+  );
+
+  it("alerts for the same bot in another environment", async () => {
+    state.active = { botId: "bot-1" };
+    state.selectedBotEnvironmentId = "env-2";
+    await render();
+    await receive();
+    expect(state.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors the bot's notification preference without replaying when enabled", async () => {
+    state.mode = "notifications-and-sound";
+    state.botNotifications = false;
+    await render();
+    await receive();
+    state.botNotifications = true;
+    await render();
+    expect(state.sound).not.toHaveBeenCalled();
+    expect(state.add).not.toHaveBeenCalled();
+    await receive("enabled-message", "2026-09-13T10:01:00.000Z");
+    expect(state.add).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses desktop alerts while the native bot chat is in the background", async () => {
+    state.mode = "notifications";
+    state.focused = false;
+    state.active = { botId: "bot-1" };
+    await render();
+    await receive();
+    expect(state.add).not.toHaveBeenCalled();
+    expect(state.notification).toHaveBeenCalledWith("New message", {
+      body: "Fix the login form",
+      tag: "env-1:grok-bot:thread-1",
+      silent: true,
+    });
+  });
+});
+
 afterEach(async () => {
   await act(() => renderer?.unmount());
   renderer = undefined;
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("thread notifications", () => {

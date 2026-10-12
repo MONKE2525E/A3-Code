@@ -5,6 +5,7 @@ import {
   EnvironmentHttpApi,
 } from "@t3tools/contracts";
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
+import { injectMcpAppCookieBootstrap, injectMcpAppThemeBootstrap } from "@t3tools/shared/mcpApp";
 import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -28,7 +29,7 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import { OtlpTracer, OtlpSerialization } from "effect/observability";
 
 import * as ServerConfig from "./config.ts";
-import { ASSET_ROUTE_PREFIX, resolveAsset } from "./assets/AssetAccess.ts";
+import { ASSET_ROUTE_PREFIX, readMcpAppHtml, resolveAsset } from "./assets/AssetAccess.ts";
 import { githubMediaResponse } from "./assets/GitHubMediaFetch.ts";
 import { statMediaFile, streamMediaFile, type OpenMediaFile } from "./assets/MediaFile.ts";
 import {
@@ -44,8 +45,10 @@ import {
   failEnvironmentScopeRequired,
   failEnvironmentAuthInvalid,
   failEnvironmentInternal,
+  failEnvironmentNotFound,
 } from "./auth/http.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
+import * as GrokBotAvatarEngine from "./grokBot/GrokBotAvatarEngine.ts";
 import { WEBHOOK_ROUTE_PREFIX } from "./scheduledTasks/ScheduledTaskService.ts";
 import { browserApiCorsAllowedHeaders, browserApiCorsAllowedMethods } from "./httpCors.ts";
 
@@ -57,8 +60,10 @@ const SVG_CONTENT_SECURITY_POLICY = "default-src 'none'; style-src 'unsafe-inlin
 // opaque origin: scripts run, but same-origin cookies, storage, and API calls are
 // out of reach. Relative sibling assets still load through their signed URLs.
 // No modals: agent HTML can open without a click (inline renders, and mobile
-// loads it as the top document), and must not raise blocking dialogs.
-const HTML_CONTENT_SECURITY_POLICY = "sandbox allow-scripts allow-forms allow-popups";
+// loads it as the top document), and must not raise blocking dialogs. Downloads
+// stay allowed so download links and buttons in the page work.
+const HTML_CONTENT_SECURITY_POLICY =
+  "sandbox allow-scripts allow-forms allow-popups allow-downloads";
 
 // Types a browser may render as a document if a proxy strips the disposition
 // header. Downloads of these fall back to octet-stream.
@@ -165,12 +170,30 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
     readonly fileName?: string;
     readonly mimeType?: string;
     readonly file?: OpenMediaFile;
+    readonly renderIntent?: "mcp-app";
   },
   rangeHeader?: string,
   ifRangeHeader?: string,
   method: "GET" | "HEAD" = "GET",
 ) {
   const headers = assetResponseHeaders(asset.path, asset);
+  if (
+    asset.renderIntent === "mcp-app" &&
+    !asset.download &&
+    headers["Content-Type"] === "text/html; charset=utf-8"
+  ) {
+    const bytes = yield* readMcpAppHtml(asset.path);
+    if (bytes === null) {
+      return HttpServerResponse.text("MCP app is too large to preview.", { status: 413 });
+    }
+    const body = new TextEncoder().encode(
+      injectMcpAppCookieBootstrap(injectMcpAppThemeBootstrap(new TextDecoder().decode(bytes))),
+    );
+    headers["Content-Length"] = String(body.byteLength);
+    return method === "HEAD"
+      ? HttpServerResponse.empty({ status: 200, headers })
+      : HttpServerResponse.uint8Array(body, { headers });
+  }
   const mediaFile = asset.file;
   const mediaInfo = mediaFile ? yield* statMediaFile(asset.path, mediaFile) : undefined;
   const isMedia = /^(?:audio|video)\//i.test(headers["Content-Type"] ?? "");
@@ -441,6 +464,65 @@ export const layerAssetRoute = HttpRouter.add(
     ).pipe(
       Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 })),
     );
+  }),
+);
+
+const GROK_BOT_AVATAR_ENGINE_PATH = "/api/grok-bot/avatar-engine";
+const avatarEngineFailureResponse = {
+  GrokBotAvatarEngineMissingError: () =>
+    failEnvironmentNotFound("grok_bot_avatar_engine_not_found"),
+  GrokBotAvatarEngineReadError: (error: GrokBotAvatarEngine.GrokBotAvatarEngineReadError) =>
+    failEnvironmentInternal("grok_bot_avatar_engine_unavailable", error),
+};
+
+export const layerGrokBotAvatarEngineRoute = HttpApiBuilder.group(
+  EnvironmentHttpApi,
+  "grokBotAvatarEngine",
+  Effect.fnUntraced(function* (handlers) {
+    const engine = yield* GrokBotAvatarEngine.GrokBotAvatarEngine;
+    return handlers
+      .handleRaw(
+        "metadata",
+        Effect.fnUntraced(function* () {
+          yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
+          const asset = yield* engine.read();
+          return yield* HttpServerResponse.json(
+            {
+              apiVersion: 1,
+              version: asset.version,
+              sha256: asset.sha256,
+              modulePath: `${GROK_BOT_AVATAR_ENGINE_PATH}/${asset.sha256}.mjs`,
+            },
+            { headers: { "cache-control": "private, no-store" } },
+          ).pipe(
+            Effect.catchTags({
+              HttpBodyError: (error) =>
+                failEnvironmentInternal("grok_bot_avatar_engine_unavailable", error),
+            }),
+          );
+        }, Effect.catchTags(avatarEngineFailureResponse)),
+      )
+      .handleRaw(
+        "module",
+        Effect.fnUntraced(function* () {
+          yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const url = HttpServerRequest.toURL(request);
+          const suffix = Option.isSome(url)
+            ? url.value.pathname.slice(GROK_BOT_AVATAR_ENGINE_PATH.length + 1)
+            : "";
+          if (!/^[a-f0-9]{64}\.mjs$/.test(suffix)) return HttpServerResponse.empty({ status: 404 });
+          const asset = yield* engine.read(suffix.slice(0, -4));
+          return HttpServerResponse.text(asset.source, {
+            contentType: "text/javascript",
+            headers: {
+              "cache-control": "private, max-age=3600",
+              "x-content-type-options": "nosniff",
+              etag: `"${asset.sha256}"`,
+            },
+          });
+        }, Effect.catchTags(avatarEngineFailureResponse)),
+      );
   }),
 );
 

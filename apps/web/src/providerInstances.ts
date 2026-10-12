@@ -15,8 +15,9 @@
 import {
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
-  resolveProviderInstanceEnabled,
+  resolveProjectProviderInstanceEnabled,
   type ModelSelection,
+  type ProjectId,
   type ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
@@ -156,14 +157,16 @@ export function deriveProviderEntriesByEnvironment(
     readonly [
       string,
       ReadonlyArray<ServerProvider>,
-      Pick<ServerSettings, "providerInstances" | "providers">?,
+      Pick<ServerSettings, "providerInstances" | "projectSettingsOverrides">?,
     ]
   >,
 ): ReadonlyMap<string, ReadonlyMap<string, ProviderInstanceEntry>> {
   const byEnvironment = new Map<string, ReadonlyMap<string, ProviderInstanceEntry>>();
   for (const [environmentId, providers, settings] of providersByEnvironment) {
     const derived = deriveProviderInstanceEntries(providers);
-    const entries = settings ? applyProviderInstanceSettings(derived, settings) : derived;
+    // One map per environment serves every project with a thread there, so
+    // there is no single project to scope `enabled` to; it stays machine-wide.
+    const entries = settings ? applyProviderInstanceSettings(derived, settings, null) : derived;
     byEnvironment.set(
       environmentId,
       new Map(entries.map((entry) => [entry.instanceId as string, entry] as const)),
@@ -178,31 +181,29 @@ export function deriveProviderEntriesByEnvironment(
  * settings write, so picker visibility must follow settings rather than waiting
  * for probe reconciliation.
  *
- * Only built-in default instances have a legacy `providers` entry. Every
- * other instance exists through `providerInstances`; if it is absent there,
- * its streamed snapshot is stale (for example immediately after deletion)
- * and is treated as disabled.
+ * A built-in default instance without a `providerInstances` entry keeps its
+ * streamed state, since the server runs it with default config. Any other
+ * instance missing from `providerInstances` is stale (for example
+ * immediately after deletion) and is treated as disabled.
+ *
+ * `projectId` folds in that project's `providerInstances[id].enabled` override
+ * (enable or disable in either direction over the machine value); `null`
+ * resolves the machine value only. It has no default: a caller that renders
+ * for a single project but forgets to pass it would silently show the
+ * machine's enablement instead of that project's, so passing `null` for a
+ * surface that isn't project-aware must be a deliberate choice, not an
+ * omission.
  */
 export function applyProviderInstanceSettings(
   entries: ReadonlyArray<ProviderInstanceEntry>,
-  settings: Pick<ServerSettings, "providerInstances" | "providers">,
+  settings: Pick<ServerSettings, "providerInstances" | "projectSettingsOverrides">,
+  projectId: ProjectId | null,
 ): ReadonlyArray<ProviderInstanceEntry> {
-  const legacyProviders = settings.providers as Readonly<
-    Record<string, { readonly enabled?: boolean } | undefined>
-  >;
-
   return entries.map((entry) => {
     const explicitInstance = Object.hasOwn(settings.providerInstances, entry.instanceId)
       ? settings.providerInstances[entry.instanceId]
       : undefined;
-    const legacyProvider = Object.hasOwn(legacyProviders, entry.driverKind)
-      ? legacyProviders[entry.driverKind]
-      : undefined;
-    const enabled = explicitInstance
-      ? resolveProviderInstanceEnabled(explicitInstance)
-      : entry.isDefault && legacyProvider
-        ? (legacyProvider.enabled ?? entry.enabled)
-        : false;
+    const enabled = resolveProjectProviderInstanceEnabled(settings, projectId, entry.instanceId);
     if (entry.driverKind !== "acpRegistry" || explicitInstance === undefined) {
       return enabled === entry.enabled ? entry : { ...entry, enabled };
     }
@@ -333,18 +334,44 @@ export function resolveSelectableProviderInstance(
 }
 
 /**
+ * Native Grok Bot instances serve bot threads only. Ordinary coding pickers,
+ * defaults, and fallbacks drop them, so a stale bot selection cannot come back
+ * as a new thread's provider. Bot threads keep them via their own composer.
+ */
+export function isGrokBotDriverKind(driver: string): boolean {
+  return driver === "grok-bot";
+}
+
+export function omitGrokBotProviderEntries(
+  entries: ReadonlyArray<ProviderInstanceEntry>,
+): ReadonlyArray<ProviderInstanceEntry> {
+  return entries.filter((entry) => !isGrokBotDriverKind(entry.driverKind));
+}
+
+/** Drop a stored selection that points at a Grok Bot instance; other selections pass through. */
+export function omitGrokBotModelSelection(
+  selection: ModelSelection | null,
+  providers: ReadonlyArray<Pick<ServerProvider, "instanceId" | "driver">>,
+): ModelSelection | null {
+  if (selection === null) return null;
+  const driver = providers.find((provider) => provider.instanceId === selection.instanceId)?.driver;
+  return driver !== undefined && isGrokBotDriverKind(driver) ? null : selection;
+}
+
+/**
  * Resolve the model selection persisted for a project or new thread. A valid
  * stored selection is preserved byte-for-byte. Falling back to another
  * instance also resets the model to that instance's own default, avoiding
- * cross-provider instance/model pairs.
+ * cross-provider instance/model pairs. Grok Bot instances are never a default.
  */
 export function resolveDefaultProviderModelSelection(
   providers: ReadonlyArray<ServerProvider>,
   selection: ModelSelection | null | undefined,
 ): ModelSelection | null {
-  const instanceId = resolveSelectableProviderInstance(providers, selection?.instanceId);
+  const ordinaryProviders = providers.filter((provider) => !isGrokBotDriverKind(provider.driver));
+  const instanceId = resolveSelectableProviderInstance(ordinaryProviders, selection?.instanceId);
   if (instanceId === undefined) return null;
   if (selection?.instanceId === instanceId) return selection;
-  const model = getDefaultProviderInstanceModel(providers, instanceId);
+  const model = getDefaultProviderInstanceModel(ordinaryProviders, instanceId);
   return model ? { instanceId, model } : null;
 }

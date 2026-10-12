@@ -7,6 +7,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
+import { discardResponseBody, responsePayloads } from "@t3tools/shared/mcpResponsePayloads";
 
 /**
  * Stdio-to-HTTP bridge for T3's MCP endpoint.
@@ -63,64 +64,16 @@ function protocolVersionOf(entry: unknown): string | null {
   return typeof version === "string" && version.length > 0 ? version : null;
 }
 
-async function* sseDataLines(response: Response): AsyncGenerator<string> {
-  if (response.body === null) return;
-  const decoder = new TextDecoder();
-  let buffered = "";
-  for await (const chunk of response.body) {
-    buffered += decoder.decode(chunk as Uint8Array, { stream: true });
-    let separatorIndex = buffered.search(/\n\n|\r\n\r\n/u);
-    while (separatorIndex !== -1) {
-      const rawEvent = buffered.slice(0, separatorIndex);
-      buffered = buffered.slice(separatorIndex).replace(/^(?:\r?\n){2}/u, "");
-      const data = rawEvent
-        .split(/\r?\n/u)
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice("data:".length).trimStart())
-        .join("\n");
-      if (data.length > 0) yield data;
-      separatorIndex = buffered.search(/\n\n|\r\n\r\n/u);
-    }
-  }
-}
-
-const discardResponseBody = (response: Response): Effect.Effect<void> =>
-  Effect.promise(() => response.body?.cancel().catch(() => undefined) ?? Promise.resolve());
-
-/**
- * Every JSON-RPC payload carried by a response, in arrival order: nothing for
- * notification acknowledgements, each SSE `data:` event as it streams in, or
- * the single JSON body.
- */
-export function responsePayloads(response: Response): Stream.Stream<unknown, AcpMcpBridgeError> {
-  if (response.status === 202 || response.status === 204) {
-    return Stream.unwrap(discardResponseBody(response).pipe(Effect.as(Stream.empty)));
-  }
-  const contentType = response.headers.get("content-type") ?? "";
-  if (contentType.includes("text/event-stream")) {
-    return Stream.fromAsyncIterable(sseDataLines(response), bridgeError).pipe(
-      Stream.mapEffect((data) => Effect.try({ try: () => JSON.parse(data), catch: bridgeError })),
-    );
-  }
-  return Stream.unwrap(
-    Effect.tryPromise({ try: () => response.text(), catch: bridgeError }).pipe(
-      Effect.flatMap((text) =>
-        text.trim().length === 0
-          ? Effect.succeed(Stream.empty)
-          : Effect.try({ try: () => JSON.parse(text) as unknown, catch: bridgeError }).pipe(
-              Effect.map((payload) => Stream.fromIterable([payload])),
-            ),
-      ),
-    ),
-  );
-}
-
 export interface AcpMcpToolCallOptions {
   readonly endpoint: string;
   readonly authorization: string;
   readonly tool: string;
   readonly arguments: Readonly<Record<string, unknown>>;
   readonly fetchImplementation?: (url: string, init?: RequestInit) => Promise<Response>;
+  readonly signal?: AbortSignal;
+  readonly redirect?: RequestInit["redirect"];
+  /** One-shot shell callers close their HTTP session; ACP keeps its existing behavior. */
+  readonly terminateSession?: boolean;
 }
 
 /**
@@ -146,6 +99,8 @@ export function callAcpMcpTool(
           try: () =>
             fetchImplementation(options.endpoint, {
               method: "POST",
+              ...(options.signal === undefined ? {} : { signal: options.signal }),
+              ...(options.redirect === undefined ? {} : { redirect: options.redirect }),
               headers: {
                 "content-type": "application/json",
                 accept: "application/json, text/event-stream",
@@ -164,49 +119,79 @@ export function callAcpMcpTool(
             new AcpMcpBridgeError(`T3 Code MCP endpoint responded with HTTP ${response.status}.`),
           );
         }
-        const payloads = yield* Stream.runCollect(responsePayloads(response));
+        const payloads = yield* Stream.runCollect(responsePayloads(response, bridgeError));
         for (const payload of payloads) {
           protocolVersion = protocolVersionOf(payload) ?? protocolVersion;
         }
         return payloads;
       });
 
-    const initializeId = "t3-acp-cli-initialize";
-    const initialized = yield* send({
-      jsonrpc: "2.0",
-      id: initializeId,
-      method: "initialize",
-      params: {
-        protocolVersion: MCP_PROTOCOL_VERSION,
-        capabilities: {},
-        clientInfo: { name: "t3-code-acp-cli", version: "0.0.0" },
-      },
-    });
-    const initializeResponse = initialized.find((entry) => asEnvelope(entry)?.id === initializeId);
-    if (initializeResponse === undefined || asEnvelope(initializeResponse)?.error !== undefined) {
-      return yield* Effect.fail(
-        new AcpMcpBridgeError("T3 Code MCP endpoint rejected initialization."),
-      );
-    }
-    yield* send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    const finish =
+      options.terminateSession !== true
+        ? Effect.void
+        : Effect.suspend(() =>
+            sessionId === null
+              ? Effect.void
+              : Effect.tryPromise({
+                  try: async () => {
+                    const response = await fetchImplementation(options.endpoint, {
+                      method: "DELETE",
+                      signal: AbortSignal.timeout(2000),
+                      ...(options.redirect === undefined ? {} : { redirect: options.redirect }),
+                      headers: {
+                        authorization: options.authorization,
+                        "mcp-session-id": sessionId!,
+                        ...(protocolVersion === null
+                          ? {}
+                          : { "mcp-protocol-version": protocolVersion }),
+                      },
+                    });
+                    await response.body?.cancel();
+                  },
+                  catch: bridgeError,
+                }).pipe(Effect.timeout("2 seconds"), Effect.ignore),
+          );
 
-    const callId = "t3-acp-cli-tool-call";
-    const responses = yield* send({
-      jsonrpc: "2.0",
-      id: callId,
-      method: "tools/call",
-      params: { name: options.tool, arguments: options.arguments },
-    });
-    const response = responses.find((entry) => asEnvelope(entry)?.id === callId);
-    const envelope = asEnvelope(response);
-    if (envelope === null || envelope.error !== undefined) {
-      return yield* Effect.fail(
-        new AcpMcpBridgeError(
-          `T3 Code MCP tool call failed${envelope?.error === undefined ? "." : `: ${JSON.stringify(envelope.error)}`}`,
-        ),
+    return yield* Effect.gen(function* () {
+      const initializeId = "t3-acp-cli-initialize";
+      const initialized = yield* send({
+        jsonrpc: "2.0",
+        id: initializeId,
+        method: "initialize",
+        params: {
+          protocolVersion: MCP_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: "t3-code-acp-cli", version: "0.0.0" },
+        },
+      });
+      const initializeResponse = initialized.find(
+        (entry) => asEnvelope(entry)?.id === initializeId,
       );
-    }
-    return envelope.result;
+      if (initializeResponse === undefined || asEnvelope(initializeResponse)?.error !== undefined) {
+        return yield* Effect.fail(
+          new AcpMcpBridgeError("T3 Code MCP endpoint rejected initialization."),
+        );
+      }
+      yield* send({ jsonrpc: "2.0", method: "notifications/initialized" });
+
+      const callId = "t3-acp-cli-tool-call";
+      const responses = yield* send({
+        jsonrpc: "2.0",
+        id: callId,
+        method: "tools/call",
+        params: { name: options.tool, arguments: options.arguments },
+      });
+      const response = responses.find((entry) => asEnvelope(entry)?.id === callId);
+      const envelope = asEnvelope(response);
+      if (envelope === null || envelope.error !== undefined || !("result" in envelope)) {
+        return yield* Effect.fail(
+          new AcpMcpBridgeError(
+            `T3 Code MCP tool call failed${envelope?.error === undefined ? "." : `: ${JSON.stringify(envelope.error)}`}`,
+          ),
+        );
+      }
+      return envelope.result;
+    }).pipe(Effect.ensuring(finish));
   });
 }
 
@@ -271,7 +256,7 @@ export function runAcpMcpStdioBridge(options: AcpMcpStdioBridgeOptions): Effect.
           }
           return yield* discardResponseBody(response);
         }
-        yield* Stream.runForEach(responsePayloads(response), handleServerPayload);
+        yield* Stream.runForEach(responsePayloads(response, bridgeError), handleServerPayload);
       }).pipe(
         Effect.catchCause((cause) => {
           if (envelope.id === undefined) return Effect.void;

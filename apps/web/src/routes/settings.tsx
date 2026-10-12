@@ -1,5 +1,6 @@
+import { capturePluginAuthReturn } from "~/components/grokBot/grokBotPluginAuthReturn";
 import { Outlet, createFileRoute, redirect, useLocation } from "@tanstack/react-router";
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { RotateCcwIcon } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { useSettingsRestore } from "../components/settings/SettingsPanels";
@@ -14,6 +15,12 @@ import {
   SettingsScopeProvider,
   useSettingsScope,
 } from "../components/settings/SettingsScopeContext";
+import {
+  environmentChangeSearch,
+  type GrokBotSettingsSearch,
+} from "../components/grokBot/grokBotPresentation";
+import type { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
+import { useEnvironmentSettings } from "../hooks/useSettings";
 import { useEnvironments } from "../state/environments";
 import { SettingsScopeNotice } from "../components/settings/SettingsScopeNotice";
 import { SETTINGS_DEVICE_ONLY_PATHS } from "../components/settings/SettingsScopeSentence";
@@ -94,13 +101,13 @@ function SettingsScopeBoundary({ pathname, children }: { pathname: string; child
   // Keep the scope sentence on screen so the selection can be changed back.
   if (scope.kind === "unavailable")
     return (
-      <SettingsPageContainer>
+      <SettingsPageContainer showScope={pathname !== "/settings/marketplace"}>
         <p className="text-sm text-muted-foreground">{scope.message}</p>
       </SettingsPageContainer>
     );
   if (scope.kind === "environment" && connectedEnvironments.length === 0) {
     return (
-      <SettingsPageContainer>
+      <SettingsPageContainer showScope={pathname !== "/settings/marketplace"}>
         <p className="text-sm text-muted-foreground">
           Reconnect {scope.label} to change its settings.
         </p>
@@ -114,7 +121,11 @@ function SettingsContentLayout() {
   const location = useLocation();
   const navigateToMainApp = useNavigateToMainApp();
   useEscapeToGoBack(navigateToMainApp);
-  const { search } = useSettingsScope();
+  const { search, environment } = useSettingsScope();
+  const contentScopeKey =
+    location.pathname === "/settings/diagnostics" || location.pathname === "/settings/providers"
+      ? environment?.environmentId
+      : JSON.stringify(search);
   const [restoreSignal, setRestoreSignal] = useState(0);
 
   return (
@@ -133,10 +144,7 @@ function SettingsContentLayout() {
           </div>
         </WorkspacePageHeader>
 
-        <div
-          key={`${JSON.stringify(search)}:${restoreSignal}`}
-          className="min-h-0 flex flex-1 flex-col"
-        >
+        <div key={`${contentScopeKey}:${restoreSignal}`} className="min-h-0 flex flex-1 flex-col">
           <SettingsScopeBoundary pathname={location.pathname}>
             <Outlet />
           </SettingsScopeBoundary>
@@ -146,29 +154,82 @@ function SettingsContentLayout() {
   );
 }
 
+/** Tracks the driver of the selected instance in the scope's resolved environment. */
+function InstanceDriverProbe({
+  instanceId,
+  driverRef,
+}: {
+  instanceId: string | undefined;
+  driverRef: { current: string | undefined };
+}) {
+  const { environment } = useSettingsScope();
+  const environmentId = environment?.environmentId;
+  useEffect(() => {
+    if (environmentId === undefined) driverRef.current = undefined;
+  }, [environmentId, driverRef]);
+  if (environmentId === undefined) return null;
+  return (
+    <ResolvedInstanceDriverProbe {...{ instanceId, driverRef }} environmentId={environmentId} />
+  );
+}
+
+function ResolvedInstanceDriverProbe({
+  instanceId,
+  driverRef,
+  environmentId,
+}: {
+  instanceId: string | undefined;
+  driverRef: { current: string | undefined };
+  environmentId: EnvironmentId;
+}) {
+  const driver = useEnvironmentSettings(environmentId, (settings) =>
+    // A lookup, not `ProviderInstanceId.make`: the raw query can hold an empty or malformed id.
+    instanceId === undefined
+      ? undefined
+      : settings.providerInstances?.[instanceId as ProviderInstanceId]?.driver,
+  );
+  useEffect(() => {
+    driverRef.current = driver;
+  }, [driver, driverRef]);
+  return null;
+}
+
 function SettingsRouteLayout() {
   const rawSearch = Route.useSearch();
   const navigate = Route.useNavigate();
   const pathname = useLocation({ select: (location) => location.pathname });
+  const providerSearch = useLocation({
+    select: (location) =>
+      location.search as GrokBotSettingsSearch & { instanceId?: string; machine?: string },
+  });
+  // Written by the probe below, which can read the resolved environment.
+  const instanceDriverRef = useRef<string | undefined>(undefined);
   return (
     <SettingsScopeProvider
       search={rawSearch}
-      singleEnvironment={pathname === "/settings/providers"}
+      singleEnvironment={pathname === "/settings/providers" || pathname === "/settings/marketplace"}
       onChange={(next) => {
         // Send every axis so the retain middleware sees an explicit target
         // even when the choice is "all", which is the absence of a key.
         void navigate({
           to: pathname,
-          search: () => ({
-            project: next.project,
-            machine: next.machine,
-            checkout: next.checkout,
-          }),
+          search: () =>
+            environmentChangeSearch(
+              { project: next.project, machine: next.machine, checkout: next.checkout },
+              pathname === "/settings/providers"
+                ? {
+                    ...(providerSearch.provider ? { provider: providerSearch.provider } : {}),
+                    ...(providerSearch.instanceId ? { instanceId: providerSearch.instanceId } : {}),
+                    instanceDriver: instanceDriverRef.current,
+                  }
+                : {},
+            ),
           hash: "",
           resetScroll: false,
         });
       }}
     >
+      <InstanceDriverProbe instanceId={providerSearch.instanceId} driverRef={instanceDriverRef} />
       <SettingsContentLayout />
     </SettingsScopeProvider>
   );
@@ -178,6 +239,7 @@ export const Route = createFileRoute("/settings")({
   validateSearch: validateSettingsRouteSearch,
   search: { middlewares: [retainSettingsScope] },
   beforeLoad: async ({ context, location }) => {
+    capturePluginAuthReturn();
     if (
       context.authGateState.status !== "authenticated" &&
       context.authGateState.status !== "hosted-static"

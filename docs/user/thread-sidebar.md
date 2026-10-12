@@ -3,6 +3,80 @@
 Use a new thread for a separate task. Choose **New worktree** when its code changes
 need a separate branch and working directory.
 
+## Grok Bots
+
+In this custom build, open **Settings → Providers → Add provider → Grok Bot**
+and set up the connection.
+Sign in to the Grok Bot desktop app on the environment's computer. T3 can use
+that native connection directly. Optional bridge setup needs Node.js and npm
+and installs `grok-bot-cli` inside this T3 instance's home.
+When connecting remotely, the Grok Bot desktop session must be on the server's
+computer.
+
+Open a bot from the collapsible **Grok Bots** section under the search field.
+Bots use persistent conversations in **No project**. Their backing threads stay
+out of ordinary thread lists. Global search includes their conversations;
+open a matching result or choose a bot through **Grok Bots**. Pinned bots show as
+tiles at the top; pin or hide a bot from its **...** menu. Bots you pinned in the
+Grok Bot desktop app start out pinned. The star marks your main bot and is not
+editable here. Look, name, role, instructions, notification, and visibility
+changes also apply in Grok Bot. Edit them in **Settings → Providers → Grok Bot**, where the
+first scope picker chooses the bot; click the bot to change its shape and color.
+A bot animates while working and follows the pointer when you hover over it.
+
+Browse and install plugins in **Settings → Marketplace**. Installation and account
+connection are separate: open an installed plugin and use **Authenticate** under
+Accounts to start connector sign-in. Finish sign-in in the new browser tab, then
+return to the plugin and refresh its account status.
+
+Pull requests use T3 Code's normal thread controls on the agents doing the work.
+If message delivery is uncertain, refresh the conversation before sending again.
+
+The custom desktop is named **T3 Code plus Grokbot** and defaults to
+`~/.t3-grokbot`, with its own browser profile and launcher. Open remote computer
+control from the bot thread's computer button. Grok Bot routines are available
+in Scheduled Tasks.
+
+When a bot requests a credential, enter it in the secure input card above the
+composer. Saving uses Grok Bot's secure storage; the value is not sent as chat.
+Computer updates and resets require confirmation and affect all bots sharing
+that account's computer. Reset restores the last saved snapshot, so newer
+changes may be lost.
+
+Desktop voice calls are experimental. Open the voice control in a bot thread
+and choose **Start call**, then allow microphone access and speak. You can mute
+or end the call while continuing to use the app. Switching threads or opening
+Settings keeps the call connected to its original bot. The persistent call
+control lets you reopen the panel, mute, or hang up from another page.
+
+### Use bots with Orchestrator V2
+
+Ask a full-access T3 agent to call `grok_bot_orchestrator_setup`. T3 enables the
+native Grok Bot connection for the account selected in the Grok Bot app.
+Open bots through **Grok Bots**; ordinary coding threads use coding providers.
+Repeating setup refreshes the catalog and keeps the same account binding.
+
+Open the bot from **Grok Bots** and name the project where you want its agents
+to work. The bot stays in **No project**. Its run can track and cancel delegated
+tasks and receive their completion through Orchestrator V2. Agents launched
+into a project use that project's normal threads and pull request controls.
+
+Enable T3 Connect in **Settings → Connections** so the cloud bot can reach this
+environment. `grok_bot_orchestrator_config` reports current provider models and
+public endpoint readiness. Setup does not send messages or alter bot plugins.
+
+During provider setup, copy the shared skill setup prompt and send it to one of
+your bots in Grok Bot. Approve its skill write if asked. All your bots can use
+the saved skill. T3 supplies the MCP connection automatically for each turn;
+you do not need to save a connector or paste credentials. Ordinary messages
+show your text first and include only a short reference to the skill. If a bot
+reports that the skill is missing or outdated, copy the setup prompt again
+from **Settings → Providers → Grok Bot** and repeat the setup with one bot.
+
+The provider stays bound to its original native account and team. If that
+selection changes, restore it before using existing bot threads. To disconnect,
+disable the provider in Settings.
+
 ## Start a thread
 
 On web and desktop, a new thread keeps the current project and carries your model

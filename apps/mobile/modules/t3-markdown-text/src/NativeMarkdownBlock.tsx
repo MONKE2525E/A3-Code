@@ -1,3 +1,5 @@
+import { SymbolView } from "expo-symbols";
+import { githubAlert } from "./githubAlert";
 import { createContext, memo, useContext, useMemo } from "react";
 import { Image, Platform, ScrollView, Text, useColorScheme, View } from "react-native";
 import type { MarkdownNode } from "react-native-nitro-markdown/headless";
@@ -546,6 +548,7 @@ export function NativeMarkdownBlock(props: {
   readonly compact?: boolean;
 }) {
   const depth = props.depth ?? 0;
+  const dark = useColorScheme() === "dark";
   switch (props.node.type) {
     case "document":
       return (
@@ -599,11 +602,13 @@ export function NativeMarkdownBlock(props: {
           }}
         />
       );
-    case "blockquote":
+    case "blockquote": {
+      const alert = githubAlert(props.node);
+      const alertColor = dark ? alert?.color : alert?.lightColor;
       return (
         <View
           style={{
-            borderLeftColor: props.textStyle.quoteMarkerColor,
+            borderLeftColor: alertColor ?? props.textStyle.quoteMarkerColor,
             borderLeftWidth: 2,
             marginVertical: props.compact ? 4 : 0,
             paddingLeft: 11,
@@ -611,7 +616,23 @@ export function NativeMarkdownBlock(props: {
             gap: 6,
           }}
         >
-          {(props.node.children ?? []).map((child, index) => (
+          {alert ? (
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 7 }}>
+              {Platform.OS === "ios" ? (
+                <SymbolView name={alert.symbol} size={17} tintColor={alertColor} />
+              ) : null}
+              <Text
+                style={{
+                  color: alertColor,
+                  fontFamily: props.textStyle.boldFontFamily,
+                  fontSize: props.textStyle.fontSize,
+                }}
+              >
+                {alert.title}
+              </Text>
+            </View>
+          ) : null}
+          {(alert?.children ?? props.node.children ?? []).map((child, index) => (
             <NativeMarkdownBlock
               key={nodeKey(child, index)}
               node={child}
@@ -625,6 +646,7 @@ export function NativeMarkdownBlock(props: {
           ))}
         </View>
       );
+    }
     case "list":
       return (
         <NativeList

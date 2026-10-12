@@ -28,8 +28,10 @@ import type * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
-import { PullRequestProviderError } from "../pullRequest/PullRequestProvider.ts";
+import * as GitManager from "../git/GitManager.ts";
+import { PullRequestProviderError } from "@t3tools/source-control-core/server/PullRequestProvider";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -155,7 +157,21 @@ export const make = Effect.gen(function* () {
   const engine = yield* Orchestrator.OrchestratorV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const pullRequests = yield* PullRequestService.PullRequestService;
+  const git = yield* GitManager.GitManager;
   const crypto = yield* Crypto.Crypto;
+  const settingsService = yield* ServerSettings.ServerSettingsService;
+
+  const unlinkMergedBotPullRequest = Effect.fn("PullRequestSyncReactor.unlinkMergedBotPullRequest")(
+    function* (entry: LinkEntry) {
+      const uuid = yield* crypto.randomUUIDv4;
+      yield* engine.dispatch({
+        type: "thread.pull-request.unlink",
+        commandId: CommandId.make(`server:pr-merged-bot-unlink:${entry.thread.id}:${uuid}`),
+        threadId: entry.thread.id,
+        ...normalizeThreadPullRequestKey(entry.link),
+      });
+    },
+  );
 
   const lastSyncedAt = new Map<string, number>();
   const requested = new Map<string, number>();
@@ -188,8 +204,13 @@ export const make = Effect.gen(function* () {
       Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.logWarning(message, fields);
 
   /** `requested` reads only keys asked for through `requestSync`; `all` is the periodic pass. */
-  const sweep = Effect.fn("PullRequestSyncReactor.sweep")(function* (scope: "all" | "requested") {
+  const sweep = Effect.fn("PullRequestSyncReactor.sweep")(function* (
+    scope: "all" | "requested" | PullRequestService.PullRequestMergeEvent,
+  ) {
     const threads = yield* projections.getThreadsWithPullRequests();
+    const settings = yield* settingsService.getSettings;
+    const isBotThread = (thread: ProjectionStore.ProjectionThreadPullRequests) =>
+      settings.providerInstances[thread.providerInstanceId]?.driver === "grok-bot";
     const now = yield* DateTime.now;
     const nowMs = DateTime.toEpochMillis(now);
     const nowIso = DateTime.formatIso(now);
@@ -197,6 +218,23 @@ export const make = Effect.gen(function* () {
     const groups = new Map<string, Array<LinkEntry>>();
     for (const thread of threads) {
       for (const link of visibleThreadPullRequests(thread.pullRequests ?? [])) {
+        // Persistent bot threads stop watching a merged PR without settling the thread.
+        // Stored terminal snapshots also cover merges observed before this reactor started.
+        if (
+          isBotThread(thread) &&
+          (link.snapshot?.state === "merged" ||
+            (typeof scope !== "string" &&
+              scope.projectId === thread.projectId &&
+              scope.host !== undefined &&
+              threadPullRequestKeysEqual({ ...scope, host: scope.host }, link)))
+        ) {
+          yield* unlinkMergedBotPullRequest({ thread, link }).pipe(
+            Effect.catchCause(
+              logSkipped("merged bot pull request unlink skipped", { threadId: thread.id }),
+            ),
+          );
+          continue;
+        }
         const key = threadPullRequestKeyOf(link);
         const entries = groups.get(key) ?? [];
         entries.push({ thread, link });
@@ -286,6 +324,19 @@ export const make = Effect.gen(function* () {
       if (generation !== undefined) yield* pullRequests.invalidate({ reference: ref });
       const summary = yield* pullRequests.summary(ref, { recoverTransientFailure: false });
       const fields = snapshotFieldsOf(summary);
+      if (summary.state === "merged") {
+        yield* Effect.forEach(
+          entries.filter((entry) => isBotThread(entry.thread)),
+          unlinkMergedBotPullRequest,
+          { discard: true },
+        );
+        entries = entries.filter((entry) => !isBotThread(entry.thread));
+        if (entries.length === 0) {
+          lastSyncedAt.set(key, nowMs);
+          if (requested.get(key) === generation) requested.delete(key);
+          return;
+        }
+      }
       const needsStack =
         generation !== undefined ||
         retryStacks.has(key) ||
@@ -394,12 +445,13 @@ export const make = Effect.gen(function* () {
     }
   });
 
-  const worker = yield* makeDrainableWorker((scope: "all" | "requested") =>
-    Effect.suspend(() => {
-      // Requests from here on queue another sweep; the ones already recorded are read by this.
-      if (scope === "requested") requestedSweepQueued = false;
-      return sweep(scope);
-    }).pipe(Effect.catchCause(logSkipped("pull request sync sweep failed", {}))),
+  const worker = yield* makeDrainableWorker(
+    (scope: "all" | "requested" | PullRequestService.PullRequestMergeEvent) =>
+      Effect.suspend(() => {
+        // Requests from here on queue another sweep; the ones already recorded are read by this.
+        if (scope === "requested") requestedSweepQueued = false;
+        return sweep(scope);
+      }).pipe(Effect.catchCause(logSkipped("pull request sync sweep failed", {}))),
   );
 
   // Threads whose current run ran a merge or close command, until that run ends.
@@ -424,6 +476,23 @@ export const make = Effect.gen(function* () {
     "PullRequestSyncReactor.start",
   )(function* () {
     const events = engine.streamDomainEvents;
+    // A client reading a pull request, or its branch status, can see it merge or close before
+    // the next sweep does.
+    const stateChanges = Stream.merge(
+      yield* pullRequests.subscribeStateChanges,
+      yield* git.subscribePullRequestStateChanges,
+    );
+    const merges = yield* pullRequests.subscribeMerges;
+    yield* forkParked(
+      Stream.runForEach(merges, worker.enqueue).pipe(
+        Effect.catchCause(logSkipped("pull request merge stream failed", {})),
+      ),
+    );
+    yield* forkParked(
+      Stream.runForEach(stateChanges, requestSync).pipe(
+        Effect.catchCause(logSkipped("pull request state change stream failed", {})),
+      ),
+    );
     yield* forkParked(
       Stream.runForEach(events, (event) => {
         switch (event.type) {

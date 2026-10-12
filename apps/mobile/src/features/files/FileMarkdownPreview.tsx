@@ -37,7 +37,7 @@ interface MarkdownPreviewStyles {
   readonly nativeTextStyle: NativeMarkdownTextStyle;
 }
 
-function useMarkdownPreviewStyles(
+export function useMarkdownPreviewStyles(
   renderImage?: MarkdownImageRenderer,
   onLinkPress?: (href: string) => void,
 ): MarkdownPreviewStyles {

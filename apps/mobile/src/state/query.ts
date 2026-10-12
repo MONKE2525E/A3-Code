@@ -13,6 +13,7 @@ export interface EnvironmentQueryView<A> {
   /** The error itself, for callers that tell failures apart, such as a pull request not found. */
   readonly failure: unknown;
   readonly isPending: boolean;
+  readonly isSuccess: boolean;
   readonly refresh: () => void;
 }
 
@@ -34,6 +35,7 @@ export function useEnvironmentQuery<A, E>(
     error: result._tag === "Failure" ? formatError(result.cause) : null,
     failure: result._tag === "Failure" ? Cause.squash(result.cause) : null,
     isPending: atom !== null && result.waiting,
+    isSuccess: result._tag === "Success",
     refresh,
   };
 }

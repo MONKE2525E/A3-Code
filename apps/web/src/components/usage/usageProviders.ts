@@ -1,3 +1,4 @@
+import type { EnvironmentPresentation } from "@t3tools/client-runtime/connection";
 import type { UsageProviderKind } from "@t3tools/contracts";
 
 import { ProviderDriverKind } from "@t3tools/contracts";
@@ -41,6 +42,11 @@ export const PROVIDER_PRESENTATION = {
     color: "#8c7bd1",
     driverKind: ProviderDriverKind.make("antigravity"),
   },
+  pi: {
+    label: "Pi",
+    color: "#4d9f8a",
+    driverKind: ProviderDriverKind.make("pi"),
+  },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;
 
 /** Stable provider reading order across charts, summaries, tables, and hover rows. */
@@ -60,4 +66,29 @@ export function providersWithUsage(
       .map((entry) => entry.provider),
   );
   return PROVIDER_ORDER.filter((provider) => active.has(provider));
+}
+
+/**
+ * Driver kinds that report subscription limits but have no cost/token usage
+ * (so no `UsageProviderKind`), such as GrokBot. Hidden ones are kept so they
+ * can be re-checked after their snapshot disappears.
+ */
+export function limitsOnlyDrivers(
+  presentations: Iterable<Pick<EnvironmentPresentation, "serverConfig">>,
+  hidden: readonly string[] = [],
+): readonly string[] {
+  const costDrivers = new Set<string>(
+    PROVIDER_ORDER.map((p) => PROVIDER_PRESENTATION[p].driverKind),
+  );
+  const found = new Set<string>(hidden);
+  for (const { serverConfig } of presentations) {
+    if (serverConfig === null) continue;
+    for (const provider of serverConfig.providers) {
+      if (provider.usageLimits !== undefined) found.add(provider.driver);
+    }
+    for (const source of serverConfig.usageLimitSources ?? []) {
+      for (const account of source.accounts) found.add(account.driver);
+    }
+  }
+  return [...found].filter((driver) => !costDrivers.has(driver)).toSorted();
 }

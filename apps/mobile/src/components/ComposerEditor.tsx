@@ -249,7 +249,8 @@ export function ComposerEditor({
                 },
               }
             : {})}
-          environmentId={environmentId}
+          environmentId={environmentId ?? draft.project?.environmentId}
+          projectId={draft.project?.projectId}
           records={draft.context?.records}
           attachments={draft.attachments}
           onClose={() => setSelected(null)}

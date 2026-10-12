@@ -1,3 +1,4 @@
+import { SourceControlProviderKind } from "@t3tools/contracts";
 import type { PullRequestAction } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -31,7 +32,7 @@ function input(
       mergeability: "mergeable",
       autoMergeEnabled: false,
       checks: [],
-      provider: "github",
+      provider: SourceControlProviderKind.make("github"),
       mergeCapabilities: { merge: true, squash: true, rebase: false },
       capabilities: { mergeMethods: ["merge", "squash", "rebase"], actions: ALL },
       viewerPermissions: { actions: ALL },
@@ -126,7 +127,9 @@ describe("pullRequestMergeBox", () => {
       method: "squash",
     });
     expect(admin(input())).toBeUndefined();
-    expect(admin(input({ provider: "gitlab" }, { canAdminMerge: true }))).toBeUndefined();
+    expect(
+      admin(input({ provider: SourceControlProviderKind.make("gitlab") }, { canAdminMerge: true })),
+    ).toBeUndefined();
     expect(admin(input({ isDraft: true }, { canAdminMerge: true }))).toBeUndefined();
     expect(admin(input({ mergeability: "conflicting" }, { canAdminMerge: true }))).toBeUndefined();
     expect(admin(input({}, { canAdminMerge: true, canMergeSingle: false }))).toBeUndefined();

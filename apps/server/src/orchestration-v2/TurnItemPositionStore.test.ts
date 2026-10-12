@@ -1,0 +1,98 @@
+import { assert, it } from "@effect/vitest";
+import {
+  MessageId,
+  ProviderDriverKind,
+  RunId,
+  ThreadId,
+  TurnItemId,
+  type OrchestrationV2TurnItem,
+} from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as Sqlite from "../persistence/Sqlite.ts";
+import * as Positions from "./TurnItemPositionStore.ts";
+
+const layer = Positions.layer.pipe(Layer.provideMerge(Sqlite.layerMemory));
+const threadId = ThreadId.make("thread:native-position");
+const item = (id: string, timestamp: string) =>
+  ({
+    id: TurnItemId.make(id),
+    threadId,
+    runId: null,
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: {
+      driver: ProviderDriverKind.make("grok-bot"),
+      nativeId: id,
+      strength: "strong",
+    },
+    parentItemId: null,
+    ordinal: 0,
+    status: "completed",
+    title: null,
+    startedAt: DateTime.makeUnsafe(timestamp),
+    completedAt: DateTime.makeUnsafe(timestamp),
+    updatedAt: DateTime.makeUnsafe(timestamp),
+    type: "user_message",
+    messageId: MessageId.make(id),
+    createdBy: "user",
+    creationSource: "provider",
+    inputIntent: "turn_start",
+    text: "Native Teach handoff",
+    attachments: [],
+  }) satisfies OrchestrationV2TurnItem;
+
+it.effect(
+  "keeps native history before the first run but positions new Teach handoffs after the preceding managed run",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const positions = yield* Positions.TurnItemPositionStoreV2;
+      yield* sql`INSERT INTO orchestration_v2_projection_runs (run_id, thread_id, ordinal, provider, status, requested_at, payload_json)
+      VALUES ('run:one', ${threadId}, 1, 'grok-bot', 'completed', '2026-10-11T06:00:00.000Z', '{}'),
+             ('run:two', ${threadId}, 2, 'grok-bot', 'completed', '2026-10-11T07:00:00.000Z', '{}')`;
+      const before = yield* positions.normalize(item("native:history", "2026-10-11T05:00:00.000Z"));
+      const managed = yield* positions.allocate({
+        threadId,
+        turnItemId: TurnItemId.make("managed:one"),
+        runId: RunId.make("run:one"),
+      });
+      const teach = yield* positions.normalize(item("native:teach", "2026-10-11T06:30:00.000Z"));
+      const reply = yield* positions.normalize({
+        ...item("native:reply", "2026-10-11T06:30:05.000Z"),
+        type: "assistant_message",
+        streaming: false,
+      });
+      assert.isBelow(before.ordinal, managed);
+      assert.isAbove(teach.ordinal, managed);
+      assert.isAbove(reply.ordinal, teach.ordinal);
+      assert.isBelow(reply.ordinal, 2_000_000);
+      assert.strictEqual((yield* positions.normalize(teach)).ordinal, teach.ordinal);
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect(
+  "repairs an already persisted pre-run native position on replay without changing its identity",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const positions = yield* Positions.TurnItemPositionStoreV2;
+      const native = item("native:previously-hidden", "2026-10-11T06:32:00.000Z");
+      const old = yield* positions.allocate({ threadId, turnItemId: native.id, runId: null });
+      yield* sql`INSERT INTO orchestration_v2_projection_runs (run_id, thread_id, ordinal, provider, status, requested_at, payload_json)
+      VALUES ('run:twentytwo', ${threadId}, 22, 'grok-bot', 'completed', '2026-10-11T06:31:00.000Z', '{}')`;
+      const repaired = yield* positions.normalize(native);
+      assert.isBelow(old, 1_000_000);
+      assert.isAbove(repaired.ordinal, 22_000_000);
+      assert.strictEqual(repaired.id, native.id);
+      assert.strictEqual((yield* positions.normalize(repaired)).ordinal, repaired.ordinal);
+      const ordinary = yield* positions.normalize({
+        ...item("ordinary:runless", "2026-10-11T06:33:00.000Z"),
+        nativeItemRef: null,
+      });
+      assert.isBelow(ordinary.ordinal, 1_000_000);
+    }).pipe(Effect.provide(layer)),
+);

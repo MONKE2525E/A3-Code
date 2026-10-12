@@ -163,6 +163,39 @@ export function isAutoSettlementCandidate(
   return wokeOnError || wokeOnCompletion;
 }
 
+/**
+ * Whether a thread is parked on its snooze: its wake time is in the future and
+ * it has not raised its hand with a pending request, a fresh failure, or work
+ * that completed after the snooze. Server twin of the client's
+ * `effectiveSnoozed`, so agents and the sidebar agree on what is snoozed. One
+ * difference: a failure counts as fresh when its run completed after the
+ * snooze, like `isAutoSettlementCandidate`. The client compares the shell's
+ * update time, so a rename can wake a failed thread there but not here.
+ */
+export function isSnoozed(
+  thread: Pick<
+    ProjectionStore.ProjectionSettlementCandidate,
+    "snoozedUntil" | "snoozedAt" | "latestRunCompletedAt" | "status" | "pendingRuntimeRequest"
+  >,
+  nowMs: number,
+): boolean {
+  const snoozedUntilMs = toMillis(thread.snoozedUntil);
+  if (snoozedUntilMs === null || snoozedUntilMs <= nowMs) return false;
+  if (thread.pendingRuntimeRequest !== null) return false;
+  const snoozedAtMs = toMillis(thread.snoozedAt);
+  const completedAtMs = toMillis(thread.latestRunCompletedAt);
+  const wokeOnError =
+    thread.status === "failed" &&
+    (snoozedAtMs === null || (completedAtMs !== null && completedAtMs > snoozedAtMs));
+  // Like the client, only a run that completed wakes it; an interrupt or cancel does not.
+  const wokeOnCompletion =
+    thread.status === "completed" &&
+    snoozedAtMs !== null &&
+    completedAtMs !== null &&
+    completedAtMs > snoozedAtMs;
+  return !wokeOnError && !wokeOnCompletion;
+}
+
 export function resolveAutoSettlementAt(input: {
   readonly thread: ProjectionStore.ProjectionSettlementCandidate;
   readonly pullRequest: SettlementPullRequest | null;
@@ -204,8 +237,14 @@ export function resolveAutoSettlementAt(input: {
     return activityAtMs === null ? thread.createdAt : DateTime.makeUnsafe(activityAtMs);
   }
   if (input.autoSettleAfterDays === null || activityAtMs === null) return null;
-  return activityAtMs < input.nowMs - input.autoSettleAfterDays * DAY_MS
-    ? DateTime.makeUnsafe(activityAtMs)
+  // A passed wake timer restarts inactivity. An earlier wake can only delay settlement.
+  const snoozedUntilMs = toMillis(thread.snoozedUntil);
+  const timerWakeAtMs =
+    snoozedUntilMs !== null && snoozedUntilMs <= input.nowMs ? snoozedUntilMs : null;
+  const inactivityAtMs =
+    latestMillis([activityAtMs, toMillis(thread.lastSnoozeWakeAt), timerWakeAtMs]) ?? activityAtMs;
+  return inactivityAtMs < input.nowMs - input.autoSettleAfterDays * DAY_MS
+    ? DateTime.makeUnsafe(inactivityAtMs)
     : null;
 }
 
@@ -236,6 +275,10 @@ export function autoSettlementSettingsKey(
   return JSON.stringify([
     settings.sidebarAutoSettleOnMerge,
     settings.sidebarAutoSettleAfterDays,
+    Object.entries(settings.providerInstances)
+      .filter(([, instance]) => instance.driver === "grok-bot")
+      .map(([id]) => id)
+      .sort(),
     // Only entries that touch settlement, in a stable order, so a project
     // override on an unrelated key does not queue a sweep. JSON drops
     // undefined, so inherit (absent) and never (null) need distinct marks.
@@ -289,12 +332,22 @@ export const make = Effect.gen(function* () {
     // the merged pull request: most threads carry no link and settle from
     // their branch lookup, which would otherwise wait for the next minute's
     // sweep on a possibly stale cached answer.
-    const candidates = threads.filter((thread) => isAutoSettlementCandidate(thread, nowMs));
+    const candidates = threads.filter(
+      (thread) =>
+        settings.providerInstances[thread.providerInstanceId]?.driver !== "grok-bot" &&
+        isAutoSettlementCandidate(thread, nowMs),
+    );
 
     const settleThread = Effect.fn("ThreadSettlementServiceV2.settleThread")(
       function* (thread: (typeof candidates)[number], pullRequest: SettlementPullRequest | null) {
+        const environmentSettings = yield* settingsService.getSettings;
+        if (
+          environmentSettings.providerInstances[thread.providerInstanceId]?.driver === "grok-bot"
+        ) {
+          return null;
+        }
         const currentSettings = resolveProjectSettings(
-          yield* settingsService.getSettings,
+          environmentSettings,
           thread.projectId,
         ).settings;
         const decisionNow = yield* DateTime.now;

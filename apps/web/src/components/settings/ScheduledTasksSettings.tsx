@@ -41,6 +41,7 @@ import { getCustomModelOptionsByInstance } from "../../modelSelection";
 import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
+  omitGrokBotProviderEntries,
   sortProviderInstanceEntries,
 } from "../../providerInstances";
 import { usePrimaryCloudLinkState } from "../../cloud/primaryCloudLinkState";
@@ -59,6 +60,9 @@ import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { WorktreeBaseBranchPicker } from "../WorktreeBaseBranchPicker";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
+import { GrokBotNativeRoutines } from "../grokBot/GrokBotNativeRoutines";
+import { resolveGrokBotSelectedEnvironment } from "../grokBot/grokBotPresentation";
+import { useSelectedGrokBotEnvironmentId } from "../grokBot/useGrokBotEnvironment";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
 import { readEnvironmentScope } from "~/state/session";
 import { useSettingsScope } from "./SettingsScopeContext";
@@ -251,6 +255,17 @@ export function ScheduledTasksSettings(target: {
   const canCreate = useAtomValue(
     serverEnvironment.upsertScheduledTask.permissionAtom(defaultEnvironment?.environmentId ?? null),
   );
+  // Grok Bot routines are account-wide, so a project or checkout scope would only hide them wrongly.
+  const grokBotEnvironment = resolveGrokBotSelectedEnvironment({
+    selectedEnvironmentId: useSelectedGrokBotEnvironmentId(),
+    connectedEnvironmentIds: connectedEnvironments.map((entry) => entry.environmentId),
+  });
+  const nativeRoutinesEnvironmentId =
+    grokBotEnvironment.kind === "environment" &&
+    (scope.kind === "all" || scope.kind === "environment") &&
+    scope.environmentIds.includes(grokBotEnvironment.environmentId)
+      ? grokBotEnvironment.environmentId
+      : null;
   return (
     <SettingsPageContainer>
       <SettingsSection
@@ -301,6 +316,9 @@ export function ScheduledTasksSettings(target: {
                 onEdit={openForEdit}
               />
             ))}
+            {nativeRoutinesEnvironmentId ? (
+              <GrokBotNativeRoutines environmentId={nativeRoutinesEnvironmentId} />
+            ) : null}
           </div>
         )}
       </SettingsSection>
@@ -804,13 +822,6 @@ function ScheduledTaskEditorDialog({
   const upsertTask = useAtomCommand(serverEnvironment.upsertScheduledTask, {
     label: "scheduled task upsert",
   });
-  const instanceEntries = useMemo(
-    () =>
-      sortProviderInstanceEntries(
-        applyProviderInstanceSettings(deriveProviderInstanceEntries(providers), settings),
-      ),
-    [providers, settings],
-  );
   const [draft, setDraft] = useState<DraftState>(() =>
     task ? taskToDraft(task) : { ...EMPTY_DRAFT, projectId: projects[0]?.id ?? "" },
   );
@@ -827,13 +838,31 @@ function ScheduledTaskEditorDialog({
     : task;
   const selectedProjectId = draft.projectId || projects[0]?.id || "";
   const selectedProject = projects.find((project) => project.id === selectedProjectId);
+  // The task runs in selectedProject, so its model picker should reflect that
+  // project's effective enablement, not just the machine's.
+  const instanceEntries = useMemo(
+    () =>
+      omitGrokBotProviderEntries(
+        sortProviderInstanceEntries(
+          applyProviderInstanceSettings(
+            deriveProviderInstanceEntries(providers),
+            settings,
+            selectedProject?.id ?? null,
+          ),
+        ),
+      ),
+    [providers, settings, selectedProject?.id],
+  );
 
   // The real model picker is keyed by a `${instanceId}:${model}` string, which
   // is exactly how the draft stores its selection.
   const firstInstance = instanceEntries[0];
-  const activeSelection = draft.modelKey
-    ? splitModelKey(draft.modelKey)
-    : scheduledTaskDefaultModel(settings, selectedProject ?? null, instanceEntries);
+  const draftSelection = draft.modelKey ? splitModelKey(draft.modelKey) : null;
+  const activeSelection =
+    draftSelection &&
+    instanceEntries.some((entry) => entry.instanceId === draftSelection.instanceId && entry.enabled)
+      ? draftSelection
+      : scheduledTaskDefaultModel(settings, selectedProject ?? null, instanceEntries);
   const activeInstanceId =
     activeSelection?.instanceId ?? firstInstance?.instanceId ?? ("" as ProviderInstanceId);
   const activeModel = activeSelection?.model ?? "";
@@ -1122,6 +1151,7 @@ function ScheduledTaskEditorDialog({
 
             <Field label="Model">
               <ProviderModelPicker
+                environmentId={environmentId}
                 disabled={saving || !connected}
                 activeInstanceId={activeInstanceId}
                 model={activeModel}

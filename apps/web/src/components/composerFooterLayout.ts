@@ -1,6 +1,8 @@
 export const COMPOSER_FOOTER_COMPACT_BREAKPOINT_PX = 620;
 export const COMPOSER_FOOTER_WIDE_ACTIONS_COMPACT_BREAKPOINT_PX = 780;
 const RESTING_COMPOSER_IMAGE_THUMBNAIL_LIMIT = 3;
+/** Gap the resting prompt row keeps between its text and the measured actions. */
+export const COMPOSER_RESTING_ACTIONS_INSET_PX = 16;
 
 export function getRestingComposerImagePreviewCounts(imageCount: number): {
   visibleCount: number;

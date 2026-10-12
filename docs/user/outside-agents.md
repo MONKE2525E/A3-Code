@@ -16,11 +16,12 @@ example:
 https://<environment-address>/mcp
 ```
 
-The address must use HTTPS, or `localhost` when the agent runs on the host
-itself. Agents refuse to sign in over a plain `http://` LAN or tailnet address.
+The copied URL uses the route this device is connected over, so an agent on the
+same device can reach it.
 
-- **An agent on your own computers** can use T3 Connect, Tailscale HTTPS, or
-  `localhost` on the host. See [remote access](./remote-access.md).
+- **An agent on your own computers** can use any address that computer reaches
+  the environment at: a LAN or Tailscale address, T3 Connect, or `localhost` on
+  the host. See [remote access](./remote-access.md).
 - **A hosted agent**, such as ChatGPT or a bot running in the cloud, must reach
   the environment from the internet. Use the T3 Connect address. A Tailscale
   address only works from your own tailnet.
@@ -85,7 +86,35 @@ Add the environment as a custom MCP app in ChatGPT's apps settings:
 
 Any agent that supports remote MCP servers over HTTP with OAuth can connect. Give
 it the MCP URL and choose OAuth, and the agent finds the sign-in settings itself.
-Agents without OAuth support cannot connect.
+Agents without OAuth support need an existing server-issued credential.
+
+## Call a tool from a shell
+
+`t3 mcp-call` calls the same tools without configuring an agent's MCP connector:
+
+```sh
+t3 mcp-call t3_project_list \
+  --endpoint https://<environment-address>/mcp \
+  --token-file /path/to/private-token \
+  --arguments-file /path/to/arguments.json
+```
+
+The arguments file contains a JSON object, such as `{}`. Use `-` to read it from
+standard input. Keep the bearer token in a private file owned by the caller. On
+Linux and macOS, the CLI requires permissions `0600`; Windows file ACLs are not
+checked by this command. Never put the token in a prompt or command argument. The CLI reads
+the token again for each call, so replacing the file supports credential rotation.
+
+The CLI does not sign in, approve access, or grant additional permissions. An
+outside agent's approved credential can call the tools that approval allows.
+Delegation and task tracking on behalf of a persistent bot require its exact
+managed thread and run credential. An OAuth sign-in does not supply that identity.
+Provisioning a credential onto a bot's computer requires a trusted channel;
+shell access alone does not provide one.
+
+Use a public T3 Connect address for a cloud computer. `localhost` refers to the
+computer running the CLI. Calls are not retried automatically; use a tool's
+`clientRequestId` where supported to reconcile a lost response safely.
 
 ## Remove an agent
 

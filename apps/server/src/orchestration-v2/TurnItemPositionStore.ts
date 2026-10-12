@@ -1,4 +1,5 @@
 import { OrchestrationV2TurnItem, RunId, ThreadId, TurnItemId } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -22,6 +23,7 @@ export interface TurnItemPositionStoreV2Shape {
     readonly turnItemId: TurnItemId;
     readonly runId: RunId | null;
     readonly runOrdinal?: number;
+    readonly advanceNativePosition?: boolean;
   }) => Effect.Effect<number, TurnItemPositionStoreError>;
   readonly normalize: (
     item: OrchestrationV2TurnItem,
@@ -44,6 +46,7 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
       turnItemId,
       runId,
       runOrdinal: suppliedRunOrdinal,
+      advanceNativePosition = false,
     }) =>
       Effect.gen(function* () {
         const runRows =
@@ -68,7 +71,9 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
           WHERE thread_id = ${threadId}
             AND ordinal >= ${lowerBound}
             AND ordinal <= ${upperBound}
-          ON CONFLICT(thread_id, turn_item_id) DO NOTHING
+          ON CONFLICT(thread_id, turn_item_id) DO UPDATE SET ordinal = excluded.ordinal
+          WHERE ${advanceNativePosition ? 1 : 0} = 1
+            AND orchestration_v2_turn_item_positions.ordinal < ${lowerBound}
         `;
         const rows = yield* sql<{ readonly ordinal: number }>`
           SELECT ordinal
@@ -96,12 +101,42 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
     return TurnItemPositionStoreV2.of({
       allocate,
       normalize: (item, runOrdinal) =>
-        allocate({
-          threadId: item.threadId,
-          turnItemId: item.id,
-          runId: item.runId,
-          ...(runOrdinal === undefined ? {} : { runOrdinal }),
-        }).pipe(Effect.map((ordinal) => (item.ordinal === ordinal ? item : { ...item, ordinal }))),
+        Effect.gen(function* () {
+          const nativeGrokMessage =
+            item.runId === null &&
+            item.nativeItemRef?.driver === "grok-bot" &&
+            (item.type === "user_message" || item.type === "assistant_message");
+          // Native phone/Teach messages have no T3 run. Put them after the preceding
+          // managed run instead of the pre-run history bucket, including on replay.
+          const precedingRuns =
+            nativeGrokMessage && item.startedAt !== null
+              ? yield* sql<{ readonly ordinal: number }>`
+                  SELECT ordinal FROM orchestration_v2_projection_runs
+                  WHERE thread_id = ${item.threadId}
+                    AND requested_at <= ${DateTime.formatIso(item.startedAt)}
+                  ORDER BY ordinal DESC LIMIT 1
+                `
+              : [];
+          const nativeRunOrdinal = runOrdinal ?? precedingRuns[0]?.ordinal;
+          const ordinal = yield* allocate({
+            threadId: item.threadId,
+            turnItemId: item.id,
+            runId: item.runId,
+            ...(nativeRunOrdinal === undefined ? {} : { runOrdinal: nativeRunOrdinal }),
+            ...(nativeGrokMessage ? { advanceNativePosition: true } : {}),
+          });
+          return item.ordinal === ordinal ? item : { ...item, ordinal };
+        }).pipe(
+          Effect.mapError((cause) =>
+            isTurnItemPositionStoreError(cause)
+              ? cause
+              : new TurnItemPositionStoreError({
+                  threadId: item.threadId,
+                  turnItemId: item.id,
+                  cause,
+                }),
+          ),
+        ),
     });
   }),
 );

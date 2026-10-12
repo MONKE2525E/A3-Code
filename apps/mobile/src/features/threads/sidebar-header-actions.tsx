@@ -1,4 +1,4 @@
-import { useNavigation } from "@react-navigation/native";
+import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
 import { SymbolView } from "../../components/AppSymbol";
 import { Pressable, View } from "react-native";
 
@@ -30,13 +30,13 @@ function FallbackHeaderButton(props: {
 }
 
 export function SidebarHeaderActions(props: SidebarHeaderActionsProps) {
-  const navigation = useNavigation();
+  const workspace = useWorkspaceTabs();
   return (
     <View className="flex-row items-center gap-0.5">
       <FallbackHeaderButton
         accessibilityLabel="Open pull requests"
         icon="arrow.triangle.pull"
-        onPress={() => navigation.navigate("PullRequests")}
+        onPress={() => workspace?.dispatch({ type: "select", tab: "pullRequests" })}
       />
       <FallbackHeaderButton
         accessibilityLabel="Open settings"

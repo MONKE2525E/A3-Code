@@ -1,3 +1,4 @@
+import { useOpenPullRequest } from "../../native/useOpenPullRequest";
 import { createNativeHeaderMenu } from "../../components/nativeHeaderMenu.ios";
 import type { ScreenHeaderMenu } from "../../components/ScreenHeader.types";
 import {
@@ -18,7 +19,6 @@ import { NativeHeaderToolbar } from "../../native/StackHeader";
 import { useCallback, useMemo } from "react";
 import { Alert } from "react-native";
 import { useEnvironmentScope } from "../../state/session";
-import { useOpenPullRequest } from "../pull-requests/useOpenPullRequest";
 import {
   basename,
   getTerminalStatusLabel,

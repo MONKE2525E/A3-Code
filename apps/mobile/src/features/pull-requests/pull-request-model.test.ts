@@ -1,3 +1,4 @@
+import { SourceControlProviderKind } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import {
   ProjectId,
@@ -22,7 +23,7 @@ import {
 
 function entry(overrides: Partial<PullRequestListEntry> = {}): PullRequestListEntry {
   return {
-    provider: "github",
+    provider: SourceControlProviderKind.make("github"),
     host: "github.com",
     projectId: ProjectId.make("project-a"),
     projectTitle: "Example",

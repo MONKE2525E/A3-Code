@@ -1,4 +1,42 @@
+import {
+  GrokBotComputerInput,
+  GrokBotComputerRecreateInput,
+  GrokBotComputerRecreateResult,
+  GrokBotComputerResetInput,
+  GrokBotComputerResetResult,
+  GrokBotComputerUpgradeScheduleInput,
+  GrokBotComputerUpgradeScheduleResult,
+  GrokBotComputer,
+  GrokBotComputerError,
+  GrokBotTeachRecording,
+  GrokBotTeachStartInput,
+  GrokBotTeachStopInput,
+} from "./grokBotComputer.ts";
+import {
+  GrokBotSecretDismissInput,
+  GrokBotSecretDismissResult,
+  GrokBotSecretError,
+  GrokBotSecretPendingInput,
+  GrokBotSecretPendingResult,
+  GrokBotSecretSubmitInput,
+  GrokBotSecretSubmitResult,
+} from "./grokBotSecret.ts";
+import {
+  OrchestrationV2SearchThreadError,
+  OrchestrationV2SearchThreadInput,
+  OrchestrationV2SearchThreadResult,
+} from "./orchestrationV2.ts";
 import { OrchestrationDispatchCommandError } from "./orchestrationDispatch.ts";
+import {
+  McpAppCallToolInput,
+  McpAppCallToolResult,
+  McpAppReadResourceInput,
+  McpAppReadResourceResult,
+  McpAppRequestError,
+  McpAppToolInfo,
+  McpAppToolInfoInput,
+  McpAppUpdateModelContextInput,
+} from "./mcpApps.ts";
 import {
   ChatGptReconnectProfileInput,
   ChatGptReconnectProfile,
@@ -7,6 +45,64 @@ import {
   ChatGptHandoffState,
 } from "./providerSetup.ts";
 import * as Schema from "effect/Schema";
+import {
+  GrokBot,
+  GrokBotStatus,
+  GrokBotError,
+  GrokBotReadInput,
+  GrokBotConversation,
+  GrokBotSendInput,
+  GrokBotSendResult,
+  GrokBotCreateInput,
+  GrokBotUpdateInput,
+  GrokBotLinkInput,
+  GrokBotDeleteInput,
+  GrokBotDeleteResult,
+} from "./grokBot.ts";
+import {
+  GrokBotOrchestratorInput,
+  GrokBotOrchestratorConfig,
+  GrokBotOrchestratorError,
+  GrokBotOpenThreadInput,
+  GrokBotOpenThreadResult,
+  GrokBotThreadError,
+} from "./grokBotOrchestrator.ts";
+import {
+  GrokBotRoutineError,
+  GrokBotRoutinesListInput,
+  GrokBotRoutinesListResult,
+  GrokBotRoutineSetEnabledInput,
+  GrokBotRoutineSetEnabledResult,
+  GrokBotRoutineDeleteInput,
+  GrokBotRoutineDeleteResult,
+} from "./grokBotRoutines.ts";
+import {
+  GrokBotComposerResources,
+  GrokBotComposerResourcesError,
+  GrokBotComposerResourcesInput,
+} from "./grokBotComposerResources.ts";
+import {
+  GrokBotMarketplaceError,
+  GrokBotMarketplaceImportInput,
+  GrokBotMarketplaceImportResult,
+  GrokBotMarketplaceListingsInput,
+  GrokBotMarketplaceInstalledPluginsInput,
+  GrokBotMarketplaceInstalledPluginsResult,
+  GrokBotMarketplaceListingsResult,
+  GrokBotMarketplacePluginChangeResult,
+  GrokBotPluginConnectionsInput,
+  GrokBotPluginConnectionsResult,
+  GrokBotPluginAuthenticateInput,
+  GrokBotPluginAuthenticateResult,
+  GrokBotPluginCompleteAuthInput,
+  GrokBotPluginCompleteAuthResult,
+  GrokBotMarketplacePluginInstallInput,
+  GrokBotMarketplacePluginUninstallInput,
+  GrokBotMarketplacePluginsInput,
+  GrokBotMarketplacePluginsResult,
+  GrokBotMarketplaceTemplate,
+  GrokBotMarketplaceTemplateInput,
+} from "./grokBotMarketplace.ts";
 import * as Rpc from "effect/rpc/Rpc";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
@@ -62,6 +158,8 @@ import {
   HostPowerSnapshot,
 } from "./background.ts";
 import {
+  FilesystemGetMetadataInput,
+  FilesystemGetMetadataResult,
   FilesystemBrowseInput,
   FilesystemBrowseResult,
   FilesystemBrowseError,
@@ -144,6 +242,7 @@ import {
   ProviderUploadFeedbackResult,
 } from "./provider.ts";
 import { ProviderInstanceId, ProviderInstanceMutation } from "./providerInstance.ts";
+import { PullRequestReviewGuideResult } from "./pullRequestReviewGuide.ts";
 import {
   PullRequestActionInput,
   PullRequestActivity,
@@ -156,6 +255,7 @@ import {
   PullRequestDiffFileContentsResult,
   PullRequestFilesViewedResult,
   PullRequestInvalidateInput,
+  PullRequestReportStateInput,
   PullRequestListInput,
   PullRequestListResult,
   PullRequestListStatsInput,
@@ -190,6 +290,7 @@ import {
 import {
   ORCHESTRATION_V2_WS_METHODS,
   OrchestrationGetWorkflowScriptError,
+  OrchestrationV2StopWorkflowError,
   OrchestrationV2DispatchCommandError,
   OrchestrationV2GetShellSnapshotError,
   OrchestrationV2GetThreadProjectionError,
@@ -241,6 +342,7 @@ import {
   PreviewListResult,
   PreviewClearProfileError,
   PreviewClearProfileInput,
+  PreviewReportProfilesInput,
   PreviewNavigateInput,
   PreviewOpenInput,
   PreviewRefreshInput,
@@ -268,6 +370,8 @@ import {} from "./previewAutomation.ts";
 import {
   ServerConfigStreamEvent,
   DesktopUpdateCommitInput,
+  OtlpEndpointCheckInput,
+  OtlpEndpointCheckResult,
   ServerConfig,
   ServerProviderUpdateError,
   ServerProviderUpdateInput,
@@ -301,7 +405,12 @@ import {
   ProviderConsumeResetCreditResult,
 } from "./providerUsageLimits.ts";
 import { UsagePricing, UsageReadError, UsageSummary, UsageSummaryInput } from "./usage.ts";
-import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
+import {
+  StorageCleanupReport,
+  ServerSettings,
+  ServerSettingsError,
+  ServerSettingsPatch,
+} from "./settings.ts";
 import {
   ScheduledTaskDeleteInput,
   ScheduledTaskDeleteResult,
@@ -339,9 +448,63 @@ import {
   SourceControlRepositoryLookupInput,
 } from "./sourceControl.ts";
 import { VcsError } from "./vcs.ts";
+import {
+  GrokBotVoiceCredential,
+  GrokBotVoiceConnectedInput,
+  GrokBotVoiceConnectedResult,
+  GrokBotVoiceEndInput,
+  GrokBotVoiceEndResult,
+  GrokBotVoiceError,
+  GrokBotVoiceRefreshInput,
+  GrokBotVoiceStartInput,
+  GrokBotVoiceStartResult,
+  GrokBotVoiceToolInput,
+  GrokBotVoiceToolResult,
+} from "./grokBotVoice.ts";
 import { Project, ProjectMutation, ProjectMutationError } from "./project.ts";
 
 export const WS_METHODS = {
+  grokBotsTeachRead: "grokBots.teachRead",
+  grokBotsTeachStart: "grokBots.teachStart",
+  grokBotsTeachStop: "grokBots.teachStop",
+  grokBotsComputerRead: "grokBots.computerRead",
+  grokBotsComputerStart: "grokBots.computerStart",
+  grokBotsComputerRecreate: "grokBots.computerRecreate",
+  grokBotsComputerReset: "grokBots.computerReset",
+  grokBotsComputerUpgradeSchedule: "grokBots.computerUpgradeSchedule",
+  grokBotsSecretPending: "grokBots.secretPending",
+  grokBotsSecretSubmit: "grokBots.secretSubmit",
+  grokBotsSecretDismiss: "grokBots.secretDismiss",
+  grokBotsVoiceStart: "grokBots.voiceStart",
+  grokBotsVoiceRefresh: "grokBots.voiceRefresh",
+  grokBotsVoiceTool: "grokBots.voiceTool",
+  grokBotsVoiceConnected: "grokBots.voiceConnected",
+  grokBotsVoiceEnd: "grokBots.voiceEnd",
+  grokBotsStatus: "grokBots.status",
+  grokBotsSetup: "grokBots.setup",
+  grokBotsList: "grokBots.list",
+  grokBotsRead: "grokBots.read",
+  grokBotsSend: "grokBots.send",
+  grokBotsCreate: "grokBots.create",
+  grokBotsUpdate: "grokBots.update",
+  grokBotsLink: "grokBots.link",
+  grokBotsDelete: "grokBots.delete",
+  grokBotsOrchestratorConfig: "grokBots.orchestratorConfig",
+  grokBotsOpenThread: "grokBots.openThread",
+  grokBotsListRoutines: "grokBots.listRoutines",
+  grokBotsListComposerResources: "grokBots.listComposerResources",
+  grokBotsSetRoutineEnabled: "grokBots.setRoutineEnabled",
+  grokBotsDeleteRoutine: "grokBots.deleteRoutine",
+  grokBotsListMarketplace: "grokBots.listMarketplace",
+  grokBotsListMarketplacePlugins: "grokBots.listMarketplacePlugins",
+  grokBotsListInstalledMarketplacePlugins: "grokBots.listInstalledMarketplacePlugins",
+  grokBotsPluginConnections: "grokBots.pluginConnections",
+  grokBotsPluginAuthenticate: "grokBots.pluginAuthenticate",
+  grokBotsPluginCompleteAuth: "grokBots.pluginCompleteAuth",
+  grokBotsInstallMarketplacePlugin: "grokBots.installMarketplacePlugin",
+  grokBotsUninstallMarketplacePlugin: "grokBots.uninstallMarketplacePlugin",
+  grokBotsGetMarketplaceTemplate: "grokBots.getMarketplaceTemplate",
+  grokBotsImportMarketplaceTemplate: "grokBots.importMarketplaceTemplate",
   // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
@@ -360,12 +523,19 @@ export const WS_METHODS = {
 
   // Filesystem methods
   filesystemBrowse: "filesystem.browse",
+  filesystemGetMetadata: "filesystem.getMetadata",
   agentSessionsScan: "agentSessions.scan",
   agentSessionsImport: "agentSessions.import",
   assetsCreateUrl: "assets.createUrl",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
   attachmentsDelete: "attachments.delete",
+
+  // MCP Apps methods
+  mcpAppsCallTool: "mcpApps.callTool",
+  mcpAppsToolInfo: "mcpApps.toolInfo",
+  mcpAppsReadResource: "mcpApps.readResource",
+  mcpAppsUpdateModelContext: "mcpApps.updateModelContext",
 
   // Provider methods
   providerUploadFeedback: "provider.uploadFeedback",
@@ -423,6 +593,7 @@ export const WS_METHODS = {
   previewClose: "preview.close",
   previewList: "preview.list",
   previewClearProfile: "preview.clearProfile",
+  previewReportProfiles: "preview.reportProfiles",
   previewReportStatus: "preview.reportStatus",
 
   // Device methods
@@ -445,6 +616,8 @@ export const WS_METHODS = {
   serverCommitDesktopUpdate: "server.commitDesktopUpdate",
   serverUpsertKeybinding: "server.upsertKeybinding",
   serverRemoveKeybinding: "server.removeKeybinding",
+  serverRunStorageCleanup: "server.runStorageCleanup",
+  serverGetStorageCleanupReport: "server.getStorageCleanupReport",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
@@ -465,6 +638,7 @@ export const WS_METHODS = {
   serverGetProcessResourceHistory: "server.getProcessResourceHistory",
   serverGetResourceTelemetryHistory: "server.getResourceTelemetryHistory",
   serverRetryResourceTelemetry: "server.retryResourceTelemetry",
+  serverCheckOtlpEndpoint: "server.checkOtlpEndpoint",
   serverSignalProcess: "server.signalProcess",
   serverReportClientActivity: "server.reportClientActivity",
   serverReportHostPowerState: "server.reportHostPowerState",
@@ -500,6 +674,8 @@ export const WS_METHODS = {
   pullRequestsPreview: "pullRequests.preview",
   pullRequestsChecks: "pullRequests.checks",
   pullRequestsActivity: "pullRequests.activity",
+  pullRequestsReviewGuide: "pullRequests.reviewGuide",
+  pullRequestsGenerateReviewGuide: "pullRequests.generateReviewGuide",
   pullRequestsThreadComments: "pullRequests.threadComments",
   pullRequestsDiffFileContents: "pullRequests.diffFileContents",
   pullRequestsFilesViewed: "pullRequests.filesViewed",
@@ -513,6 +689,7 @@ export const WS_METHODS = {
   pullRequestsSetThreadResolution: "pullRequests.setThreadResolution",
   pullRequestsSetReaction: "pullRequests.setReaction",
   pullRequestsInvalidate: "pullRequests.invalidate",
+  pullRequestsReportState: "pullRequests.reportState",
   pullRequestsSubscribeRefreshes: "pullRequests.subscribeRefreshes",
   pullRequestsReviewerCandidates: "pullRequests.reviewerCandidates",
   pullRequestsRequestReviewers: "pullRequests.requestReviewers",
@@ -707,6 +884,18 @@ const WsServerCommitDesktopUpdateRpc = Rpc.make(WS_METHODS.serverCommitDesktopUp
   error: Schema.Union([ServerSelfUpdateError, EnvironmentAuthorizationError]),
 });
 
+const WsServerRunStorageCleanupRpc = Rpc.make(WS_METHODS.serverRunStorageCleanup, {
+  payload: Schema.Struct({}),
+  success: StorageCleanupReport,
+  error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
+});
+const WsServerGetStorageCleanupReportRpc = Rpc.make(WS_METHODS.serverGetStorageCleanupReport, {
+  payload: Schema.Struct({}),
+  success: Schema.NullOr(StorageCleanupReport),
+  stream: true,
+  error: EnvironmentAuthorizationError,
+});
+
 const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
   payload: Schema.Struct({}),
   success: ServerSettings,
@@ -839,6 +1028,12 @@ const WsServerRetryResourceTelemetryRpc = Rpc.make(WS_METHODS.serverRetryResourc
   error: EnvironmentAuthorizationError,
 });
 
+const WsServerCheckOtlpEndpointRpc = Rpc.make(WS_METHODS.serverCheckOtlpEndpoint, {
+  payload: OtlpEndpointCheckInput,
+  success: OtlpEndpointCheckResult,
+  error: EnvironmentAuthorizationError,
+});
+
 const WsServerGetUsageSummaryRpc = Rpc.make(WS_METHODS.serverGetUsageSummary, {
   payload: UsageSummaryInput,
   success: UsageSummary,
@@ -967,6 +1162,18 @@ const WsPullRequestsActivityRpc = Rpc.make(WS_METHODS.pullRequestsActivity, {
   error: PullRequestRpcError,
 });
 
+const WsPullRequestsReviewGuideRpc = Rpc.make(WS_METHODS.pullRequestsReviewGuide, {
+  payload: PullRequestRef,
+  success: PullRequestReviewGuideResult,
+  error: PullRequestRpcError,
+});
+
+const WsPullRequestsGenerateReviewGuideRpc = Rpc.make(WS_METHODS.pullRequestsGenerateReviewGuide, {
+  payload: PullRequestRef,
+  success: PullRequestReviewGuideResult,
+  error: PullRequestRpcError,
+});
+
 const WsPullRequestsThreadCommentsRpc = Rpc.make(WS_METHODS.pullRequestsThreadComments, {
   payload: PullRequestThreadCommentsInput,
   success: PullRequestThreadCommentsResult,
@@ -1041,6 +1248,12 @@ const WsPullRequestsSetReactionRpc = Rpc.make(WS_METHODS.pullRequestsSetReaction
 
 const WsPullRequestsInvalidateRpc = Rpc.make(WS_METHODS.pullRequestsInvalidate, {
   payload: PullRequestInvalidateInput,
+  success: Schema.Void,
+  error: PullRequestRpcError,
+});
+
+const WsPullRequestsReportStateRpc = Rpc.make(WS_METHODS.pullRequestsReportState, {
+  payload: PullRequestReportStateInput,
   success: Schema.Void,
   error: PullRequestRpcError,
 });
@@ -1186,6 +1399,12 @@ const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
   error: Schema.Union([ExternalLauncherError, EnvironmentAuthorizationError]),
 });
 
+const WsFilesystemGetMetadataRpc = Rpc.make(WS_METHODS.filesystemGetMetadata, {
+  payload: FilesystemGetMetadataInput,
+  success: FilesystemGetMetadataResult,
+  error: EnvironmentAuthorizationError,
+});
+
 const WsFilesystemBrowseRpc = Rpc.make(WS_METHODS.filesystemBrowse, {
   payload: FilesystemBrowseInput,
   success: FilesystemBrowseResult,
@@ -1230,6 +1449,29 @@ const WsAttachmentsCreateUploadUrlRpc = Rpc.make(WS_METHODS.attachmentsCreateUpl
 const WsAttachmentsDeleteRpc = Rpc.make(WS_METHODS.attachmentsDelete, {
   payload: AttachmentDeleteInput,
   error: EnvironmentAuthorizationError,
+});
+
+const WsMcpAppsCallToolRpc = Rpc.make(WS_METHODS.mcpAppsCallTool, {
+  payload: McpAppCallToolInput,
+  success: McpAppCallToolResult,
+  error: Schema.Union([McpAppRequestError, EnvironmentAuthorizationError]),
+});
+
+const WsMcpAppsToolInfoRpc = Rpc.make(WS_METHODS.mcpAppsToolInfo, {
+  payload: McpAppToolInfoInput,
+  success: McpAppToolInfo,
+  error: Schema.Union([McpAppRequestError, EnvironmentAuthorizationError]),
+});
+
+const WsMcpAppsUpdateModelContextRpc = Rpc.make(WS_METHODS.mcpAppsUpdateModelContext, {
+  payload: McpAppUpdateModelContextInput,
+  error: Schema.Union([McpAppRequestError, EnvironmentAuthorizationError]),
+});
+
+const WsMcpAppsReadResourceRpc = Rpc.make(WS_METHODS.mcpAppsReadResource, {
+  payload: McpAppReadResourceInput,
+  success: McpAppReadResourceResult,
+  error: Schema.Union([McpAppRequestError, EnvironmentAuthorizationError]),
 });
 
 const WsProviderUploadFeedbackRpc = Rpc.make(WS_METHODS.providerUploadFeedback, {
@@ -1431,6 +1673,11 @@ const WsPreviewClearProfileRpc = Rpc.make(WS_METHODS.previewClearProfile, {
   error: Schema.Union([PreviewClearProfileError, EnvironmentAuthorizationError]),
 });
 
+const WsPreviewReportProfilesRpc = Rpc.make(WS_METHODS.previewReportProfiles, {
+  payload: PreviewReportProfilesInput,
+  error: EnvironmentAuthorizationError,
+});
+
 const WsPreviewReportStatusRpc = Rpc.make(WS_METHODS.previewReportStatus, {
   payload: PreviewReportStatusInput,
   error: Schema.Union([PreviewError, EnvironmentAuthorizationError]),
@@ -1526,6 +1773,22 @@ const WsOrchestrationV2GetFullThreadDiffRpc = Rpc.make(
   },
 );
 
+const WsOrchestrationV2SearchThreadRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.searchThread, {
+  payload: OrchestrationV2SearchThreadInput,
+  success: OrchestrationV2SearchThreadResult,
+  error: Schema.Union([OrchestrationV2SearchThreadError, EnvironmentAuthorizationError]),
+});
+
+const WsOrchestrationV2SearchThreadStreamRpc = Rpc.make(
+  ORCHESTRATION_V2_WS_METHODS.searchThreadStream,
+  {
+    payload: OrchestrationV2SearchThreadInput,
+    success: OrchestrationV2SearchThreadResult,
+    error: Schema.Union([OrchestrationV2SearchThreadError, EnvironmentAuthorizationError]),
+    stream: true,
+  },
+);
+
 const WsOrchestrationV2SearchThreadsRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.searchThreads, {
   payload: OrchestrationSearchThreadsInput,
   success: OrchestrationSearchThreadsResult,
@@ -1549,6 +1812,12 @@ const WsOrchestrationV2GetThreadProjectionRpc = Rpc.make(
     error: Schema.Union([OrchestrationV2GetThreadProjectionError, EnvironmentAuthorizationError]),
   },
 );
+
+const WsOrchestrationV2StopWorkflowRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.stopWorkflow, {
+  payload: OrchestrationV2RpcSchemas.stopWorkflow.input,
+  success: OrchestrationV2RpcSchemas.stopWorkflow.output,
+  error: Schema.Union([OrchestrationV2StopWorkflowError, EnvironmentAuthorizationError]),
+});
 
 const WsOrchestrationV2GetWorkflowScriptRpc = Rpc.make(
   ORCHESTRATION_V2_WS_METHODS.getWorkflowScript,
@@ -1742,6 +2011,210 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
 ) {}
 
 export const WsRpcGroup = RpcGroup.make(
+  Rpc.make(WS_METHODS.grokBotsTeachRead, {
+    payload: GrokBotComputerInput,
+    success: GrokBotTeachRecording,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsTeachStart, {
+    payload: GrokBotTeachStartInput,
+    success: GrokBotTeachRecording,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsTeachStop, {
+    payload: GrokBotTeachStopInput,
+    success: GrokBotTeachRecording,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsComputerRead, {
+    payload: GrokBotComputerInput,
+    success: GrokBotComputer,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsComputerStart, {
+    payload: GrokBotComputerInput,
+    success: GrokBotComputer,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsComputerRecreate, {
+    payload: GrokBotComputerRecreateInput,
+    success: GrokBotComputerRecreateResult,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsComputerReset, {
+    payload: GrokBotComputerResetInput,
+    success: GrokBotComputerResetResult,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsComputerUpgradeSchedule, {
+    payload: GrokBotComputerUpgradeScheduleInput,
+    success: GrokBotComputerUpgradeScheduleResult,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsSecretPending, {
+    payload: GrokBotSecretPendingInput,
+    success: GrokBotSecretPendingResult,
+    error: GrokBotSecretError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsSecretSubmit, {
+    payload: GrokBotSecretSubmitInput,
+    success: GrokBotSecretSubmitResult,
+    error: GrokBotSecretError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsSecretDismiss, {
+    payload: GrokBotSecretDismissInput,
+    success: GrokBotSecretDismissResult,
+    error: GrokBotSecretError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsVoiceStart, {
+    payload: GrokBotVoiceStartInput,
+    success: GrokBotVoiceStartResult,
+    error: GrokBotVoiceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsVoiceRefresh, {
+    payload: GrokBotVoiceRefreshInput,
+    success: GrokBotVoiceCredential,
+    error: GrokBotVoiceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsVoiceTool, {
+    payload: GrokBotVoiceToolInput,
+    success: GrokBotVoiceToolResult,
+    error: GrokBotVoiceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsVoiceConnected, {
+    payload: GrokBotVoiceConnectedInput,
+    success: GrokBotVoiceConnectedResult,
+    error: GrokBotVoiceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsVoiceEnd, {
+    payload: GrokBotVoiceEndInput,
+    success: GrokBotVoiceEndResult,
+  }),
+  Rpc.make(WS_METHODS.grokBotsListRoutines, {
+    payload: GrokBotRoutinesListInput,
+    success: GrokBotRoutinesListResult,
+    error: Schema.Union([GrokBotError, GrokBotRoutineError]),
+  }),
+  Rpc.make(WS_METHODS.grokBotsListMarketplace, {
+    payload: GrokBotMarketplaceListingsInput,
+    success: GrokBotMarketplaceListingsResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsListMarketplacePlugins, {
+    payload: GrokBotMarketplacePluginsInput,
+    success: GrokBotMarketplacePluginsResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsListInstalledMarketplacePlugins, {
+    payload: GrokBotMarketplaceInstalledPluginsInput,
+    success: GrokBotMarketplaceInstalledPluginsResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsPluginConnections, {
+    payload: GrokBotPluginConnectionsInput,
+    success: GrokBotPluginConnectionsResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsPluginAuthenticate, {
+    payload: GrokBotPluginAuthenticateInput,
+    success: GrokBotPluginAuthenticateResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsPluginCompleteAuth, {
+    payload: GrokBotPluginCompleteAuthInput,
+    success: GrokBotPluginCompleteAuthResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsInstallMarketplacePlugin, {
+    payload: GrokBotMarketplacePluginInstallInput,
+    success: GrokBotMarketplacePluginChangeResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsUninstallMarketplacePlugin, {
+    payload: GrokBotMarketplacePluginUninstallInput,
+    success: GrokBotMarketplacePluginChangeResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsGetMarketplaceTemplate, {
+    payload: GrokBotMarketplaceTemplateInput,
+    success: GrokBotMarketplaceTemplate,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsImportMarketplaceTemplate, {
+    payload: GrokBotMarketplaceImportInput,
+    success: GrokBotMarketplaceImportResult,
+    error: GrokBotMarketplaceError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsListComposerResources, {
+    payload: GrokBotComposerResourcesInput,
+    success: GrokBotComposerResources,
+    error: Schema.Union([GrokBotError, GrokBotComposerResourcesError]),
+  }),
+  Rpc.make(WS_METHODS.grokBotsSetRoutineEnabled, {
+    payload: GrokBotRoutineSetEnabledInput,
+    success: GrokBotRoutineSetEnabledResult,
+    error: Schema.Union([GrokBotError, GrokBotRoutineError]),
+  }),
+  Rpc.make(WS_METHODS.grokBotsDeleteRoutine, {
+    payload: GrokBotRoutineDeleteInput,
+    success: GrokBotRoutineDeleteResult,
+    error: Schema.Union([GrokBotError, GrokBotRoutineError]),
+  }),
+  Rpc.make(WS_METHODS.grokBotsOpenThread, {
+    payload: GrokBotOpenThreadInput,
+    success: GrokBotOpenThreadResult,
+    error: Schema.Union([GrokBotError, GrokBotOrchestratorError, GrokBotThreadError]),
+  }),
+  Rpc.make(WS_METHODS.grokBotsOrchestratorConfig, {
+    payload: GrokBotOrchestratorInput,
+    success: GrokBotOrchestratorConfig,
+    error: Schema.Union([GrokBotError, GrokBotOrchestratorError]),
+  }),
+  Rpc.make(WS_METHODS.grokBotsStatus, {
+    payload: Schema.Struct({}),
+    success: GrokBotStatus,
+    error: GrokBotError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsSetup, {
+    payload: Schema.Struct({}),
+    success: GrokBotStatus,
+    error: GrokBotError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsList, {
+    payload: Schema.Struct({}),
+    success: Schema.Array(GrokBot),
+    error: GrokBotError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsRead, {
+    payload: GrokBotReadInput,
+    success: GrokBotConversation,
+    error: GrokBotError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsSend, {
+    payload: GrokBotSendInput,
+    success: GrokBotSendResult,
+    error: GrokBotError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsCreate, {
+    payload: GrokBotCreateInput,
+    success: GrokBot,
+    error: GrokBotError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsUpdate, {
+    payload: GrokBotUpdateInput,
+    success: GrokBot,
+    error: GrokBotError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsLink, {
+    payload: GrokBotLinkInput,
+    success: GrokBot,
+    error: GrokBotError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsDelete, {
+    payload: GrokBotDeleteInput,
+    success: GrokBotDeleteResult,
+    error: Schema.Union([GrokBotError, GrokBotThreadError]),
+  }),
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
@@ -1766,6 +2239,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerCommitDesktopUpdateRpc,
   WsServerUpsertKeybindingRpc,
   WsServerRemoveKeybindingRpc,
+  WsServerRunStorageCleanupRpc,
+  WsServerGetStorageCleanupReportRpc,
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
   WsServerDiscoverSourceControlRpc,
@@ -1786,6 +2261,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetProcessResourceHistoryRpc,
   WsServerGetResourceTelemetryHistoryRpc,
   WsServerRetryResourceTelemetryRpc,
+  WsServerCheckOtlpEndpointRpc,
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
   WsServerSignalProcessRpc,
@@ -1815,6 +2291,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsPullRequestsPreviewRpc,
   WsPullRequestsChecksRpc,
   WsPullRequestsActivityRpc,
+  WsPullRequestsReviewGuideRpc,
+  WsPullRequestsGenerateReviewGuideRpc,
   WsPullRequestsThreadCommentsRpc,
   WsPullRequestsDiffFileContentsRpc,
   WsPullRequestsFilesViewedRpc,
@@ -1828,6 +2306,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsPullRequestsSetThreadResolutionRpc,
   WsPullRequestsSetReactionRpc,
   WsPullRequestsInvalidateRpc,
+  WsPullRequestsReportStateRpc,
   WsPullRequestsSubscribeRefreshesRpc,
   WsPullRequestsReviewerCandidatesRpc,
   WsPullRequestsRequestReviewersRpc,
@@ -1850,12 +2329,17 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsMutateRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
+  WsFilesystemGetMetadataRpc,
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,
   WsAssetsPersistChatAttachmentsRpc,
   WsAttachmentsCreateUploadUrlRpc,
   WsAttachmentsDeleteRpc,
+  WsMcpAppsCallToolRpc,
+  WsMcpAppsToolInfoRpc,
+  WsMcpAppsReadResourceRpc,
+  WsMcpAppsUpdateModelContextRpc,
   WsProviderUploadFeedbackRpc,
   WsSubscribeVcsStatusRpc,
   WsSubscribeWorktreeSetupRpc,
@@ -1891,6 +2375,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsPreviewCloseRpc,
   WsPreviewListRpc,
   WsPreviewClearProfileRpc,
+  WsPreviewReportProfilesRpc,
   WsPreviewReportStatusRpc,
   WsSubscribePreviewEventsRpc,
   WsSubscribeDiscoveredLocalServersRpc,
@@ -1910,10 +2395,13 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeResourceTelemetryRpc,
   WsOrchestrationV2DispatchCommandRpc,
   WsOrchestrationV2GetWorkflowScriptRpc,
+  WsOrchestrationV2StopWorkflowRpc,
   WsOrchestrationV2GetTurnItemRpc,
   WsOrchestrationV2GetTurnDiffRpc,
   WsOrchestrationV2GetFullThreadDiffRpc,
   WsOrchestrationV2SearchThreadsRpc,
+  WsOrchestrationV2SearchThreadRpc,
+  WsOrchestrationV2SearchThreadStreamRpc,
   WsOrchestrationV2GetArchivedShellSnapshotRpc,
   WsOrchestrationV2GetThreadProjectionRpc,
   WsOrchestrationV2LaunchThreadRpc,

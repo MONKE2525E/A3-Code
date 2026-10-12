@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.monke.t3code.grokbot</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>T3 Code plus Grokbot</name>
+  <summary>T3 Code with persistent Grok Bot conversations</summary>
+  <description>
+    <p>A custom T3 Code desktop with a bridge to your signed-in Grok Bots.</p>
+  </description>
+  <launchable type="desktop-id">t3code-grokbot.desktop</launchable>
+  <icon type="stock">t3code-grokbot</icon>
+  <provides><binary>t3code-grokbot</binary></provides>
+  <categories><category>Development</category></categories>
+  <url type="vcs-browser">https://github.com/MONKE2525E/t3code/tree/t3/grokbot-sidebar-integration</url>
+</component>

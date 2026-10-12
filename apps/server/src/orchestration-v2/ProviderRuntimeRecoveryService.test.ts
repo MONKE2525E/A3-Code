@@ -18,13 +18,54 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 
+import * as GrokBotThreadService from "../grokBot/GrokBotThreadService.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
-import * as IdAllocator from "./IdAllocator.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+
+it.effect("reattaches native Grok Bot observation after startup recovery, not shutdown", () =>
+  Effect.gen(function* () {
+    const observed = yield* Ref.make(0);
+    const layer = ProviderRuntimeRecovery.layer.pipe(
+      Layer.provide(ServerSettings.layerTest()),
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getRecoveryThreadIds: () => Effect.succeed([]),
+          }),
+          Layer.mock(EventSink.EventSinkV2)({}),
+          IdAllocator.layer,
+          Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({}),
+          Layer.mock(EffectOutbox.EffectOutboxV2)({
+            reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+          }),
+        ),
+      ),
+      Layer.provideMerge(
+        Layer.succeed(
+          GrokBotThreadService.GrokBotThreadService,
+          GrokBotThreadService.GrokBotThreadService.of({
+            open: () => Effect.die("recovery observation must not open a thread"),
+            send: () => Effect.die("recovery observation must not send"),
+            deleteBot: () => Effect.die("recovery observation must not delete a bot"),
+            observeAll: Ref.update(observed, (count) => count + 1),
+          }),
+        ),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const recovery = yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService;
+      yield* recovery.reconcile("shutdown");
+      assert.equal(yield* Ref.get(observed), 0);
+      yield* recovery.recover;
+      assert.equal(yield* Ref.get(observed), 1);
+    }).pipe(Effect.provide(layer));
+  }),
+);
 
 it.effect("leaves durable effects for the worker after runtime reconciliation", () =>
   Effect.gen(function* () {
@@ -179,6 +220,136 @@ it.effect("expires orphaned runtime requests before command readiness", () => {
     }
   }).pipe(Effect.provide(layer));
 });
+
+it.effect(
+  "expires a live Grok Bot runless approval and cancels its transcript item on startup",
+  () => {
+    const threadId = ThreadId.make("thread_recovery_grok_bot_approval");
+    const requestId = RuntimeRequestId.make("request_grok_bot_approval");
+    const nodeId = NodeId.make("node_grok_bot_approval");
+    const itemId = TurnItemId.make("item_grok_bot_approval");
+    const observerSessionId = ProviderSessionId.make(
+      "provider-session:grok-bot-observe:thread_recovery_grok_bot_approval",
+    );
+    let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+      null;
+    const observed = vi.fn();
+    const projection = {
+      thread: { id: threadId, providerInstanceId: ProviderInstanceId.make("grok-bot") },
+      runtimeRequests: [
+        {
+          id: requestId,
+          nodeId,
+          providerTurnId: null,
+          nativeRequestRef: {
+            driver: ProviderDriverKind.make("grok-bot"),
+            nativeId: "auto_review_approval/native-pending",
+            strength: "strong",
+          },
+          kind: "command",
+          status: "pending",
+          responseCapability: { type: "live", providerSessionId: observerSessionId },
+        },
+      ],
+      providerSessions: [
+        {
+          id: observerSessionId,
+          driver: ProviderDriverKind.make("grok-bot"),
+          status: "ready",
+        },
+      ],
+      providerThreads: [],
+      runs: [],
+      nodes: [
+        {
+          id: nodeId,
+          runId: null,
+          kind: "approval_request",
+          status: "waiting",
+        },
+      ],
+      turnItems: [
+        {
+          id: itemId,
+          runId: null,
+          nodeId,
+          type: "approval_request",
+          status: "waiting",
+          requestId,
+        },
+      ],
+    } as unknown as OrchestrationV2ThreadProjection;
+    const layer = ProviderRuntimeRecovery.layer.pipe(
+      Layer.provide(ServerSettings.layerTest()),
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getRecoveryThreadIds: () => Effect.succeed([threadId]),
+            getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+          }),
+          Layer.mock(EventSink.EventSinkV2)({
+            commitCommand: (input) => {
+              committedInput = input;
+              return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+            },
+          }),
+          IdAllocator.layer,
+          Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({
+            runRecoveryOnce: Effect.succeed(false),
+          }),
+          Layer.mock(EffectOutbox.EffectOutboxV2)({
+            reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+          }),
+        ),
+      ),
+      Layer.provideMerge(
+        Layer.succeed(
+          GrokBotThreadService.GrokBotThreadService,
+          GrokBotThreadService.GrokBotThreadService.of({
+            open: () => Effect.die("recovery observation must not open a thread"),
+            send: () => Effect.die("recovery observation must not send"),
+            deleteBot: () => Effect.die("recovery observation must not delete a bot"),
+            observeAll: Effect.sync(() => {
+              observed();
+            }),
+          }),
+        ),
+      ),
+    );
+    return Effect.gen(function* () {
+      const summary = yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService)
+        .recover;
+      assert.equal(summary.closedRequests, 1);
+      assert.equal(observed.mock.calls.length, 1);
+      const events = committedInput?.events ?? [];
+      const requestEvent = events.find((event) => event.type === "runtime-request.updated");
+      const nodeEvent = events.find((event) => event.type === "node.updated");
+      const itemEvent = events.find((event) => event.type === "turn-item.updated");
+      assert.equal(
+        requestEvent?.type === "runtime-request.updated" ? requestEvent.payload.id : null,
+        requestId,
+      );
+      assert.equal(
+        requestEvent?.type === "runtime-request.updated" ? requestEvent.payload.status : null,
+        "expired",
+      );
+      assert.equal(
+        requestEvent?.type === "runtime-request.updated"
+          ? requestEvent.payload.responseCapability.type
+          : null,
+        "not_resumable",
+      );
+      assert.equal(
+        nodeEvent?.type === "node.updated" ? nodeEvent.payload.status : null,
+        "cancelled",
+      );
+      assert.equal(
+        itemEvent?.type === "turn-item.updated" ? itemEvent.payload.status : null,
+        "cancelled",
+      );
+    }).pipe(Effect.provide(layer));
+  },
+);
 
 it.effect("preserves async questions across startup and shutdown", () => {
   const threadId = ThreadId.make("async-recovery-thread");
@@ -854,6 +1025,97 @@ it.effect(
   },
 );
 
+it.effect("cancels workflow members and child roots without run ids after restart", () => {
+  const parentThreadId = ThreadId.make("thread_recovery_workflow_members");
+  const childThreadId = ThreadId.make("thread_recovery_workflow_member_child");
+  const memberId = NodeId.make("node_recovery_workflow_member");
+  const childRootId = NodeId.make("node_recovery_workflow_member_root");
+  const providerInstanceId = ProviderInstanceId.make("claudeAgent");
+  const driver = ProviderDriverKind.make("claudeAgent");
+  const member = {
+    id: memberId,
+    threadId: parentThreadId,
+    runId: null,
+    origin: "provider_native",
+    status: "running",
+    driver,
+    providerInstanceId,
+  };
+  const parentProjection = {
+    thread: { id: parentThreadId, providerInstanceId },
+    runs: [],
+    attempts: [],
+    nodes: [
+      { id: memberId, threadId: parentThreadId, runId: null, kind: "subagent", status: "running" },
+    ],
+    subagents: [member],
+    runtimeRequests: [],
+    providerSessions: [],
+    providerThreads: [],
+    providerTurns: [],
+    messages: [],
+    turnItems: [],
+  } as unknown as OrchestrationV2ThreadProjection;
+  const childProjection = {
+    ...parentProjection,
+    thread: { id: childThreadId, providerInstanceId },
+    nodes: [
+      {
+        id: childRootId,
+        threadId: childThreadId,
+        runId: null,
+        kind: "root_turn",
+        status: "running",
+      },
+    ],
+    subagents: [],
+  } as unknown as OrchestrationV2ThreadProjection;
+  const committed: Array<Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0]> = [];
+  const layer = ProviderRuntimeRecovery.layer.pipe(
+    Layer.provide(ServerSettings.layerTest()),
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getRecoveryThreadIds: () => Effect.succeed([parentThreadId, childThreadId]),
+          getRuntimeRecoveryProjection: (threadId) =>
+            Effect.succeed(threadId === parentThreadId ? parentProjection : childProjection),
+        }),
+        Layer.mock(EventSink.EventSinkV2)({
+          commitCommand: (input) => {
+            committed.push(input);
+            return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+          },
+        }),
+        IdAllocator.layer,
+        Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({
+          runRecoveryOnce: Effect.succeed(false),
+        }),
+        Layer.mock(EffectOutbox.EffectOutboxV2)({
+          reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+        }),
+      ),
+    ),
+  );
+
+  return Effect.gen(function* () {
+    yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService).reconcile("startup");
+    assert.deepEqual(
+      committed.flatMap((command) =>
+        command.events.map((event) => [
+          command.threadId,
+          event.type,
+          "status" in event.payload ? event.payload.status : null,
+        ]),
+      ),
+      [
+        [parentThreadId, "subagent.updated", "cancelled"],
+        [parentThreadId, "node.updated", "cancelled"],
+        [childThreadId, "node.updated", "cancelled"],
+      ],
+    );
+  }).pipe(Effect.provide(layer));
+});
+
 it.effect(
   "clears persisted pendingBackgroundTasks and terminalizes stale background items on settled runs",
   () => {
@@ -1227,6 +1489,7 @@ it.effect(
         {
           id: staleSubagentNodeId,
           runId: settledRunId,
+          origin: "provider_native",
           driver: ProviderDriverKind.make("claude"),
           providerInstanceId: claudeInstanceId,
           status: "running",
@@ -1235,6 +1498,7 @@ it.effect(
           // Already finished with a real result: must never be overwritten.
           id: doneSubagentNodeId,
           runId: settledRunId,
+          origin: "provider_native",
           driver: ProviderDriverKind.make("claude"),
           providerInstanceId: claudeInstanceId,
           status: "completed",

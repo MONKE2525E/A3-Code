@@ -1,3 +1,4 @@
+import { readPluginAuthReturn } from "~/components/grokBot/grokBotPluginAuthReturn";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 
 import {
@@ -44,7 +45,7 @@ function PairRouteView() {
       onAuthenticated={() => {
         // Recreate the primary connection so its WebSocket and cached scopes
         // use the newly issued cookie after re-pairing.
-        router.history.replace("/");
+        router.history.replace(readPluginAuthReturn() ? "/settings/marketplace" : "/");
         router.history.flush();
         window.location.reload();
       }}

@@ -5,6 +5,7 @@ import {
   ThreadHistoryController,
 } from "@t3tools/client-runtime/state/threads";
 import { PullRequestDiffLoader } from "@t3tools/client-runtime/state/pull-requests";
+import * as GrokBotAvatarEngineHttp from "@t3tools/client-runtime/state/grok-bot-avatar-engine";
 import * as Layer from "effect/Layer";
 import { Atom } from "effect/reactivity";
 
@@ -19,6 +20,7 @@ const layerSnapshotLoader = Layer.mergeAll(
   ShellSnapshotLoader.layer,
   ThreadHistoryController.layer,
   PullRequestDiffLoader.layer,
+  GrokBotAvatarEngineHttp.layer,
 );
 
 type ConnectionLayerSource =

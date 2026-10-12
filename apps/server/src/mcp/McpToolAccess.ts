@@ -6,7 +6,6 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
-import * as Struct from "effect/Struct";
 import type * as Layer from "effect/Layer";
 import type * as Scope from "effect/Scope";
 import type { Tool, Toolkit } from "effect/ai";
@@ -16,6 +15,7 @@ import {
   type DispatchModeRefusal,
 } from "../orchestration-v2/DispatchModeLimit.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as McpToolActivity from "./McpToolActivity.ts";
 import { resolveInteractionMode, resolveRuntimeMode } from "./OrchestratorMcpService.ts";
 import {
   assertFullAccess,
@@ -47,14 +47,11 @@ let declare: <P, A, E, R>(
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => Declaration<(params: P) => Effect.Effect<A, E, R>>;
 
-type CheckedHandlerOf<D> = D extends Declaration<infer Handler> ? Handler : never;
-
 /** Turns each declaration back into the handler it checks, keeping its type. */
-interface CheckedHandler extends Struct.Lambda {
-  <Handler>(declaration: Declaration<Handler>): Handler;
-  readonly "~lambda.out": CheckedHandlerOf<this["~lambda.in"]>;
-}
-let checkedHandler: CheckedHandler;
+let checkedHandler: <P, A, E, R>(
+  declaration: Declaration<(params: P) => Effect.Effect<A, E, R>>,
+  name: string,
+) => (params: P) => Effect.Effect<A, E, R>;
 
 /** Only `toLayer` below builds one. */
 let handlersLayer: <Tools extends Record<string, Tool.Any>, EX, RX>(
@@ -93,7 +90,11 @@ export class Declaration<out Handler> {
   }
   static {
     declare = (handle) => new Declaration(builtHere, handle);
-    checkedHandler = Struct.lambda<CheckedHandler>((declaration) => declaration.#handle);
+    checkedHandler = (declaration, name) => {
+      const handle = declaration.#handle;
+      return (params) =>
+        handle(params).pipe(Effect.provideService(McpToolActivity.RegisteredToolName, name));
+    };
   }
 }
 
@@ -134,11 +135,16 @@ const requireThreadCaller = McpInvocationContext.McpInvocationContext.pipe(
 
 /** Changes nothing, so every caller may call it. */
 export const reads = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
-  declare((params: P) => handle(params));
+  declare((params: P) => McpToolActivity.observe(handle(params)));
 
 /** Reads what belongs to the calling T3 thread, such as its preview tabs or devices. */
 export const readsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
-  declare((params: P) => requireThreadCaller.pipe(Effect.flatMap(() => handle(params))));
+  declare((params: P) =>
+    requireThreadCaller.pipe(
+      Effect.tap((scope) => (scope.thread.remoteRun === undefined ? Effect.void : loadCaller())),
+      Effect.flatMap(() => McpToolActivity.observe(handle(params))),
+    ),
+  );
 
 /**
  * Acts as the calling T3 thread (its subagents, preview tabs, devices,
@@ -149,13 +155,34 @@ export const actsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A,
   declare((params: P) =>
     requireThreadCaller.pipe(
       Effect.flatMap(() => writingCaller),
-      Effect.flatMap(() => handle(params)),
+      Effect.flatMap(() => McpToolActivity.observe(handle(params))),
     ),
+  );
+
+/** Delegation accepts a separately issued live call parent; other caller-only tools still require a provider. */
+export const actsAsDelegationCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
+  declare((params: P) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      yield* McpInvocationContext.requireDelegationScope(scope, "This tool");
+      yield* writingCaller;
+      return yield* McpToolActivity.observe(handle(params));
+    }),
   );
 
 /** Changes something that belongs to no thread, such as a pending upload or a scheduled task. */
 export const writes = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
-  declare((params: P) => orchestratingCaller.pipe(Effect.flatMap(() => handle(params))));
+  declare((params: P) =>
+    orchestratingCaller.pipe(Effect.flatMap(() => McpToolActivity.observe(handle(params)))),
+  );
+
+/**
+ * Changes something that belongs to no thread under a capability of the tool's own, such as
+ * writing a pull request's review guide. Unlike `writes` it does not need thread control; the
+ * handler checks its capability, as the capability toolkits do.
+ */
+export const writesWithCapability = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
+  declare((params: P) => writingCaller.pipe(Effect.flatMap(() => handle(params))));
 
 /**
  * Changes the threads `threads` names. An omitted id is the caller's own
@@ -183,7 +210,7 @@ export const writesThreads = <P, A, E, R>(
       // orchestrator checks again under the thread's lock and records its
       // refusal here, since handlers wrap dispatch errors their own way.
       const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
-      return yield* handle(params).pipe(
+      return yield* McpToolActivity.observe(handle(params)).pipe(
         Effect.provideService(DispatchModeLimit, { ...caller.limits, refused }),
         Effect.catch((error) =>
           Effect.flatMap(Ref.get(refused), (refusal) =>
@@ -231,7 +258,7 @@ export const startsThreads = <P, A, E, R>(
           requested.interactionMode,
         ),
       };
-      return yield* handle(params, started);
+      return yield* McpToolActivity.observe(handle(params, started));
     }),
   );
 
@@ -252,7 +279,9 @@ export const writesEnvironment = <P, A, E, R>(
   const check = orchestratingCaller.pipe(
     Effect.tap((caller) => assertFullAccess(caller, fullAccessRequired)),
   );
-  return declare((params: P) => check.pipe(Effect.flatMap(() => handle(params, check))));
+  return declare((params: P) =>
+    check.pipe(Effect.flatMap(() => McpToolActivity.observe(handle(params, check)))),
+  );
 };
 
 /** What a declaration's own check needs. */
@@ -300,7 +329,14 @@ export class HandlersLayer<Tools extends Record<string, Tool.Any>, EX = never, R
 }
 
 const checkedHandlers = <Handlers>(declarations: Declarations<Handlers>): Handlers =>
-  Struct.map(declarations, checkedHandler);
+  Object.fromEntries(
+    Object.entries(declarations).map(([name, declaration]) => [
+      name,
+      // Object.entries erases this mapped record's per-tool types; registration
+      // adds only a context reference and keeps every handler signature intact.
+      checkedHandler(declaration as Declaration<(params: never) => Effect.Effect<never>>, name),
+    ]),
+  ) as Handlers;
 
 /** `Toolkit.toLayer` for handlers that all declare their access. */
 export const toLayer = <Tools extends Record<string, Tool.Any>, EX = never, RX = never>(

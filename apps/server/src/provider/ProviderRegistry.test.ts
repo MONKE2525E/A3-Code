@@ -1,4 +1,5 @@
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as GrokBotProviderServicesTestkit from "../grokBot/GrokBotProviderServices.testkit.ts";
 import * as CodexInstallation from "./CodexInstallation.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -40,14 +41,17 @@ import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 
 import { checkCodexProviderStatus, type CodexAppServerProviderSnapshot } from "./CodexProvider.ts";
 import { checkClaudeProviderStatus } from "./ClaudeProvider.ts";
+import { checkGrokBotProvider } from "./Drivers/GrokBotDriver.ts";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as AntigravityInstallation from "./AntigravityInstallation.ts";
 import * as ModelManifest from "./ModelManifest.ts";
 import { applyProviderCompatibility } from "./providerCompatibility.ts";
 import * as ResetCreditCoordinator from "./resetCreditCoordinator.ts";
-import * as OpenCodeRuntime from "./opencodeRuntime.ts";
-import * as OpenCodeServerLedger from "./OpenCodeServerLedger.ts";
-import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
+import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as OpenCodeRuntime from "@t3tools/provider-opencode/server/OpenCodeRuntime";
+import * as OpenCodeServerLedger from "@t3tools/provider-opencode/server/OpenCodeServerLedger";
+import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import * as ProviderInstanceRegistryHydration from "./ProviderInstanceRegistryHydration.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettingsModule from "../serverSettings.ts";
@@ -56,14 +60,28 @@ import {
   resolveProviderStatusCachePath,
   writeProviderStatusCache,
 } from "./providerStatusCache.ts";
-import { COMPACT_SLASH_COMMAND } from "./providerSnapshot.ts";
-import type { ProviderInstance, ProviderWorkspaceSnapshot } from "./ProviderDriver.ts";
+import { COMPACT_SLASH_COMMAND } from "@t3tools/provider-core/server/snapshotProbe";
+import type {
+  ProviderInstance,
+  ProviderWorkspaceSnapshot,
+} from "@t3tools/provider-core/server/driver";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
 import * as ProviderRegistry from "./ProviderRegistry.ts";
-import { makeManualOnlyProviderMaintenanceCapabilities } from "./providerMaintenance.ts";
+import { makeManualOnlyProviderMaintenanceCapabilities } from "@t3tools/provider-core/server/maintenanceResolver";
 const decodeServerSettings = Schema.decodeSync(ServerSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodedDefaultServerSettings = encodeServerSettings(DEFAULT_SERVER_SETTINGS);
+
+/** Default slots that settings mark disabled, so their probes never spawn. */
+const disabledDefaultSlots = (
+  ...drivers: ReadonlyArray<string>
+): ContractServerSettings["providerInstances"] =>
+  Object.fromEntries(
+    drivers.map((driver) => [
+      ProviderInstanceId.make(driver),
+      { driver: ProviderDriverKind.make(driver), enabled: false },
+    ]),
+  );
 
 const defaultClaudeSettings: ClaudeSettings = Schema.decodeSync(ClaudeSettings)({});
 const defaultCodexSettings: CodexSettings = Schema.decodeSync(CodexSettings)({});
@@ -150,6 +168,7 @@ type TestClaudeCapabilities = {
   readonly email: string | undefined;
   readonly subscriptionType: string | undefined;
   readonly tokenSource: string | undefined;
+  readonly apiKeySource: string | undefined;
   readonly apiProvider: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
 };
@@ -160,6 +179,7 @@ function claudeCapabilities(overrides: Partial<TestClaudeCapabilities> = {}) {
       email: undefined,
       subscriptionType: undefined,
       tokenSource: undefined,
+      apiKeySource: undefined,
       apiProvider: undefined,
       slashCommands: [],
       ...overrides,
@@ -385,6 +405,7 @@ const awaitPersistedProvider = (
 
 const layerTestNodeServices = Layer.mergeAll(
   NodeServices.layer,
+  GrokBotProviderServicesTestkit.layer,
   Layer.mock(CodexInstallation.CodexInstallation)({
     managedDirectory: "unused-managed-installation",
   }),
@@ -397,6 +418,23 @@ const layerTestNodeServices = Layer.mergeAll(
 it.layer(
   Layer.mergeAll(layerTestNodeServices, ServerSettingsModule.layerTest(), layerTestHttpClient),
 )("ProviderRegistry", (it) => {
+  it.effect("keeps Grok Bot unavailable without a native test account", () =>
+    Effect.gen(function* () {
+      const provider = yield* checkGrokBotProvider({
+        instanceId: ProviderInstanceId.make("grok-bot-test"),
+        displayName: undefined,
+        enabled: true,
+        environment: [],
+        config: { accountBinding: "a".repeat(64) },
+      });
+
+      assert.strictEqual(provider.status, "error");
+      assert.strictEqual(provider.auth.status, "unknown");
+      assert.deepStrictEqual(provider.models, []);
+      assert.strictEqual(provider.message, "The selected native Grok Bot account is unavailable.");
+    }),
+  );
+
   describe("checkCodexProviderStatus", () => {
     it.effect("uses the app-server account and model list for provider status", () =>
       Effect.gen(function* () {
@@ -765,6 +803,40 @@ it.layer(
       assert.deepStrictEqual(
         ProviderRegistry.mergeProviderSnapshot(previousProvider, refreshedProvider).models,
         [...refreshedProvider.models],
+      );
+    });
+
+    it("does not bring back models the installed CLI is too old to run", () => {
+      // The pending snapshot lists the whole catalog before the version is known.
+      const pendingProvider = {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        driver: ProviderDriverKind.make("claudeAgent"),
+        status: "warning",
+        enabled: true,
+        installed: false,
+        auth: { status: "unknown" },
+        checkedAt: "2026-04-14T00:00:00.000Z",
+        version: null,
+        models: [
+          { slug: "claude-old", name: "Old", isCustom: false, capabilities: null },
+          { slug: "claude-next", name: "Next", isCustom: false, capabilities: null },
+        ],
+        slashCommands: [],
+        skills: [],
+      } as const satisfies ServerProvider;
+      const probedProvider = {
+        ...pendingProvider,
+        status: "ready",
+        installed: true,
+        auth: { status: "authenticated" },
+        version: "1.0.0",
+        models: [pendingProvider.models[0]],
+        updateRequiredModels: [{ slug: "claude-next", name: "Next", minVersion: "1.1.0" }],
+      } satisfies ServerProvider;
+
+      assert.deepStrictEqual(
+        ProviderRegistry.mergeProviderSnapshot(pendingProvider, probedProvider).models,
+        [...probedProvider.models],
       );
     });
 
@@ -2660,24 +2732,18 @@ it.layer(
         const serverSettings = yield* makeMutableServerSettingsService(
           decodeServerSettings(
             deepMerge(encodedDefaultServerSettings, {
-              providers: {
-                // Disable every built-in probe that would otherwise spawn
-                // on the CI host. `enabled: false` short-circuits each
-                // driver's probe *before* it touches the spawner, so the
-                // test environment stays isolated from the dev
-                // machine's PATH.
-                codex: { enabled: false },
-                claudeAgent: { enabled: false },
-                cursor: { enabled: false },
-                grok: { enabled: false },
-                opencode: { enabled: false },
-              },
               // `providerInstances` keys are branded `ProviderInstanceId`;
               // the branded index signature rejects plain string literals
               // at the TS level even though the runtime schema happily
               // accepts + decodes them. Cast the patch to `unknown` so
               // the `Schema.decodeSync` below does the real validation.
               providerInstances: {
+                // Disable every built-in probe that would otherwise spawn
+                // on the CI host. `enabled: false` short-circuits each
+                // driver's probe *before* it touches the spawner, so the
+                // test environment stays isolated from the dev
+                // machine's PATH.
+                ...disabledDefaultSlots("codex", "claudeAgent", "cursor", "grok", "opencode"),
                 // Matches the shape the user had in `.t3/dev/settings.json`
                 // when the bug was reported: a custom enabled Codex instance
                 // pointing at a binary the server has to actually spawn.
@@ -2715,6 +2781,8 @@ it.layer(
               ProviderEventLoggers.NoOpProviderEventLoggers,
             ),
           ),
+          Layer.provideMerge(ProviderLatestVersions.layer),
+          Layer.provideMerge(McpProviderSessions.layer),
           Layer.provideMerge(ModelManifest.layerTest),
           Layer.provideMerge(ResetCreditCoordinator.layerTest),
           Layer.provideMerge(
@@ -2778,12 +2846,13 @@ it.layer(
         const mutableServerSettings = yield* makeMutableServerSettingsService(
           decodeServerSettings(
             deepMerge(encodedDefaultServerSettings, {
-              providers: {
-                codex: { enabled: true, binaryPath: firstMissing },
-                claudeAgent: { enabled: false },
-                cursor: { enabled: false },
-                grok: { enabled: false },
-                opencode: { enabled: false },
+              providerInstances: {
+                ...disabledDefaultSlots("claudeAgent", "cursor", "grok", "opencode"),
+                [ProviderInstanceId.make("codex")]: {
+                  driver: ProviderDriverKind.make("codex"),
+                  enabled: true,
+                  config: { binaryPath: firstMissing },
+                },
               },
             }),
           ),
@@ -2817,6 +2886,8 @@ it.layer(
               ProviderEventLoggers.NoOpProviderEventLoggers,
             ),
           ),
+          Layer.provideMerge(ProviderLatestVersions.layer),
+          Layer.provideMerge(McpProviderSessions.layer),
           Layer.provideMerge(ModelManifest.layerTest),
           Layer.provideMerge(ResetCreditCoordinator.layerTest),
           Layer.provideMerge(
@@ -2868,8 +2939,13 @@ it.layer(
             ),
           );
           yield* serverSettings.updateSettings({
-            providers: {
-              codex: { enabled: true, binaryPath: secondMissing },
+            providerInstances: {
+              ...disabledDefaultSlots("claudeAgent", "cursor", "grok", "opencode"),
+              [ProviderInstanceId.make("codex")]: {
+                driver: ProviderDriverKind.make("codex"),
+                enabled: true,
+                config: { binaryPath: secondMissing },
+              },
             },
           });
           // Start the lazy stream only after publishing. A watcher that did
@@ -2897,14 +2973,8 @@ it.layer(
         const serverSettings = yield* makeMutableServerSettingsService(
           decodeServerSettings(
             deepMerge(encodedDefaultServerSettings, {
-              providers: {
-                codex: { enabled: false },
-                claudeAgent: { enabled: false },
-                cursor: { enabled: false },
-                grok: { enabled: false },
-                opencode: { enabled: false },
-              },
               providerInstances: {
+                ...disabledDefaultSlots("codex", "claudeAgent", "cursor", "grok", "opencode"),
                 ghost_main: {
                   driver: "ghostDriver",
                   displayName: "A fork-only driver we don't ship",
@@ -2936,6 +3006,8 @@ it.layer(
               ProviderEventLoggers.NoOpProviderEventLoggers,
             ),
           ),
+          Layer.provideMerge(ProviderLatestVersions.layer),
+          Layer.provideMerge(McpProviderSessions.layer),
           Layer.provideMerge(ModelManifest.layerTest),
           Layer.provideMerge(ResetCreditCoordinator.layerTest),
           Layer.provideMerge(
@@ -2968,14 +3040,7 @@ it.layer(
           const serverSettings = yield* makeMutableServerSettingsService(
             decodeServerSettings(
               deepMerge(encodedDefaultServerSettings, {
-                providers: {
-                  codex: {
-                    enabled: false,
-                  },
-                  grok: {
-                    enabled: false,
-                  },
-                },
+                providerInstances: disabledDefaultSlots("codex", "grok"),
               }),
             ),
           );
@@ -3001,6 +3066,8 @@ it.layer(
                 ProviderEventLoggers.NoOpProviderEventLoggers,
               ),
             ),
+            Layer.provideMerge(ProviderLatestVersions.layer),
+            Layer.provideMerge(McpProviderSessions.layer),
             Layer.provideMerge(ModelManifest.layerTest),
             Layer.provideMerge(ResetCreditCoordinator.layerTest),
             Layer.provideMerge(
@@ -3051,12 +3118,16 @@ it.layer(
               "codex",
               "cursor",
               "grok",
+              "muse",
               "opencode",
               "pi",
             ]);
             assert.strictEqual(cursorProvider?.enabled, false);
             assert.strictEqual(cursorProvider?.status, "disabled");
             assert.strictEqual(cursorProvider?.message, "Cursor is disabled in T3 Code settings.");
+            const museProvider = providers.find((provider) => provider.driver === "muse");
+            assert.strictEqual(museProvider?.enabled, false);
+            assert.strictEqual(museProvider?.status, "disabled");
             assert.strictEqual(cursorSpawned, false);
           }).pipe(Effect.provide(runtimeServices));
         }),
@@ -3128,6 +3199,100 @@ it.layer(
       ),
     );
 
+    it.effect("reports a logged-out CLI as unauthenticated", () =>
+      Effect.gen(function* () {
+        // The capability probe resolves for a logged-out CLI, so `tokenSource:
+        // "none"` is the only thing separating it from an authenticated one.
+        const status = yield* checkClaudeProviderStatus(
+          defaultClaudeSettings,
+          claudeCapabilities({
+            tokenSource: "none",
+            apiKeySource: "none",
+            apiProvider: "firstParty",
+          }),
+        );
+        assert.strictEqual(status.status, "error");
+        assert.strictEqual(status.auth.status, "unauthenticated");
+      }).pipe(
+        Effect.provide(
+          layerMockSpawner((args) => {
+            const joined = args.join(" ");
+            if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+            throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+      ),
+    );
+
+    it.effect("keeps an API key install authenticated when it reports no token source", () =>
+      Effect.gen(function* () {
+        // `ANTHROPIC_API_KEY` never populates `tokenSource`, so reading that
+        // field alone would log the install out.
+        const status = yield* checkClaudeProviderStatus(
+          defaultClaudeSettings,
+          claudeCapabilities({
+            tokenSource: "none",
+            apiKeySource: "ANTHROPIC_API_KEY",
+            apiProvider: "firstParty",
+          }),
+        );
+        assert.strictEqual(status.status, "ready");
+        assert.strictEqual(status.auth.status, "authenticated");
+      }).pipe(
+        Effect.provide(
+          layerMockSpawner((args) => {
+            const joined = args.join(" ");
+            if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+            throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+      ),
+    );
+
+    it.effect("keeps a third-party backend authenticated without any token source", () =>
+      Effect.gen(function* () {
+        // Bedrock and Vertex authenticate outside the CLI, so the account
+        // payload is empty by design rather than because nobody logged in.
+        const status = yield* checkClaudeProviderStatus(
+          defaultClaudeSettings,
+          claudeCapabilities({ tokenSource: "none", apiProvider: "bedrock" }),
+        );
+        assert.strictEqual(status.status, "ready");
+        assert.strictEqual(status.auth.status, "authenticated");
+      }).pipe(
+        Effect.provide(
+          layerMockSpawner((args) => {
+            const joined = args.join(" ");
+            if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+            throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+      ),
+    );
+
+    it.effect("keeps a CLI that says nothing about its account authenticated", () =>
+      Effect.gen(function* () {
+        // Profile-authenticated installs report no token source at all, and a
+        // CLI too old to send an account payload reports nothing whatsoever.
+        // Only `tokenSource: "none"` disproves authentication; saying nothing
+        // is not the same as saying no.
+        const status = yield* checkClaudeProviderStatus(
+          defaultClaudeSettings,
+          claudeCapabilities(),
+        );
+        assert.strictEqual(status.status, "ready");
+        assert.strictEqual(status.auth.status, "authenticated");
+      }).pipe(
+        Effect.provide(
+          layerMockSpawner((args) => {
+            const joined = args.join(" ");
+            if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+            throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+      ),
+    );
+
     it.effect("returns a display label for claude subscription types", () =>
       Effect.gen(function* () {
         const status = yield* checkClaudeProviderStatus(
@@ -3165,6 +3330,7 @@ it.layer(
                 email: undefined,
                 subscriptionType: undefined,
                 tokenSource: undefined,
+                apiKeySource: undefined,
                 apiProvider: undefined,
                 slashCommands: [],
                 usage: { rate_limits_available: true, rate_limits: {} },

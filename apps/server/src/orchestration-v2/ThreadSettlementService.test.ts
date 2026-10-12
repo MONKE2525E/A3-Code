@@ -1,3 +1,4 @@
+import { SourceControlProviderKind } from "@t3tools/contracts";
 import { assert, describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import {
@@ -5,6 +6,7 @@ import {
   ProjectId,
   EventId,
   ProviderInstanceId,
+  ProviderDriverKind,
   ProviderSessionId,
   ThreadId,
   type OrchestrationProjectShell,
@@ -276,6 +278,26 @@ describe("resolveAutoSettlementAt", () => {
     ).toBeNull();
   });
 
+  it.each(["manual", "timer"])("restarts inactivity on a %s snooze wake", (wake) => {
+    const thread = {
+      ...shell({ latestRunCompletedAt: at(-4 * DAY_MS) }),
+      ...(wake === "manual"
+        ? { lastSnoozeWakeAt: at(-1_000) }
+        : { snoozedAt: at(-3 * DAY_MS), snoozedUntil: at(-1_000) }),
+    };
+    const input = {
+      thread,
+      pullRequest: null,
+      nowMs: NOW_MS,
+      autoSettleAfterDays: 1,
+      autoSettleOnMerge: false,
+    };
+    expect(ThreadSettlementService.resolveAutoSettlementAt(input)).toBeNull();
+    expect(
+      ThreadSettlementService.resolveAutoSettlementAt({ ...input, nowMs: NOW_MS + DAY_MS }),
+    ).toEqual(at(-1_000));
+  });
+
   it("settles on merge only after the user's last action and preserves the activity time", () => {
     const thread = shell({
       latestUserMessageAt: at(-2 * 60 * 60 * 1_000),
@@ -363,6 +385,30 @@ const PROJECT_ID = ProjectId.make("settlement-project");
 const LINKED_PROJECT_ID = ProjectId.make("linked-settlement-project");
 
 describe("autoSettlementSettingsKey", () => {
+  it("tracks bot provider changes while ignoring unrelated provider settings", () => {
+    const instanceId = ProviderInstanceId.make("bot");
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        ...DEFAULT_SERVER_SETTINGS.providerInstances,
+        [instanceId]: { driver: ProviderDriverKind.make("grok-bot"), enabled: true },
+      },
+    };
+    assert.notStrictEqual(
+      ThreadSettlementService.autoSettlementSettingsKey(settings),
+      ThreadSettlementService.autoSettlementSettingsKey(DEFAULT_SERVER_SETTINGS),
+    );
+    assert.strictEqual(
+      ThreadSettlementService.autoSettlementSettingsKey(settings),
+      ThreadSettlementService.autoSettlementSettingsKey({
+        ...settings,
+        providerInstances: {
+          ...settings.providerInstances,
+          [instanceId]: { driver: ProviderDriverKind.make("grok-bot"), enabled: false },
+        },
+      }),
+    );
+  });
   it("distinguishes a project that inherits the threshold from one that disables it", () => {
     const inherits = ThreadSettlementService.autoSettlementSettingsKey({
       ...DEFAULT_SERVER_SETTINGS,
@@ -452,7 +498,7 @@ function makePullRequestSummary(input: {
   readonly updatedAt?: string;
 }): PullRequestSummary {
   return {
-    provider: "github",
+    provider: SourceControlProviderKind.make("github"),
     projectId: input.projectId,
     repository: input.repository,
     number: input.number,
@@ -673,6 +719,72 @@ const startHarness = Effect.fn("startThreadSettlementHarness")(function* (
 });
 
 describe("ThreadSettlementServiceV2 worker", () => {
+  it.effect("keeps native bot threads persistent while ordinary threads settle", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const botId = ProviderInstanceId.make("persistent-bot");
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([
+            makeThread("bot-idle", { providerInstanceId: botId, branch: "bot" }),
+            makeThread("bot-merged", {
+              providerInstanceId: botId,
+              pullRequests: [
+                {
+                  host: "github.com",
+                  repository: "owner/repository",
+                  number: 42,
+                  url: "https://github.com/owner/repository/pull/42",
+                  source: "manual",
+                  linkedAt: NOW,
+                  stack: null,
+                  snapshot: {
+                    state: "merged",
+                    title: "Merged",
+                    headBranch: "bot",
+                    baseBranch: "main",
+                    isDraft: false,
+                    updatedAt: NOW,
+                    syncedAt: NOW,
+                    mergedAt: NOW,
+                  },
+                },
+              ],
+            }),
+            makeThread("bot-pinned", { providerInstanceId: botId, pinnedAt: at(-1) }),
+            makeThread("ordinary-idle"),
+          ]),
+          settings: {
+            ...DEFAULT_SERVER_SETTINGS,
+            sidebarAutoSettleAfterDays: 2,
+            sidebarAutoSettleOnMerge: true,
+            providerInstances: {
+              ...DEFAULT_SERVER_SETTINGS.providerInstances,
+              [botId]: { driver: ProviderDriverKind.make("grok-bot"), enabled: false },
+            },
+          },
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+          yield* startHarness(reactor, fixture.activation, fixture.snapshotReads);
+          assert.deepStrictEqual(
+            (yield* Ref.get(fixture.commands)).map((command) => command.threadId),
+            [ThreadId.make("ordinary-idle")],
+          );
+          assert.deepStrictEqual(yield* Ref.get(fixture.branchCalls), []);
+          assert.deepStrictEqual(yield* Ref.get(fixture.summaryCalls), []);
+          yield* fixture.publishMerge;
+          yield* Queue.take(fixture.snapshotReads);
+          yield* reactor.drain;
+          assert.isTrue(
+            (yield* Ref.get(fixture.commands)).every(
+              (command) => command.threadId === "ordinary-idle",
+            ),
+          );
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
   it.effect("settles a merged pull request stored only in the thread links", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1251,4 +1363,26 @@ describe("ThreadSettlementServiceV2 single-thread sweeps", () => {
       }),
     ),
   );
+});
+
+describe("isSnoozed", () => {
+  const snoozed = { snoozedAt: at(-2 * DAY_MS), snoozedUntil: at(DAY_MS) };
+  it("wakes for completed work after the snooze, but not an interrupted run", () => {
+    expect(ThreadSettlementService.isSnoozed(shell(snoozed), NOW_MS)).toBe(true);
+    expect(
+      ThreadSettlementService.isSnoozed(
+        shell({ ...snoozed, status: "interrupted", latestRunCompletedAt: at(-DAY_MS) }),
+        NOW_MS,
+      ),
+    ).toBe(true);
+    expect(
+      ThreadSettlementService.isSnoozed(
+        shell({ ...snoozed, status: "completed", latestRunCompletedAt: at(-DAY_MS) }),
+        NOW_MS,
+      ),
+    ).toBe(false);
+    expect(
+      ThreadSettlementService.isSnoozed(shell({ ...snoozed, snoozedUntil: at(-1) }), NOW_MS),
+    ).toBe(false);
+  });
 });

@@ -1,4 +1,4 @@
-import { useNavigation } from "@react-navigation/native";
+import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
 import { useCallback, useEffect, useRef, useState, type ComponentProps } from "react";
 import {
   BackHandler,
@@ -35,7 +35,7 @@ export function MaterialThreadListToolbar(props: {
   readonly onLayout?: (event: LayoutChangeEvent) => void;
   readonly onRequestVisibility?: () => void;
 }) {
-  const navigation = useNavigation();
+  const workspace = useWorkspaceTabs();
   const insets = useSafeAreaInsets();
   const { fabSize } = useAndroidControlSizing();
   const { height: toolbarHeight, ...headerPadding } = useMaterialToolbarLayout();
@@ -124,7 +124,7 @@ export function MaterialThreadListToolbar(props: {
               <AndroidHeaderIconButton
                 accessibilityLabel="Open pull requests"
                 icon="arrow.triangle.pull"
-                onPress={() => navigation.navigate("PullRequests")}
+                onPress={() => workspace?.dispatch({ type: "select", tab: "pullRequests" })}
               />
               <AndroidHeaderIconButton
                 accessibilityLabel="Open settings"

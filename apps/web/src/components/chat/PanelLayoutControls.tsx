@@ -1,4 +1,4 @@
-import { PanelBottomIcon, PanelRightIcon, SquareMenuIcon } from "lucide-react";
+import { EllipsisIcon, PanelBottomIcon, PanelRightIcon, SquareMenuIcon } from "lucide-react";
 import { Maximize2, Minimize2 } from "lucide";
 import { MorphIcon } from "~/components/MorphIcon";
 import { memo, type ReactElement } from "react";
@@ -7,8 +7,12 @@ import type { ThreadPanelPresentation } from "../../rightPanelLayout";
 import { PopoverCreateHandle, PopoverTrigger } from "../ui/popover";
 import { Toggle } from "../ui/toggle";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { Button } from "../ui/button";
+import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
+import { useMediaQuery } from "~/hooks/useMediaQuery";
 
 export interface PanelLayoutControlsProps {
+  compactOnMobile?: boolean;
   showThreadPanelControl?: boolean;
   showTerminalControl?: boolean;
   showRightPanelControl?: boolean;
@@ -19,7 +23,6 @@ export interface PanelLayoutControlsProps {
   threadPanelPresentation: ThreadPanelPresentation;
   threadPanelPopoverHandle?: ReturnType<typeof PopoverCreateHandle>;
   threadPanelShortcutLabel: string | null;
-  threadPanelHasAttention: boolean;
   rightPanelAvailable: boolean;
   rightPanelOpen: boolean;
   rightPanelShortcutLabel: string | null;
@@ -30,6 +33,7 @@ export interface PanelLayoutControlsProps {
 }
 
 export const PanelLayoutControls = memo(function PanelLayoutControls({
+  compactOnMobile = false,
   showThreadPanelControl = true,
   showTerminalControl = true,
   showRightPanelControl = true,
@@ -40,7 +44,6 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
   threadPanelPresentation,
   threadPanelPopoverHandle,
   threadPanelShortcutLabel,
-  threadPanelHasAttention,
   rightPanelAvailable,
   rightPanelOpen,
   rightPanelShortcutLabel,
@@ -49,6 +52,7 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
   onToggleThreadPanel,
   onToggleRightPanel,
 }: PanelLayoutControlsProps) {
+  const isPhone = useMediaQuery("max-sm");
   const threadPanelToggle = (
     <Toggle
       className="relative shrink-0 [-webkit-app-region:no-drag]"
@@ -58,12 +62,6 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
       size="sm"
     >
       <SquareMenuIcon className="size-4" />
-      {threadPanelHasAttention ? (
-        <span
-          className="absolute right-1 top-1 size-1.5 rounded-full bg-warning ring-2 ring-background"
-          aria-hidden="true"
-        />
-      ) : null}
     </Toggle>
   );
   const threadPanelTooltip = (trigger: ReactElement) => (
@@ -78,6 +76,42 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
       </TooltipPopup>
     </Tooltip>
   );
+
+  if (compactOnMobile && isPhone) {
+    return (
+      <Menu>
+        <MenuTrigger
+          render={<Button variant="ghost" size="icon-touch-sm" aria-label="Layout actions" />}
+        >
+          <EllipsisIcon />
+        </MenuTrigger>
+        <MenuPopup align="end">
+          {showThreadPanelControl ? (
+            <MenuItem density="touch-lg" onClick={onToggleThreadPanel}>
+              <SquareMenuIcon />
+              {threadPanelOpen ? "Hide thread details" : "Show thread details"}
+            </MenuItem>
+          ) : null}
+          {showTerminalControl ? (
+            <MenuItem density="touch-lg" disabled={!terminalAvailable} onClick={onToggleTerminal}>
+              <PanelBottomIcon />
+              {terminalOpen ? "Hide terminal" : "Show terminal"}
+            </MenuItem>
+          ) : null}
+          {showRightPanelControl ? (
+            <MenuItem
+              density="touch-lg"
+              disabled={!rightPanelAvailable}
+              onClick={onToggleRightPanel}
+            >
+              <PanelRightIcon />
+              {rightPanelOpen ? "Hide right panel" : "Show right panel"}
+            </MenuItem>
+          ) : null}
+        </MenuPopup>
+      </Menu>
+    );
+  }
 
   return (
     <div

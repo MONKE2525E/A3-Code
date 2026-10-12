@@ -68,6 +68,25 @@ describe("getProviderSummary", () => {
   it("treats a disabled provider status as disabled even before its enabled flag updates", () => {
     expect(getProviderSummary({ ...provider, status: "disabled" }).headline).toBe("Disabled");
   });
+
+  it("shows a Grok Bot plan from auth.label without the protocol note", () => {
+    expect(
+      getProviderSummary({
+        ...provider,
+        driver: ProviderDriverKind.make("grok-bot"),
+        auth: {
+          status: "authenticated",
+          type: "cached_token",
+          email: "fixture@example.test",
+          label: "SuperGrok Heavy",
+        },
+        message: "Grok Bot managed turns require verified native session ownership.",
+      }),
+    ).toEqual({
+      headline: "Authenticated · SuperGrok Heavy",
+      detail: null,
+    });
+  });
 });
 
 it("does not suggest copying a command that installs an incompatible latest version", () => {

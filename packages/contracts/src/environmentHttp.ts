@@ -123,6 +123,7 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "orchestration_thread_snapshot_failed",
   "orchestration_thread_bounded_snapshot_failed",
   "orchestration_thread_history_failed",
+  "grok_bot_avatar_engine_unavailable",
   "internal_error",
 ]);
 export type EnvironmentInternalErrorReason = typeof EnvironmentInternalErrorReason.Type;
@@ -220,7 +221,10 @@ export class EnvironmentInternalError extends Schema.TaggedError<EnvironmentInte
   }
 }
 
-export const EnvironmentResourceNotFoundReason = Schema.Literals(["thread_not_found"]);
+export const EnvironmentResourceNotFoundReason = Schema.Literals([
+  "thread_not_found",
+  "grok_bot_avatar_engine_not_found",
+]);
 export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
 
 export class EnvironmentResourceNotFoundError extends Schema.TaggedError<EnvironmentResourceNotFoundError>()(
@@ -584,8 +588,18 @@ const EnvironmentOrchestrationThreadSnapshotParams = Schema.Struct({
   threadId: ThreadId,
 });
 
+/**
+ * `compactTurnItems=1` opts into `turnItemsOmitLocalVisible`. Other values are
+ * ignored, and older servers ignore the whole query.
+ */
+const EnvironmentOrchestrationThreadBoundedSnapshotQuery = Schema.Struct({
+  compactTurnItems: Schema.optionalKey(Schema.String),
+});
+
 const EnvironmentOrchestrationThreadHistoryQuery = Schema.Struct({
   cursor: TrimmedNonEmptyString,
+  throughEntryId: Schema.optional(TrimmedNonEmptyString),
+  view: Schema.optional(Schema.Literals(["conversation", "activity"])),
 });
 
 const EnvironmentOrchestrationThreadHistoryErrors = [
@@ -615,6 +629,7 @@ class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
     HttpApiEndpoint.get("threadBoundedSnapshot", "/api/orchestration/threads/:threadId/bounded", {
       headers: OrchestrationProtocolHeaders,
       params: EnvironmentOrchestrationThreadSnapshotParams,
+      query: EnvironmentOrchestrationThreadBoundedSnapshotQuery,
       success: OrchestrationV2ThreadBoundedSnapshot,
       error: EnvironmentOrchestrationThreadSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
@@ -661,6 +676,40 @@ class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").a
     ],
   }).middleware(EnvironmentAuthenticatedAuth),
 ) {}
+
+export const GrokBotAvatarEngineMetadata = Schema.Struct({
+  apiVersion: Schema.Literal(1),
+  version: Schema.String.check(Schema.isPattern(/^[\w.-]{1,64}$/)),
+  sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  modulePath: Schema.String.check(
+    Schema.isPattern(/^\/api\/grok-bot\/avatar-engine\/[a-f0-9]{64}\.mjs$/),
+  ),
+});
+export type GrokBotAvatarEngineMetadata = typeof GrokBotAvatarEngineMetadata.Type;
+
+const GrokBotAvatarEngineErrors = [
+  EnvironmentAuthInvalidError,
+  EnvironmentScopeRequiredError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentInternalError,
+] as const;
+
+class EnvironmentGrokBotAvatarEngineHttpApi extends HttpApiGroup.make("grokBotAvatarEngine")
+  .add(
+    HttpApiEndpoint.get("metadata", "/api/grok-bot/avatar-engine", {
+      headers: OptionalBearerHeaders,
+      success: GrokBotAvatarEngineMetadata,
+      error: GrokBotAvatarEngineErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("module", "/api/grok-bot/avatar-engine/:file", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ file: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}\.mjs$/)) }),
+      success: Schema.String.pipe(HttpApiSchema.asText({ contentType: "text/javascript" })),
+      error: GrokBotAvatarEngineErrors,
+    }),
+  ) {}
 
 class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
   .add(
@@ -753,6 +802,7 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentMcpOAuthHttpApi)
   .add(EnvironmentOrchestrationHttpApi)
   .add(EnvironmentPullRequestsHttpApi)
+  .add(EnvironmentGrokBotAvatarEngineHttpApi)
   .add(EnvironmentProjectsHttpApi)
   .add(EnvironmentConnectHttpApi)
   .add(EnvironmentWebhooksHttpApi) {}
