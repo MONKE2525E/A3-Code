@@ -13,6 +13,8 @@ import * as Scope from "effect/Scope";
 import * as Electron from "electron";
 
 export const DESKTOP_HOST = "app";
+// T3 Connect allowlists this renderer origin. OS links keep the fork-specific scheme.
+export const DESKTOP_RENDERER_SCHEME = "t3code";
 const DESKTOP_PRODUCTION_SCHEME = "t3code-grokbot";
 const DESKTOP_DEVELOPMENT_SCHEME = "t3code-grokbot-dev";
 
@@ -20,12 +22,12 @@ export function getDesktopScheme(isDevelopment: boolean): string {
   return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;
 }
 
-function getDesktopOrigin(isDevelopment: boolean): string {
-  return `${getDesktopScheme(isDevelopment)}://${DESKTOP_HOST}`;
+function getDesktopOrigin(): string {
+  return `${DESKTOP_RENDERER_SCHEME}://${DESKTOP_HOST}`;
 }
 
-export function getDesktopUrl(isDevelopment: boolean): string {
-  return `${getDesktopOrigin(isDevelopment)}/`;
+export function getDesktopUrl(_isDevelopment: boolean): string {
+  return `${getDesktopOrigin()}/`;
 }
 
 export class ElectronProtocolRegistrationError extends Schema.TaggedError<ElectronProtocolRegistrationError>()(
