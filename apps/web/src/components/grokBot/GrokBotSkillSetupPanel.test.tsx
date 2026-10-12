@@ -5,7 +5,7 @@ import { act } from "react";
 import { create, type ReactTestRenderer, type ReactTestInstance } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-const mocks = vi.hoisted(() => ({ copy: vi.fn() }));
+const mocks = vi.hoisted(() => ({ copy: vi.fn(), send: vi.fn() }));
 
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => true }));
 vi.mock("~/hooks/useCopyToClipboard", () => ({ writeTextToClipboard: mocks.copy }));
@@ -13,7 +13,7 @@ vi.mock("~/state/grokBots", () => ({
   grokBotsOrchestratorSetup: { label: "setup", permissionAtom: () => null },
 }));
 vi.mock("~/state/session", () => ({ useEnvironmentScope: () => true }));
-vi.mock("~/state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
+vi.mock("~/state/use-atom-command", () => ({ useAtomCommand: () => mocks.send }));
 vi.mock("./GrokBotSetupAuthorize", () => ({ GrokBotSetupAuthorize: () => null }));
 
 import { GrokBotSkillSetupPanel } from "./GrokBotSkillSetupPanel";
@@ -63,12 +63,36 @@ describe("GrokBotSkillSetupPanel manual install", () => {
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     mocks.copy.mockReset();
+    mocks.send.mockReset();
   });
 
   afterEach(async () => {
     await act(async () => renderer?.unmount());
     renderer = undefined;
     vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("rechecks a failed status read without resending and stops checking after recovery", async () => {
+    vi.useFakeTimers();
+    const refresh = vi.fn();
+    const props = { environmentId, prompt, refresh, refreshing: false };
+    await act(async () => {
+      renderer = create(
+        <GrokBotSkillSetupPanel
+          {...props}
+          setupStatus={{ ...status(false), phase: "failed", retryable: true }}
+        />,
+      );
+    });
+    await act(async () => vi.advanceTimersByTime(10_000));
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(mocks.send).not.toHaveBeenCalled();
+    await act(async () =>
+      renderer!.update(<GrokBotSkillSetupPanel {...props} setupStatus={status(true)} />),
+    );
+    await act(async () => vi.advanceTimersByTime(10_000));
+    expect(refresh).toHaveBeenCalledTimes(2);
   });
 
   it("reveals the prompt from a button and keeps a selectable copy when copying fails", async () => {

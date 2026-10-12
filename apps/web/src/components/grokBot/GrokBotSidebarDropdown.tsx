@@ -31,6 +31,7 @@ import {
   grokBotsUpdate,
   refreshGrokBotRoster,
 } from "~/state/grokBots";
+import { useEnvironmentPresentation } from "~/state/presentation";
 import { useEnvironmentQuery } from "~/state/query";
 import { environmentServerConfigsAtom, serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -40,6 +41,7 @@ import { type GrokBotActivity, useGrokBotActivity } from "./grokBotActivity";
 import { grokBotNativeReady } from "./grokBotConnection";
 import {
   grokBotSettingsDestinationSearch,
+  isGrokBotEnvironmentConnecting,
   grokBotSurfaceKey,
   partitionGrokBotRoster,
   resolveGrokBotSelectedEnvironment,
@@ -75,6 +77,13 @@ function ConfiguredGrokBotSidebarDropdown() {
     selectedEnvironmentId,
     connectedEnvironmentIds,
   });
+  const { isReady: catalogReady, presentation } = useEnvironmentPresentation(selectedEnvironmentId);
+  const connecting =
+    resolved.kind === "disconnected" &&
+    isGrokBotEnvironmentConnecting({
+      catalogReady,
+      phase: presentation?.connection.phase ?? null,
+    });
   const environmentId = resolved.kind === "environment" ? resolved.environmentId : null;
   const [open, setOpen] = useLocalStorage(GROK_BOTS_OPEN_STORAGE_KEY, true, Schema.Boolean);
   const navigate = useNavigate();
@@ -173,6 +182,8 @@ function ConfiguredGrokBotSidebarDropdown() {
               <p className="px-2 py-2 text-xs text-sidebar-muted-foreground">
                 Connect an environment to use Grok Bots.
               </p>
+            ) : connecting ? (
+              <GrokBotSidebarLoading />
             ) : resolved.kind === "disconnected" ? (
               <GrokBotSidebarNotice
                 message="This environment is unavailable. Reconnect it or choose a connected one."
@@ -180,10 +191,7 @@ function ConfiguredGrokBotSidebarDropdown() {
                 onAction={() => openSettings()}
               />
             ) : status.isPending && status.data === null ? (
-              <div className="flex flex-col gap-2 px-1 py-1">
-                <Skeleton className="h-16 w-full" shape="card" />
-                <Skeleton className="h-10 w-full" shape="card" />
-              </div>
+              <GrokBotSidebarLoading />
             ) : status.error ? (
               <GrokBotSidebarNotice
                 message={status.error}
@@ -208,10 +216,7 @@ function ConfiguredGrokBotSidebarDropdown() {
                 onSecondary={() => openSettings()}
               />
             ) : roster.isPending && roster.data === null ? (
-              <div className="flex flex-col gap-2 px-1 py-1">
-                <Skeleton className="h-16 w-full" shape="card" />
-                <Skeleton className="h-10 w-full" shape="card" />
-              </div>
+              <GrokBotSidebarLoading />
             ) : roster.error ? (
               <GrokBotSidebarNotice
                 message={roster.error}
@@ -241,6 +246,16 @@ function ConfiguredGrokBotSidebarDropdown() {
         </CollapsiblePanel>
       </Collapsible>
     </SidebarGroup>
+  );
+}
+
+function GrokBotSidebarLoading() {
+  return (
+    <div className="flex flex-col gap-2 px-1 py-1" role="status" aria-busy="true">
+      <p className="px-1 text-xs text-sidebar-muted-foreground">Loading Grok Bots…</p>
+      <Skeleton className="h-16 w-full" shape="card" />
+      <Skeleton className="h-10 w-full" shape="card" />
+    </div>
   );
 }
 

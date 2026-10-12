@@ -114,6 +114,8 @@ export const GrokBotSetupStatus = Schema.Struct({
   authorizationUrl: Schema.NullOr(Schema.String),
   connectorServerId: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))),
   error: Schema.NullOr(Schema.String),
+  /** A failed status read can be retried without resending the setup message. */
+  retryable: Schema.optionalKey(Schema.Boolean),
   updatedAtMs: Schema.Number,
 });
 export type GrokBotSetupStatus = typeof GrokBotSetupStatus.Type;

@@ -13,6 +13,7 @@ import {
   partitionGrokBotRoster,
   resolveGrokBotAvatarColor,
   resolveGrokBotAvatarKind,
+  isGrokBotEnvironmentConnecting,
   resolveGrokBotSelectedEnvironment,
   resolveGrokBotSettingsEnvironment,
   retainGrokBotSettingsBotIdSearch,
@@ -410,5 +411,25 @@ describe("settingsSearchResultSearch", () => {
   it("leaves other results untouched", () => {
     const previous = { machine: "env-1", instanceId: "codex" };
     expect(settingsSearchResultSearch("providers", previous)).toBe(previous);
+  });
+});
+
+describe("isGrokBotEnvironmentConnecting", () => {
+  it("treats in-flight connection phases as loading", () => {
+    expect(isGrokBotEnvironmentConnecting({ catalogReady: true, phase: "connecting" })).toBe(true);
+    expect(isGrokBotEnvironmentConnecting({ catalogReady: true, phase: "reconnecting" })).toBe(
+      true,
+    );
+  });
+
+  it("waits for the catalog before declaring a missing environment unavailable", () => {
+    expect(isGrokBotEnvironmentConnecting({ catalogReady: false, phase: null })).toBe(true);
+    expect(isGrokBotEnvironmentConnecting({ catalogReady: true, phase: null })).toBe(false);
+  });
+
+  it("surfaces classified failures promptly", () => {
+    for (const phase of ["offline", "error", "unsupported", "available"]) {
+      expect(isGrokBotEnvironmentConnecting({ catalogReady: true, phase })).toBe(false);
+    }
   });
 });

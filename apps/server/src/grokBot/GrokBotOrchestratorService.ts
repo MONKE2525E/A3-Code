@@ -119,6 +119,7 @@ const make = Effect.gen(function* () {
             mcpUrl: null,
             terminalCommand: null,
             authorizationUrl: null,
+            retryable: error.stage === "read",
             error:
               error.stage === "account"
                 ? "Sign in to GrokBot on the hosting computer, then check again."
@@ -215,7 +216,13 @@ const make = Effect.gen(function* () {
             yield* setup(input);
             const setupStatus = yield* guidedSetup.send.pipe(
               Effect.mapError(
-                () => new GrokBotOrchestratorError({ reason: "provider_unavailable" }),
+                (error) =>
+                  new GrokBotOrchestratorError({
+                    reason:
+                      error.stage === "account"
+                        ? "native_account_unavailable"
+                        : "provider_unavailable",
+                  }),
               ),
             );
             return { ...(yield* status(input)), setupStatus };

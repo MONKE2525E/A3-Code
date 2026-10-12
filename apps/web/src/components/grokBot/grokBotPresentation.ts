@@ -146,6 +146,19 @@ export function resolveGrokBotSelectedEnvironment(input: {
     : { kind: "disconnected", environmentId: input.selectedEnvironmentId };
 }
 
+/**
+ * A selected environment that is not connected yet but is still on its way (initial connect,
+ * reconnect, or a catalog that has not loaded) is loading, not unavailable. Final phases
+ * (offline, error, unsupported, a settled catalog without the environment) stay failures.
+ */
+export function isGrokBotEnvironmentConnecting(input: {
+  readonly catalogReady: boolean;
+  readonly phase: string | null;
+}): boolean {
+  if (input.phase === null) return !input.catalogReady;
+  return input.phase === "connecting" || input.phase === "reconnecting";
+}
+
 /** `view=history` opens the read-only transcript from before bots were ordinary threads. */
 export function validateGrokBotConversationSearch(raw: Record<string, unknown>): {
   readonly environmentId?: EnvironmentId;

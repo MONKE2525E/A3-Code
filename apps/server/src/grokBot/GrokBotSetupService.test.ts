@@ -24,6 +24,8 @@ const fixtureWith = (
     conversation?: boolean;
     connector?: boolean;
     connectorAuthenticated?: boolean;
+    primaryMissing?: boolean;
+    noPrimary?: boolean;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -68,12 +70,14 @@ const fixtureWith = (
           runtimeRequest: (_binding, method) =>
             Effect.succeed(
               method === "GetGrokBotUserRuntimeSettings"
-                ? { settings: { mainAgentId: "actual-primary" } }
+                ? { settings: options.noPrimary ? {} : { mainAgentId: "actual-primary" } }
                 : {
-                    agents: [
-                      { agentId: "other-bot", name: "Other" },
-                      { agentId: "actual-primary", name: "Primary" },
-                    ],
+                    agents: options.primaryMissing
+                      ? []
+                      : [
+                          { agentId: "other-bot", name: "Other" },
+                          { agentId: "actual-primary", name: "Primary" },
+                        ],
                   },
             ),
         }),
@@ -161,6 +165,20 @@ const fixtureWith = (
 const fixture = fixtureWith();
 
 it.layer(NodeServices.layer)("guided GrokBot setup", (it) => {
+  it.effect(
+    "distinguishes an absent primary selection from a missing starred bot without sending",
+    () =>
+      Effect.gen(function* () {
+        const missing = yield* fixtureWith({ primaryMissing: true });
+        const status = yield* missing.service.send;
+        assert.equal(status.phase, "needs_prerequisite");
+        assert.include(status.error ?? "", "starred primary bot was not found");
+        assert.equal(missing.sends(), 0);
+        const unselected = yield* fixtureWith({ noPrimary: true });
+        assert.equal((yield* unselected.service.send).phase, "needs_primary");
+        assert.equal(unselected.sends(), 0);
+      }),
+  );
   it.effect("offers authorization only for this environment's native connector", () =>
     Effect.gen(function* () {
       const f = yield* fixtureWith({ conversation: true, connector: true });

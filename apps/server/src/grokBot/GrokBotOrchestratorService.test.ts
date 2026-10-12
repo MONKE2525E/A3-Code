@@ -32,7 +32,11 @@ import * as GuidedSetup from "./GrokBotSetupService.ts";
 
 const account = "a".repeat(64);
 const decodeConfig = Schema.decodeEffect(GrokBotOrchestratorConfig);
-const fixture = (bridgeInstalled = true, installFails = false) =>
+const fixture = (
+  bridgeInstalled = true,
+  installFails = false,
+  guidedStage: "account" | "read" = "account",
+) =>
   Effect.gen(function* () {
     const installs = yield* Ref.make(0);
     const selected = yield* Ref.make(account);
@@ -79,7 +83,8 @@ const fixture = (bridgeInstalled = true, installFails = false) =>
       Layer.provideMerge(
         Layer.mergeAll(
           Layer.mock(GuidedSetup.GrokBotSetupService)({
-            status: Effect.fail(new GuidedSetup.GrokBotSetupError({ stage: "account" })),
+            status: Effect.fail(new GuidedSetup.GrokBotSetupError({ stage: guidedStage })),
+            send: Effect.fail(new GuidedSetup.GrokBotSetupError({ stage: guidedStage })),
           }),
           Settings.layerTest(),
           Layer.succeed(Native.GrokBotNativeRuntimeService, native),
@@ -107,6 +112,24 @@ const fixture = (bridgeInstalled = true, installFails = false) =>
     const instances = Context.get(context, Instances.ProviderInstanceRegistry);
     return { context, service, settings, instances, selected, ready, skillWrites, installs };
   });
+
+it.effect("marks status read failures retryable without sending another setup prompt", () =>
+  Effect.gen(function* () {
+    const { service } = yield* fixture(true, false, "read");
+    const status = yield* service.inspect({});
+    assert.strictEqual(status.setupStatus?.retryable, true);
+    assert.strictEqual(status.setupStatus?.phase, "failed");
+  }).pipe(Effect.scoped),
+);
+
+it.effect("reports a sign-out during setup sending as an account prerequisite", () =>
+  Effect.gen(function* () {
+    const { service, ready } = yield* fixture();
+    yield* Ref.set(ready, true);
+    const error = yield* service.inspect({ action: "send_setup_prompt" }).pipe(Effect.flip);
+    assert.strictEqual(error.reason, "native_account_unavailable");
+  }).pipe(Effect.scoped),
+);
 
 it.effect(
   "inspection is read-only and explicit setup creates one native instance with actual bot models",

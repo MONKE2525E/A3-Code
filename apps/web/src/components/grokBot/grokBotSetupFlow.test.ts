@@ -32,6 +32,23 @@ describe("grokBotSetupView", () => {
   it("offers retry on failure", () => {
     expect(grokBotSetupView(status("failed")).sendLabel).toBe("Retry setup");
   });
+  it("rechecks transient status failures without permitting another setup message", () => {
+    const unavailable = { ...status("failed"), retryable: true };
+    expect(grokBotSetupView(unavailable).active).toBe(true);
+    expect(grokBotSetupView(unavailable).title).toBe("Setup temporarily unavailable");
+    expect(grokBotSetupSendDisabled(unavailable)).toBe(true);
+    expect(grokBotSetupView(status("failed")).active).toBe(false);
+  });
+  it("requires a primary bot before sending", () => {
+    expect(grokBotSetupSendDisabled(status("needs_primary"))).toBe(true);
+    expect(grokBotSetupSendDisabled(status("needs_prerequisite"))).toBe(true);
+    expect(
+      grokBotSetupSendDisabled({
+        ...status("needs_prerequisite"),
+        primaryBot: { id: "primary", name: "Primary" },
+      }),
+    ).toBe(false);
+  });
   it("blocks resend while any phase is active but allows retry after failure", () => {
     expect(grokBotSetupSendDisabled(status("awaiting_authorization"))).toBe(true);
     expect(grokBotSetupSendDisabled(status("verifying"))).toBe(true);
