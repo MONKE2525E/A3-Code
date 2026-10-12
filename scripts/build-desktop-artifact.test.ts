@@ -272,6 +272,16 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   });
 
   it("switches desktop packaging product names to nightly for nightly builds", () => {
+    assert.equal(
+      resolveDesktopProductName("0.0.45-dev.grokbot.20261012"),
+      "T3 Code plus Grokbot (Dev)",
+    );
+    assert.equal(resolveDesktopWebAssetBrand("0.0.45-dev.grokbot.20261012"), "development");
+    assert.deepStrictEqual(resolveDesktopBuildIconAssets("0.0.45-dev.grokbot.20261012"), {
+      macIconPng: BRAND_ASSET_PATHS.developmentDesktopIconPng,
+      linuxIconPng: BRAND_ASSET_PATHS.developmentUniversalIconPng,
+      windowsIconIco: BRAND_ASSET_PATHS.developmentWindowsIconIco,
+    });
     assert.equal(resolveDesktopProductName("0.0.17"), "T3 Code plus Grokbot");
     assert.equal(
       resolveDesktopProductName("0.0.17-nightly.20260413.42"),

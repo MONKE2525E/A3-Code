@@ -99,7 +99,7 @@ function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;
   readonly appVersion: string;
 }): DesktopAppStageLabel {
-  if (input.isDevelopment) {
+  if (input.isDevelopment || /-dev\./.test(input.appVersion)) {
     return "Dev";
   }
 

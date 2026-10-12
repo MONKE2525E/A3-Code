@@ -39,6 +39,19 @@ const makeEnvironment = (
 ) => DesktopEnvironment.DesktopEnvironment.pipe(Effect.provide(layerEnvironment(overrides, env)));
 
 describe("DesktopEnvironment", () => {
+  it("labels a packaged dev build without requiring a Vite server", () => {
+    assert.deepEqual(
+      DesktopEnvironment.resolveDesktopAppBranding({
+        isDevelopment: false,
+        appVersion: "0.0.45-dev.grokbot.20261012",
+      }),
+      {
+        baseName: "T3 Code plus Grokbot",
+        stageLabel: "Dev",
+        displayName: "T3 Code plus Grokbot (Dev)",
+      },
+    );
+  });
   it.effect("derives state paths and development identity inside Effect", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment(
