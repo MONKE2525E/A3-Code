@@ -10,6 +10,7 @@ import {
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 
 import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
@@ -56,6 +57,17 @@ export interface Caller {
   readonly limits: CallerLimits;
 }
 
+const assertCallAuthority = (scope: McpInvocationContext.McpInvocationScope) =>
+  Effect.gen(function* () {
+    const service = yield* Effect.serviceOption(OrchestrationMcp.OrchestratorMcpService);
+    if (Option.isNone(service))
+      return yield* new OrchestratorMcpFailure({
+        code: "parent_not_active",
+        message: "Call delegation authority is unavailable.",
+      });
+    yield* service.value.validateCallInvocation(scope);
+  });
+
 export const readCaller = Effect.fn("mcp.readCaller")(function* () {
   const scope = yield* McpInvocationContext.McpInvocationContext;
   if (!scope.capabilities.has("orchestration")) {
@@ -74,6 +86,34 @@ export const readCaller = Effect.fn("mcp.readCaller")(function* () {
 export const loadCaller = Effect.fn("mcp.loadCaller")(function* () {
   const scope = yield* McpInvocationContext.McpInvocationContext;
   const threads = yield* ThreadManagement.ThreadManagementService;
+  if (scope.call !== undefined) {
+    yield* assertCallAuthority(scope);
+    const caller = yield* threads
+      .getThreadShell(scope.call.threadId)
+      .pipe(Effect.mapError(unavailable));
+    if (caller === null || caller.deletedAt !== null || caller.archivedAt !== null)
+      return yield* unavailable();
+    // Either ceiling can tighten during the call; never inherit a broader thread mode.
+    const runtimeMode = yield* OrchestrationMcp.resolveRuntimeMode(caller.runtimeMode, undefined);
+    const callMode = scope.call.runtimeMode;
+    const rank = { "approval-required": 0, "auto-accept-edits": 1, auto: 2, "full-access": 3 };
+    return {
+      scope,
+      threads,
+      caller,
+      limits: {
+        runtimeMode: [
+          callMode,
+          runtimeMode,
+          McpInvocationContext.clientRuntimeModeCeiling(scope.client),
+        ].toSorted((a, b) => rank[a] - rank[b])[0]!,
+        interactionMode:
+          scope.call.interactionMode === "plan" || caller.interactionMode === "plan"
+            ? "plan"
+            : "default",
+      },
+    } satisfies Caller;
+  }
   if (scope.thread === undefined) {
     return {
       scope,
@@ -141,6 +181,7 @@ export const assertTargetWithinLimits = (
  * OAuth client has no run; its session and ceiling are its authority.
  */
 export function assertLiveCaller({ caller, scope }: Caller) {
+  if (scope.call !== undefined) return assertCallAuthority(scope);
   if (caller === undefined) return Effect.void;
   return caller.archivedAt !== null ||
     caller.activeRunId === null ||

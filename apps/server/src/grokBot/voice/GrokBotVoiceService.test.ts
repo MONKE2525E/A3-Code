@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import { GrokBotVoiceError } from "@t3tools/contracts/grokBotVoice";
 import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Bridge from "../voiceRouting/GrokBotVoiceT3Bridge.ts";
@@ -64,6 +65,9 @@ const makeBackend = (websocketUrl: string, expiresIn = 600) =>
 type Backend = Effect.Success<ReturnType<typeof makeBackend>>;
 const routed: { botId: string; callId: string; name: string; access: string }[] = [];
 const bridgeLayer = Layer.succeed(Bridge.GrokBotVoiceT3Bridge, {
+  context: () => Effect.succeed(undefined),
+  activate: () => Effect.void,
+  forget: () => Effect.void,
   call: (input) =>
     Effect.sync(() => {
       routed.push({
@@ -80,7 +84,60 @@ const serviceLayer = (backend: Backend) =>
 
 const start = { botId: "bot-a" };
 const url = "wss://api.x.ai/v1/realtime";
-const request = { toolCallId: "t1", name: "recall_text_messages", input: {}, line };
+const request = { toolCallId: "t1", name: "stay_silent", input: {}, line };
+
+it.effect("rejects delayed results after hang-up or an account switch", () =>
+  Effect.gen(function* () {
+    for (const change of ["hang-up", "account"] as const) {
+      const backend = yield* makeBackend(url);
+      const waiting = yield* Deferred.make<void>();
+      const completed = yield* Deferred.make<void>();
+      const delayedBridge = Layer.succeed(Bridge.GrokBotVoiceT3Bridge, {
+        context: () => Effect.succeed(undefined),
+        activate: () => Effect.void,
+        forget: () => Effect.void,
+        call: () =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(waiting, undefined);
+            yield* Deferred.await(completed);
+            return {
+              kind: "served",
+              output: { updates: ["Completed work"] },
+              completion: { requestToolCallId: "t1", pending: false },
+            } as const;
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const voice = yield* Voice.GrokBotVoiceService;
+        const call = yield* voice.start(start);
+        const result = yield* voice
+          .tool(
+            {
+              ...request,
+              callId: call.callId,
+              name: Bridge.T3_TASK_PROGRESS,
+              input: { requestToolCallId: "t1" },
+            },
+            "operate",
+          )
+          .pipe(Effect.flip, Effect.forkChild);
+        yield* Deferred.await(waiting);
+        if (change === "hang-up") {
+          yield* voice.end({ callId: call.callId });
+          yield* voice.start(start);
+        } else yield* Ref.set(backend.binding, "account-2");
+        yield* Deferred.succeed(completed, undefined);
+        const error = yield* Fiber.join(result);
+        assert.strictEqual(
+          error.reason,
+          change === "hang-up" ? "unknown_call" : "account_unavailable",
+        );
+      }).pipe(
+        Effect.provide(Voice.layer.pipe(Layer.provide(Layer.merge(backend.layer, delayedBridge)))),
+      );
+    }
+  }),
+);
 
 it.effect("rejects realtime endpoints outside the official wss origin", () =>
   Effect.gen(function* () {
@@ -390,7 +447,13 @@ it.effect("swaps native execution for T3 tools and routes them locally, never to
       const voice = yield* Voice.GrokBotVoiceService;
       const call = yield* voice.start(start);
       const names = call.session.tools.map((tool) => tool.name);
-      assert.includeMembers(names, ["t3_run_task", "t3_project_list", "t3_task_progress"]);
+      assert.includeMembers(names, [
+        "t3_thread_launch",
+        "t3_project_list",
+        "delegate_task",
+        "t3_thread_read",
+      ]);
+      assert.notInclude(names, "t3_run_task");
       assert.notInclude(names, "send_task");
       assert.include(call.session.instructions, "t3_run_task");
       for (const name of ["t3_run_task", "send_task"])
@@ -416,7 +479,7 @@ it.effect("refuses stale connector tools locally, in whichever environment the c
     yield* Effect.gen(function* () {
       const voice = yield* Voice.GrokBotVoiceService;
       const call = yield* voice.start(start);
-      for (const name of ["delegate_task", "t3_thread_send", "t3-code__delegate_task", ""]) {
+      for (const name of ["t3_thread_send", "t3-code__delegate_task", ""]) {
         const result = yield* voice.tool({ callId: call.callId, ...request, name }, "operate");
         assert.strictEqual(result.kind, "unknown_tool");
       }
@@ -449,4 +512,89 @@ it.effect(
         assert.strictEqual(backend.records.at(-1)?.binding, "account-1");
       }).pipe(Effect.provide(serviceLayer(backend)));
     }),
+);
+
+it.effect("releases call authority on hang-up, account change, expiry, and shutdown", () =>
+  Effect.gen(function* () {
+    const backend = yield* makeBackend(url, 3600 * 24);
+    const activated: string[] = [];
+    const forgotten: string[] = [];
+    const lifecycleBridge = Layer.succeed(Bridge.GrokBotVoiceT3Bridge, {
+      context: () => Effect.succeed(undefined),
+      activate: ({ callId }) =>
+        Effect.sync(() => {
+          activated.push(callId);
+        }),
+      forget: (callId) =>
+        Effect.sync(() => {
+          forgotten.push(callId);
+        }),
+      call: () => Effect.succeed({ kind: "served", output: null }),
+    });
+    let shutdownCall = "";
+    yield* Effect.gen(function* () {
+      const voice = yield* Voice.GrokBotVoiceService;
+      const hung = yield* voice.start(start);
+      yield* voice.connected(hung.callId);
+      yield* voice.connected(hung.callId);
+      assert.deepStrictEqual(activated, [hung.callId]);
+      yield* voice.end({ callId: hung.callId });
+      const switched = yield* voice.start(start);
+      yield* voice.connected(switched.callId);
+      yield* Ref.set(backend.binding, "account-2");
+      yield* voice.refresh(switched.callId).pipe(Effect.flip);
+      const expired = yield* voice.start(start);
+      yield* voice.connected(expired.callId);
+      yield* TestClock.adjust("5 hours");
+      shutdownCall = (yield* voice.start(start)).callId;
+      yield* voice.connected(shutdownCall);
+      assert.includeMembers(forgotten, [hung.callId, switched.callId, expired.callId]);
+    }).pipe(
+      Effect.provide(Voice.layer.pipe(Layer.provide(Layer.merge(backend.layer, lifecycleBridge)))),
+      Effect.scoped,
+    );
+    assert.include(forgotten, shutdownCall);
+  }),
+);
+
+it.effect("hang-up during parent acquisition releases late authority before serving a tool", () =>
+  Effect.gen(function* () {
+    const backend = yield* makeBackend(url);
+    const acquiring = yield* Deferred.make<void>();
+    const acquired = yield* Deferred.make<void>();
+    const forgotten: string[] = [];
+    let dispatched = false;
+    const lifecycleBridge = Layer.succeed(Bridge.GrokBotVoiceT3Bridge, {
+      context: () => Effect.succeed(undefined),
+      activate: () =>
+        Deferred.succeed(acquiring, undefined).pipe(Effect.andThen(Deferred.await(acquired))),
+      forget: (id) =>
+        Effect.sync(() => {
+          forgotten.push(id);
+        }),
+      call: () =>
+        Effect.sync(() => {
+          dispatched = true;
+          return { kind: "served", output: null } as const;
+        }),
+    });
+    yield* Effect.gen(function* () {
+      const voice = yield* Voice.GrokBotVoiceService;
+      const current = yield* voice.start(start);
+      const tool = yield* voice
+        .tool(
+          { callId: current.callId, ...request, name: "delegate_task", input: { task: "work" } },
+          "operate",
+        )
+        .pipe(Effect.flip, Effect.forkChild);
+      yield* Deferred.await(acquiring);
+      yield* voice.end({ callId: current.callId });
+      yield* Deferred.succeed(acquired, undefined);
+      assert.strictEqual((yield* Fiber.join(tool)).reason, "unknown_call");
+      assert.isFalse(dispatched);
+      assert.include(forgotten, current.callId);
+    }).pipe(
+      Effect.provide(Voice.layer.pipe(Layer.provide(Layer.merge(backend.layer, lifecycleBridge)))),
+    );
+  }),
 );

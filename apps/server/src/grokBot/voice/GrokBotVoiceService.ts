@@ -11,6 +11,7 @@ import {
 import * as NodeCrypto from "node:crypto";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
@@ -166,6 +167,7 @@ interface ActiveCall {
   readonly at: number;
   /** Set once the client (or a tool call) proves the realtime session is live; dates the call. */
   connectedAtMs: number | undefined;
+  readonly authorityReady: Deferred.Deferred<void>;
   readonly toolCalls: VoiceCallRecord["toolCalls"][number][];
 }
 
@@ -180,14 +182,19 @@ const make = Effect.gen(function* () {
       const next = new Map(current);
       next.delete(callId);
       return next;
-    });
+    }).pipe(Effect.andThen(bridge.forget(callId)));
 
   const sweep = (now: number) =>
-    Ref.update(calls, (current) => {
+    Ref.modify(calls, (current) => {
       const next = new Map(current);
-      for (const [id, call] of next) if (now - call.at > CALL_MAX_AGE_MS) next.delete(id);
-      return next;
-    });
+      const expired: string[] = [];
+      for (const [id, call] of next)
+        if (now - call.at > CALL_MAX_AGE_MS) {
+          next.delete(id);
+          expired.push(id);
+        }
+      return [expired, next] as const;
+    }).pipe(Effect.flatMap((expired) => Effect.forEach(expired, bridge.forget, { discard: true })));
 
   /** The call, if it is still within its lifetime and the selected account is the one that opened it. */
   const active = Effect.fnUntraced(function* (callId: string) {
@@ -228,7 +235,15 @@ const make = Effect.gen(function* () {
       call.connectedAtMs = now;
       return [true, current] as const;
     });
-    if (!first) return false;
+    if (!first) {
+      if ((yield* Ref.get(calls)).get(callId) !== call) return false;
+      yield* Deferred.await(call.authorityReady);
+      return false;
+    }
+    yield* bridge
+      .activate({ binding: call.binding, botId: call.botId, callId })
+      .pipe(Effect.ensuring(Deferred.succeed(call.authorityReady, undefined)));
+    if (!(yield* Ref.get(calls)).has(callId)) yield* bridge.forget(callId);
     const presence = { botId: call.botId, callId };
     yield* backend.setPresence(call.binding, { ...presence, onTheLine: true }).pipe(Effect.ignore);
     if (!(yield* Ref.get(calls)).has(callId))
@@ -252,11 +267,13 @@ const make = Effect.gen(function* () {
       const binding = yield* backend.accountBinding;
       const credential = yield* backend.mintCredential(binding).pipe(Effect.flatMap(dialable));
       const session = yield* backend.openSession(binding, input);
+      const chatContext = yield* bridge.context(input.botId);
       // The account may have changed while the credential and session were being fetched.
       if ((yield* backend.accountBinding) !== binding)
         return yield* new GrokBotVoiceError({ reason: "account_unavailable" });
       // Same shape as the desktop's call ids.
       const callId = yield* Effect.sync(() => `call-${NodeCrypto.randomUUID()}`);
+      const authorityReady = yield* Deferred.make<void>();
       yield* Ref.update(calls, (current) =>
         new Map(current).set(callId, {
           binding,
@@ -264,6 +281,7 @@ const make = Effect.gen(function* () {
           model: credential.model,
           at: now,
           connectedAtMs: undefined,
+          authorityReady,
           toolCalls: [],
         }),
       );
@@ -273,6 +291,7 @@ const make = Effect.gen(function* () {
         credential,
         session: {
           ...session,
+          ...(chatContext === undefined ? {} : { chatContext }),
           instructions: Bridge.withT3Instructions(session.instructions),
           tools: Bridge.routeSessionTools(session.tools),
         },
@@ -293,6 +312,7 @@ const make = Effect.gen(function* () {
       const startedAt = yield* Clock.currentTimeMillis;
       // A tool call is also proof of connection, for a client that never sent the notification.
       yield* markConnected(input.callId, call);
+      yield* active(input.callId);
       // T3 tools are served here, conversation controls go to native, anything else is refused.
       const result = Bridge.isRoutedLocally(input.name)
         ? yield* bridge.call({
@@ -315,11 +335,18 @@ const make = Effect.gen(function* () {
           : // A name outside the session's tool list (a stale connector's orchestration tool, a
             // guess) is never forwarded: native has no say in what runs for this server.
             ({ kind: "unknown_tool", output: { error: "unknown tool" } } as const);
+      // A completion wait can outlive hang-up or an account switch. Recheck after waiting,
+      // before allowing its result back onto the wire.
+      yield* active(input.callId);
       const endedAt = yield* Clock.currentTimeMillis;
       const json = yield* toJson(result.output);
       const argumentsJson = yield* toJson(input.input);
       // Entries stay on the call object, so a call already ended simply drops them.
-      if (call.toolCalls.length < MAX_TOOL_CALLS)
+      if (
+        call.toolCalls.length < MAX_TOOL_CALLS &&
+        input.name !== Bridge.T3_CHAT_UPDATES &&
+        !(input.name === Bridge.T3_TASK_PROGRESS && result.completion !== undefined)
+      )
         call.toolCalls.push({
           id: input.toolCallId,
           name: input.name,
@@ -342,6 +369,7 @@ const make = Effect.gen(function* () {
         return [entry, next] as const;
       });
       if (call === undefined) return { ended: false, recorded: false };
+      yield* bridge.forget(input.callId);
       const endedAtMs = yield* Clock.currentTimeMillis;
       // The record and the presence reset both go out under the account that opened the call, so a
       // switched account fails them instead of writing into the new account's history.
@@ -379,7 +407,11 @@ const make = Effect.gen(function* () {
   );
 
   // Hanging up is the only cleanup the credential needs: it lives in the response and nowhere else.
-  yield* Effect.addFinalizer(() => Ref.set(calls, new Map()));
+  yield* Effect.addFinalizer(() =>
+    Ref.getAndSet(calls, new Map()).pipe(
+      Effect.flatMap((current) => Effect.forEach(current.keys(), bridge.forget, { discard: true })),
+    ),
+  );
 
   return GrokBotVoiceService.of({ start, refresh, tool, connected, end });
 });

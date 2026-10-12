@@ -1,7 +1,11 @@
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import * as Option from "effect/Option";
+import { AsyncResult } from "effect/reactivity";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
+import { environmentCatalog } from "~/connection/catalog";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
 import {
   grokBotsVoiceConnected,
   grokBotsVoiceEnd,
@@ -67,6 +71,22 @@ export function GrokBotVoiceCallProvider({ children }: { readonly children: Reac
             endCall: async (input) => unwrap(await endCommand({ environmentId, input })),
             openAudio: (onFrame) => openVoiceAudio({ onFrame }),
             openSocket: openBrowserVoiceSocket,
+            subscribeEnvironmentRecovery: (onRecovery) => {
+              const connectionAtom = environmentCatalog.stateAtom(environmentId);
+              const connectedGeneration = () =>
+                Option.getOrNull(
+                  Option.flatMap(AsyncResult.value(appAtomRegistry.get(connectionAtom)), (state) =>
+                    state.phase === "connected" ? Option.some(state.generation) : Option.none(),
+                  ),
+                );
+              let previous = connectedGeneration();
+              return appAtomRegistry.subscribe(connectionAtom, () => {
+                const generation = connectedGeneration();
+                const recovered = generation !== null && generation !== previous;
+                previous = generation;
+                if (recovered) onRecovery();
+              });
+            },
           },
           onState: (state: GrokBotVoiceCallState) => {
             if (controllerRef.current === controller) setCall({ ...target, state });

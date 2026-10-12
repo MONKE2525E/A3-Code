@@ -159,6 +159,17 @@ export const actsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A,
     ),
   );
 
+/** Delegation accepts a separately issued live call parent; other caller-only tools still require a provider. */
+export const actsAsDelegationCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
+  declare((params: P) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      yield* McpInvocationContext.requireDelegationScope(scope, "This tool");
+      yield* writingCaller;
+      return yield* McpToolActivity.observe(handle(params));
+    }),
+  );
+
 /** Changes something that belongs to no thread, such as a pending upload or a scheduled task. */
 export const writes = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
   declare((params: P) =>

@@ -24,7 +24,19 @@ export const GrokBotVoiceToolDescriptor = Schema.Struct({
   parameters: Schema.Unknown,
 });
 
+export const GrokBotVoiceChatContext = Schema.Struct({
+  afterSequence: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  messages: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      role: Schema.Literals(["user", "assistant"]),
+      text: Schema.String.check(Schema.isMaxLength(4_000)),
+    }),
+  ).check(Schema.isMaxLength(40)),
+});
+
 export const GrokBotVoiceSession = Schema.Struct({
+  chatContext: Schema.optionalKey(GrokBotVoiceChatContext),
   instructions: Schema.String,
   tools: Schema.Array(GrokBotVoiceToolDescriptor),
   hasOverheard: Schema.Boolean,
@@ -67,8 +79,16 @@ export const GrokBotVoiceToolInput = Schema.Struct({
   line: GrokBotVoiceLineState,
 });
 export const GrokBotVoiceToolResult = Schema.Struct({
+  chatContext: Schema.optionalKey(GrokBotVoiceChatContext),
   kind: Schema.Literals(["served", "unknown_tool", "invalid_input"]),
   output: Schema.Unknown,
+  /** Client-owned completion wait, separate from the model's immediate function result. */
+  completion: Schema.optionalKey(
+    Schema.Struct({
+      requestToolCallId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
+      pending: Schema.Boolean,
+    }),
+  ),
 });
 
 /** Mints a replacement credential for the same call; the original is good for one handshake. */

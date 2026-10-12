@@ -2,6 +2,7 @@ import * as GrokBotComputerService from "./grokBot/GrokBotComputerService.ts";
 import * as GrokBotSecretService from "./grokBot/GrokBotSecretService.ts";
 import * as GrokBotVoiceBackendLive from "./grokBot/voice/GrokBotVoiceBackendLive.ts";
 import * as GrokBotVoiceT3Bridge from "./grokBot/voiceRouting/GrokBotVoiceT3Bridge.ts";
+import * as GrokBotVoiceOrchestration from "./grokBot/voiceRouting/GrokBotVoiceOrchestration.ts";
 import * as GrokBotVoiceService from "./grokBot/voice/GrokBotVoiceService.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
@@ -752,6 +753,11 @@ const layerGrokBotVoice = GrokBotVoiceService.layer.pipe(
   Layer.provide(GrokBotVoiceBackendLive.layer),
   Layer.provide(layerGrokBotNativeRuntime),
   Layer.provide(GrokBotVoiceT3Bridge.layer),
+  Layer.provide(
+    GrokBotVoiceOrchestration.layerLive.pipe(
+      Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+    ),
+  ),
 );
 
 const layerCommandReadiness = HttpRouter.middleware(

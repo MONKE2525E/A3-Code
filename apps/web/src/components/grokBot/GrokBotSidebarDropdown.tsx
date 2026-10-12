@@ -440,6 +440,7 @@ function GrokBotRosterRow({
       >
         <GrokBotAvatar
           bot={bot}
+          environmentId={environmentId}
           size="lg"
           featured={bot.featured}
           state={activity}
@@ -513,6 +514,7 @@ function GrokBotPinnedTile({
       >
         <GrokBotAvatar
           bot={bot}
+          environmentId={environmentId}
           size="xl"
           fillPx={60}
           featured={bot.featured}

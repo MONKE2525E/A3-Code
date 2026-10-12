@@ -119,6 +119,34 @@ export function functionCallOutputFrame(callId: string, output: string): string 
   });
 }
 
+/** Native's non-orchestrated work_landed delivery: seed the event, then invite a spoken turn. */
+export function workLandedFrames(requestId: string, output: string): readonly string[] {
+  const callId = `seeded-nudge-t3-${requestId}`;
+  return [
+    JSON.stringify({
+      type: "conversation.item.create",
+      item: { type: "function_call", name: "work_landed", call_id: callId, arguments: "{}" },
+    }),
+    functionCallOutputFrame(callId, output),
+  ];
+}
+
+/** Native's written-chat update is context, distinct from a completed work nudge. */
+export function writtenChatFrame(message: {
+  readonly id: string;
+  readonly text: string;
+  readonly atMs: number;
+}): string {
+  return JSON.stringify({
+    type: "async_update.add",
+    event_id: `written-turn-${message.id}`,
+    async_update: {
+      topic: "user_message",
+      payload: [{ message: { type: "text", content: message.text }, timestampMs: message.atMs }],
+    },
+  });
+}
+
 export function responseCreateFrame(instructions: string | null): string {
   return JSON.stringify(
     instructions === null
@@ -138,9 +166,15 @@ export function truncateFrame(cut: { itemId: string; contentIndex: number; audio
 
 export type VoiceServerEvent =
   | { readonly type: "session.ready" }
+  | { readonly type: "session.configured" }
   | { readonly type: "conversation.created"; readonly conversationId: string | null }
-  | { readonly type: "response.created" }
-  | { readonly type: "response.ended" }
+  | { readonly type: "response.created"; readonly responseId: string | null }
+  | {
+      readonly type: "response.ended";
+      readonly responseId: string | null;
+      readonly status: string | null;
+      readonly cancelled: boolean;
+    }
   | {
       readonly type: "audio.delta";
       readonly itemId: string | null;
@@ -190,18 +224,27 @@ export function parseServerEvent(raw: string): VoiceServerEvent | null {
   const itemId = str(value.item_id) ?? (isRecord(value.item) ? str(value.item.id) : null);
   switch (value.type) {
     case "session.created":
-    case "session.updated":
       return { type: "session.ready" };
+    case "session.updated":
+      return { type: "session.configured" };
     case "conversation.created":
       return {
         type: "conversation.created",
         conversationId: isRecord(value.conversation) ? str(value.conversation.id) : null,
       };
     case "response.created":
-      return { type: "response.created" };
+      return {
+        type: "response.created",
+        responseId: isRecord(value.response) ? str(value.response.id) : str(value.response_id),
+      };
     case "response.done":
     case "response.cancelled":
-      return { type: "response.ended" };
+      return {
+        type: "response.ended",
+        responseId: isRecord(value.response) ? str(value.response.id) : str(value.response_id),
+        status: isRecord(value.response) ? str(value.response.status) : null,
+        cancelled: value.type === "response.cancelled",
+      };
     case "response.audio.delta":
     case "response.output_audio.delta": {
       const delta = str(value.delta);

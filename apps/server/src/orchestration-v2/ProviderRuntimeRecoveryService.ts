@@ -254,6 +254,9 @@ export const make = Effect.gen(function* () {
   const managedBots = yield* Effect.serviceOption(
     GrokBotManagedStateStore.GrokBotManagedStateStore,
   );
+  // Startup runs before command readiness. Later reconciliation must not end
+  // call authority acquired by this process after that initial recovery.
+  let callParentsRecovered = false;
   const recoverableRemoteRuns = Effect.fn("ProviderRuntimeRecoveryService.remoteRuns")(function* (
     projection: ProjectionStore.ProjectionRuntimeRecoveryState,
   ) {
@@ -306,6 +309,7 @@ export const make = Effect.gen(function* () {
       originalProjection: ProjectionStore.ProjectionRuntimeRecoveryState,
       trigger: "startup" | "shutdown",
       continueAfterRestart: boolean,
+      recoverCallParents: boolean,
     ) {
       const now = yield* DateTime.now;
       const remoteRuns = yield* recoverableRemoteRuns(originalProjection);
@@ -369,6 +373,26 @@ export const make = Effect.gen(function* () {
           ),
         );
       const events: Array<OrchestrationV2DomainEvent> = [];
+      if (recoverCallParents) {
+        for (const node of projection.nodes) {
+          if (
+            node.kind !== "call_parent" ||
+            node.runId !== null ||
+            !["pending", "starting", "running", "waiting"].includes(node.status)
+          )
+            continue;
+          // The previous process's call is gone. Its delegated children own
+          // their lifecycle and history, so only terminalize the call root.
+          events.push({
+            id: yield* allocateEventId(),
+            type: "node.updated",
+            threadId: projection.thread.id,
+            nodeId: node.id,
+            occurredAt: now,
+            payload: { ...node, status: "cancelled", completedAt: now },
+          });
+        }
+      }
       // Background work that outlived its settled turn. The provider transcript
       // cannot record its death, so the next provider turn is told instead.
       // Shutdown records it too: a graceful restart cancels it there first.
@@ -816,6 +840,7 @@ export const make = Effect.gen(function* () {
 
   const reconcile = (trigger: "startup" | "shutdown") =>
     Effect.gen(function* () {
+      const recoverCallParents = trigger === "startup" && !callParentsRecovered;
       const continueAfterRestart = yield* settings.getSettings.pipe(
         Effect.orElseSucceed(() => null),
       );
@@ -845,7 +870,7 @@ export const make = Effect.gen(function* () {
           continueAfterRestart !== null &&
           resolveProjectSettings(continueAfterRestart, projection.thread.projectId).settings
             .continueThreadsAfterServerUpdate;
-        const result = yield* reconcileProjection(projection, trigger, enabled);
+        const result = yield* reconcileProjection(projection, trigger, enabled, recoverCallParents);
         terminalizedRuns += result.terminalizedRuns;
         stoppedSessions += result.stoppedSessions;
         closedRequests += result.closedRequests;
@@ -856,6 +881,7 @@ export const make = Effect.gen(function* () {
           (cause) => new ProviderRuntimeRecoveryError({ operation: "drain-outbox", cause }),
         ),
       );
+      if (recoverCallParents) callParentsRecovered = true;
       return {
         terminalizedRuns,
         stoppedSessions,

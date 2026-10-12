@@ -27,6 +27,7 @@ import {
   type ModelSelection,
   OrchestrationV2Command,
   type OrchestrationV2InternalCommand,
+  OrchestrationV2CallParent,
   type OrchestrationV2ServerCommand,
   type ThreadPullRequestLink,
   type ThreadPullRequestWatch,
@@ -459,10 +460,13 @@ function isGoalCommand(message: {
 }
 
 const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLinkedPullRequest));
+const callParentEqual = Schema.toEquivalence(OrchestrationV2CallParent);
 
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
     case "thread.create":
+    case "call-parent.acquire":
+    case "call-parent.release":
     case "grok-bot.thread.rebind":
     case "thread.archive":
     case "thread.unarchive":
@@ -513,6 +517,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "provider.switch":
       return command.threadId;
     case "delegated_task.request":
+    case "call.delegated_task.request":
     case "delegated_task.wake-policy":
     case "delegated_task.completion-delivery.acknowledge":
     case "delegated_task.completion-delivery.dispose":
@@ -6616,7 +6621,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   const dispatchDelegatedTaskRequest = Effect.fn("orchestrationV2.dispatch.delegatedTaskRequest")(
     function* (
-      command: Extract<OrchestrationV2Command, { readonly type: "delegated_task.request" }>,
+      command: Extract<
+        OrchestrationV2ServerCommand,
+        { readonly type: "delegated_task.request" | "call.delegated_task.request" }
+      >,
       events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
       effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
     ) {
@@ -6641,33 +6649,59 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const parentRun = parentProjection.runs.find(
         (candidate) => candidate.id === command.parentRunId,
       );
-      if (parentRun === undefined || !isBlockingRun(parentRun)) {
-        return yield* new OrchestratorDispatchError({
-          commandId: command.commandId,
-          commandType: command.type,
-          cause: `Parent run ${command.parentRunId} is not active.`,
-        });
-      }
-      if (yield* stopReachedRun(command, command.parentThreadId, parentRun.id)) {
-        return yield* new OrchestratorDispatchError({
-          commandId: command.commandId,
-          commandType: command.type,
-          cause: `Parent run ${command.parentRunId} is stopping.`,
-        });
-      }
       const parentNode = parentProjection.nodes.find(
         (candidate) => candidate.id === command.parentNodeId,
       );
-      if (
-        parentNode === undefined ||
-        parentNode.runId !== parentRun.id ||
-        parentRun.rootNodeId === null
-      ) {
-        return yield* new OrchestratorDispatchError({
-          commandId: command.commandId,
-          commandType: command.type,
-          cause: `Parent node ${command.parentNodeId} is not part of active run ${parentRun.id}.`,
-        });
+      if (command.type === "call.delegated_task.request") {
+        if (
+          parentProjection.thread.deletedAt !== null ||
+          parentProjection.thread.archivedAt !== null ||
+          parentNode?.kind !== "call_parent" ||
+          parentNode.runId !== null ||
+          parentNode.status !== "running" ||
+          parentNode.callParent === undefined ||
+          !callParentEqual(parentNode.callParent, command.authority)
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "The calling live call no longer owns this delegation parent.",
+          });
+        }
+        yield* refuseAboveDispatchModeLimit(command, command.parentThreadId, {
+          runtimeMode: command.runtimeMode,
+          interactionMode: command.interactionMode,
+        }).pipe(Effect.provideService(DispatchModeLimit, command.authority));
+        yield* refuseAboveDispatchModeLimit(command, command.parentThreadId, {
+          runtimeMode: command.runtimeMode,
+          interactionMode: command.interactionMode,
+        }).pipe(Effect.provideService(DispatchModeLimit, parentProjection.thread));
+      } else {
+        if (parentRun === undefined || !isBlockingRun(parentRun)) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Parent run ${command.parentRunId} is not active.`,
+          });
+        }
+        if (yield* stopReachedRun(command, command.parentThreadId, parentRun.id)) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Parent run ${command.parentRunId} is stopping.`,
+          });
+        }
+        if (
+          parentNode === undefined ||
+          parentNode.runId !== parentRun.id ||
+          parentRun.rootNodeId === null
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Parent node ${command.parentNodeId} is not part of active run ${parentRun.id}.`,
+          });
+        }
       }
 
       const projectId = command.projectId ?? parentProjection.thread.projectId;
@@ -6734,7 +6768,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const task: OrchestrationV2Subagent = {
         id: taskNodeId,
         threadId: command.parentThreadId,
-        runId: parentRun.id,
+        runId: parentRun?.id ?? null,
         parentNodeId: command.parentNodeId,
         origin: "app_owned",
         createdBy: command.createdBy,
@@ -6756,9 +6790,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const taskNode: OrchestrationV2ExecutionNode = {
         id: taskNodeId,
         threadId: command.parentThreadId,
-        runId: parentRun.id,
+        runId: parentRun?.id ?? null,
         parentNodeId: command.parentNodeId,
-        rootNodeId: parentRun.rootNodeId,
+        rootNodeId: parentNode!.rootNodeId,
         kind: "subagent",
         status: "running",
         countsForRun: false,
@@ -6770,13 +6804,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         startedAt: now,
         completedAt: null,
       };
-      const parentProviderTurn = providerTurnForRun(parentProjection, parentRun);
+      const parentProviderTurn =
+        parentRun === undefined ? undefined : providerTurnForRun(parentProjection, parentRun);
       const taskTurnItem: OrchestrationV2TurnItem = {
         id: taskTurnItemId,
         threadId: command.parentThreadId,
-        runId: parentRun.id,
+        runId: parentRun?.id ?? null,
         nodeId: taskNodeId,
-        providerThreadId: parentRun.providerThreadId,
+        providerThreadId: parentRun?.providerThreadId ?? null,
         providerTurnId: parentProviderTurn?.id ?? null,
         nativeItemRef: null,
         parentItemId: null,
@@ -6808,7 +6843,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       yield* emitEvent({
         type: "node.updated",
         threadId: command.parentThreadId,
-        runId: parentRun.id,
+        ...(parentRun === undefined ? {} : { runId: parentRun.id }),
         nodeId: taskNodeId,
         driver: targetAdapter.driver,
         providerInstanceId: command.modelSelection.instanceId,
@@ -6818,7 +6853,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       yield* emitEvent({
         type: "subagent.updated",
         threadId: command.parentThreadId,
-        runId: parentRun.id,
+        ...(parentRun === undefined ? {} : { runId: parentRun.id }),
         nodeId: taskNodeId,
         driver: targetAdapter.driver,
         providerInstanceId: command.modelSelection.instanceId,
@@ -6828,7 +6863,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       yield* emitEvent({
         type: "turn-item.updated",
         threadId: command.parentThreadId,
-        runId: parentRun.id,
+        ...(parentRun === undefined ? {} : { runId: parentRun.id }),
         nodeId: taskNodeId,
         driver: targetAdapter.driver,
         providerInstanceId: command.modelSelection.instanceId,
@@ -6873,11 +6908,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         sourceThreadId: command.parentThreadId,
         targetThreadId: childThreadId,
         sourcePoint: {
-          ...contextSourcePointForRun(parentProjection, parentRun),
+          ...(parentRun === undefined
+            ? { threadId: command.parentThreadId }
+            : contextSourcePointForRun(parentProjection, parentRun)),
           turnItemId: taskTurnItemId,
         },
         basePoint: null,
-        sourceProviderInstanceId: parentRun.providerInstanceId,
+        sourceProviderInstanceId:
+          parentRun?.providerInstanceId ?? parentProjection.thread.providerInstanceId,
         targetProviderInstanceId: command.modelSelection.instanceId,
         targetRunId: childRun.id,
         status: "consumed",
@@ -10788,6 +10826,69 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
       | undefined;
     switch (command.type) {
+      case "call-parent.acquire":
+      case "call-parent.release": {
+        const projection = yield* projectionStore
+          .getThreadRecords(command.threadId, ["nodes"])
+          .pipe(mapDispatchError(command));
+        const existing = projection.nodes.find((node) => node.id === command.nodeId);
+        if (
+          command.type === "call-parent.acquire" &&
+          (projection.thread.deletedAt !== null ||
+            projection.thread.archivedAt !== null ||
+            existing !== undefined)
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "The call delegation parent is unavailable.",
+          });
+        }
+        if (
+          command.type === "call-parent.release" &&
+          (existing?.kind !== "call_parent" ||
+            existing.callParent?.authorityId !== command.authorityId)
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "The call does not own this delegation parent.",
+          });
+        }
+        const now = yield* DateTime.now;
+        const node: OrchestrationV2ExecutionNode =
+          command.type === "call-parent.acquire"
+            ? {
+                id: command.nodeId,
+                threadId: command.threadId,
+                runId: null,
+                parentNodeId: null,
+                rootNodeId: command.nodeId,
+                kind: "call_parent",
+                callParent: command.authority,
+                status: "running",
+                countsForRun: false,
+                providerThreadId: null,
+                providerTurnId: null,
+                nativeItemRef: null,
+                runtimeRequestId: null,
+                checkpointScopeId: null,
+                startedAt: now,
+                completedAt: null,
+              }
+            : { ...existing!, status: "completed", completedAt: now };
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "node.updated",
+          threadId: command.threadId,
+          nodeId: node.id,
+          occurredAt: now,
+          payload: node,
+        });
+        break;
+      }
       case "thread.create":
         yield* dispatchThreadCreate(command, events);
         break;
@@ -11074,6 +11175,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* dispatchThreadMergeBack(command, events);
         break;
       case "delegated_task.request":
+      case "call.delegated_task.request":
         yield* dispatchDelegatedTaskRequest(command, events, effects);
         break;
       case "delegated_task.wake-policy":

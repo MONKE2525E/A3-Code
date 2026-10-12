@@ -16,21 +16,21 @@ const handlers = {
       return yield* service.capabilities(scope);
     }),
   ),
-  delegate_task: McpToolAccess.actsAsCaller((input) =>
+  delegate_task: McpToolAccess.actsAsDelegationCaller((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
       return yield* service.delegateTask(scope, input);
     }),
   ),
-  task_status: McpToolAccess.actsAsCaller(({ taskId }) =>
+  task_status: McpToolAccess.actsAsDelegationCaller(({ taskId }) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;
       return yield* service.taskStatus(scope, taskId);
     }),
   ),
-  task_cancel: McpToolAccess.actsAsCaller((input) =>
+  task_cancel: McpToolAccess.actsAsDelegationCaller((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const service = yield* OrchestratorMcpService.OrchestratorMcpService;

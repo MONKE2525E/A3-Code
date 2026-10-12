@@ -209,10 +209,15 @@ function RootRouteView() {
     <GrokBotVoiceCallProvider>
       <CommandPalette>
         <AppSidebarLayout>
-          <Outlet />
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {/* Route insets fill the space above the call footer instead of the viewport. */}
+            <div className="flex min-h-0 min-w-0 flex-1 [&>[data-slot=sidebar-inset]]:h-full!">
+              <Outlet />
+            </div>
+            <GrokBotVoiceCallDock />
+          </div>
         </AppSidebarLayout>
       </CommandPalette>
-      <GrokBotVoiceCallDock />
     </GrokBotVoiceCallProvider>
   );
 

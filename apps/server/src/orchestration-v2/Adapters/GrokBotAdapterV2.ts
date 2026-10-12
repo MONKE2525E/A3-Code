@@ -452,6 +452,11 @@ export const makeGrokBotTranscriptProjection = (input: {
         createdBy: assistant || peer !== undefined ? "agent" : "user",
         ...(peer === undefined ? {} : { grokBotPeer: peer }),
         creationSource: "provider",
+        ...(entry.kind === "message" &&
+        entry.role === "user" &&
+        grokBotVoiceCallIdFromChannel(entry.channel) !== undefined
+          ? { grokBotVoiceUtterance: true as const }
+          : {}),
         text:
           unavailableAttachments === 0
             ? (text ?? "")

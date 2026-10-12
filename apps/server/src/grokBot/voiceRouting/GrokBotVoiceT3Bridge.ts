@@ -1,12 +1,22 @@
-import { ThreadId } from "@t3tools/contracts";
+import {
+  MessageId,
+  RunId,
+  ThreadId,
+  type GrokBotVoiceChatContext,
+  type GrokBotVoiceToolResult,
+  type OrchestrationV2ConversationMessage,
+} from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import { GROK_BOT_MANAGED_SKILL_NAME } from "../../orchestration-v2/Adapters/GrokBotManagedBinding.ts";
+import * as Stream from "effect/Stream";
+import * as Option from "effect/Option";
+import * as Duration from "effect/Duration";
 import * as ThreadManagementService from "../../orchestration-v2/ThreadManagementService.ts";
-import * as ProjectService from "../../project/ProjectService.ts";
 import * as GrokBotThreadService from "../GrokBotThreadService.ts";
+import * as Direct from "./GrokBotVoiceOrchestration.ts";
 
 /**
  * Tools the native voice harness defines itself, read from the official desktop bundle
@@ -15,16 +25,12 @@ import * as GrokBotThreadService from "../GrokBotThreadService.ts";
  * the conversation and stay native.
  */
 export const NATIVE_EXECUTION_TOOLS: ReadonlySet<string> = new Set(["send_task"]);
-export const NATIVE_CONTROL_TOOLS: ReadonlySet<string> = new Set([
-  "end_the_call",
-  "recall_text_messages",
-  "search_conversations",
-  "stay_silent",
-]);
+export const NATIVE_CONTROL_TOOLS: ReadonlySet<string> = new Set(["end_the_call", "stay_silent"]);
 
 export const T3_RUN_TASK = "t3_run_task";
 export const T3_PROJECT_LIST = "t3_project_list";
 export const T3_TASK_PROGRESS = "t3_task_progress";
+export const T3_CHAT_UPDATES = "t3_chat_updates";
 
 interface VoiceToolDescriptor {
   readonly type: string;
@@ -37,34 +43,28 @@ interface VoiceToolDescriptor {
 export const T3_VOICE_TOOLS: ReadonlyArray<VoiceToolDescriptor> = [
   {
     type: "function",
-    name: T3_RUN_TASK,
+    name: "recall_text_messages",
     description:
-      "Do any computer, file, code, or project work by handing it to this bot's T3 Code agents. Use this instead of send_task. Say what to do in the task; pass projectId (from t3_project_list) when the user names a project. Returns once the work is accepted; it keeps running after this call.",
+      "Read recent written messages in this bot's canonical T3 chat, including messages imported from its native chat. This reads current history, including messages sent during this call.",
+    parameters: { type: "object", properties: {} },
+  },
+  {
+    type: "function",
+    name: "search_conversations",
+    description:
+      "Search this bot's canonical T3 chat history, including imported native chat. Returns actual matching messages. Only this bot's chat in this T3 environment is searched.",
     parameters: {
       type: "object",
-      properties: {
-        task: { type: "string", description: "What the T3 agents should do, in plain words." },
-        projectId: { type: "string", description: "A projectId from t3_project_list." },
-      },
-      required: ["task"],
+      properties: { query: { type: "string" }, index: { type: "integer", minimum: 0 } },
+      required: ["query"],
     },
   },
-  {
-    type: "function",
-    name: T3_PROJECT_LIST,
-    description: "List the T3 Code projects work can run in, with their projectId.",
-    parameters: { type: "object", properties: {} },
-  },
-  {
-    type: "function",
-    name: T3_TASK_PROGRESS,
-    description: "Say whether this bot's T3 work is running or finished.",
-    parameters: { type: "object", properties: {} },
-  },
+  ...Direct.tools,
 ];
 
-/** Short session addendum; the full protocol lives in the managed skill, not in the call prompt. */
-export const T3_VOICE_INSTRUCTIONS = `Computer, file, and code work runs in T3 Code, never through send_task: call ${T3_RUN_TASK}. Follow the ${GROK_BOT_MANAGED_SKILL_NAME} skill for how T3 work is done.`;
+/** Execution belongs to this call; independent threads still require an explicit request. */
+export const T3_VOICE_INSTRUCTIONS =
+  "Use the T3 orchestration functions on this call directly. Delegate work with delegate_task, choosing models from orchestrator_capabilities; use task_status and task_cancel for this call’s tasks. Completed delegated work is delivered back to this live call automatically. This call has approval-required permissions. send_task and t3_run_task are disabled. Use t3_thread_launch only when the caller requests independent work in a new thread. Recall and search read this bot’s canonical chat in this T3 environment.";
 
 /**
  * A session's tools are an allowlist: only native conversation controls (plain `function` tools by
@@ -75,7 +75,12 @@ export const T3_VOICE_INSTRUCTIONS = `Computer, file, and code work runs in T3 C
 export const routeSessionTools = (
   native: ReadonlyArray<VoiceToolDescriptor>,
 ): ReadonlyArray<VoiceToolDescriptor> => [
-  ...native.filter((tool) => tool.type === "function" && NATIVE_CONTROL_TOOLS.has(tool.name)),
+  ...native.filter(
+    (tool) =>
+      tool.type === "function" &&
+      NATIVE_CONTROL_TOOLS.has(tool.name) &&
+      !T3_VOICE_TOOLS.some((local) => local.name === tool.name),
+  ),
   ...T3_VOICE_TOOLS,
 ];
 
@@ -87,7 +92,12 @@ export const withT3Instructions = (instructions: string) =>
  * still calls it is refused here instead of reaching native execution.
  */
 export const isRoutedLocally = (name: string) =>
-  NATIVE_EXECUTION_TOOLS.has(name) || T3_VOICE_TOOLS.some((tool) => tool.name === name);
+  Direct.isTool(name) ||
+  name === T3_TASK_PROGRESS ||
+  name === T3_RUN_TASK ||
+  name === T3_CHAT_UPDATES ||
+  NATIVE_EXECUTION_TOOLS.has(name) ||
+  T3_VOICE_TOOLS.some((tool) => tool.name === name);
 
 /** The only names forwarded to native; every other name is refused locally as an unknown tool. */
 export const isNativeControl = (name: string) => NATIVE_CONTROL_TOOLS.has(name);
@@ -107,25 +117,76 @@ export interface VoiceToolCall {
   readonly access: VoiceAccess;
 }
 
-export type VoiceToolOutcome =
-  | { readonly kind: "served"; readonly output: unknown }
-  | { readonly kind: "invalid_input"; readonly output: { readonly error: string } };
+export type VoiceToolOutcome = typeof GrokBotVoiceToolResult.Type;
 
-const RunTaskInput = Schema.Struct({
-  task: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8000)),
-  projectId: Schema.optionalKey(
-    Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),
-  ),
-});
-const decodeRunTask = Schema.decodeUnknownEffect(RunTaskInput);
+const decodeCompletionRequest = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    requestToolCallId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
+  }),
+);
+const decodeChatWait = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    afterSequence: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  }),
+);
+const decodeSearch = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    query: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),
+    index: Schema.optionalKey(
+      Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+    ),
+  }),
+);
+type ChatContext = typeof GrokBotVoiceChatContext.Type;
+
+// Transcripts are already stripped of managed prompt footers by the adapter. Keep only visible
+// conversation text; never expose system messages, runtime requests, notifications, or tool data.
+const chatMessage = (
+  message: OrchestrationV2ConversationMessage,
+): ChatContext["messages"][number] | undefined => {
+  if (
+    (message.role !== "user" && message.role !== "assistant") ||
+    message.grokBotPeer !== undefined ||
+    message.senderThreadId !== undefined ||
+    (message.role === "user" &&
+      (message.createdBy !== "user" || message.creationSource === "mcp")) ||
+    message.voiceRequest === true ||
+    message.grokBotVoiceUtterance === true ||
+    message.scheduledTaskId !== undefined ||
+    message.notification !== undefined ||
+    message.streaming ||
+    !message.text.trim()
+  )
+    return undefined;
+  return { id: message.id, role: message.role, text: message.text.slice(0, 4_000) };
+};
+const boundedChat = (messages: readonly OrchestrationV2ConversationMessage[]) => {
+  const visible: ChatContext["messages"][number][] = [];
+  let remaining = 16_000;
+  for (const message of messages.toReversed()) {
+    const row = chatMessage(message);
+    if (row === undefined) continue;
+    if (remaining === 0 || visible.length === 40) break;
+    const text = row.text.slice(0, remaining);
+    remaining -= text.length;
+    visible.unshift({ ...row, text });
+  }
+  return visible;
+};
 
 const spoken = (text: string) => ({ kind: "served", output: { spoken: text } }) as const;
-const MAX_PROJECTS = 25;
 
 export class GrokBotVoiceT3Bridge extends Context.Service<
   GrokBotVoiceT3Bridge,
   {
+    readonly activate: (input: {
+      readonly binding: string;
+      readonly botId: string;
+      readonly callId: string;
+    }) => Effect.Effect<void>;
     readonly call: (input: VoiceToolCall) => Effect.Effect<VoiceToolOutcome>;
+    readonly forget: (callId: string) => Effect.Effect<void>;
+    readonly context: (botId: string) => Effect.Effect<ChatContext | undefined>;
   }
 >()("t3/grokBot/voiceRouting/GrokBotVoiceT3Bridge") {}
 
@@ -137,73 +198,194 @@ const progressText = (run: { status: string } | undefined) =>
 const make = Effect.gen(function* () {
   const threads = yield* GrokBotThreadService.GrokBotThreadService;
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
-  const projects = yield* ProjectService.ProjectService;
+  const direct = yield* Effect.serviceOption(Direct.GrokBotVoiceOrchestration);
+  // Targets come only from accepted MCP results, never from model-supplied ids.
+  const pending = new Map<
+    string,
+    {
+      callId: string;
+      target: Direct.VoiceWorkTarget;
+      at: number;
+      receipt: VoiceToolOutcome;
+    }
+  >();
+  const key = (input: VoiceToolCall, toolCallId = input.toolCallId) =>
+    JSON.stringify([input.binding, input.botId, input.callId, toolCallId]);
 
-  /**
-   * Work starts as a message on the bot's own thread: its managed turn already carries the T3
-   * MCP tools and the managed skill, and delegate_task needs a live parent run a call lacks.
-   * The bot's thread keeps its own runtime and interaction modes, so nothing is escalated.
-   */
-  const runTask = (input: VoiceToolCall) =>
+  const canonical = (botId: string) =>
+    threads.open({ botId }).pipe(Effect.map((opened) => ThreadId.make(opened.threadId)));
+  const context = (botId: string) =>
     Effect.gen(function* () {
-      if (input.access !== "operate")
-        return spoken("This session is not allowed to start T3 work.");
-      const parsed = yield* decodeRunTask(input.input).pipe(Effect.option);
-      if (parsed._tag === "None")
-        return {
-          kind: "invalid_input",
-          output: { error: `invalid arguments for ${T3_RUN_TASK}` },
-        } as const;
-      const { task, projectId } = parsed.value;
-      const message = [
-        "[From a voice call]",
-        projectId === undefined
-          ? undefined
-          : `Project: ${projectId} (pass it as projectId to delegate_task).`,
-        task,
-      ]
-        .filter((line) => line !== undefined)
-        .join("\n");
-      const sent = yield* threads
-        .send(
-          {
-            botId: input.botId,
-            message,
-            clientRequestId: `voice:${input.callId}:${input.toolCallId}`,
-          },
-          {
-            requestNamespace: `grok-bot-voice:${input.binding}:${input.botId}`,
-            voiceRequest: true,
-          },
-        )
-        .pipe(Effect.option);
-      return sent._tag === "None"
-        ? spoken("T3 could not take that task right now.")
-        : spoken(
-            sent.value.delivery === "queued"
-              ? "Queued in T3 behind earlier work."
-              : "Started in T3. It keeps running on its own.",
-          );
-    });
+      const threadId = yield* canonical(botId);
+      yield* threadManagement.ensureLegacyTranscript(threadId);
+      const snapshot = yield* threadManagement.getThreadSnapshotWindow(threadId, {
+        rowLimit: 40,
+        userTurnLimit: 20,
+      });
+      return {
+        afterSequence: snapshot.snapshotSequence,
+        messages: boundedChat(snapshot.projection.messages),
+      };
+    }).pipe(Effect.orElseSucceed(() => undefined));
 
-  const projectList = Effect.gen(function* () {
-    const snapshot = yield* projects.snapshot.pipe(Effect.option);
-    if (snapshot._tag === "None") return spoken("T3 projects are unavailable right now.");
-    const rows = snapshot.value.projects.filter((project) => project.deletedAt === null);
-    return {
-      kind: "served",
-      output: {
-        projects: rows
-          .slice(0, MAX_PROJECTS)
-          .map((project) => ({ projectId: project.id, title: project.title })),
-        truncated: rows.length > MAX_PROJECTS,
-      },
-    } as const;
-  });
+  const recall = (input: VoiceToolCall) =>
+    context(input.botId).pipe(
+      Effect.map((chat) =>
+        chat === undefined
+          ? spoken("T3 chat history is unavailable right now.")
+          : ({ kind: "served", output: { messages: chat.messages } } as const),
+      ),
+    );
+
+  const search = (input: VoiceToolCall) =>
+    Effect.gen(function* () {
+      const parsed = yield* decodeSearch(input.input).pipe(Effect.option);
+      if (parsed._tag === "None")
+        return { kind: "invalid_input", output: { error: "invalid search arguments" } } as const;
+      const threadId = yield* canonical(input.botId);
+      const found = yield* threadManagement.searchThread({
+        threadId,
+        query: parsed.value.query,
+        ...(parsed.value.index === undefined ? {} : { index: parsed.value.index }),
+      });
+      if (found.match === null)
+        return {
+          kind: "served",
+          output: { messages: [], totalMatches: found.totalMatches },
+        } as const;
+      const records = yield* threadManagement.getThreadRecords(threadId, ["messages"], {
+        messageIds: [MessageId.make(found.match.entryId)],
+        messageRoles: ["user", "assistant"],
+      });
+      const messages = records.messages.flatMap((message) => {
+        const visible = chatMessage(message);
+        return visible === undefined ? [] : [visible];
+      });
+      return {
+        kind: "served",
+        output: { messages, totalMatches: found.totalMatches, index: found.activeIndex },
+      } as const;
+    }).pipe(Effect.orElseSucceed(() => spoken("T3 chat search is unavailable right now.")));
+
+  const chatUpdates = (input: VoiceToolCall) =>
+    Effect.gen(function* () {
+      const parsed = yield* decodeChatWait(input.input).pipe(Effect.option);
+      if (parsed._tag === "None")
+        return { kind: "invalid_input", output: { error: "invalid chat cursor" } } as const;
+      const threadId = yield* canonical(input.botId);
+      const event = yield* threadManagement
+        .streamStoredEventsFrom({
+          threadId,
+          afterSequence: parsed.value.afterSequence,
+          eventType: "message.updated",
+        })
+        .pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "message.updated" &&
+              stored.event.payload.role === "user" &&
+              stored.event.payload.createdBy === "user" &&
+              stored.event.payload.creationSource !== "mcp" &&
+              stored.event.payload.voiceRequest !== true &&
+              chatMessage(stored.event.payload) !== undefined,
+          ),
+          Stream.runHead,
+          Effect.timeoutOption(Duration.seconds(20)),
+          Effect.map(Option.flatten),
+        );
+      const stored = Option.getOrUndefined(event);
+      return {
+        kind: "served",
+        output: null,
+        chatContext: {
+          afterSequence: stored?.sequence ?? parsed.value.afterSequence,
+          messages:
+            stored?.event.type === "message.updated" ? [chatMessage(stored.event.payload)!] : [],
+        },
+      } as const;
+    }).pipe(
+      Effect.orElseSucceed(
+        () => ({ kind: "invalid_input", output: { error: "chat updates unavailable" } }) as const,
+      ),
+    );
 
   /** Reads only run status from the bot's own canonical thread; no MCP scope is involved. */
   const progress = (input: VoiceToolCall) =>
     Effect.gen(function* () {
+      // This branch is the client's long wait over the existing voice RPC. It is not a
+      // model tool or a new dispatch; normal progress calls still report status below.
+      const requested = yield* decodeCompletionRequest(input.input).pipe(Effect.option);
+      if (requested._tag === "Some") {
+        const requestToolCallId = requested.value.requestToolCallId;
+        const target = pending.get(key(input, requestToolCallId));
+        if (target === undefined)
+          return { kind: "invalid_input", output: { error: "unknown voice request" } } as const;
+        if ("taskId" in target.target) {
+          if (Option.isNone(direct))
+            return {
+              kind: "invalid_input",
+              output: { error: "voice request unavailable" },
+            } as const;
+          const result = yield* direct.value.wait({ ...input, taskId: target.target.taskId });
+          // Ending a call removes the entry while its wait is in flight.
+          if (pending.get(key(input, requestToolCallId)) !== target)
+            return { kind: "invalid_input", output: { error: "unknown voice request" } } as const;
+          return {
+            ...result.result,
+            ...(result.result.kind === "served"
+              ? { completion: { requestToolCallId, pending: result.pending } }
+              : {}),
+          };
+        }
+        const threadId = ThreadId.make(target.target.threadId);
+        const shell = yield* threadManagement.getThreadShell(threadId).pipe(Effect.option);
+        if (shell._tag === "None" || shell.value === null)
+          return { kind: "invalid_input", output: { error: "voice request unavailable" } } as const;
+        const waited = yield* threadManagement
+          .waitForThread({
+            projectId: shell.value.projectId,
+            threadId,
+            runId: RunId.make(target.target.runId),
+            timeoutMs: 20_000,
+          })
+          .pipe(Effect.option);
+        if (waited._tag === "None")
+          return { kind: "invalid_input", output: { error: "voice request unavailable" } } as const;
+        if (pending.get(key(input, requestToolCallId)) !== target)
+          return { kind: "invalid_input", output: { error: "unknown voice request" } } as const;
+        if (waited.value.timedOut)
+          return {
+            kind: "served",
+            output: null,
+            completion: { requestToolCallId, pending: true },
+          } as const;
+        const records = yield* threadManagement
+          .getThreadRecords(threadId, ["messages"], {
+            messageRunIds: [RunId.make(target.target.runId)],
+          })
+          .pipe(Effect.option);
+        if (records._tag === "None")
+          return { kind: "invalid_input", output: { error: "voice result unavailable" } } as const;
+        // Only the selected launch run's final text is its result. Other requests and native
+        // chat updates must not be delivered as completion of this work.
+        const runId = target.target.runId;
+        const final = records.value.messages.findLast(
+          (message) =>
+            message.runId === runId &&
+            message.role === "assistant" &&
+            !message.streaming &&
+            message.text.trim().length > 0,
+        );
+        return {
+          kind: "served",
+          output: {
+            status: "landed",
+            runStatus: waited.value.run?.status,
+            updates: final === undefined ? [] : [final.text.slice(0, 16_000)],
+          },
+          completion: { requestToolCallId, pending: false },
+        } as const;
+      }
       const opened = yield* threads.open({ botId: input.botId }).pipe(Effect.option);
       if (opened._tag === "None") return spoken("T3 is not ready for this bot.");
       const read = yield* threadManagement
@@ -215,14 +397,62 @@ const make = Effect.gen(function* () {
     });
 
   return GrokBotVoiceT3Bridge.of({
+    context,
+    activate: (input) =>
+      Effect.gen(function* () {
+        if (Option.isNone(direct)) return;
+        const canonicalThreadId = yield* canonical(input.botId);
+        yield* direct.value.activate({ ...input, canonicalThreadId });
+      }).pipe(Effect.orElseSucceed(() => undefined)),
+    forget: (callId) =>
+      Effect.sync(() => {
+        for (const [id, entry] of pending) if (entry.callId === callId) pending.delete(id);
+      }).pipe(Effect.andThen(Option.isSome(direct) ? direct.value.forget(callId) : Effect.void)),
     call: (input) => {
+      if (Direct.isTool(input.name))
+        return Effect.gen(function* () {
+          if (Option.isNone(direct))
+            return {
+              kind: "invalid_input",
+              output: { error: "direct voice orchestration unavailable" },
+            } as const;
+          const prior = pending.get(key(input));
+          if (prior !== undefined) return prior.receipt;
+          const now = yield* Clock.currentTimeMillis;
+          for (const [id, entry] of pending)
+            if (now - entry.at > 4 * 60 * 60 * 1000) pending.delete(id);
+          if (pending.size >= 1_000) return spoken("Too many voice requests are awaiting results.");
+          const threadId = yield* canonical(input.botId).pipe(Effect.option);
+          if (threadId._tag === "None")
+            return {
+              kind: "invalid_input",
+              output: { error: "canonical bot thread unavailable" },
+            } as const;
+          const outcome = yield* direct.value.call({ ...input, canonicalThreadId: threadId.value });
+          if (outcome.target === undefined) return outcome.result;
+          const receipt: VoiceToolOutcome = {
+            ...outcome.result,
+            completion: { requestToolCallId: input.toolCallId, pending: true },
+          };
+          const at = yield* Clock.currentTimeMillis;
+          pending.set(key(input), { callId: input.callId, target: outcome.target, at, receipt });
+          return receipt;
+        });
       if (NATIVE_EXECUTION_TOOLS.has(input.name))
-        return Effect.succeed(spoken(`Use ${T3_RUN_TASK} for that; native task execution is off.`));
+        return Effect.succeed(
+          spoken("Use direct T3 orchestration tools; native task execution is off."),
+        );
       switch (input.name) {
+        case "recall_text_messages":
+          return recall(input);
+        case "search_conversations":
+          return search(input);
+        case T3_CHAT_UPDATES:
+          return chatUpdates(input);
         case T3_RUN_TASK:
-          return runTask(input);
-        case T3_PROJECT_LIST:
-          return projectList;
+          return Effect.succeed(
+            spoken("Use direct T3 orchestration tools; voice chat relays are disabled."),
+          );
         case T3_TASK_PROGRESS:
           return progress(input);
         default:

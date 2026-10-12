@@ -598,6 +598,12 @@ function needsRecovery(
     }
     case "runtime":
       return (
+        projection.nodes.some(
+          (node) =>
+            node.kind === "call_parent" &&
+            node.runId === null &&
+            ["pending", "starting", "running", "waiting"].includes(node.status),
+        ) ||
         projection.runs.some(
           (run) =>
             ["preparing", "starting", "running", "waiting"].includes(run.status) ||
@@ -3710,6 +3716,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 SELECT thread_id FROM orchestration_v2_projection_runtime_requests
                 WHERE status = 'pending'
                 UNION
+                SELECT thread_id FROM orchestration_v2_projection_nodes
+                WHERE kind = 'call_parent' AND run_id IS NULL
+                  AND status IN ('pending', 'starting', 'running', 'waiting')
+                UNION
                 SELECT bindings.thread_id
                 FROM orchestration_v2_projection_provider_sessions AS sessions
                 CROSS JOIN orchestration_v2_projection_provider_session_bindings AS bindings
@@ -4126,7 +4136,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               WHERE node.thread_id = ${threadId}
                 AND node.status IN ('pending', 'starting', 'running', 'waiting')
                 AND (
-                  (node.run_id IS NULL AND node.kind = 'root_turn')
+                  (node.run_id IS NULL AND node.kind IN ('root_turn', 'call_parent'))
                   OR node.run_id IN (
                     SELECT run_id FROM orchestration_v2_projection_runs
                     WHERE thread_id = ${threadId}

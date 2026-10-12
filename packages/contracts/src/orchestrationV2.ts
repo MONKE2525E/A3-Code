@@ -18,6 +18,7 @@ import {
   ContextHandoffId,
   ContextTransferId,
   EventId,
+  EnvironmentId,
   IsoDateTime,
   MessageId,
   NodeId,
@@ -640,13 +641,27 @@ export const OrchestrationV2RunAttempt = Schema.Struct({
 });
 export type OrchestrationV2RunAttempt = typeof OrchestrationV2RunAttempt.Type;
 
+/** Authority of one server-owned live call; never a provider turn or run. */
+export const OrchestrationV2CallParent = Schema.Struct({
+  authorityId: TrimmedNonEmptyString,
+  environmentId: EnvironmentId,
+  accountId: TrimmedNonEmptyString,
+  botId: TrimmedNonEmptyString,
+  callId: TrimmedNonEmptyString,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+});
+export type OrchestrationV2CallParent = typeof OrchestrationV2CallParent.Type;
+
 export const OrchestrationV2ExecutionNode = Schema.Struct({
   id: NodeId,
   threadId: ThreadId,
   runId: Schema.NullOr(RunId),
   parentNodeId: Schema.NullOr(NodeId),
   rootNodeId: NodeId,
+  callParent: Schema.optional(OrchestrationV2CallParent),
   kind: Schema.Literals([
+    "call_parent",
     "root_turn",
     "assistant_message",
     "reasoning",
@@ -1231,6 +1246,8 @@ const GrokBotMessagePeer = Schema.Struct({
 });
 
 export const OrchestrationV2ConversationMessage = Schema.Struct({
+  /** Native spoken input stays in chat history but is not a written-message voice update. */
+  grokBotVoiceUtterance: Schema.optionalKey(Schema.Literal(true)),
   grokBotPeer: Schema.optional(GrokBotMessagePeer),
   grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
   /** A voice call row; its text is empty and native's summary arrives as the next message. */
@@ -3214,6 +3231,38 @@ export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
  * send them.
  */
 const OrchestrationV2InternalCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("call-parent.acquire"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    nodeId: NodeId,
+    authority: OrchestrationV2CallParent,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("call-parent.release"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    nodeId: NodeId,
+    authorityId: TrimmedNonEmptyString,
+  }),
+  /** Server-only delegation from a live runless call parent. */
+  Schema.Struct({
+    type: Schema.Literal("call.delegated_task.request"),
+    ...OrchestrationV2CreationFields,
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    parentRunId: Schema.Null,
+    parentNodeId: NodeId,
+    authority: OrchestrationV2CallParent,
+    projectId: Schema.optional(ProjectId),
+    task: TrimmedNonEmptyString,
+    title: Schema.optional(TrimmedNonEmptyString),
+    modelSelection: ModelSelection,
+    runtimeMode: RuntimeMode,
+    interactionMode: ProviderInteractionMode,
+    completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+    createdAt: Schema.optional(Schema.DateTimeUtc),
+  }),
   /** Moves an idle canonical bot conversation to its environment's No project storage. */
   Schema.Struct({
     type: Schema.Literal("grok-bot.thread.rebind"),

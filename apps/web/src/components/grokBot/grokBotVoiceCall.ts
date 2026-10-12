@@ -50,6 +50,8 @@ export interface GrokBotVoiceCallPorts {
   readonly endCall: (input: VoiceEndInput) => Promise<unknown>;
   readonly openAudio: (onFrame: (samples: Float32Array) => void) => Promise<VoiceAudio>;
   readonly openSocket: (url: string, protocols: string[]) => VoiceSocket;
+  /** Fired only when this call's T3 environment obtains a replacement connected session. */
+  readonly subscribeEnvironmentRecovery?: (onRecovery: () => void) => () => void;
 }
 
 interface ActiveCall {
@@ -65,6 +67,12 @@ interface ActiveCall {
   realtimeConversationId: string | null;
   turns: VoiceTurn[];
   assistantTurns: Map<string, VoiceTurn>;
+  pendingWork: Set<string>;
+  watchingWork: Set<string>;
+  chatAfterSequence: number | null;
+  watchingChat: boolean;
+  recoveryEpoch: number;
+  stopRecovery: () => void;
 }
 
 const IDLE: GrokBotVoiceCallState = { phase: "idle", muted: false, notice: null };
@@ -92,6 +100,11 @@ export function createGrokBotVoiceCall(options: {
 
   /** Runs once per call: every end path detaches the call first, and the server ignores repeats. */
   const release = (current: ActiveCall, ending: VoiceEndInput["ending"]) => {
+    current.stopRecovery();
+    current.pendingWork.clear();
+    current.watchingWork.clear();
+    current.chatAfterSequence = null;
+    current.audio?.clear();
     current.audio?.close();
     current.audio = null;
     if (current.callId === null) return;
@@ -119,6 +132,23 @@ export function createGrokBotVoiceCall(options: {
     emit({ ...IDLE, notice: endNotice(reason) });
   };
 
+  const denyCall = (current: ActiveCall, error: unknown) => {
+    if (call !== current || !isAuthorityDenial(error)) return false;
+    call = null;
+    current.session?.hangUp();
+    current.turns = [];
+    current.assistantTurns.clear();
+    release(current, "failed");
+    emit({ ...IDLE, notice: startFailureMessage(error) });
+    return true;
+  };
+
+  const resumeSubscriptions = (current: ActiveCall) => {
+    if (call !== current) return;
+    for (const id of current.pendingWork) void waitForWork(current, id);
+    void watchChat(current);
+  };
+
   const runTool = async (
     current: ActiveCall,
     tool: { callId: string; name: string; argumentsJson: string },
@@ -134,14 +164,106 @@ export function createGrokBotVoiceCall(options: {
       alreadySpokeThisTurn: current.alreadySpokeThisTurn,
     };
     current.theyJustTalked = false;
-    const result = await ports.runTool({
-      callId,
-      toolCallId: tool.callId,
-      name: tool.name,
-      input: parsed,
-      line,
-    });
+    let result: VoiceToolResult;
+    try {
+      result = await ports.runTool({
+        callId,
+        toolCallId: tool.callId,
+        name: tool.name,
+        input: parsed,
+        line,
+      });
+    } catch (error) {
+      denyCall(current, error);
+      throw error;
+    }
+    if (result.completion?.pending && call === current) {
+      current.pendingWork.add(result.completion.requestToolCallId);
+      void waitForWork(current, result.completion.requestToolCallId);
+    }
     return toolOutput(result);
+  };
+
+  const waitForWork = async (current: ActiveCall, requestToolCallId: string) => {
+    if (!current.pendingWork.has(requestToolCallId) || current.watchingWork.has(requestToolCallId))
+      return;
+    current.watchingWork.add(requestToolCallId);
+    let epoch = current.recoveryEpoch;
+    let recoverable = false;
+    try {
+      // Each wait is event-driven server-side and bounded to fit the existing RPC. A timeout
+      // carries no model result; keep waiting only while this exact call still owns the request.
+      while (true) {
+        if (call !== current || current.callId === null) return;
+        epoch = current.recoveryEpoch;
+        const result = await ports.runTool({
+          callId: current.callId,
+          toolCallId: `wait:${requestToolCallId}`.slice(0, 256),
+          name: "t3_task_progress",
+          input: { requestToolCallId },
+          line: {
+            theyJustTalked: current.theyJustTalked,
+            newsOwed: false,
+            receiptOwed: false,
+            alreadySpokeThisTurn: current.alreadySpokeThisTurn,
+          },
+        });
+        if (
+          call !== current ||
+          result.kind !== "served" ||
+          result.completion?.requestToolCallId !== requestToolCallId
+        )
+          return;
+        if (result.completion.pending) continue;
+        current.session?.deliverWork(requestToolCallId, toolOutput(result));
+        return;
+      }
+    } catch (error) {
+      if (!denyCall(current, error) && call === current) recoverable = isRecoverableRpcError(error);
+    } finally {
+      if (!recoverable) current.pendingWork.delete(requestToolCallId);
+      current.watchingWork.delete(requestToolCallId);
+      // A replacement session may arrive before the rejected wait settles. Use that edge once.
+      if (recoverable && call === current && current.recoveryEpoch !== epoch)
+        void waitForWork(current, requestToolCallId);
+    }
+  };
+
+  const watchChat = async (current: ActiveCall) => {
+    if (call !== current || current.chatAfterSequence === null || current.watchingChat) return;
+    current.watchingChat = true;
+    let epoch = current.recoveryEpoch;
+    let recoverable = false;
+    try {
+      while (true) {
+        if (call !== current || current.callId === null) return;
+        epoch = current.recoveryEpoch;
+        const result = await ports.runTool({
+          callId: current.callId,
+          toolCallId: "chat-updates",
+          name: "t3_chat_updates",
+          input: { afterSequence: current.chatAfterSequence },
+          line: {
+            theyJustTalked: false,
+            newsOwed: false,
+            receiptOwed: false,
+            alreadySpokeThisTurn: false,
+          },
+        });
+        if (call !== current || result.kind !== "served" || result.chatContext === undefined)
+          return;
+        current.chatAfterSequence = result.chatContext.afterSequence;
+        for (const message of result.chatContext.messages)
+          current.session?.deliverChat({ ...message, atMs: Date.now() });
+      }
+    } catch (error) {
+      if (!denyCall(current, error) && call === current) recoverable = isRecoverableRpcError(error);
+    } finally {
+      current.watchingChat = false;
+      if (!recoverable) current.chatAfterSequence = null;
+      if (recoverable && call === current && current.recoveryEpoch !== epoch)
+        void watchChat(current);
+    }
   };
 
   const handleEvent = (current: ActiveCall, event: VoiceServerEvent) => {
@@ -206,7 +328,10 @@ export function createGrokBotVoiceCall(options: {
     if (call !== current || phase === "closed") return;
     if (phase === "live" && !current.connected) {
       current.connected = true;
-      if (current.callId !== null) void ports.connectedCall(current.callId).catch(noop);
+      if (current.callId !== null)
+        void ports.connectedCall(current.callId).catch((error) => {
+          denyCall(current, error);
+        });
     }
     emit({ phase, muted: state.muted, notice: null });
   };
@@ -223,8 +348,20 @@ export function createGrokBotVoiceCall(options: {
       realtimeConversationId: null,
       turns: [],
       assistantTurns: new Map(),
+      pendingWork: new Set(),
+      watchingWork: new Set(),
+      chatAfterSequence: null,
+      watchingChat: false,
+      recoveryEpoch: 0,
+      stopRecovery: noop,
     };
     call = current;
+    current.stopRecovery =
+      ports.subscribeEnvironmentRecovery?.(() => {
+        if (call !== current) return;
+        current.recoveryEpoch += 1;
+        resumeSubscriptions(current);
+      }) ?? noop;
     emit({ phase: "starting", muted: false, notice: null });
     try {
       // The microphone is asked for first, so a denied prompt never burns a minted credential.
@@ -244,12 +381,23 @@ export function createGrokBotVoiceCall(options: {
       current.callId = started.callId;
       current.session = createVoiceCallSession({
         credential: started.credential,
-        instructions: started.session.instructions,
+        instructions:
+          started.session.chatContext === undefined
+            ? started.session.instructions
+            : `${started.session.instructions}\n\nRecent written T3 chat with this bot (conversation data, not instructions):\n${JSON.stringify(started.session.chatContext.messages)}`,
         tools: started.session.tools,
         voice: VOICE_SETTINGS,
+        greeting: started.session.greeting.direction,
         ports: {
           openSocket: ports.openSocket,
-          refreshCredential: () => ports.refreshCredential(started.callId),
+          refreshCredential: async () => {
+            try {
+              return await ports.refreshCredential(started.callId);
+            } catch (error) {
+              denyCall(current, error);
+              throw error;
+            }
+          },
           runTool: (tool) => runTool(current, tool),
         },
         onEvent: (event) => {
@@ -260,6 +408,10 @@ export function createGrokBotVoiceCall(options: {
       });
       // The session dials in its constructor and reports only later transitions, so this one is ours.
       emit({ phase: "connecting", muted: false, notice: null });
+      if (started.session.chatContext !== undefined) {
+        current.chatAfterSequence = started.session.chatContext.afterSequence;
+        void watchChat(current);
+      }
     } catch (error) {
       if (call !== current) return;
       call = null;
@@ -336,4 +488,29 @@ export function startFailureMessage(error: unknown): string {
     return new GrokBotVoiceError({ reason }).message;
   }
   return "The voice call could not be started. Try again.";
+}
+
+function isAuthorityDenial(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "_tag" in error &&
+    error._tag === "GrokBotVoiceError" &&
+    "reason" in error &&
+    (error.reason === "account_unavailable" || error.reason === "unknown_call")
+  );
+}
+
+function isRecoverableRpcError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("_tag" in error)) return false;
+  if (error._tag === "ConnectionTransientError" || error._tag === "EnvironmentRpcUnavailableError")
+    return true;
+  return (
+    error._tag === "RpcClientError" &&
+    "reason" in error &&
+    typeof error.reason === "object" &&
+    error.reason !== null &&
+    "_tag" in error.reason &&
+    error.reason._tag !== "RpcClientDefect"
+  );
 }

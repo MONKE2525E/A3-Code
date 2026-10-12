@@ -2,12 +2,13 @@ import { MicIcon, MicOffIcon, PhoneOffIcon } from "lucide-react";
 import { useState } from "react";
 
 import { Button } from "../ui/button";
-import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { Alert, AlertDescription } from "../ui/alert";
+import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 import type { PinnedGrokBotVoiceCall } from "./useGrokBotVoiceCall";
 import { useGrokBotVoiceCall } from "./useGrokBotVoiceCall";
-import { GrokBotVoiceCallPanel, voiceCallStatusLabel } from "./GrokBotVoiceCallPanel";
+import { voiceCallStatusLabel } from "./GrokBotVoiceCallPanel";
 
 /**
  * A compact, always-visible indicator for a live call, mounted in the app shell so it shows on every
@@ -28,17 +29,21 @@ function LiveCallDock(props: {
   const [open, setOpen] = useState(false);
   const { state } = call;
 
-  // Docked just under the top bar, right-aligned: the composer sits at the bottom of the viewport on
-  // every width, so a bottom dock would cover it. Bounded by the gutters so it never leaves the screen.
+  // The shell reserves this footer below the route, so the composer and tool panels shrink with it.
   return (
-    <div className="pointer-events-none fixed top-[calc(var(--workspace-controls-top)+var(--workspace-topbar-height)+0.25rem)] right-(--workspace-controls-right) left-(--workspace-controls-left) z-50 flex justify-end">
-      <div className="pointer-events-auto flex max-w-full items-center gap-1 rounded-full border border-border bg-popover p-1 shadow-lg/5 [-webkit-app-region:no-drag]">
+    <div
+      role="region"
+      aria-label="Active voice call"
+      className="flex shrink-0 justify-end border-t border-border bg-background px-2 pb-safe"
+    >
+      <div className="flex min-h-11 min-w-0 max-w-full items-center gap-1 py-1 sm:min-h-0 [-webkit-app-region:no-drag]">
         <Popover open={open} onOpenChange={setOpen}>
           <PopoverTrigger
             render={
               <Button
                 variant="ghost"
                 size="sm"
+                className="min-w-0 shrink"
                 aria-label={`Call ${call.botName}, ${voiceCallStatusLabel(state)}`}
               />
             }
@@ -52,13 +57,20 @@ function LiveCallDock(props: {
             </Tooltip>
             <span className="shrink-0 text-muted-foreground">{voiceCallStatusLabel(state)}</span>
           </PopoverTrigger>
-          <PopoverPopup align="end" side="bottom" className="w-72">
-            <GrokBotVoiceCallPanel
-              botName={call.botName}
-              state={state}
-              onSetMuted={onSetMuted}
-              onHangUp={onHangUp}
-            />
+          <PopoverPopup align="end" side="top" width="sm">
+            <div className="flex min-w-0 flex-col gap-3">
+              <div className="flex min-w-0 flex-col gap-1">
+                <PopoverTitle>Call {call.botName}</PopoverTitle>
+                <p className="text-xs text-muted-foreground" aria-live="polite">
+                  {voiceCallStatusLabel(state)}
+                </p>
+              </div>
+              {state.notice !== null ? (
+                <Alert variant="warning" aria-live="polite">
+                  <AlertDescription>{state.notice}</AlertDescription>
+                </Alert>
+              ) : null}
+            </div>
           </PopoverPopup>
         </Popover>
         <Button

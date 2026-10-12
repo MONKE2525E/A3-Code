@@ -3,6 +3,7 @@ import { StarIcon } from "lucide-react";
 import {
   type ComponentRef,
   type CSSProperties,
+  useContext,
   useEffect,
   useId,
   useMemo,
@@ -20,7 +21,11 @@ import {
   hoverGazeAt,
   loadGrokBotAvatarEngine,
 } from "./grokBotAvatarEngine";
-import type { GrokBotActivity } from "./grokBotActivity";
+import {
+  type GrokBotAvatarActivity,
+  resolveGrokBotVoiceCallActivity,
+} from "./grokBotVoiceCallActivity";
+import { GrokBotVoiceCallContext } from "./useGrokBotVoiceCall";
 import { GROK_BOT_AVATAR_COLORS } from "./grokBotAvatarShapes";
 import type { GrokBotStatusDot } from "./grokBotStatusDots";
 import { resolveGrokBotAvatarColor, resolveGrokBotAvatarKind } from "./grokBotPresentation";
@@ -41,7 +46,7 @@ const CLICK_POKES = ["spin", "bounce", "nod"] as const;
  * Turn-in-progress states play the same idle clips a bot shows on hover, so they animate
  * exactly like a resting bot.
  */
-const IDLE_LOOKING_STATES: ReadonlySet<GrokBotActivity> = new Set<GrokBotActivity>([
+const IDLE_LOOKING_STATES: ReadonlySet<GrokBotAvatarActivity> = new Set<GrokBotAvatarActivity>([
   "loading",
   "sending",
   "thinking",
@@ -65,7 +70,7 @@ type GrokBotAvatarProps = {
   /** Overrides the size token with an exact CSS box, in pixels. */
   readonly fillPx?: number;
   readonly featured?: boolean;
-  readonly state?: GrokBotActivity | undefined;
+  readonly state?: GrokBotAvatarActivity | undefined;
   /** Sidebar status in the bottom-right corner; absent when the surface does not show one. */
   readonly statusDot?: GrokBotStatusDot | null;
   /** Each change spins the bot once. */
@@ -97,18 +102,26 @@ type GrokBotAvatarProps = {
  * Like the app, a bot that enters "happy" or whose look changes spins and bounces once.
  */
 export function GrokBotAvatar(props: GrokBotAvatarProps) {
-  const engine = useGrokBotAvatarEngine(props.environmentId);
+  const selectedEnvironmentId = useSelectedGrokBotEnvironmentId();
+  const environmentId = props.environmentId ?? selectedEnvironmentId;
+  // Catalogs and other standalone surfaces can render outside the call provider.
+  const voiceCall = useContext(GrokBotVoiceCallContext);
+  const state = resolveGrokBotVoiceCallActivity({
+    call: voiceCall?.call ?? null,
+    environmentId,
+    botId: props.bot.id,
+    activity: props.state,
+  });
+  const engine = useGrokBotAvatarEngine(environmentId);
   return engine === null ? (
     <GrokBotAvatarFallback {...props} />
   ) : (
-    <GrokBotEngineAvatar engine={engine} {...props} />
+    <GrokBotEngineAvatar engine={engine} {...props} state={state} />
   );
 }
 
 /** The engine lives per environment, so the avatar follows the selected Grok Bot environment. */
-function useGrokBotAvatarEngine(override?: EnvironmentId): GrokBotAvatarEngine | null {
-  const selectedEnvironmentId = useSelectedGrokBotEnvironmentId();
-  const environmentId = override ?? selectedEnvironmentId;
+function useGrokBotAvatarEngine(environmentId: EnvironmentId | null): GrokBotAvatarEngine | null {
   const query = useEnvironmentQuery(
     environmentId === null ? null : grokBotAvatarEngineQuery({ environmentId, input: {} }),
   );
