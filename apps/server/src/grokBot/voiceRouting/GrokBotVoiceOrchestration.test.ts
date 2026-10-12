@@ -1,5 +1,5 @@
 import { assert, it } from "@effect/vitest";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, OrchestratorMcpFailure } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -20,6 +20,7 @@ import * as Git from "../../vcs/GitVcsDriver.ts";
 import * as Voice from "./GrokBotVoiceOrchestration.ts";
 
 // Real checked MCP handlers; external services would fail if either refusal reached execution.
+let acquisitionFailure: OrchestratorMcpFailure | undefined;
 const harness = Voice.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -37,14 +38,16 @@ const harness = Voice.layer.pipe(
       Layer.succeed(Config.ServerConfig, {} as never),
       Layer.succeed(Orchestrator.OrchestratorMcpService, {
         acquireCallInvocation: () =>
-          Effect.succeed({
-            environmentId: EnvironmentId.make("voice-env"),
-            issuedAt: 0,
-            capabilities: new Set(["orchestration"]),
-            requestNamespace: "voice-call",
-            thread: undefined,
-            client: { sessionId: "call", label: "Voice call", access: "approval-required" },
-          }),
+          acquisitionFailure !== undefined
+            ? Effect.fail(acquisitionFailure)
+            : Effect.succeed({
+                environmentId: EnvironmentId.make("voice-env"),
+                issuedAt: 0,
+                capabilities: new Set(["orchestration"]),
+                requestNamespace: "voice-call",
+                thread: undefined,
+                client: { sessionId: "call", label: "Voice call", access: "approval-required" },
+              }),
         validateCallInvocation: () => Effect.void,
         restrictCallInvocation: (
           scope: import("../../mcp/McpInvocationContext.ts").McpInvocationScope,
@@ -89,6 +92,42 @@ const caller = {
   canonicalThreadId: "canonical-bot-thread",
 };
 
+it.effect("preserves an authority acquisition failure and can acquire again after recovery", () =>
+  Effect.gen(function* () {
+    const voice = yield* Voice.GrokBotVoiceOrchestration;
+    acquisitionFailure = new OrchestratorMcpFailure({
+      code: "thread_not_found",
+      message: "The call conversation is archived. Reopen it before calling.",
+    });
+    yield* voice.activate(caller);
+    const failed = yield* voice.call({
+      ...caller,
+      access: "operate",
+      name: "orchestrator_capabilities",
+      input: {},
+    });
+    assert.strictEqual(failed.result.kind, "invalid_input");
+    assert.include((failed.result.output as { error: string }).error, "archived");
+    acquisitionFailure = undefined;
+    yield* voice.activate(caller);
+    const recovered = yield* voice.call({
+      ...caller,
+      access: "operate",
+      name: "orchestrator_capabilities",
+      input: {},
+    });
+    assert.strictEqual(recovered.result.kind, "served");
+    yield* voice.forget(caller.callId);
+  }).pipe(
+    Effect.provide(harness),
+    Effect.ensuring(
+      Effect.sync(() => {
+        acquisitionFailure = undefined;
+      }),
+    ),
+  ),
+);
+
 it.effect(
   "direct call tools require activation and preserve the checked MCP read-only ceiling",
   () =>
@@ -120,7 +159,7 @@ it.effect(
         name: "t3_thread_launch",
         input: { title: "Read-only launch", scratch: true, runtimeMode: "full-access" },
       });
-      assert.strictEqual(denied.result.kind, "served");
+      assert.strictEqual(denied.result.kind, "invalid_input");
       assert.strictEqual((denied.result.output as { code: string }).code, "capability_denied");
       assert.isUndefined(denied.target);
       const noParent = yield* voice.call({

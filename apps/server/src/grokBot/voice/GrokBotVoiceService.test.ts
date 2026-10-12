@@ -479,7 +479,7 @@ it.effect("refuses stale connector tools locally, in whichever environment the c
     yield* Effect.gen(function* () {
       const voice = yield* Voice.GrokBotVoiceService;
       const call = yield* voice.start(start);
-      for (const name of ["t3_thread_send", "t3-code__delegate_task", ""]) {
+      for (const name of ["t3-code__t3_thread_send", "t3-code__delegate_task", ""]) {
         const result = yield* voice.tool({ callId: call.callId, ...request, name }, "operate");
         assert.strictEqual(result.kind, "unknown_tool");
       }

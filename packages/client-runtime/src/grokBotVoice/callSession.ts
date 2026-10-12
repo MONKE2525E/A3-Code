@@ -71,9 +71,9 @@ const NORMAL = 1000;
 // Each response drains at most eight results; payload and identity retention are call-local.
 const MAX_QUEUED_RESULTS = 64;
 const MAX_QUEUED_BYTES = 256 * 1024;
-const MAX_OUTPUT_BYTES = 16_000;
+const MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_BATCH_RESULTS = 8;
-const MAX_BATCH_BYTES = 32 * 1024;
+const MAX_BATCH_BYTES = 128 * 1024;
 const MAX_RETAINED_IDS = 512;
 const encoder = new TextEncoder();
 const bytes = (text: string) => encoder.encode(text).byteLength;
@@ -86,7 +86,11 @@ const availableInT3 =
 const boundedOutput = (output: string) =>
   output.length <= MAX_OUTPUT_BYTES && bytes(JSON.stringify(output)) <= MAX_OUTPUT_BYTES
     ? output
-    : JSON.stringify({ status: "landed", updates: [availableInT3] });
+    : JSON.stringify({
+        error: "result_too_large",
+        message:
+          "The tool result exceeds the voice limit. Narrow the query and request a smaller result.",
+      });
 
 /**
  * One call's realtime lifecycle: handshake, session setup, tool brokering, mute, hang-up, and
@@ -121,6 +125,9 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
   let responseInFlight = false;
   // Failed delivery waits for a caller speech cycle or a replacement socket.
   let deliveryPaused = false;
+  let responseRetryTimer: unknown = null;
+  let responseRequestTimer: unknown = null;
+  let responseRetries = 0;
 
   let callerSpeaking = false;
   let greeted = false;
@@ -148,6 +155,41 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
     overflow: number;
   } | null = null;
   let activeResponseId: string | null = null;
+  const clearResponseRequest = () => {
+    if (responseRequestTimer !== null) timers.clearTimeout(responseRequestTimer);
+    responseRequestTimer = null;
+  };
+  const retryResponse = () => {
+    clearResponseRequest();
+    responseInFlight = false;
+    if (delivery === null && receipts.size === 0 && work.size === 0) greeted = false;
+    delivery = null;
+    sentReceipts.clear();
+    deliveryPaused = true;
+    if (responseRetries++ === 0) {
+      responseRetryTimer = timers.setTimeout(() => {
+        responseRetryTimer = null;
+        if (phase !== "live") return;
+        deliveryPaused = false;
+        flushResponses();
+      }, 500);
+    }
+  };
+  const requestResponse = (instructions: string | null) => {
+    responseInFlight = true;
+    clearResponseRequest();
+    responseRequestTimer = timers.setTimeout(() => {
+      responseRequestTimer = null;
+      if (phase !== "live" || !responseInFlight || activeResponseId !== null) return;
+      input.onEvent({
+        type: "error",
+        message:
+          "The voice server did not start a response. Results are retained; delivery retries once.",
+      });
+      retryResponse();
+    }, 10_000);
+    socket?.send(responseCreateFrame(instructions));
+  };
   const flushChat = () => {
     if (!configured || phase !== "live" || !socket?.isOpen) return;
     for (const [id, message] of chat) socket.send(writtenChatFrame({ id, ...message }));
@@ -197,38 +239,34 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
       }
     }
     delivery = { kind: "work", ids, overflow: overflowSent };
-    responseInFlight = true;
-    socket.send(responseCreateFrame(null));
+    requestResponse(null);
   };
 
   const flushResponses = () => {
     if (!configured || deliveryPaused || callerSpeaking || phase !== "live" || !socket?.isOpen)
       return;
     // Outputs may arrive during the model's tool-request response. Keep them for its follow-up.
-    let count = sentReceipts.size;
-    let batchBytes = [...sentReceipts].reduce(
-      (total, id) => total + bytes(functionCallOutputFrame(id, receipts.get(id)!)),
-      0,
-    );
+    // Realtime requires every parallel function output before its continuation. Work nudges
+    // can be batched, but splitting function receipts across spoken responses strands tools.
     for (const [callId, output] of receipts) {
       if (sentReceipts.has(callId)) continue;
       const frame = functionCallOutputFrame(callId, output);
-      const size = bytes(frame);
-      if (count >= MAX_BATCH_RESULTS || batchBytes + size > MAX_BATCH_BYTES) break;
       socket.send(frame);
       sentReceipts.add(callId);
-      batchBytes += size;
-      count += 1;
     }
-    if (responseInFlight || callerSpeaking) return;
+    // Parallel tools must all return a result or a running receipt before continuation.
+    if (
+      responseInFlight ||
+      callerSpeaking ||
+      [...pendingTools].some((id) => !acknowledgedTools.has(id))
+    )
+      return;
     if (!greeted) {
       greeted = true;
-      responseInFlight = true;
-      socket.send(responseCreateFrame(input.greeting?.trim() || null));
+      requestResponse(input.greeting?.trim() || null);
     } else if (sentReceipts.size > 0) {
       delivery = { kind: "receipt", ids: [...sentReceipts], overflow: 0 };
-      responseInFlight = true;
-      socket.send(responseCreateFrame(null));
+      requestResponse(null);
     } else flushWork();
   };
 
@@ -242,6 +280,9 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
     if (phase === "closed") return;
     generation += 1;
     work.clear();
+    clearResponseRequest();
+    if (responseRetryTimer !== null) timers.clearTimeout(responseRetryTimer);
+    responseRetryTimer = null;
     for (const timer of toolProgressTimers) timers.clearTimeout(timer);
     toolProgressTimers.clear();
     receipts.clear();
@@ -257,6 +298,10 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
 
   const attach = (credential: VoiceRealtimeCredential, reconnecting: boolean) => {
     configured = false;
+    clearResponseRequest();
+    if (responseRetryTimer !== null) timers.clearTimeout(responseRetryTimer);
+    responseRetryTimer = null;
+    responseRetries = 0;
     deliveryPaused = false;
     responseInFlight = false;
     if (activeResponseId !== null) remember(endedResponses, activeResponseId);
@@ -353,6 +398,7 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
       } else if (event.type === "response.created") {
         if (event.responseId !== null && endedResponses.has(event.responseId)) return;
         if (activeResponseId !== null && activeResponseId !== event.responseId) return;
+        clearResponseRequest();
         responseInFlight = true;
         activeResponseId = event.responseId;
       } else if (event.type === "response.ended") {
@@ -362,6 +408,7 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
         )
           return;
         if (!responseInFlight) return;
+        clearResponseRequest();
         if (activeResponseId !== null) remember(endedResponses, activeResponseId);
         // An ID-less terminal event cannot acknowledge an identified response. Treat it as
         // interrupted, preserving its delivery, rather than stranding a native cancellation.
@@ -396,7 +443,15 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
                 "Voice response did not complete. Results are saved; speak again or reconnect to retry.",
             });
         }
+        if (completed) responseRetries = 0;
         flushResponses();
+      } else if (event.type === "error") {
+        // A rejected response.create has no response.done. Release its reservation and retry
+        // delivery once without executing any tool again. An active response still waits for
+        // its terminal event so we never overlap speech.
+        if (responseInFlight && activeResponseId === null) {
+          retryResponse();
+        }
       } else if (event.type === "speech.started") {
         callerSpeaking = true;
       } else if (event.type === "speech.stopped") {
@@ -409,6 +464,7 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
     next.onClose(({ code, clean }) => {
       if (mine !== generation || phase === "closed") return;
       socket = null;
+      clearResponseRequest();
       clearTimers();
       // A clean remote close ends the call; an abrupt close or our own reconnect code is a dropped path.
       const recoverable = code === GOING_AWAY || !clean;
@@ -482,18 +538,25 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
     try {
       output = await ports.runTool(call);
     } catch {
-      output = JSON.stringify({ error: "tool_failed" });
+      output = JSON.stringify({
+        error: "tool_failed",
+        tool: call.name,
+        message:
+          "T3 could not return this tool's result. Tell the caller it failed. Do not claim success or repeat a write automatically.",
+      });
     }
     timers.clearTimeout(progressTimer);
     toolProgressTimers.delete(progressTimer);
     // Socket generations share the call's tool identity; only ending the call invalidates it.
     if (phase === "closed") return;
     output = boundedOutput(output);
-    // Reserve space for every admitted tool, even when all 64 receipts finish together.
-    if (bytes(JSON.stringify(output)) > 4096)
-      output = JSON.stringify({ status: "landed", updates: [availableInT3] });
-    if (queuedReceiptBytes + bytes(output) > MAX_QUEUED_BYTES) {
-      output = JSON.stringify({ status: "landed", updates: [availableInT3] });
+    // Reserve a small failure receipt for every admitted tool even if large results fill the queue.
+    if (queuedReceiptBytes + bytes(output) > MAX_QUEUED_BYTES - MAX_QUEUED_RESULTS * 512) {
+      output = JSON.stringify({
+        error: "voice_result_capacity",
+        message:
+          "The voice result queue is full. Read the result in T3 before requesting more work.",
+      });
     }
     pendingTools.delete(call.callId);
     acknowledgedTools.delete(call.callId);

@@ -42,6 +42,13 @@ interface VoiceToolDescriptor {
 export const T3_VOICE_TOOLS: ReadonlyArray<VoiceToolDescriptor> = [
   {
     type: "function",
+    name: T3_TASK_PROGRESS,
+    description:
+      "Get the number of this call's delegated tasks and thread runs still awaiting a result. Use task_status for a specific task. This does not launch or wait for work.",
+    parameters: { type: "object", properties: {} },
+  },
+  {
+    type: "function",
     name: "recall_text_messages",
     description:
       "Read recent written messages in this bot's canonical T3 chat, including messages imported from its native chat. This reads current history, including messages sent during this call.",
@@ -63,7 +70,7 @@ export const T3_VOICE_TOOLS: ReadonlyArray<VoiceToolDescriptor> = [
 
 /** Execution belongs to this call; independent threads still require an explicit request. */
 export const T3_VOICE_INSTRUCTIONS =
-  "Use the T3 orchestration functions on this call directly. Delegate work with delegate_task, choosing models from orchestrator_capabilities; use task_status and task_cancel for this call’s tasks. Completed delegated work is delivered back to this live call automatically. This call has approval-required permissions. send_task and t3_run_task are disabled. Use t3_thread_launch only when the caller requests independent work in a new thread. Recall and search read this bot’s canonical chat in this T3 environment.";
+  "Use the T3 orchestration functions on this call directly. First discover providers and exact model IDs with orchestrator_capabilities and find the project with t3_project_list. Delegate work with delegate_task in async mode; use task_status and task_cancel for this call’s tasks. Completed delegated work is delivered back to this live call automatically. A running receipt means the operation continues in the background: acknowledge it briefly, then keep answering the caller. Use t3_task_progress for this call's pending-work count. Tell the caller immediately when a tool fails, explain its error and the next step, and never claim that rejected or unknown work succeeded. Do not silently stop or repeatedly retry a failed write. This call has approval-required permissions; explain when a child needs the user's approval in T3. send_task and t3_run_task are disabled. Use t3_thread_launch only when the caller requests independent work in a new thread. Read, message, interrupt and update existing threads using the direct tools; scheduling requires the caller's explicit request. Recall and search read this bot’s canonical chat in this T3 environment.";
 
 /**
  * A session's tools are an allowlist: only native conversation controls (plain `function` tools by
@@ -189,11 +196,6 @@ export class GrokBotVoiceT3Bridge extends Context.Service<
   }
 >()("t3/grokBot/voiceRouting/GrokBotVoiceT3Bridge") {}
 
-const progressText = (run: { status: string } | undefined) =>
-  run === undefined
-    ? "No T3 work has been started for this bot yet."
-    : `The latest T3 run is ${run.status}.`;
-
 const make = Effect.gen(function* () {
   const threads = yield* GrokBotThreadService.GrokBotThreadService;
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
@@ -208,6 +210,7 @@ const make = Effect.gen(function* () {
       target: Direct.VoiceWorkTarget;
       at: number;
       receipt: VoiceToolOutcome;
+      settled: boolean;
     }
   >();
   const key = (input: VoiceToolCall, toolCallId = input.toolCallId) =>
@@ -347,6 +350,7 @@ const make = Effect.gen(function* () {
           // Ending a call removes the entry while its wait is in flight.
           if (pending.get(key(input, requestToolCallId)) !== target)
             return { kind: "invalid_input", output: { error: "unknown voice request" } } as const;
+          if (!result.pending) target.settled = true;
           return {
             ...result.result,
             ...(result.result.kind === "served"
@@ -386,6 +390,7 @@ const make = Effect.gen(function* () {
         // Only the selected launch run's final text is its result. Other requests and native
         // chat updates must not be delivered as completion of this work.
         const runId = target.target.runId;
+        target.settled = true;
         const final = records.value.messages.findLast(
           (message) =>
             message.runId === runId &&
@@ -403,14 +408,19 @@ const make = Effect.gen(function* () {
           completion: { requestToolCallId, pending: false },
         } as const;
       }
-      const opened = yield* threads.open({ botId: input.botId }).pipe(Effect.option);
-      if (opened._tag === "None") return spoken("T3 is not ready for this bot.");
-      const read = yield* threadManagement
-        .getThreadRecords(ThreadId.make(opened.value.threadId), ["runs"])
-        .pipe(Effect.option);
-      if (read._tag === "None") return spoken("T3 progress is unavailable right now.");
-      const latest = read.value.runs.toSorted((a, b) => b.ordinal - a.ordinal)[0];
-      return spoken(progressText(latest));
+      const count = [...pending.values()].filter(
+        (entry) => entry.callId === input.callId && !entry.settled,
+      ).length;
+      return {
+        kind: "served",
+        output: {
+          pending: count,
+          message:
+            count === 0
+              ? "This call has no work awaiting a result."
+              : `${count} operation(s) from this call are still awaiting results. Use task_status for a specific delegated task.`,
+        },
+      } as const;
     });
 
   return GrokBotVoiceT3Bridge.of({
@@ -470,7 +480,13 @@ const make = Effect.gen(function* () {
             completion: { requestToolCallId: input.toolCallId, pending: true },
           };
           const at = yield* Clock.currentTimeMillis;
-          pending.set(key(input), { callId: input.callId, target: outcome.target, at, receipt });
+          pending.set(key(input), {
+            callId: input.callId,
+            target: outcome.target,
+            at,
+            receipt,
+            settled: false,
+          });
           return receipt;
         });
       if (NATIVE_EXECUTION_TOOLS.has(input.name))

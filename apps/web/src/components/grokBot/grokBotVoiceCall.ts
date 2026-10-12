@@ -174,8 +174,22 @@ export function createGrokBotVoiceCall(options: {
         line,
       });
     } catch (error) {
-      denyCall(current, error);
+      if (!denyCall(current, error) && call === current) {
+        const message = isRecoverableRpcError(error)
+          ? "The T3 connection interrupted this tool. Its outcome is unknown. Check its status before retrying a write."
+          : "T3 could not execute this tool. Try a smaller read, or check the call's permissions.";
+        emit({ ...state, notice: message });
+        return JSON.stringify({ error: "tool_failed", tool: tool.name, message });
+      }
       throw error;
+    }
+    if (result.kind !== "served" && call === current) {
+      emit({
+        ...state,
+        notice: `Call tool ${tool.name.slice(0, 100)} failed. ${toolFailureMessage(result)}`,
+      });
+    } else if (call === current && state.notice !== null) {
+      emit({ ...state, notice: null });
     }
     if (result.completion?.pending && call === current) {
       current.pendingWork.add(result.completion.requestToolCallId);
@@ -208,18 +222,38 @@ export function createGrokBotVoiceCall(options: {
             alreadySpokeThisTurn: current.alreadySpokeThisTurn,
           },
         });
+        if (call !== current) return;
         if (
-          call !== current ||
           result.kind !== "served" ||
           result.completion?.requestToolCallId !== requestToolCallId
-        )
+        ) {
+          if (result.kind === "served") return;
+          const message =
+            "T3 could not retrieve this call's work result. Its status is unknown; ask for task_status before retrying.";
+          emit({ ...state, notice: message });
+          current.session?.deliverWork(
+            requestToolCallId,
+            JSON.stringify({ error: "task_watch_failed", message }),
+          );
           return;
+        }
         if (result.completion.pending) continue;
+        if (state.notice !== null) emit({ ...state, notice: null });
         current.session?.deliverWork(requestToolCallId, toolOutput(result));
         return;
       }
     } catch (error) {
-      if (!denyCall(current, error) && call === current) recoverable = isRecoverableRpcError(error);
+      if (!denyCall(current, error) && call === current) {
+        recoverable = isRecoverableRpcError(error);
+        const message = recoverable
+          ? "The T3 connection dropped while checking work. Results will resume when it reconnects."
+          : "T3 could not check this call's work. Ask for its status before retrying.";
+        emit({ ...state, notice: message });
+        current.session?.deliverWork(
+          `watch-error:${requestToolCallId}:${epoch}`,
+          JSON.stringify({ error: "task_watch_failed", message }),
+        );
+      }
     } finally {
       if (!recoverable) current.pendingWork.delete(requestToolCallId);
       current.watchingWork.delete(requestToolCallId);
@@ -310,6 +344,14 @@ export function createGrokBotVoiceCall(options: {
       }
       case "response.ended":
         current.alreadySpokeThisTurn = false;
+        return;
+      case "error":
+        if (state.notice === null)
+          emit({
+            ...state,
+            notice:
+              "The voice response failed. Tool results are retained. Speak again or reconnect if the bot stays quiet.",
+          });
         return;
       default:
         return;
@@ -461,12 +503,24 @@ export function toolOutput(result: VoiceToolResult): string {
         ? (result.output as Record<string, unknown>)
         : {};
     return JSON.stringify({
-      error: typeof output.error === "string" ? output.error.slice(0, 500) : result.kind,
+      error: toolFailureMessage(result),
       ...(typeof output.code === "string" ? { code: output.code.slice(0, 100) } : {}),
       ...(typeof output.tool === "string" ? { tool: output.tool.slice(0, 100) } : {}),
     });
   }
   return JSON.stringify(result.output) ?? "{}";
+}
+
+function toolFailureMessage(result: VoiceToolResult): string {
+  const output =
+    result.output !== null && typeof result.output === "object"
+      ? (result.output as Record<string, unknown>)
+      : {};
+  return typeof output.error === "string"
+    ? output.error.slice(0, 500)
+    : typeof output.message === "string"
+      ? output.message.slice(0, 500)
+      : result.kind;
 }
 
 function endNotice(reason: VoiceCallEnd): string | null {

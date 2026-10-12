@@ -135,6 +135,74 @@ const flush = async () => {
 };
 
 describe("grok bot voice call", () => {
+  it("shows a rejected tool's reason and returns it for a spoken explanation", async () => {
+    const h = harness({
+      runTool: async () => ({
+        kind: "invalid_input",
+        output: { code: "capability_denied", message: "This call requires approval in T3." },
+      }),
+    });
+    await h.call.start();
+    const fake = h.sockets[0]!.fake;
+    fake.listeners.message(ready);
+    fake.listeners.message(JSON.stringify({ type: "session.updated" }));
+    fake.listeners.message(JSON.stringify({ type: "response.done" }));
+    fake.listeners.message(
+      JSON.stringify({
+        type: "response.function_call_arguments.done",
+        call_id: "denied",
+        name: "delegate_task",
+        arguments: "{}",
+      }),
+    );
+    await flush();
+    expect(h.call.state.notice).toContain("requires approval");
+    const output = fake.sent
+      .map((frame) => JSON.parse(frame))
+      .find((frame) => frame.item?.call_id === "denied");
+    expect(JSON.parse(output.item.output)).toMatchObject({
+      code: "capability_denied",
+      error: "This call requires approval in T3.",
+    });
+    expect(
+      fake.sent
+        .map((frame) => JSON.parse(frame))
+        .filter((frame) => frame.type === "response.create"),
+    ).toHaveLength(2);
+    h.call.hangUp();
+  });
+
+  it("reports a lost completion watch without claiming the task failed or finished", async () => {
+    const h = harness({
+      runTool: async (input) =>
+        input.name === "delegate_task"
+          ? {
+              kind: "served",
+              output: { taskId: "task" },
+              completion: { requestToolCallId: input.toolCallId, pending: true },
+            }
+          : { kind: "invalid_input", output: { error: "unavailable" } },
+    });
+    await h.call.start();
+    const fake = h.sockets[0]!.fake;
+    fake.listeners.message(ready);
+    fake.listeners.message(JSON.stringify({ type: "session.updated" }));
+    fake.listeners.message(JSON.stringify({ type: "response.done" }));
+    fake.listeners.message(
+      JSON.stringify({
+        type: "response.function_call_arguments.done",
+        call_id: "task-call",
+        name: "delegate_task",
+        arguments: "{}",
+      }),
+    );
+    await flush();
+    fake.listeners.message(JSON.stringify({ type: "response.done" }));
+    await flush();
+    expect(h.call.state.notice).toContain("status is unknown");
+    expect(fake.sent.join("")).toContain("task_watch_failed");
+    h.call.hangUp();
+  });
   it("queues an immediately completed launch behind its receipt and ignores mismatched completion", async () => {
     type Result = Awaited<ReturnType<GrokBotVoiceCallPorts["runTool"]>>;
     const receipts = [deferred<void>(), deferred<void>()];
@@ -1002,7 +1070,7 @@ describe("voice environment authority and subscription recovery", () => {
     });
     await flush();
     const frames = next.sent.map((f) => JSON.parse(f));
-    expect(frames.filter((f) => f.item?.name === "work_landed")).toHaveLength(1);
+    expect(frames.filter((f) => f.item?.name === "work_landed")).toHaveLength(2);
     expect(frames.filter((f) => f.type === "async_update.add")).toHaveLength(1);
     expect(inputs.filter((i) => i.name === "t3_chat_updates").at(-1)?.input).toEqual({
       afterSequence: 44,
