@@ -43,11 +43,15 @@ Computer updates and resets require confirmation and affect all bots sharing
 that account's computer. Reset restores the last saved snapshot, so newer
 changes may be lost.
 
-Desktop voice calls are experimental. Open the voice control in a bot thread
+Voice calls are experimental. Use the desktop app or an HTTPS browser (including
+on your phone). Open the voice control in a bot thread
 and choose **Start call**, then allow microphone access and speak. You can mute
 or end the call while continuing to use the app. Switching threads or opening
 Settings keeps the call connected to its original bot. The persistent call
 control lets you reopen the panel, mute, or hang up from another page.
+Call work runs in the background so you can keep talking and ask for its status.
+If a tool fails, the call shows **Needs attention**; open its controls for the
+reason and next step. Approve delegated work in T3 when it asks.
 
 ### Use bots with Orchestrator V2
 

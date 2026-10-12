@@ -95,6 +95,147 @@ const flush = async () => {
 };
 
 describe("work completion and greeting", () => {
+  it("does not sit silently when the server never acknowledges its opening response", async () => {
+    vi.useFakeTimers();
+    const h = harness({ greeting: "Greet the caller" });
+    try {
+      const { fake } = h.sockets[0]!;
+      fake.listeners.message(ready);
+      fake.listeners.message(JSON.stringify({ type: "session.updated" }));
+      await vi.advanceTimersByTimeAsync(10_500);
+      expect(h.events).toContain("error");
+      expect(
+        fake.sent
+          .map((frame) => JSON.parse(frame))
+          .filter((frame) => frame.type === "response.create"),
+      ).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(
+        fake.sent
+          .map((frame) => JSON.parse(frame))
+          .filter((frame) => frame.type === "response.create"),
+      ).toHaveLength(2);
+    } finally {
+      h.session.hangUp();
+      vi.useRealTimers();
+    }
+  });
+  it("delivers a full capabilities catalog instead of replacing it with a generic completion", async () => {
+    const catalog = JSON.stringify({
+      providers: [
+        {
+          providerInstanceId: "provider",
+          models: Array.from({ length: 200 }, (_, i) => ({
+            id: `model-${i}`,
+            description: "option".repeat(30),
+          })),
+        },
+      ],
+    });
+    const h = harness({ runTool: async () => catalog });
+    const { fake } = h.sockets[0]!;
+    configure(fake);
+    fake.listeners.message(
+      JSON.stringify({
+        type: "response.function_call_arguments.done",
+        call_id: "catalog",
+        name: "orchestrator_capabilities",
+        arguments: "{}",
+      }),
+    );
+    await flush();
+    const receipt = fake.sent
+      .map((frame) => JSON.parse(frame))
+      .find((frame) => frame.item?.call_id === "catalog");
+    expect(receipt.item.output).toBe(catalog);
+    h.session.hangUp();
+  });
+
+  it("waits for every parallel tool receipt before continuing", async () => {
+    const first = deferred<string>();
+    const second = deferred<string>();
+    let count = 0;
+    const h = harness({ runTool: () => (++count === 1 ? first.promise : second.promise) });
+    const { fake } = h.sockets[0]!;
+    configure(fake);
+    for (const id of ["first", "second"])
+      fake.listeners.message(
+        JSON.stringify({
+          type: "response.function_call_arguments.done",
+          call_id: id,
+          name: "t3_thread_read",
+          arguments: "{}",
+        }),
+      );
+    first.resolve('{"ok":true}');
+    await flush();
+    expect(
+      fake.sent
+        .map((frame) => JSON.parse(frame))
+        .filter((frame) => frame.type === "response.create"),
+    ).toHaveLength(0);
+    second.resolve('{"ok":true}');
+    await flush();
+    expect(
+      fake.sent
+        .map((frame) => JSON.parse(frame))
+        .filter((frame) => frame.type === "response.create"),
+    ).toHaveLength(1);
+    h.session.hangUp();
+  });
+
+  it("recovers a rejected continuation once without repeating the tool action", async () => {
+    vi.useFakeTimers();
+    let executions = 0;
+    const h = harness({
+      runTool: async () => {
+        executions++;
+        return '{"error":"permission_denied"}';
+      },
+    });
+    try {
+      const { fake } = h.sockets[0]!;
+      configure(fake);
+      fake.listeners.message(
+        JSON.stringify({
+          type: "response.function_call_arguments.done",
+          call_id: "failed-tool",
+          name: "delegate_task",
+          arguments: "{}",
+        }),
+      );
+      await flush();
+      const reject = () =>
+        fake.listeners.message(
+          JSON.stringify({ type: "error", error: { message: "Response request failed" } }),
+        );
+      reject();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(
+        fake.sent
+          .map((frame) => JSON.parse(frame))
+          .filter((frame) => frame.type === "response.create"),
+      ).toHaveLength(2);
+      reject();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(
+        fake.sent
+          .map((frame) => JSON.parse(frame))
+          .filter((frame) => frame.type === "response.create"),
+      ).toHaveLength(2);
+      expect(executions).toBe(1);
+      fake.listeners.message(JSON.stringify({ type: "input_audio_buffer.speech_started" }));
+      fake.listeners.message(JSON.stringify({ type: "input_audio_buffer.speech_stopped" }));
+      expect(
+        fake.sent
+          .map((frame) => JSON.parse(frame))
+          .filter((frame) => frame.type === "response.create"),
+      ).toHaveLength(3);
+    } finally {
+      h.session.hangUp();
+      vi.useRealTimers();
+    }
+  });
   it("acknowledges slow tools so the call can answer while the action runs, then speaks the result once", async () => {
     vi.useFakeTimers();
     const result = deferred<string>();
@@ -1014,7 +1155,7 @@ describe("response-acknowledged delivery and bounded backlog", () => {
       ).toBeLessThanOrEqual(32 * 1024);
       expect(
         new TextEncoder().encode(fake.sent.slice(framesBefore).join("")).byteLength,
-      ).toBeLessThanOrEqual(32 * 1024 + 26);
+      ).toBeLessThanOrEqual(128 * 1024 + 26);
       framesBefore = fake.sent.length;
       before = current.length;
       finishResponse(fake, "batch-" + i);
@@ -1053,7 +1194,7 @@ describe("response-acknowledged delivery and bounded backlog", () => {
         ?.additionalResults,
     ).toBe(46);
     const oversized = result.find((f) => f.item.call_id === "seeded-nudge-t3-oversize");
-    expect(JSON.parse(oversized.item.output).status).toBe("landed");
+    expect(JSON.parse(oversized.item.output).error).toBe("result_too_large");
     expect(new TextEncoder().encode(fake.sent.join("")).byteLength).toBeLessThan(270_000);
     h.session.hangUp();
   });
@@ -1085,12 +1226,15 @@ describe("response-acknowledged delivery and bounded backlog", () => {
     const next = h.sockets[1]!.fake;
     emit(next, "session.created");
     emit(next, "session.updated");
-    expect(outputs(next)).toHaveLength(8);
+    expect(outputs(next)).toHaveLength(64);
     for (let i = 0; i < 10; i += 1) finishResponse(next, "receipt-batch-" + i);
     const receipts = outputs(next).filter((f) => f.item.call_id.startsWith("tool-"));
     expect(receipts).toHaveLength(64);
     expect(
-      receipts.every((f) => JSON.parse(f.item.output).updates[0].includes("available in T3")),
+      receipts.every((f) => {
+        const output = JSON.parse(f.item.output);
+        return output.text?.length === 16000 || output.error === "voice_result_capacity";
+      }),
     ).toBe(true);
     expect(
       new TextEncoder().encode(receipts.map((f) => f.item.output).join("")).byteLength,

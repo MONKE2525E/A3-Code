@@ -5,6 +5,7 @@ import {
   type GrokBotVoiceToolResult,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -33,6 +34,14 @@ const names = [
   "t3_thread_list",
   "t3_thread_read",
   "t3_thread_wait",
+  "t3_thread_send",
+  "t3_thread_update",
+  "t3_thread_interrupt",
+  "t3_workflow_stop",
+  "schedule_task",
+  "list_scheduled_tasks",
+  "update_scheduled_task",
+  "delete_scheduled_task",
   "t3_project_list",
 ] as const;
 export const isTool = (name: string): name is (typeof names)[number] =>
@@ -106,6 +115,7 @@ const make = Effect.gen(function* () {
       scope: Invocation.McpInvocationScope | undefined;
     }
   >();
+  const activationFailures = new Map<string, OrchestratorMcpFailure>();
   const scopeFor = (input: CallIdentity & { readonly access: "read" | "operate" }) =>
     Effect.gen(function* () {
       const call = calls.get(input.callId);
@@ -114,10 +124,13 @@ const make = Effect.gen(function* () {
         call.identity.binding !== input.binding ||
         call.identity.botId !== input.botId
       )
-        return yield* new OrchestratorMcpFailure({
-          code: "parent_not_active",
-          message: "This voice call has no live delegation authority.",
-        });
+        return yield* (
+          activationFailures.get(input.callId) ??
+            new OrchestratorMcpFailure({
+              code: "parent_not_active",
+              message: "This voice call has no live delegation authority.",
+            })
+        );
       yield* orchestrator.validateCallInvocation(call.scope);
       return input.access === "read"
         ? yield* orchestrator.restrictCallInvocation(call.scope, "read-only")
@@ -164,6 +177,7 @@ const make = Effect.gen(function* () {
             });
           }
           entry.scope = scope;
+          activationFailures.delete(input.callId);
         }).pipe(
           Effect.uninterruptible,
           Effect.onExit((exit) =>
@@ -177,11 +191,27 @@ const make = Effect.gen(function* () {
             }),
           ),
         );
-      }).pipe(Effect.orElseSucceed(() => undefined)),
+      }).pipe(
+        Effect.catchCause((cause) => {
+          const error = Option.getOrUndefined(Cause.findErrorOption(cause));
+          activationFailures.set(
+            input.callId,
+            isOrchestratorFailure(error)
+              ? error
+              : new OrchestratorMcpFailure({
+                  code: "parent_not_active",
+                  message:
+                    "T3 could not acquire this call's orchestration authority. Check that this bot's conversation is available, then reconnect the call.",
+                }),
+          );
+          return Effect.logWarning("grok-bot.voice.authority-unavailable");
+        }),
+      ),
     forget: (callId) =>
       Effect.gen(function* () {
         const call = calls.get(callId);
         calls.delete(callId);
+        activationFailures.delete(callId);
         if (call?.scope !== undefined)
           yield* orchestrator.releaseCallInvocation(call.scope).pipe(Effect.ignore);
       }),
@@ -204,12 +234,18 @@ const make = Effect.gen(function* () {
           pending: result.waitTimedOut,
         } as const;
       }).pipe(
-        Effect.orElseSucceed(
-          () =>
-            ({
-              result: { kind: "invalid_input", output: { error: "voice task unavailable" } },
-              pending: false,
-            }) as const,
+        Effect.catchCause(() =>
+          Effect.succeed({
+            result: {
+              kind: "invalid_input",
+              output: {
+                code: "task_watch_failed",
+                error:
+                  "T3 could not check the delegated task. Tell the caller that its status is unknown; do not claim it finished.",
+              },
+            },
+            pending: false,
+          } as const),
         ),
       ),
     call: (input) =>
@@ -256,11 +292,14 @@ const make = Effect.gen(function* () {
         if (!last.value.isFailure) {
           if (input.name === "delegate_task")
             target = yield* decodeTaskTarget(last.value.encodedResult).pipe(Effect.option);
-          else if (input.name === "t3_thread_launch")
+          else if (input.name === "t3_thread_launch" || input.name === "t3_thread_send")
             target = yield* decodeRunTarget(last.value.encodedResult).pipe(Effect.option);
         }
         return {
-          result: { kind: "served", output: last.value.encodedResult },
+          result: {
+            kind: last.value.isFailure ? "invalid_input" : "served",
+            output: last.value.encodedResult,
+          },
           ...(Option.isNone(target) ? {} : { target: target.value }),
         } as const;
       }).pipe(
@@ -274,9 +313,21 @@ const make = Effect.gen(function* () {
                 code: isOrchestratorFailure(error) ? error.code : "invalid_arguments",
                 error: isOrchestratorFailure(error)
                   ? error.code === "parent_not_active"
-                    ? "This call's orchestration session is unavailable. Reconnect the call and try again."
-                    : `T3 rejected ${input.name} (${error.code}). Check the call's permissions and try again.`
+                    ? error.message.slice(0, 500)
+                    : `T3 rejected ${input.name} (${error.code}): ${error.message.slice(0, 500)}`
                   : `T3 could not run ${input.name}. Check its arguments against the tool's schema and try again.`,
+              },
+            },
+          } as const),
+        ),
+        Effect.catchCause(() =>
+          Effect.succeed({
+            result: {
+              kind: "invalid_input",
+              output: {
+                tool: input.name,
+                code: "orchestration_unavailable",
+                error: `T3 could not execute ${input.name}. Tell the caller it failed; do not claim success or repeat a write automatically.`,
               },
             },
           } as const),

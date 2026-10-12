@@ -87,6 +87,7 @@ it("keeps only native conversation controls and drops connectors and stale T3 to
   assert.deepStrictEqual(names, [
     "stay_silent",
     "end_the_call",
+    "t3_task_progress",
     "recall_text_messages",
     "search_conversations",
     ...Direct.tools.map((tool) => tool.name),
@@ -134,10 +135,13 @@ it.effect("native send_task is refused locally and unknown names are invalid", (
   }),
 );
 
-it.effect("progress reports the latest canonical bot run", () =>
+it.effect("call progress does not mistake a canonical chat turn for call work", () =>
   Effect.gen(function* () {
     const progress = yield* call("t3_task_progress", {}, "read");
-    assert.deepStrictEqual(progress.output, { spoken: "The latest T3 run is running." });
+    assert.deepStrictEqual(progress.output, {
+      pending: 0,
+      message: "This call has no work awaiting a result.",
+    });
   }),
 );
 
