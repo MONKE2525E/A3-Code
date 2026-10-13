@@ -173,7 +173,7 @@ const harness = Effect.gen(function* () {
                 Effect.gen(function* () {
                   if (state.pauseAfterIssue && active.size > 0) {
                     yield* Deferred.succeed(postIssueRead, undefined);
-                    yield* Effect.never;
+                    return yield* Effect.never;
                   }
                   return state.shell;
                 }),

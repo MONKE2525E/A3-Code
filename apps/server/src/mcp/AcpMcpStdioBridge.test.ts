@@ -62,7 +62,7 @@ describe("AcpMcpStdioBridge", () => {
         authorization: "Bearer bridge-test",
         tool: "task_status",
         arguments: {},
-      }).pipe(Effect.flip);
+      }).pipe(Effect.asVoid, Effect.flip);
       expect(failure._tag).toBe("AcpMcpBridgeError");
       expect(forwarded).toBe(0);
     }).pipe(Effect.scoped),
