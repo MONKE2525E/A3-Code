@@ -9,25 +9,31 @@
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 
-async function* sseDataLines(response: Response): AsyncGenerator<string> {
-  if (response.body === null) return;
-  const decoder = new TextDecoder();
-  let buffered = "";
-  for await (const chunk of response.body) {
-    buffered += decoder.decode(chunk as Uint8Array, { stream: true });
-    let separatorIndex = buffered.search(/\n\n|\r\n\r\n/u);
-    while (separatorIndex !== -1) {
-      const rawEvent = buffered.slice(0, separatorIndex);
-      buffered = buffered.slice(separatorIndex).replace(/^(?:\r?\n){2}/u, "");
-      const data = rawEvent
-        .split(/\r?\n/u)
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice("data:".length).trimStart())
-        .join("\n");
-      if (data.length > 0) yield data;
-      separatorIndex = buffered.search(/\n\n|\r\n\r\n/u);
-    }
-  }
+function sseDataLines<E>(bytes: Stream.Stream<Uint8Array, E>): Stream.Stream<string, E> {
+  return Stream.suspend(() => {
+    const decoder = new TextDecoder();
+    let buffered = "";
+    return bytes.pipe(
+      Stream.map((chunk) => {
+        buffered += decoder.decode(chunk, { stream: true });
+        const values: string[] = [];
+        let separatorIndex = buffered.search(/\n\n|\r\n\r\n/u);
+        while (separatorIndex !== -1) {
+          const rawEvent = buffered.slice(0, separatorIndex);
+          buffered = buffered.slice(separatorIndex).replace(/^(?:\r?\n){2}/u, "");
+          const data = rawEvent
+            .split(/\r?\n/u)
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice("data:".length).trimStart())
+            .join("\n");
+          if (data.length > 0) values.push(data);
+          separatorIndex = buffered.search(/\n\n|\r\n\r\n/u);
+        }
+        return values;
+      }),
+      Stream.flatMap(Stream.fromIterable),
+    );
+  });
 }
 
 export const discardResponseBody = (response: Response): Effect.Effect<void> =>
@@ -45,14 +51,24 @@ export function responsePayloads<E>(
   if (response.status === 202 || response.status === 204) {
     return Stream.unwrap(discardResponseBody(response).pipe(Effect.as(Stream.empty)));
   }
+  // A pending async-generator read cannot be interrupted by iterator.return().
+  // The scoped reader cancels the HTTP body even while no bytes are arriving.
+  const body = response.body;
+  const bytes =
+    body === null ? Stream.empty : Stream.fromReadableStream({ evaluate: () => body, onError });
   const contentType = response.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream")) {
-    return Stream.fromAsyncIterable(sseDataLines(response), onError).pipe(
+    return sseDataLines(bytes).pipe(
       Stream.mapEffect((data) => Effect.try({ try: () => JSON.parse(data), catch: onError })),
     );
   }
   return Stream.unwrap(
-    Effect.tryPromise({ try: () => response.text(), catch: onError }).pipe(
+    bytes.pipe(
+      Stream.decodeText(),
+      Stream.runFold(
+        () => "",
+        (text, chunk) => text + chunk,
+      ),
       Effect.flatMap((text) =>
         text.trim().length === 0
           ? Effect.succeed(Stream.empty)

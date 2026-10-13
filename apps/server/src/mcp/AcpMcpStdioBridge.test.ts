@@ -115,6 +115,37 @@ describe("AcpMcpStdioBridge", () => {
     }),
   );
 
+  it.effect("cancels a bridge response that stalls after sending its SSE headers", () =>
+    Effect.gen(function* () {
+      const reading = Promise.withResolvers<void>();
+      let cancelled = false;
+      const { input, written, bridge } = makeHarness(
+        () =>
+          new Response(
+            new ReadableStream<Uint8Array>(
+              {
+                pull: () => {
+                  reading.resolve();
+                },
+                cancel: () => {
+                  cancelled = true;
+                },
+              },
+              { highWaterMark: 0 },
+            ),
+            { headers: { "content-type": "text/event-stream" } },
+          ),
+      );
+      const fiber = yield* Effect.forkChild(bridge);
+      input.write('{"jsonrpc":"2.0","id":1,"method":"tools/call"}\n');
+      yield* Effect.promise(() => reading.promise);
+      yield* Fiber.interrupt(fiber);
+      expect(cancelled).toBe(true);
+      expect(input.listenerCount("data")).toBe(0);
+      expect(written).toEqual([]);
+    }),
+  );
+
   it.effect("preserves the original transport failure as the typed error cause", () =>
     Effect.gen(function* () {
       const source = new Error("fetch failed");
