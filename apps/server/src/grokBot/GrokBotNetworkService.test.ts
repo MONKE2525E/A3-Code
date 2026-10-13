@@ -97,6 +97,48 @@ const fixture = Effect.gen(function* () {
   };
 });
 
+it.effect.each(["write", "rename"] as const)(
+  "a failed %s keeps routing state and the saved opt-in unchanged until disabling succeeds",
+  (operation) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      let fail = false;
+      let savedFile = "";
+      const { service, current, starts } = yield* fixture.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          writeFileString: (path, contents, options) =>
+            fs.writeFileString(
+              fail && operation === "write" ? `${path}/blocked` : path,
+              contents,
+              options,
+            ),
+          rename: (from, to) => {
+            savedFile = to;
+            return fs.rename(fail && operation === "rename" ? `${from}.missing` : from, to);
+          },
+        }),
+      );
+      yield* service.set(true);
+      const client = yield* Queue.take(starts);
+      client.status("connected", 2, 3);
+      const previous = yield* service.read();
+      const persisted = yield* fs.readFileString(savedFile);
+      const stops = current.stops;
+      fail = true;
+      const result = yield* Effect.result(service.set(false));
+      assert.strictEqual(result._tag, "Failure");
+      assert.deepEqual(yield* service.read(), previous);
+      assert.strictEqual(current.stops, stops);
+      assert.strictEqual(yield* fs.readFileString(savedFile), persisted);
+      fail = false;
+      assert.strictEqual((yield* service.set(false)).state, "off");
+      assert.strictEqual((yield* service.read()).enabled, false);
+      assert.strictEqual(JSON.parse(yield* fs.readFileString(savedFile)).enabled, false);
+      assert.strictEqual(current.stops, stops + 1);
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.effect("observed sign-out stops routing and does not enable it again on sign-in", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;

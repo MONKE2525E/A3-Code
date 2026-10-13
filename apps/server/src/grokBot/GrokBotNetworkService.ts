@@ -310,18 +310,6 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const binding = enabled ? yield* account : saved.binding;
         const value = { enabled, binding };
-        if (!enabled) {
-          epoch++;
-          resetContext();
-          saved = value;
-          state = {
-            enabled: false,
-            state: "off",
-            activeStreams: 0,
-            relayedStreams: 0,
-            error: null,
-          };
-        }
         yield* persist(value);
         epoch++;
         resetContext();
