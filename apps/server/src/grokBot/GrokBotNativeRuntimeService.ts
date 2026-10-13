@@ -111,7 +111,7 @@ const ConnectorGrantInput = Schema.Struct({
   entryId: Schema.optionalKey(Id),
   resolution: Schema.Literals(["ALLOWED", "SKIPPED", "ALWAYS_THIS_BOT", "ALWAYS_ALL_TEAM_BOTS"]),
 });
-// Widget payloads are inferred from the 0.68.1 client shape, not yet verified against a live bot.
+// Shipped RespondGrokBotWidget takes one string; the projection serializes selected values.
 const WidgetOwner = Schema.Struct({
   binding: Id,
   botId: Id,
@@ -120,7 +120,6 @@ const WidgetOwner = Schema.Struct({
 const WidgetResponseInput = Schema.Struct({
   ...WidgetOwner.fields,
   entryId: Id,
-  // Native carries one string per widget; multi-select encoding is not verified.
   value: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(65536)),
 });
 const WidgetDismissInput = Schema.Struct({

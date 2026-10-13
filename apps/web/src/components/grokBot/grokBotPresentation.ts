@@ -38,6 +38,27 @@ export function grokBotFailureMessage(error: unknown): string {
   return "Grok Bot could not complete that request.";
 }
 
+/** A failed background roster read should not replace a recent successful list. */
+export function isGrokBotRosterRecovering(input: {
+  readonly failure: unknown;
+  readonly hasData: boolean;
+  readonly dataUpdatedAt: number;
+  readonly nowMs: number;
+}): boolean {
+  return (
+    input.hasData &&
+    input.dataUpdatedAt > 0 &&
+    input.nowMs >= input.dataUpdatedAt &&
+    input.nowMs - input.dataUpdatedAt < 30_000 &&
+    typeof input.failure === "object" &&
+    input.failure !== null &&
+    "_tag" in input.failure &&
+    input.failure._tag === "GrokBotError" &&
+    "reason" in input.failure &&
+    input.failure.reason === "gateway_failed"
+  );
+}
+
 export function grokBotSurfaceKey(environmentId: string, botId: string): string {
   return `${environmentId}:${botId}`;
 }
@@ -144,6 +165,19 @@ export function resolveGrokBotSelectedEnvironment(input: {
   return input.connectedEnvironmentIds.includes(input.selectedEnvironmentId)
     ? { kind: "environment", environmentId: input.selectedEnvironmentId }
     : { kind: "disconnected", environmentId: input.selectedEnvironmentId };
+}
+
+/**
+ * A selected environment that is not connected yet but is still on its way (initial connect,
+ * reconnect, or a catalog that has not loaded) is loading, not unavailable. Final phases
+ * (offline, error, unsupported, a settled catalog without the environment) stay failures.
+ */
+export function isGrokBotEnvironmentConnecting(input: {
+  readonly catalogReady: boolean;
+  readonly phase: string | null;
+}): boolean {
+  if (input.phase === null) return !input.catalogReady;
+  return input.phase === "connecting" || input.phase === "reconnecting";
 }
 
 /** `view=history` opens the read-only transcript from before bots were ordinary threads. */

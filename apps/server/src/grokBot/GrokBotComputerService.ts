@@ -1,5 +1,8 @@
 import {
   GrokBotComputerError,
+  GrokBotHostMachines,
+  GrokBotHostMachineUpdateInput,
+  GrokBotLocalPermission,
   type GrokBotComputerRecreateInput,
   type GrokBotComputerRecreateResult,
   type GrokBotComputerResetInput,
@@ -14,12 +17,17 @@ import {
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as Native from "./GrokBotNativeService.ts";
 import * as Runtime from "./GrokBotNativeRuntimeService.ts";
 
 export class GrokBotComputerService extends Context.Service<
   GrokBotComputerService,
   {
+    readonly machines: () => Effect.Effect<typeof GrokBotHostMachines.Type, GrokBotComputerError>;
+    readonly updateMachine: (
+      input: typeof GrokBotHostMachineUpdateInput.Type,
+    ) => Effect.Effect<typeof GrokBotHostMachines.Type, GrokBotComputerError>;
     readonly readTeaching: (
       input: typeof GrokBotComputerInput.Type,
     ) => Effect.Effect<typeof GrokBotTeachRecording.Type, GrokBotComputerError>;
@@ -51,6 +59,33 @@ export class GrokBotComputerService extends Context.Service<
 const make = Effect.gen(function* () {
   const native = yield* Native.GrokBotNativeService;
   const runtime = yield* Runtime.GrokBotNativeRuntimeService;
+  const decodeMachines = Schema.decodeUnknownEffect(
+    Schema.Struct({
+      machines: Schema.optionalKey(
+        Schema.Array(
+          Schema.Struct({
+            machineId: Schema.String,
+            label: Schema.optionalKey(Schema.String),
+            connected: Schema.optionalKey(Schema.Boolean),
+            localToolPermission: Schema.optionalKey(GrokBotLocalPermission),
+          }),
+        ),
+      ),
+    }),
+  );
+  const readMachines = (binding: string) =>
+    native.runtimeRequest(binding, "ListSandMachines", {}).pipe(
+      Effect.flatMap(decodeMachines),
+      Effect.map((value) => ({
+        machines: (value.machines ?? []).map((machine) => ({
+          machineId: machine.machineId,
+          label: machine.label ?? "",
+          connected: machine.connected ?? null,
+          permission: machine.localToolPermission ?? ("ask" as const),
+        })),
+      })),
+      Effect.mapError(() => new GrokBotComputerError({ reason: "unavailable" })),
+    );
   const accountBinding = native.accountBinding.pipe(
     Effect.mapError(() => new GrokBotComputerError({ reason: "account_unavailable" })),
   );
@@ -122,6 +157,39 @@ const make = Effect.gen(function* () {
     };
   });
   return GrokBotComputerService.of({
+    machines: () =>
+      Effect.gen(function* () {
+        const binding = yield* accountBinding;
+        const result = yield* readMachines(binding);
+        if ((yield* accountBinding) !== binding)
+          return yield* new GrokBotComputerError({ reason: "account_unavailable" });
+        return result;
+      }),
+    updateMachine: (input) =>
+      Effect.gen(function* () {
+        const binding = yield* accountBinding;
+        const existing = yield* readMachines(binding);
+        if (!existing.machines.some((machine) => machine.machineId === input.machineId))
+          return yield* new GrokBotComputerError({ reason: "unavailable" });
+        if (input.permission !== undefined)
+          yield* native
+            .runtimeRequest(binding, "UpdateSandMachineLocalToolPermission", {
+              machineId: input.machineId,
+              localToolPermission: input.permission,
+            })
+            .pipe(Effect.mapError(() => new GrokBotComputerError({ reason: "unavailable" })));
+        if (input.label !== undefined)
+          yield* native
+            .runtimeRequest(binding, "UpdateSandMachineLabel", {
+              machineId: input.machineId,
+              label: input.label,
+            })
+            .pipe(Effect.mapError(() => new GrokBotComputerError({ reason: "unavailable" })));
+        const result = yield* readMachines(binding);
+        if ((yield* accountBinding) !== binding)
+          return yield* new GrokBotComputerError({ reason: "account_unavailable" });
+        return result;
+      }),
     recreate,
     reset,
     upgradeSchedule,

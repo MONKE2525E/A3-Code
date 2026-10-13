@@ -33,6 +33,8 @@ const longRunningRpcAckMethods = new Set<string>([
   WS_METHODS.serverUpdateProvider,
   WS_METHODS.serverRefreshProviders,
   WS_METHODS.serverUpdateServer,
+  // Voice completion and chat subscriptions intentionally long-poll for up to 20 seconds.
+  WS_METHODS.grokBotsVoiceTool,
 ]);
 
 const slowRpcAckRequestsAtom = Atom.make<ReadonlyArray<SlowRpcAckRequest>>([]).pipe(

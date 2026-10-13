@@ -1,6 +1,7 @@
 import { assert, it, vi } from "@effect/vitest";
 import {
   NodeId,
+  ProviderDriverKind,
   ProviderSessionId,
   RuntimeRequestId,
   ThreadId,
@@ -127,6 +128,81 @@ it.effect("forwards orchestrator-resolved runtime requests to the live adapter",
     });
   }).pipe(Effect.provide(layerTest));
 });
+
+it.effect.each(["auto_review_approval/", "local_tool_permission/", "connector_grant/"])(
+  "executes pending $0 only through its bound native session",
+  (prefix) => {
+    const threadId = ThreadId.make("native-thread");
+    const providerSessionId = ProviderSessionId.make("native-session");
+    const requestId = RuntimeRequestId.make(`native-${prefix}`);
+    const request: OrchestrationV2RuntimeRequest = {
+      ...resolvedRuntimeRequest(requestId, providerSessionId),
+      status: "pending",
+      resolvedAt: null,
+      nativeRequestRef: {
+        driver: ProviderDriverKind.make("grok-bot"),
+        nativeId: `${prefix}request`,
+        strength: "strong",
+      },
+    };
+    const respondToRuntimeRequest = vi.fn(
+      (_input: ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput) => Effect.void,
+    );
+    const getSession = vi.fn(() =>
+      Effect.succeed(Option.some({ respondToRuntimeRequest } as never)),
+    );
+    const projection = projectionWithRuntimeRequest(request);
+    return Effect.gen(function* () {
+      const service = yield* RuntimeRequestService.RuntimeRequestServiceV2;
+      yield* service.respond({ threadId, providerSessionId, requestId, decision: "accept" });
+      assert.deepStrictEqual(respondToRuntimeRequest.mock.calls, [
+        [{ requestId, decision: "accept" }],
+      ]);
+      const error = yield* service
+        .respond({
+          threadId,
+          providerSessionId: ProviderSessionId.make("other-session"),
+          requestId,
+          decision: "accept",
+        })
+        .pipe(Effect.flip);
+      assert.equal(error.reason, "request-not-ready");
+      assert.equal(respondToRuntimeRequest.mock.calls.length, 1);
+      assert.equal(getSession.mock.calls.length, 1);
+      assert.equal(projection.runtimeRequests[0]?.status, "pending");
+    }).pipe(Effect.provide(layerRuntimeRequestTest(projection, getSession)));
+  },
+);
+
+it.effect.each([
+  { driver: "codex", strength: "strong", nativeId: "local_tool_permission/request" },
+  { driver: "grok-bot", strength: "weak", nativeId: "local_tool_permission/request" },
+  { driver: "grok-bot", strength: "strong", nativeId: "unknown/request" },
+] as const)(
+  "rejects pending live requests with an unrelated or weak native identity: $driver $strength $nativeId",
+  (nativeRef) => {
+    const threadId = ThreadId.make("unbound-thread");
+    const providerSessionId = ProviderSessionId.make("unbound-session");
+    const requestId = RuntimeRequestId.make("unbound-request");
+    const request: OrchestrationV2RuntimeRequest = {
+      ...resolvedRuntimeRequest(requestId, providerSessionId),
+      status: "pending",
+      resolvedAt: null,
+      nativeRequestRef: { ...nativeRef, driver: ProviderDriverKind.make(nativeRef.driver) },
+    };
+    const getSession = vi.fn(() => Effect.succeed(Option.none()));
+    return Effect.gen(function* () {
+      const service = yield* RuntimeRequestService.RuntimeRequestServiceV2;
+      const error = yield* service
+        .respond({ threadId, providerSessionId, requestId, decision: "accept" })
+        .pipe(Effect.flip);
+      assert.equal(error.reason, "request-not-ready");
+      assert.equal(getSession.mock.calls.length, 0);
+    }).pipe(
+      Effect.provide(layerRuntimeRequestTest(projectionWithRuntimeRequest(request), getSession)),
+    );
+  },
+);
 
 it.effect("rejects expired runtime requests before invoking the live adapter", () => {
   const threadId = ThreadId.make("thread-runtime-request-expired");

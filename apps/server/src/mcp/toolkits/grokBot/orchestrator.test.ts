@@ -1,3 +1,4 @@
+import * as GuidedSetup from "../../../grokBot/GrokBotSetupService.ts";
 import { assert, it } from "@effect/vitest";
 import {
   EnvironmentId,
@@ -57,6 +58,7 @@ const decode = Schema.decodeUnknownEffect(
       code: Schema.optionalKey(Schema.String),
       state: Schema.optionalKey(Schema.String),
       threadId: Schema.optionalKey(ThreadId),
+      verified: Schema.optionalKey(Schema.Boolean),
     }),
   ),
 );
@@ -94,6 +96,7 @@ it.effect(
       Layer.provideMerge(McpServer.McpServer.layer),
       Layer.provide(
         Layer.mergeAll(
+          Layer.mock(GuidedSetup.GrokBotSetupService)({}),
           Layer.mock(Threads.ThreadManagementService)({}),
           Layer.mock(BotThreads.GrokBotThreadService)({}),
           Layer.mock(BotService.GrokBotService)({ list: Effect.succeed(roster) }),
@@ -126,6 +129,7 @@ it.effect(
       Layer.provideMerge(McpServer.McpServer.layer),
       Layer.provide(
         Layer.mergeAll(
+          Layer.mock(GuidedSetup.GrokBotSetupService)({}),
           Layer.mock(Threads.ThreadManagementService)({}),
           Layer.mock(BotService.GrokBotService)({
             send: () => Effect.die("legacy CLI must not send"),
@@ -165,6 +169,7 @@ it.effect("readonly status cannot request setup and settings writes require full
     Layer.provideMerge(McpServer.McpServer.layer),
     Layer.provide(
       Layer.mergeAll(
+        Layer.mock(GuidedSetup.GrokBotSetupService)({}),
         Layer.mock(Threads.ThreadManagementService)({}),
         Layer.mock(BotThreads.GrokBotThreadService)({
           open: () => {
@@ -211,5 +216,33 @@ it.effect("readonly status cannot request setup and settings writes require full
       "bot-thread",
     );
     assert.equal(opens, 1);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("setup verification requires an ordinary OAuth client with orchestration access", () => {
+  let verifications = 0;
+  const layer = Http.toolkitRegistration(Orchestrator.toolkit, Orchestrator.layer).pipe(
+    Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(GuidedSetup.GrokBotSetupService)({
+          verify: () =>
+            Effect.sync(() => {
+              verifications++;
+              return { verified: true as const };
+            }),
+        }),
+        Layer.mock(Threads.ThreadManagementService)({}),
+        Layer.mock(BotThreads.GrokBotThreadService)({}),
+        Layer.mock(Service.GrokBotOrchestratorService)({}),
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    const args = { nonce: "a".repeat(64), managedSkillHash: "b".repeat(64) };
+    yield* call("grok_bot_verify_setup", "read-only", args);
+    assert.equal(verifications, 0);
+    assert.equal((yield* call("grok_bot_verify_setup", "approval-required", args)).verified, true);
+    assert.equal(verifications, 1);
   }).pipe(Effect.provide(layer));
 });

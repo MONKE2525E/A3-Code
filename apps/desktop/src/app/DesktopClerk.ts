@@ -87,7 +87,8 @@ function createDesktopClerkBridge(stateDir: string, isDevelopment: boolean) {
     storage: storage({ path: stateDir }),
     passkeys: true,
     renderer: {
-      scheme: ElectronProtocol.getDesktopScheme(isDevelopment),
+      scheme: ElectronProtocol.DESKTOP_RENDERER_SCHEME,
+      callbackScheme: ElectronProtocol.getDesktopScheme(isDevelopment),
       host: ElectronProtocol.DESKTOP_HOST,
     },
   });
@@ -178,7 +179,14 @@ export const make = Effect.gen(function* () {
           Effect.gen(function* () {
             const mainWindow = yield* electronWindow.currentMainOrFirst;
             if (Option.isNone(mainWindow)) return;
-            yield* Effect.promise(() => mainWindow.value.loadURL(destination));
+            yield* Effect.promise(() =>
+              mainWindow.value.loadURL(
+                destination.replace(
+                  expectedOrigin,
+                  `${ElectronProtocol.DESKTOP_RENDERER_SCHEME}://app`,
+                ),
+              ),
+            );
             yield* electronWindow.reveal(mainWindow.value);
           }).pipe(
             Effect.catchCause((cause) =>

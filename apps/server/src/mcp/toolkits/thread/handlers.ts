@@ -8,7 +8,7 @@ import {
   type OrchestrationV2Command,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import { modelSelectionCommandType } from "@t3tools/shared/model";
+import * as ThreadConfiguration from "../../ThreadConfigurationMcpService.ts";
 
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
@@ -75,7 +75,9 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
-export const layer = McpToolAccess.toLayer(ThreadToolkit, {
+const handlers = (
+  configuration: ThreadConfiguration.ThreadConfigurationMcpService["Service"],
+): McpToolAccess.Handlers<typeof ThreadToolkit.tools> => ({
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const scheduler = yield* ScheduledTasks.ScheduledTaskService;
@@ -182,24 +184,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       };
     }),
   ),
-  t3_thread_configure: writesThread((input) =>
-    Effect.gen(function* () {
-      const {
-        threads,
-        projection: { thread },
-      } = yield* readThread(input.threadId);
-      const type = modelSelectionCommandType(thread.providerInstanceId, input.modelSelection);
-      const result = yield* threads
-        .dispatch({
-          type,
-          threadId: thread.id,
-          commandId: yield* newCommandId(),
-          modelSelection: input.modelSelection,
-        })
-        .pipe(Effect.mapError(dispatchFailure));
-      return { sequence: result.sequence };
-    }),
-  ),
+  t3_thread_configure: writesThread((input) => configuration.configure(input)),
   t3_pending_request_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const { projection } = yield* readThread(input.threadId, ["runtimeRequests"]);
@@ -226,6 +211,39 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           commandId: yield* newCommandId(),
           requestId: input.requestId,
           answers: input.answers,
+        })
+        .pipe(Effect.mapError(dispatchFailure));
+      return { sequence: result.sequence };
+    }),
+  ),
+  t3_pending_approval_respond: writesThread((input) =>
+    Effect.gen(function* () {
+      if (!input.userConfirmed)
+        return yield* new OrchestratorMcpFailure({
+          code: "capability_denied",
+          message: "The user's explicit approval or decline instruction is required.",
+        });
+      const { threads, projection } = yield* readThread(input.threadId, ["runtimeRequests"]);
+      const request = projection.runtimeRequests.find(
+        (request) =>
+          request.id === input.requestId &&
+          request.status === "pending" &&
+          ["command", "file-read", "file-change", "permission", "mcp-elicitation"].includes(
+            request.kind,
+          ),
+      );
+      if (request === undefined)
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: "That permission request is not pending in this thread.",
+        });
+      const result = yield* threads
+        .dispatch({
+          type: "runtime-request.respond",
+          commandId: yield* newCommandId(),
+          threadId: projection.thread.id,
+          requestId: input.requestId,
+          decision: input.decision,
         })
         .pipe(Effect.mapError(dispatchFailure));
       return { sequence: result.sequence };
@@ -325,3 +343,11 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     }),
   ),
 });
+
+export const layer = McpToolAccess.toLayer(
+  ThreadToolkit,
+  ThreadConfiguration.ThreadConfigurationMcpService.pipe(
+    Effect.map(handlers),
+    Effect.provide(ThreadConfiguration.layer),
+  ),
+);

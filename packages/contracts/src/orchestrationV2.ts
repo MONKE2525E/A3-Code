@@ -1,4 +1,5 @@
 import {
+  GrokBotConnectorCard,
   GrokBotReactions,
   GrokBotVoiceCallId,
   GrokBotVoiceCallMarker,
@@ -573,6 +574,8 @@ export const OrchestrationV2Run = Schema.Struct({
   queuePosition: Schema.optional(Schema.NullOr(PositiveInt)),
   /** Restart recovery holds the queue until the user explicitly resumes it. */
   queueHeld: Schema.optional(Schema.Boolean),
+  /** While starting, the provider is waiting for host capacity. */
+  resourceWait: Schema.optional(Schema.Boolean),
   requestedAt: Schema.DateTimeUtc,
   startedAt: Schema.NullOr(Schema.DateTimeUtc),
   completedAt: Schema.NullOr(Schema.DateTimeUtc),
@@ -1256,6 +1259,8 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   grokBotVoiceCall: Schema.optionalKey(GrokBotVoiceCallMarker),
   /** The call a summary belongs to; set only on native's `voice:<callId>` summaries. */
   grokBotVoiceCallId: Schema.optionalKey(GrokBotVoiceCallId),
+  /** A connector sign-in card the bot sent; `text` is its plain label. */
+  grokBotConnectorCard: Schema.optionalKey(GrokBotConnectorCard),
   notification: Schema.optional(OrchestrationV2Notification),
   ...OrchestrationV2CreationFields,
   scheduledTaskId: Schema.optional(ScheduledTaskId),
@@ -1545,6 +1550,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
     grokBotVoiceCall: Schema.optionalKey(GrokBotVoiceCallMarker),
     grokBotVoiceCallId: Schema.optionalKey(GrokBotVoiceCallId),
+    grokBotConnectorCard: Schema.optionalKey(GrokBotConnectorCard),
     messageId: MessageId,
     text: Schema.String,
     attachments: Schema.optional(Schema.Array(ChatAttachment)),
@@ -2334,6 +2340,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
     grokBotVoiceCall: Schema.optionalKey(GrokBotVoiceCallMarker),
     grokBotVoiceCallId: Schema.optionalKey(GrokBotVoiceCallId),
+    grokBotConnectorCard: Schema.optionalKey(GrokBotConnectorCard),
     messageId: MessageId,
     text: Schema.String,
     attachments: Schema.optional(Schema.Array(ChatAttachment)),
@@ -3183,6 +3190,7 @@ export const OrchestrationV2Command = Schema.Union([
     parentNodeId: NodeId,
     projectId: Schema.optional(ProjectId),
     task: TrimmedNonEmptyString,
+    attachments: Schema.optional(Schema.Array(ChatAttachment)),
     title: Schema.optional(TrimmedNonEmptyString),
     modelSelection: ModelSelection,
     runtimeMode: RuntimeMode,
@@ -3262,12 +3270,34 @@ const OrchestrationV2InternalCommand = Schema.Union([
     authority: OrchestrationV2CallParent,
     projectId: Schema.optional(ProjectId),
     task: TrimmedNonEmptyString,
+    attachments: Schema.optional(Schema.Array(ChatAttachment)),
     title: Schema.optional(TrimmedNonEmptyString),
     modelSelection: ModelSelection,
     runtimeMode: RuntimeMode,
     interactionMode: ProviderInteractionMode,
     completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
     createdAt: Schema.optional(Schema.DateTimeUtc),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("call.chat-message.append"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    parentNodeId: NodeId,
+    authority: OrchestrationV2CallParent,
+    messageId: MessageId,
+    text: TrimmedNonEmptyString.check(Schema.isMaxLength(120_000)),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("call.runtime-request.respond"),
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    parentNodeId: NodeId,
+    authority: OrchestrationV2CallParent,
+    taskId: NodeId,
+    threadId: ThreadId,
+    requestId: RuntimeRequestId,
+    decision: Schema.optional(Schema.Literals(["accept", "decline"])),
+    answers: Schema.optional(ProviderUserInputAnswers),
   }),
   /** Moves an idle canonical bot conversation to its environment's No project storage. */
   Schema.Struct({

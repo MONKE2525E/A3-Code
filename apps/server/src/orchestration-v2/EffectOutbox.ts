@@ -251,6 +251,8 @@ export interface EffectOutboxV2Shape {
     readonly workerId: string;
     readonly error: string;
     readonly delayMs: number;
+    /** Capacity deferrals do not consume the provider failure retry budget. */
+    readonly consumeAttempt?: boolean;
   }) => Effect.Effect<boolean, EffectOutboxError>;
   readonly fail: (input: {
     readonly effectId: string;
@@ -615,7 +617,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             (cause) => new EffectOutboxError({ operation: "succeed", effectId, cause }),
           ),
         ),
-      retry: ({ effectId, workerId, error, delayMs }) =>
+      retry: ({ effectId, workerId, error, delayMs, consumeAttempt = true }) =>
         Effect.gen(function* () {
           const now = yield* DateTime.now;
           const nowIso = DateTime.formatIso(now);
@@ -627,6 +629,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             SET
               status = 'pending',
               available_at = ${availableAt},
+              attempt_count = MAX(0, attempt_count - ${consumeAttempt ? 0 : 1}),
               lease_owner = NULL,
               lease_expires_at = NULL,
               updated_at = ${nowIso},

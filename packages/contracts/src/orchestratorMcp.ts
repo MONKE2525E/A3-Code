@@ -11,6 +11,7 @@ import {
   PositiveInt,
   ProjectId,
   RunId,
+  RuntimeRequestId,
   ScheduledTaskId,
   SecretRef,
   ThreadId,
@@ -25,11 +26,13 @@ import {
 import { ProviderInteractionMode, RuntimeMode } from "./providerPolicy.ts";
 import { ThreadLinkedPullRequest } from "./threadPullRequest.ts";
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
+import { ChatAttachmentId, PROVIDER_SEND_TURN_MAX_ATTACHMENTS } from "./chatAttachment.ts";
 import {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
+  OrchestrationV2UserInputQuestion,
 } from "./orchestrationV2.ts";
 import {
   ProviderOptionDescriptor,
@@ -177,6 +180,14 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   task: OrchestratorMcpPrompt.annotate({
     description: "Self-contained task for one delegated child agent/subagent.",
   }),
+  attachmentIds: Schema.optional(
+    Schema.Array(ChatAttachmentId)
+      .check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS))
+      .annotate({
+        description:
+          "Attachments already in the calling thread's chat to include in the child's first message. Use the attachment IDs from chat context; do not invent paths or re-upload files.",
+      }),
+  ),
   target: Schema.optional(OrchestratorMcpTarget),
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),
@@ -216,6 +227,26 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
     description:
       "True only on that mode=wait call when timeoutMs elapsed. The timeout does not cancel the child. Later task_status reads return false and use status for liveness.",
   }),
+  title: Schema.optionalKey(Schema.String),
+  pendingQuestions: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        threadId: Schema.optionalKey(ThreadId),
+        requestId: RuntimeRequestId,
+        questions: Schema.Array(OrchestrationV2UserInputQuestion),
+      }),
+    ),
+  ),
+  pendingApprovals: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        threadId: Schema.optionalKey(ThreadId),
+        requestId: RuntimeRequestId,
+        title: Schema.String.check(Schema.isMaxLength(500)),
+        prompt: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(2000))),
+      }),
+    ),
+  ),
 });
 export type OrchestratorMcpDelegateTaskResult = typeof OrchestratorMcpDelegateTaskResult.Type;
 

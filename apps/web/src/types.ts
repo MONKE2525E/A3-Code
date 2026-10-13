@@ -108,6 +108,7 @@ export interface ChatMessage {
   readonly grokBotReactions?: import("@t3tools/contracts").OrchestrationV2ConversationMessage["grokBotReactions"];
   readonly grokBotVoiceCall?: import("@t3tools/contracts").GrokBotVoiceCallMarker;
   readonly grokBotVoiceCallId?: import("@t3tools/contracts").GrokBotVoiceCallMarker["callId"];
+  readonly grokBotConnectorCard?: import("@t3tools/contracts").GrokBotConnectorCard;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly inputIntent?: OrchestrationV2UserMessageInputIntent | undefined;

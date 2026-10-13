@@ -169,14 +169,20 @@ const resolveInstallLauncher = Effect.gen(function* () {
  * the package runner this process came from, or else the absolute path of the
  * launcher for this install, such as the one the desktop app installs.
  */
-const resolveHostCliCommand = (subcommand: string) =>
+export const resolveHostCliCommand = (
+  subcommand: string,
+  shell: "posix" | "powershell" = "posix",
+) =>
   Effect.gen(function* () {
     const command = yield* resolveCliCommand(subcommand);
     if (command !== `t3 ${subcommand}`) return { command, launcher: false };
     if (yield* isCommandAvailable("t3")) return { command, launcher: false };
     const launcher = yield* resolveInstallLauncher;
     return Option.isSome(launcher)
-      ? { command: `${shellWord(launcher.value)} ${subcommand}`, launcher: true }
+      ? {
+          command: `${shell === "powershell" ? `'${launcher.value.replaceAll("'", "''")}'` : shellWord(launcher.value)} ${subcommand}`,
+          launcher: true,
+        }
       : { command, launcher: false };
   });
 
