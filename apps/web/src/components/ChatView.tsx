@@ -88,6 +88,7 @@ import {
   RuntimeMode,
   TerminalOpenInput,
   isGrokBotBackingThread,
+  nativeAgentSourceForThread,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
 import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
@@ -3290,6 +3291,11 @@ export default function ChatView(props: ChatViewProps) {
   );
   const selectedProvider = selectedProviderEntry?.driverKind ?? requestedDriverKind;
   const isGrokBotThread = activeThreadId !== null && isGrokBotBackingThread({ id: activeThreadId });
+  // Native Muse threads use the same compact composer as Grok Bot, so they also skip the strip below.
+  const isNativeAgentComposerThread =
+    isGrokBotThread ||
+    (activeThreadId !== null &&
+      nativeAgentSourceForThread({ id: activeThreadId }) === "muse-agent");
   const activeProviderInstanceId = selectedProviderEntry?.instanceId ?? null;
   const activeProviderStatus = selectedProviderEntry?.snapshot ?? null;
   const { enabled: interactionModeEnabled, interactionMode } = resolveComposerInteractionMode({
@@ -4363,7 +4369,7 @@ export default function ChatView(props: ChatViewProps) {
           reportedModelSelection,
         );
   const mountComposerContextStrip =
-    !isGrokBotThread &&
+    !isNativeAgentComposerThread &&
     shouldShowComposerContextStrip({
       isDraftHeroState,
       persistInActiveThreads: settings.persistComposerContextStrip,
@@ -4373,7 +4379,7 @@ export default function ChatView(props: ChatViewProps) {
       hostsRestingComposerControls: routeKind === "server",
     });
   const showComposerContextStrip =
-    !isGrokBotThread &&
+    !isNativeAgentComposerThread &&
     shouldShowComposerContextStrip({
       isDraftHeroState,
       persistInActiveThreads: settings.persistComposerContextStrip,
@@ -4383,7 +4389,7 @@ export default function ChatView(props: ChatViewProps) {
       hostsRestingComposerControls: routeKind === "server" && restingComposerControlsVisible,
     });
   const mountComposerModelStrip =
-    !isGrokBotThread &&
+    !isNativeAgentComposerThread &&
     routeKind === "server" &&
     !mountComposerContextStrip &&
     !showProviderSubagentBar;
@@ -11742,7 +11748,8 @@ export default function ChatView(props: ChatViewProps) {
                   >
                     <ComposerSurface.Shell
                       contextStrip={
-                        !isGrokBotThread && (showComposerContextStrip || showComposerModelStrip)
+                        !isNativeAgentComposerThread &&
+                        (showComposerContextStrip || showComposerModelStrip)
                       }
                     >
                       <ComposerSurface.Host
