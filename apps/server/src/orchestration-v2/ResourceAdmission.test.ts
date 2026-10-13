@@ -28,18 +28,26 @@ const host: HostResourcesSnapshot = {
 
 describe("agent work capacity", () => {
   it("reserves CPU capacity and limits small-memory hosts", () => {
-    expect(ResourceAdmission.agentWorkCapacity(host)).toBe(2);
+    expect(ResourceAdmission.agentWorkCapacity(host)).toEqual({ concurrentTurns: 2, newStarts: 3 });
     expect(
       ResourceAdmission.agentWorkCapacity({ ...host, cpuCount: 12, totalMemoryBytes: 8 * GiB }),
-    ).toBe(3);
-    expect(ResourceAdmission.agentWorkCapacity({ ...host, cpuCount: 1 })).toBe(1);
+    ).toEqual({ concurrentTurns: 3, newStarts: 3 });
+    expect(ResourceAdmission.agentWorkCapacity({ ...host, cpuCount: 1 })).toEqual({
+      concurrentTurns: 1,
+      newStarts: 3,
+    });
   });
   it("pauses admission before memory headroom is exhausted", () => {
-    expect(ResourceAdmission.agentWorkCapacity({ ...host, availableMemoryBytes: 3 * GiB })).toBe(0);
+    expect(ResourceAdmission.agentWorkCapacity({ ...host, availableMemoryBytes: 3 * GiB })).toEqual(
+      { concurrentTurns: 2, newStarts: 0 },
+    );
     expect(
       ResourceAdmission.agentWorkCapacity({ ...host, cpuCount: 12, availableMemoryBytes: 4 * GiB }),
-    ).toBe(1);
-    expect(ResourceAdmission.agentWorkCapacity({ ...host, cpuUtilization: 0.99 })).toBe(0);
+    ).toEqual({ concurrentTurns: 6, newStarts: 1 });
+    expect(ResourceAdmission.agentWorkCapacity({ ...host, cpuUtilization: 0.99 })).toEqual({
+      concurrentTurns: 0,
+      newStarts: 0,
+    });
   });
 });
 
@@ -149,19 +157,23 @@ it.effect.each(["memory", "sqlite"] as const)(
         yield* put("b", "waiting", false);
         expect(yield* admission.acquire(a)).toBe(true);
         yield* admission.release(a.runId);
-        yield* Ref.set(resources, { ...host, availableMemoryBytes: GiB });
+        yield* Ref.set(resources, { ...host, sampledAt: 1, availableMemoryBytes: GiB });
         expect(yield* admission.acquire(a)).toBe(false);
-        yield* Ref.set(resources, host);
+        yield* Ref.set(resources, { ...host, sampledAt: 2 });
         expect(yield* admission.acquire(a)).toBe(true);
         const d = yield* put("d", "starting");
         yield* put("c", "completed", false);
-        yield* Ref.set(resources, { ...host, availableMemoryBytes: 4 * GiB });
-        expect(yield* admission.acquire(d)).toBe(false);
         yield* put("a", "running", false);
-        // Publishing running must not grant another slot from the same host sample.
-        expect(yield* admission.acquire(d)).toBe(false);
-        yield* put("a", "completed", false);
+        yield* Ref.set(resources, { ...host, sampledAt: 3, availableMemoryBytes: 4 * GiB });
         expect(yield* admission.acquire(d)).toBe(true);
+        const e = yield* put("e", "starting");
+        // Publishing running must not grant another slot from the same host sample.
+        expect(yield* admission.acquire(e)).toBe(false);
+        yield* put("a", "completed", false);
+        yield* put("d", "completed", false);
+        expect(yield* admission.acquire(e)).toBe(false);
+        yield* Ref.set(resources, { ...host, sampledAt: 4, availableMemoryBytes: 4 * GiB });
+        expect(yield* admission.acquire(e)).toBe(true);
       }).pipe(
         Effect.provide(
           ResourceAdmission.layer.pipe(
