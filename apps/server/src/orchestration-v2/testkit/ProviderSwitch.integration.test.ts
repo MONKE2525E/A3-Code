@@ -45,6 +45,11 @@ import {
 import { AcpProviderCapabilitiesV2 } from "@t3tools/provider-acp/server/adapter";
 import { CursorProviderCapabilitiesV2 } from "@t3tools/provider-cursor/testing";
 import { GrokBotCapabilitiesV2 } from "../Adapters/GrokBotAdapterV2.ts";
+import {
+  GROK_BOT_NATIVE_MESSAGE_LIMIT,
+  grokBotInlineHandoffBudget,
+  grokBotManagedPrompt,
+} from "../Adapters/GrokBotManagedBinding.ts";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
 import * as LegacyV1ThreadImporter from "../legacy/LegacyV1ThreadImporter.ts";
@@ -495,6 +500,14 @@ describe("orchestration v2 provider switching", () => {
               assert.equal((yield* Ref.get(capturedTurns)).length, 1);
               return;
             }
+            const restartNote = "A background run was cancelled while restarting this turn.";
+            const restartBudget = grokBotInlineHandoffBudget({
+              tokenCap: GROK_BOT_NATIVE_MESSAGE_LIMIT,
+              userText: "Current request",
+              restartNote,
+            });
+            const restartPrompt = `${"h".repeat(restartBudget)}\n\n${restartNote}\n\nUser message:\nCurrent request`;
+            assert.equal(grokBotManagedPrompt(restartPrompt).length, GROK_BOT_NATIVE_MESSAGE_LIMIT);
             const turns = yield* Ref.get(capturedTurns);
             assert.equal(turns.length, 2);
             assert.equal(turns[1]?.nativeThreadId, turns[0]?.nativeThreadId);
@@ -528,6 +541,40 @@ describe("orchestration v2 provider switching", () => {
             assert.include(
               bounded.contextHandoffs.at(-1)!.delivery!.omittedItemIds ?? [],
               missedItem.id,
+            );
+            yield* Ref.set(failStartOnce, true);
+            const nearLimitMissedRequest = "Near-limit recovery source";
+            yield* dispatch(7, nearLimitMissedRequest);
+            yield* wait(7, "failed");
+            const nearLimitCurrentRequest = "x".repeat(
+              GROK_BOT_NATIVE_MESSAGE_LIMIT - grokBotManagedPrompt("").length,
+            );
+            yield* dispatch(8, nearLimitCurrentRequest, screenshots);
+            const nearLimitRun = yield* wait(8, "completed");
+            const nearLimitTurn = (yield* Ref.get(capturedTurns)).at(-1)!;
+            assert.equal(nearLimitTurn.nativeThreadId, turns.at(-1)?.nativeThreadId);
+            assert.equal(nearLimitTurn.text, nearLimitCurrentRequest);
+            assert.deepEqual(nearLimitTurn.attachments, screenshots);
+            assert.equal(
+              grokBotManagedPrompt(nearLimitTurn.text).length,
+              GROK_BOT_NATIVE_MESSAGE_LIMIT,
+            );
+            assert.isFalse(nearLimitTurn.text.includes(nearLimitMissedRequest));
+            assert.equal(nearLimitRun.contextHandoffs.length, bounded.contextHandoffs.length);
+            yield* dispatch(9, "Small follow-up after near-limit request");
+            const retryable = yield* wait(9, "completed");
+            const retriedTurn = (yield* Ref.get(capturedTurns)).at(-1)!;
+            assert.equal(retriedTurn.nativeThreadId, nearLimitTurn.nativeThreadId);
+            assert.include(retriedTurn.text, nearLimitMissedRequest);
+            assert.isTrue(
+              retriedTurn.text.endsWith("User message:\nSmall follow-up after near-limit request"),
+            );
+            const nearLimitMissedItem = retryable.turnItems.find(
+              (item) => item.type === "user_message" && item.text === nearLimitMissedRequest,
+            )!;
+            assert.include(
+              retryable.contextHandoffs.at(-1)!.delivery!.itemIds ?? [],
+              nearLimitMissedItem.id,
             );
           }).pipe(
             Effect.provide(
