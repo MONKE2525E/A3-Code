@@ -33,18 +33,26 @@ export function grokBotUserMessageIds(
   );
 }
 
-/** Delivered once the polled transcript shows a user message with the same text that was not there before. */
-export function isGrokBotSendDelivered(
-  messages: readonly ConversationMessage[],
+/** The user messages a send produced: same text, and not in the transcript before the send. */
+function grokBotSendEchoes<Message extends ConversationMessage>(
+  messages: readonly Message[],
   sent: GrokBotSentMessage,
-): boolean {
+): readonly Message[] {
   const text = sent.text.trim();
-  return messages.some(
+  return messages.filter(
     (message) =>
       message.sender.kind === "user" &&
       !sent.baselineUserIds.has(message.id) &&
       message.text.trim() === text,
   );
+}
+
+/** Delivered once the polled transcript shows a user message with the same text that was not there before. */
+export function isGrokBotSendDelivered(
+  messages: readonly ConversationMessage[],
+  sent: GrokBotSentMessage,
+): boolean {
+  return grokBotSendEchoes(messages, sent).length > 0;
 }
 
 export function grokBotErrorReason(error: unknown): string | null {
@@ -136,6 +144,41 @@ export function groupGrokBotReactions(
     counts.set(reaction.emoji, (counts.get(reaction.emoji) ?? 0) + 1);
   }
   return [...counts].map(([emoji, count]) => ({ emoji, count }));
+}
+
+/** Who put this emoji on the message, for a reaction pill's tooltip and accessible description. */
+export function grokBotReactionTitle(reactions: ReactionList | undefined, emoji: string): string {
+  const senders = new Set(
+    (reactions ?? [])
+      .filter((reaction) => reaction.emoji === emoji)
+      .map((reaction) => reaction.from),
+  );
+  const names = [senders.has("user") ? "you" : null, senders.has("bot") ? "Grok Bot" : null];
+  return `Reacted by ${names.filter((name) => name !== null).join(" and ")}`;
+}
+
+/**
+ * A bot reaction answers a send only on the message the send produced, or as a standalone
+ * reaction after the send began. The server makes a standalone reaction only when its target is
+ * missing from the transcript. A reaction on any other message is not a reply, however new it is.
+ * If the anchor message has left the transcript, only the echo counts.
+ */
+export function isGrokBotReactionReplyToSend(input: {
+  readonly sent: GrokBotSentMessage;
+  readonly afterMessageId: string | undefined;
+  readonly messages: readonly (typeof GrokBotMessage.Type)[];
+}): boolean {
+  const botReacted = (message: typeof GrokBotMessage.Type): boolean =>
+    (message.reactions ?? []).some((reaction) => reaction.from === "bot");
+  if (grokBotSendEchoes(input.messages, input.sent).some(botReacted)) return true;
+  const anchor =
+    input.afterMessageId === undefined
+      ? -1
+      : input.messages.findIndex((message) => message.id === input.afterMessageId);
+  if (input.afterMessageId !== undefined && anchor === -1) return false;
+  return input.messages
+    .slice(anchor + 1)
+    .some((message) => message.reactionOnly === true && botReacted(message));
 }
 
 /**

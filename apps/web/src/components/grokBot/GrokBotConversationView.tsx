@@ -35,6 +35,7 @@ import {
 } from "~/state/grokBots";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { cn } from "~/lib/utils";
 
 import { GrokBotAvatar } from "./GrokBotAvatar";
 import { GROK_BOT_AVATAR_COLORS } from "./grokBotAvatarShapes";
@@ -49,6 +50,7 @@ import {
   grokBotUserMessageIds,
   groupGrokBotPeerCounts,
   groupGrokBotTimeline,
+  isGrokBotReactionReplyToSend,
   isGrokBotReplyAfterSend,
   isGrokBotSendDelivered,
   type GrokBotPeer,
@@ -112,8 +114,14 @@ export function GrokBotConversationView({
   const [outgoing, setOutgoing] = useState<readonly OutgoingMessage[]>([]);
   const outgoingSequence = useRef(0);
   const sendMessage = useAtomCommand(grokBotsSend, { reportFailure: false });
-  /** Set while a send waits for its reply; cleared when a newer message settles or the send fails. */
-  const replyAwaiting = useRef<{ readonly afterMessageId: string | undefined } | null>(null);
+  /**
+   * Set while a send waits for its reply; cleared when a newer message settles, a bot reaction
+   * lands on the send's message, or the send fails.
+   */
+  const replyAwaiting = useRef<{
+    readonly sent: GrokBotSentMessage;
+    readonly afterMessageId: string | undefined;
+  } | null>(null);
 
   // Opening a chat re-reads it and the roster right away, so a profile edit made elsewhere
   // shows here without waiting for the poll.
@@ -135,22 +143,28 @@ export function GrokBotConversationView({
     }
     wasStreaming.current = streaming;
   }, [streaming, surfaceKey]);
-  // A reply answers the send only when it is a message that arrived after the
-  // send; the transcript's last settled message from before the send does not count.
+  // A reply answers the send when a message arrived after it, or when the bot reacted to the
+  // message the send produced. The transcript's last settled message from before the send does
+  // not count, and neither does a reaction on any other message.
   useEffect(() => {
     const awaiting = replyAwaiting.current;
     if (
       awaiting !== null &&
-      isGrokBotReplyAfterSend({
+      (isGrokBotReplyAfterSend({
         afterMessageId: awaiting.afterMessageId,
         lastMessageId,
         lastMessageSettled: botSettled,
-      })
+      }) ||
+        isGrokBotReactionReplyToSend({
+          sent: awaiting.sent,
+          afterMessageId: awaiting.afterMessageId,
+          messages,
+        }))
     ) {
       replyAwaiting.current = null;
       setGrokBotActivity(surfaceKey, "finished", GROK_BOT_SETTLE_LINGER_MS);
     }
-  }, [botSettled, lastMessageId, surfaceKey]);
+  }, [botSettled, lastMessageId, messages, surfaceKey]);
   // Leaving the chat ends what only this view could observe; a pending
   // "thinking" survives so the sidebar keeps showing the bot at work.
   useEffect(
@@ -165,7 +179,7 @@ export function GrokBotConversationView({
     const id = ++outgoingSequence.current;
     setOutgoing((items) => [...items, { ...sent, id, surfaceKey }]);
     setGrokBotActivity(surfaceKey, "sending");
-    replyAwaiting.current = { afterMessageId: lastMessageId };
+    replyAwaiting.current = { sent, afterMessageId: lastMessageId };
     const result = await sendMessage({
       environmentId,
       input: { botId, message: sent.text },
@@ -391,6 +405,21 @@ function GrokBotMessageList({
           if (message.voiceCall !== undefined) {
             return <GrokBotVoiceCallRow key={message.id} marker={message.voiceCall} />;
           }
+          // Reaction-only entries are the fallback for a reaction whose target is not in the
+          // transcript; a reaction on a message in view is shown as a pill on that message.
+          if (message.reactionOnly) {
+            return (
+              <li
+                key={message.id}
+                className={cn(
+                  "flex",
+                  message.sender.kind === "user" ? "justify-end" : "justify-start",
+                )}
+              >
+                <GrokBotReactions reactions={message.reactions} />
+              </li>
+            );
+          }
           if (message.sender.kind === "user") {
             const stamp = splitGrokBotAgentStamp(message.text);
             return (
@@ -405,10 +434,9 @@ function GrokBotMessageList({
                 ) : null}
                 <GrokBotUserBubble
                   text={stamp.text}
-                  large={message.reactionOnly === true}
                   references={message.grokBotWorkflowReferences}
                 />
-                {message.reactionOnly ? null : <GrokBotReactions reactions={message.reactions} />}
+                <GrokBotReactions reactions={message.reactions} />
               </li>
             );
           }
@@ -416,7 +444,8 @@ function GrokBotMessageList({
           const continuesBot =
             previous?.kind === "message" &&
             previous.message.sender.kind !== "user" &&
-            previous.message.voiceCall === undefined;
+            previous.message.voiceCall === undefined &&
+            previous.message.reactionOnly !== true;
           return (
             <li key={message.id} className="flex min-w-0 gap-3">
               {continuesBot ? (
@@ -469,9 +498,7 @@ function GrokBotMessageBody({
   readonly message: GrokBotMessage;
   readonly environmentId: EnvironmentId;
 }) {
-  return message.reactionOnly ? (
-    <p className="text-2xl leading-none">{message.text.trim()}</p>
-  ) : (
+  return (
     <>
       <ChatMarkdown
         text={message.text}
@@ -572,23 +599,15 @@ function peerAvatar(
 
 function GrokBotUserBubble({
   text,
-  large = false,
   references,
 }: {
   readonly text: string;
-  readonly large?: boolean;
   readonly references?: GrokBotWorkflowReferences | undefined;
 }) {
   return (
     <div className="max-w-[80%] rounded-2xl bg-message p-3 text-message-foreground">
       {references ? <GrokBotWorkflowReferenceChips references={references} /> : null}
-      {large ? (
-        <p className="text-2xl leading-none">{text.trim()}</p>
-      ) : (
-        <p className="whitespace-pre-wrap text-sm leading-relaxed [overflow-wrap:anywhere]">
-          {text}
-        </p>
-      )}
+      <p className="whitespace-pre-wrap text-sm leading-relaxed [overflow-wrap:anywhere]">{text}</p>
     </div>
   );
 }

@@ -1,5 +1,9 @@
 import { assert, it } from "@effect/vitest";
-import { ProviderTurnId, OrchestrationV2TurnItemJson } from "@t3tools/contracts";
+import {
+  ProviderTurnId,
+  OrchestrationV2TurnItemJson,
+  type OrchestrationV2ConversationMessage,
+} from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
@@ -12,13 +16,22 @@ import {
   GrokBotNativeRuntimeService,
   type RuntimeFrame,
 } from "../../grokBot/GrokBotNativeRuntimeService.ts";
-import { grokBotTurnIdentity } from "./GrokBotSettlementProjection.ts";
+import {
+  grokBotTurnIdentity,
+  grokBotMessageTurnItem,
+  makeGrokBotSettlementProjection,
+} from "./GrokBotSettlementProjection.ts";
 import {
   createGrokBotAdapterV2,
   GrokBotCapabilitiesV2,
   makeGrokBotTranscriptProjection,
 } from "./GrokBotAdapterV2.ts";
-import { GrokBotManagedBinding, GrokBotBindingError } from "./GrokBotManagedBinding.ts";
+import { GROK_BOT_IDLE_COMPLETE_MS, makeGrokBotTurnWatchdog } from "./GrokBotTurnWatchdog.ts";
+import {
+  GrokBotManagedBinding,
+  GrokBotBindingError,
+  type GrokBotManagedTurn,
+} from "./GrokBotManagedBinding.ts";
 import {
   makeBindings,
   makeNative,
@@ -76,6 +89,28 @@ const answer = (version = "2", text = "native answer") => ({
     message: { type: "text", content: text },
     requestId: "native-request",
   },
+});
+
+const encodeTurnItemJson = Schema.encodeEffect(OrchestrationV2TurnItemJson);
+const decodeTurnItemJson = Schema.decodeEffect(OrchestrationV2TurnItemJson);
+
+const appUserMessage = (
+  turn: GrokBotManagedTurn,
+  grokBotReactions?: OrchestrationV2ConversationMessage["grokBotReactions"],
+): OrchestrationV2ConversationMessage => ({
+  id: turn.input.message.messageId,
+  threadId: turn.input.threadId,
+  runId: turn.input.runId,
+  nodeId: turn.input.rootNodeId,
+  role: "user",
+  createdBy: turn.input.message.createdBy,
+  creationSource: turn.input.message.creationSource,
+  text: turn.input.message.text,
+  attachments: turn.input.message.attachments,
+  streaming: false,
+  createdAt: DateTime.makeUnsafe(1),
+  updatedAt: DateTime.makeUnsafe(1),
+  ...(grokBotReactions === undefined ? {} : { grokBotReactions }),
 });
 
 it.effect("projects native bot messages and clickable peer metadata into durable turn items", () =>
@@ -342,6 +377,351 @@ it.effect(
       assert.equal(projection.messages()[0]?.text, "updated answer");
       assert.equal(projection.messages()[0]?.runId, turn.input.runId);
     }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect("projects owned echo reactions onto the original T3 user message", () =>
+  Effect.gen(function* () {
+    const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    const turn = yield* makeTurn;
+    const identity = grokBotTurnIdentity(turn);
+    const original = appUserMessage(turn);
+    const originalItem = {
+      ...grokBotMessageTurnItem(original, { native: nativeSession, turn: identity }).turnItem,
+      id: idAllocator.derive.userTurnItem({ messageId: original.id }),
+      ordinal: 100,
+    };
+    const output: { turn: string; streaming: boolean; atMs: number }[] = [];
+    const projection = makeGrokBotTranscriptProjection({
+      native: nativeSession,
+      idAllocator,
+      existingMessage: (id) => Effect.succeed(id === original.id ? original : undefined),
+      existingUserTurnItem: (id) => Effect.succeed(id === original.id ? originalItem : null),
+      onOwnedOutput: (owned, streaming, atMs) =>
+        output.push({ turn: owned.messageId, streaming, atMs }),
+    });
+    projection.registerManagedTurn(identity);
+    const initialEcho = echo(identity.messageId);
+    yield* projection.project(
+      transcript(
+        [
+          {
+            ...initialEcho,
+            value: { ...initialEcho.value, id: "owned-user-echo", timestampMs: 1 },
+          },
+        ],
+        true,
+      ),
+    );
+    yield* TestClock.adjust("1 second");
+
+    const changed = yield* projection.project(
+      transcript([
+        {
+          ...initialEcho,
+          updatedSeq: "2",
+          value: {
+            ...initialEcho.value,
+            id: "owned-user-echo",
+            timestampMs: 1,
+            reactions: [{ emoji: "👍", by: nativeSession.botId }],
+          },
+        },
+      ]),
+    );
+    const messageEvents = changed.filter((event) => event.type === "message.updated");
+    assert.equal(messageEvents.length, 1);
+    assert.equal(messageEvents[0]?.type, "message.updated");
+    if (messageEvents[0]?.type !== "message.updated") return;
+    assert.equal(messageEvents[0].message.id, original.id);
+    assert.equal(messageEvents[0].message.role, "user");
+    assert.equal(messageEvents[0].message.text, original.text);
+    assert.deepEqual(messageEvents[0].message.grokBotReactions, [
+      { emoji: "👍", from: "bot", messageId: original.id },
+    ]);
+    const itemEvents = changed.filter((event) => event.type === "turn_item.updated");
+    assert.equal(itemEvents.length, 1);
+    if (itemEvents[0]?.type === "turn_item.updated") {
+      const reactions = messageEvents[0].message.grokBotReactions;
+      if (reactions === undefined) return assert.fail("The message must carry its reaction.");
+      assert.deepEqual(itemEvents[0].turnItem, {
+        ...originalItem,
+        grokBotReactions: reactions,
+      });
+      const wire = yield* encodeTurnItemJson(itemEvents[0].turnItem);
+      const restored = yield* decodeTurnItemJson(wire);
+      assert.deepEqual(restored, itemEvents[0].turnItem);
+    }
+    assert.equal(output.length, 1);
+    assert.equal(output[0]?.turn, identity.messageId);
+    assert.isFalse(output[0]?.streaming);
+    assert.isAbove(output[0]!.atMs, 1);
+
+    const duplicate = yield* projection.project(
+      transcript([
+        {
+          ...initialEcho,
+          updatedSeq: "3",
+          value: {
+            ...initialEcho.value,
+            id: "owned-user-echo",
+            timestampMs: 1,
+            reactions: [{ emoji: "👍", by: nativeSession.botId }],
+          },
+        },
+      ]),
+    );
+    assert.deepEqual(duplicate, []);
+    assert.equal(output.length, 1);
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect.each([false, true])(
+  "restores a reaction-only reply on replay with persisted pill = %s",
+  (persisted) =>
+    Effect.gen(function* () {
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const turn = yield* makeTurn;
+      const identity = grokBotTurnIdentity(turn);
+      const original = appUserMessage(
+        turn,
+        persisted
+          ? [{ emoji: "👍", from: "bot", messageId: turn.input.message.messageId }]
+          : undefined,
+      );
+      const restoredAtMs = 1_000_000;
+      const watchdog = makeGrokBotTurnWatchdog(restoredAtMs);
+      watchdog.track(identity, restoredAtMs);
+      watchdog.observeFrame(
+        {
+          _tag: "Live",
+          state: {
+            agentId: nativeSession.botId,
+            sessionId: nativeSession.sessionId,
+            isRunning: false,
+            updatedAtMs: restoredAtMs,
+            staleAfterMs: 1_000_000,
+          },
+          observedAtMs: restoredAtMs,
+          snapshot: true,
+        },
+        restoredAtMs,
+      );
+      const outputTimes: number[] = [];
+      const projection = makeGrokBotTranscriptProjection({
+        native: nativeSession,
+        idAllocator,
+        existingMessage: (id) => Effect.succeed(id === original.id ? original : undefined),
+        onOwnedOutput: (owned, streaming, atMs) => {
+          assert.equal(owned.messageId, identity.messageId);
+          outputTimes.push(atMs);
+          watchdog.observeOutput(owned.messageId, streaming, atMs);
+        },
+      });
+      projection.registerManagedTurn(identity);
+      const oldEcho = echo(identity.messageId);
+      const frame = transcript(
+        [
+          {
+            ...oldEcho,
+            value: {
+              ...oldEcho.value,
+              id: "old-owned-user-echo",
+              timestampMs: 1,
+              reactions: [{ emoji: "👍", by: nativeSession.botId }],
+            },
+          },
+        ],
+        true,
+      );
+      watchdog.observeFrame(frame, restoredAtMs);
+      const events = yield* projection.project(frame);
+      assert.equal(events.length, persisted ? 0 : 1);
+      assert.deepEqual(outputTimes, [1]);
+      assert.deepEqual(watchdog.evaluate(restoredAtMs, false), []);
+      assert.equal(watchdog.evaluate(restoredAtMs + 120_000, false)[0]?.outcome, "success");
+    }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect(
+  "settles a reaction-only managed turn after idle grace without claiming unrelated work",
+  () =>
+    Effect.gen(function* () {
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const turn = yield* makeTurn;
+      const identity = grokBotTurnIdentity(turn);
+      const original = appUserMessage(turn);
+      const watchdog = makeGrokBotTurnWatchdog(0);
+      watchdog.track(identity, 0);
+      const idleFrame: RuntimeFrame = {
+        _tag: "Live",
+        state: {
+          agentId: nativeSession.botId,
+          sessionId: nativeSession.sessionId,
+          isRunning: false,
+          updatedAtMs: 0,
+          staleAfterMs: 1_000_000,
+        },
+        observedAtMs: 0,
+        snapshot: true,
+      };
+      watchdog.observeFrame(idleFrame, 0);
+      const ownedOutputTimes: number[] = [];
+      const projection = makeGrokBotTranscriptProjection({
+        native: nativeSession,
+        idAllocator,
+        existingMessage: (id) => Effect.succeed(id === original.id ? original : undefined),
+        onOwnedOutput: (owned, streaming, atMs) => {
+          assert.equal(owned.messageId, identity.messageId);
+          assert.isFalse(streaming);
+          ownedOutputTimes.push(atMs);
+          watchdog.observeOutput(owned.messageId, streaming, atMs);
+        },
+      });
+      projection.registerManagedTurn(identity);
+      const settlements = makeGrokBotSettlementProjection(nativeSession);
+      yield* settlements.register(identity);
+
+      const managedEcho = echo(identity.messageId);
+      const unrelatedUser = {
+        seq: "2",
+        updatedSeq: "1",
+        value: {
+          id: "unrelated-user",
+          kind: "message",
+          role: "user",
+          content: "another prompt",
+          clientNonce: "unrelated-nonce",
+          requestId: "unrelated-request",
+          reactions: [{ emoji: "🤔", by: nativeSession.botId }],
+          timestampMs: 2,
+        },
+      };
+      const unrelatedAnswer = {
+        seq: "3",
+        updatedSeq: "1",
+        value: {
+          id: "unrelated-answer",
+          kind: "send-message",
+          message: { type: "text", content: "unrelated answer" },
+          requestId: "unrelated-request",
+          timestampMs: 3,
+        },
+      };
+      const initialRows = [
+        {
+          ...managedEcho,
+          value: {
+            ...managedEcho.value,
+            id: "managed-user-echo",
+            timestampMs: 1,
+          },
+        },
+        unrelatedUser,
+        unrelatedAnswer,
+      ];
+      const replay = transcript(initialRows, true);
+      watchdog.observeFrame(replay, 0);
+      const replayEvents = yield* projection.project(replay);
+      const unrelatedMessage = replayEvents.find(
+        (event) =>
+          event.type === "message.updated" &&
+          event.message.role === "user" &&
+          event.message.text === "another prompt",
+      );
+      assert.equal(unrelatedMessage?.type, "message.updated");
+      if (unrelatedMessage?.type === "message.updated")
+        assert.deepEqual(unrelatedMessage.message.grokBotReactions, [
+          {
+            emoji: "🤔",
+            from: "bot",
+            messageId: unrelatedMessage.message.id,
+          },
+        ]);
+      const unrelatedItem = replayEvents.find(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "user_message" &&
+          unrelatedMessage?.type === "message.updated" &&
+          event.turnItem.messageId === unrelatedMessage.message.id,
+      );
+      assert.equal(unrelatedItem?.type, "turn_item.updated");
+      if (
+        unrelatedItem?.type === "turn_item.updated" &&
+        unrelatedItem.turnItem.type === "user_message"
+      )
+        assert.deepEqual(unrelatedItem.turnItem.grokBotReactions, [
+          {
+            emoji: "🤔",
+            from: "bot",
+            messageId: unrelatedItem.turnItem.messageId,
+          },
+        ]);
+      assert.deepEqual(ownedOutputTimes, []);
+      assert.deepEqual(watchdog.evaluate(0, false), []);
+
+      yield* TestClock.adjust("10 seconds");
+      const liveReaction = transcript([
+        {
+          ...managedEcho,
+          updatedSeq: "2",
+          value: {
+            ...managedEcho.value,
+            id: "managed-user-echo",
+            timestampMs: 1,
+            reactions: [{ emoji: "👍", by: nativeSession.botId }],
+          },
+        },
+        unrelatedUser,
+        {
+          ...unrelatedAnswer,
+          updatedSeq: "2",
+          value: { ...unrelatedAnswer.value, timestampMs: 10_000 },
+        },
+      ]);
+      watchdog.observeFrame(liveReaction, 10_000);
+      const reactionEvents = yield* projection.project(liveReaction);
+      const actualUserUpdate = reactionEvents.find(
+        (event) => event.type === "message.updated" && event.message.id === original.id,
+      );
+      assert.equal(actualUserUpdate?.type, "message.updated");
+      if (actualUserUpdate?.type === "message.updated") {
+        assert.equal(actualUserUpdate.message.role, "user");
+        assert.deepEqual(actualUserUpdate.message.grokBotReactions, [
+          { emoji: "👍", from: "bot", messageId: original.id },
+        ]);
+      }
+      assert.deepEqual(ownedOutputTimes, [10_000]);
+      assert.deepEqual(watchdog.evaluate(10_000, false), []);
+
+      const held = new Set([identity.messageId]);
+      assert.deepEqual(watchdog.evaluate(210_000, false, held), []);
+      assert.deepEqual(watchdog.evaluate(300_000, false, held), []);
+      const releasedAtMs = 300_001;
+      assert.deepEqual(watchdog.evaluate(releasedAtMs, false), []);
+      assert.deepEqual(watchdog.evaluate(releasedAtMs + GROK_BOT_IDLE_COMPLETE_MS - 1, false), []);
+      const settledAtMs = releasedAtMs + GROK_BOT_IDLE_COMPLETE_MS;
+      const [verdict] = watchdog.evaluate(settledAtMs, false);
+      assert.equal(verdict?.outcome, "success");
+      if (verdict === undefined) return;
+      const settlementEvents = yield* settlements.recover({
+        identity: verdict.identity,
+        outcome: verdict.outcome,
+        settledAtMs,
+      });
+      assert.deepEqual(
+        settlementEvents.map((event) => event.type),
+        ["provider_turn.updated", "turn.terminal"],
+      );
+      assert.isTrue(settlements.isSettled(identity.messageId));
+      assert.isFalse(
+        [...replayEvents, ...reactionEvents, ...settlementEvents].some(
+          (event) =>
+            event.type === "message.updated" &&
+            event.message.role === "assistant" &&
+            event.message.text === "",
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(IdAllocator.layer)),
 );
 
 it.effect("associates an earlier reply only after an owned echo proves its native request", () =>

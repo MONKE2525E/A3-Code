@@ -5,11 +5,13 @@ import type { GrokBotMessage } from "@t3tools/contracts";
 import {
   formatGrokBotVoiceCallDuration,
   grokBotErrorReason,
+  grokBotReactionTitle,
   grokBotUserMessageIds,
   grokBotVoiceCallLabel,
   groupGrokBotPeerCounts,
   groupGrokBotReactions,
   groupGrokBotTimeline,
+  isGrokBotReactionReplyToSend,
   isGrokBotReplyAfterSend,
   isGrokBotSendDelivered,
 } from "./grokBotConversation";
@@ -213,6 +215,113 @@ describe("isGrokBotReplyAfterSend", () => {
         lastMessageSettled: true,
       }),
     ).toBe(true);
+  });
+});
+
+describe("grokBotReactionTitle", () => {
+  it("names who put each emoji on the message", () => {
+    const reactions = [
+      { emoji: "👍", from: "bot" as const, messageId: "u1" },
+      { emoji: "👍", from: "user" as const, messageId: "u1" },
+      { emoji: "🎉", from: "bot" as const, messageId: "u1" },
+    ];
+    expect(grokBotReactionTitle(reactions, "👍")).toBe("Reacted by you and Grok Bot");
+    expect(grokBotReactionTitle(reactions, "🎉")).toBe("Reacted by Grok Bot");
+  });
+});
+
+describe("isGrokBotReactionReplyToSend", () => {
+  type Row = typeof GrokBotMessage.Type;
+  const row = (
+    id: string,
+    sender: Row["sender"],
+    fields: {
+      readonly text?: string;
+      readonly reactions?: Row["reactions"];
+      readonly reactionOnly?: true;
+    } = {},
+  ): Row => ({
+    id,
+    role: sender.kind === "user" ? "user" : "assistant",
+    sender,
+    text: fields.text ?? id,
+    timestampMs: 0,
+    streaming: false,
+    ...(fields.reactions === undefined ? {} : { reactions: fields.reactions }),
+    ...(fields.reactionOnly === undefined ? {} : { reactionOnly: fields.reactionOnly }),
+  });
+  const botReaction = (messageId: string): NonNullable<Row["reactions"]> => [
+    { emoji: "👍", from: "bot", messageId },
+  ];
+  // "ship it" was sent after u1 and a1 were in the transcript.
+  const sent = { text: "ship it", baselineUserIds: new Set(["u1"]) };
+  const reply = (messages: readonly Row[], afterMessageId: string | undefined = "a1") =>
+    isGrokBotReactionReplyToSend({ sent, afterMessageId, messages });
+
+  it("does not count a new bot reaction on an old message the send did not produce", () => {
+    const messages = [
+      row("u1", user, {
+        text: "hello",
+        reactions: [...botReaction("u1"), { emoji: "🎉", from: "bot", messageId: "u1" }],
+      }),
+      row("a1", self),
+      row("u2", user, { text: "ship it" }),
+    ];
+    expect(reply(messages)).toBe(false);
+  });
+
+  it("does not count an old same-text message as the echo of the send", () => {
+    const messages = [
+      row("u1", user, { text: "ship it", reactions: botReaction("u1") }),
+      row("a1", self),
+    ];
+    expect(reply(messages)).toBe(false);
+  });
+
+  it("counts a bot reaction on the message the send produced", () => {
+    const messages = [
+      row("u1", user, { text: "hello" }),
+      row("a1", self),
+      row("u2", user, { text: "ship it", reactions: botReaction("u2") }),
+    ];
+    expect(reply(messages)).toBe(true);
+  });
+
+  it("does not count the user's own reaction on the sent message", () => {
+    const messages = [
+      row("a1", self),
+      row("u2", user, {
+        text: "ship it",
+        reactions: [{ emoji: "❤️", from: "user", messageId: "u2" }],
+      }),
+    ];
+    expect(reply(messages)).toBe(false);
+  });
+
+  it("counts a standalone bot reaction that arrived after the send", () => {
+    const messages = [
+      row("a1", self),
+      row("u2", user, { text: "ship it" }),
+      row("r1", self, {
+        text: "👍",
+        reactions: [{ emoji: "👍", from: "bot", messageId: "gone" }],
+        reactionOnly: true,
+      }),
+    ];
+    expect(reply(messages)).toBe(true);
+  });
+
+  it("does not count a standalone bot reaction from before the send", () => {
+    const messages = [
+      row("r0", self, {
+        text: "👍",
+        reactions: [{ emoji: "👍", from: "bot", messageId: "gone" }],
+        reactionOnly: true,
+      }),
+      row("a1", self),
+      row("u2", user, { text: "ship it" }),
+    ];
+    expect(reply(messages)).toBe(false);
   });
 });
 
