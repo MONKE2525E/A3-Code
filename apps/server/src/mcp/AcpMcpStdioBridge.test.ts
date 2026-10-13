@@ -2,6 +2,7 @@
 // schema-free passthrough.
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off
 import * as NodeStream from "node:stream";
+import * as NodeHttp from "node:http";
 
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -32,6 +33,88 @@ function makeHarness(responder: (request: Request) => Promise<Response> | Respon
 }
 
 describe("AcpMcpStdioBridge", () => {
+  it.effect("refuses redirects before replaying an authenticated MCP request", () =>
+    Effect.gen(function* () {
+      let forwarded = 0;
+      const server = yield* Effect.acquireRelease(
+        Effect.promise(
+          () =>
+            new Promise<NodeHttp.Server>((resolve) => {
+              const listener = NodeHttp.createServer((request, response) => {
+                if (request.url === "/mcp") {
+                  response.writeHead(307, { Location: "/other" }).end();
+                } else {
+                  forwarded++;
+                  response.writeHead(202).end();
+                }
+              });
+              listener.listen(0, "127.0.0.1", () => resolve(listener));
+            }),
+        ),
+        (listener) =>
+          Effect.promise(() => new Promise<void>((resolve) => listener.close(() => resolve()))),
+      );
+      const address = server.address();
+      if (address === null || typeof address === "string")
+        return yield* Effect.die("Expected a loopback TCP listener.");
+      const failure = yield* callAcpMcpTool({
+        endpoint: `http://127.0.0.1:${address.port}/mcp`,
+        authorization: "Bearer bridge-test",
+        tool: "task_status",
+        arguments: {},
+      }).pipe(Effect.flip);
+      expect(failure._tag).toBe("AcpMcpBridgeError");
+      expect(forwarded).toBe(0);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("aborts a one-shot HTTP request when its caller is interrupted", () =>
+    Effect.gen(function* () {
+      const started = Promise.withResolvers<AbortSignal | null | undefined>();
+      const fiber = yield* Effect.forkChild(
+        callAcpMcpTool({
+          endpoint: "http://127.0.0.1:1/mcp",
+          authorization: "Bearer bridge-test",
+          tool: "task_status",
+          arguments: {},
+          fetchImplementation: (_url, init) => {
+            started.resolve(init?.signal);
+            return new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+                once: true,
+              });
+            });
+          },
+        }),
+      );
+      const signal = yield* Effect.promise(() => started.promise);
+      expect(signal).toBeDefined();
+      yield* Fiber.interrupt(fiber);
+      expect(signal?.aborted).toBe(true);
+    }),
+  );
+
+  it.effect("aborts pending bridge requests and releases stdin listeners on interruption", () =>
+    Effect.gen(function* () {
+      const started = Promise.withResolvers<AbortSignal>();
+      const { input, written, bridge } = makeHarness((request) => {
+        started.resolve(request.signal);
+        return new Promise<Response>((_resolve, reject) => {
+          request.signal.addEventListener("abort", () => reject(new Error("aborted")), {
+            once: true,
+          });
+        });
+      });
+      const fiber = yield* Effect.forkChild(bridge);
+      input.write('{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n');
+      const signal = yield* Effect.promise(() => started.promise);
+      yield* Fiber.interrupt(fiber);
+      expect(signal.aborted).toBe(true);
+      expect(input.listenerCount("data")).toBe(0);
+      expect(written).toEqual([]);
+    }),
+  );
+
   it.effect("preserves the original transport failure as the typed error cause", () =>
     Effect.gen(function* () {
       const source = new Error("fetch failed");
