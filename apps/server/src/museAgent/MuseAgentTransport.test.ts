@@ -34,8 +34,21 @@ const fixture = () => {
   let handleRoute: ((route: Route) => Promise<void>) | undefined;
   let sourceFingerprint = "synthetic-fingerprint";
   let pageAuthority: string | null = "synthetic-authority";
+  let disconnectObserved = false;
+  let recoveryFails = false;
   const bridge = {
     authority: () => pageAuthority,
+    observeDisconnect: async (input: unknown) => {
+      calls.push({ method: "observeDisconnect", input });
+      if (recoveryFails) throw new Error("local_recovery_failed");
+      if (disconnectObserved) return;
+      disconnectObserved = true;
+      await exposed.get("__t3MuseEvent")!({
+        authority: "synthetic-authority",
+        event: "transport.disconnected",
+        payload: {},
+      });
+    },
     ...Object.fromEntries(
       [
         "request",
@@ -114,6 +127,9 @@ const fixture = () => {
     setAuthority: (value: string | null) => {
       pageAuthority = value;
     },
+    failRecovery: () => {
+      recoveryFails = true;
+    },
     setFingerprint: (value: string) => {
       sourceFingerprint = value;
     },
@@ -148,7 +164,7 @@ const registration: Transport.MuseAgentToolRegistration = {
 };
 
 it.effect(
-  "keeps warm observers and computer streams alive across transient native unreadiness",
+  "keeps the warm browser alive and delegates a transient readiness gap to bridge recovery",
   () => {
     const f = fixture();
     return Effect.scoped(
@@ -156,18 +172,8 @@ it.effect(
         const transport = yield* Transport.MuseAgentTransport;
         const binding = yield* transport.connect;
         const watch = yield* transport.watch(binding, "primary");
-        const computer = yield* transport.openComputerStream(binding, {
-          sessionId: "worker",
-          taskId: "task",
-          takeoverId: "takeover",
-        });
         const watcher = yield* watch.events.pipe(
-          Stream.take(3),
-          Stream.runCollect,
-          Effect.forkScoped,
-        );
-        const viewer = yield* computer.events.pipe(
-          Stream.take(1),
+          Stream.take(2),
           Stream.runCollect,
           Effect.forkScoped,
         );
@@ -189,20 +195,18 @@ it.effect(
         yield* Effect.promise(async () =>
           f.nativeEvent({
             authority: "synthetic-authority",
-            event: "transport.reconnected",
+            event: "message.user",
             payload: {},
           }),
         );
-        const opening = f.calls.find((call) => call.method === "openComputerStream");
-        const metadata = yield* decodeStreamMetadata(opening?.input);
-        yield* Effect.promise(async () =>
-          f.computerEvent({ ...metadata, type: "data", base64: "UkZC" }),
-        );
         assert.deepStrictEqual(
           (yield* Fiber.join(watcher)).map((event) => event.event),
-          ["transport.disconnected", "transport.disconnected", "transport.reconnected"],
+          ["transport.disconnected", "message.user"],
         );
-        assert.deepStrictEqual(yield* Fiber.join(viewer), [Buffer.from("RFB")]);
+        assert.deepStrictEqual(
+          f.calls.filter((call) => call.method === "observeDisconnect").map((call) => call.input),
+          [{ authority: "synthetic-authority" }, { authority: "synthetic-authority" }],
+        );
         assert.strictEqual(f.calls.filter((call) => call.method === "watch").length, 1);
       }),
     ).pipe(Effect.provide(f.layer));
@@ -228,6 +232,23 @@ it.effect(
     ).pipe(Effect.provide(f.layer));
   },
 );
+
+it.effect("retires an observer when the bridge cannot fence its local recovery signal", () => {
+  const f = fixture();
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const transport = yield* Transport.MuseAgentTransport;
+      const binding = yield* transport.connect;
+      const watch = yield* transport.watch(binding, "primary");
+      const watcher = yield* watch.events.pipe(Stream.runCollect, Effect.forkScoped);
+      f.setAuthority(null);
+      f.failRecovery();
+      assert.strictEqual((yield* transport.connect.pipe(Effect.flip)).kind, "disconnected");
+      assert.strictEqual((yield* Fiber.join(watcher).pipe(Effect.flip)).kind, "disconnected");
+      assert.strictEqual(f.closed(), true);
+    }),
+  ).pipe(Effect.provide(f.layer));
+});
 
 it.effect(
   "retires old source-bound observers with a disconnected error when copied cookies change",

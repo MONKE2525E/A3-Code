@@ -6,6 +6,7 @@ import { MUSE_AGENT_AVATAR_MAX_BYTES } from "./MuseAgentAvatar.ts";
 type Params = Record<string, unknown>;
 interface Bridge {
   authority(): string;
+  observeDisconnect(input: Params): void;
   connectionId(input: Params): string;
   watch(input: Params): Promise<unknown>;
   request(input: Params): Promise<unknown>;
@@ -385,6 +386,60 @@ const admission = async (f: ReturnType<typeof fixture>) => {
     parent_agent_id: "root-task",
   });
 };
+
+it("recovers a host-observed readiness gap between interval ticks through the real bridge loop", async () => {
+  const f = fixture();
+  await admission(f);
+  const before = f.bridge.connectionId({ authority: f.authority });
+  await f.bridge.register({
+    authority: f.authority,
+    clientId: "device-before-gap",
+    nativeSessionId: "primary",
+    connectionId: before,
+    commands: { "t3.probe": {} },
+  });
+  f.rpc.isReady = false;
+  expect(f.bridge.authority()).toBeNull();
+  f.bridge.observeDisconnect({ authority: f.authority });
+  f.emit("delta.turn_done", {
+    session_id: "primary",
+    reply_to_message_id: "user-1",
+    status: "completed",
+  });
+  expect(f.events.filter((event) => event.event === "delta.turn_done")).toHaveLength(0);
+  expect(f.invokes.size).toBe(0);
+  f.rpc.isReady = true;
+  await f.tick();
+  expect(f.events.some((event) => event.event === "transport.reconnected")).toBe(true);
+  expect(f.bridge.connectionId({ authority: f.authority })).not.toBe(before);
+  f.emit("delta.turn_done", {
+    session_id: "primary",
+    reply_to_message_id: "user-1",
+    status: "completed",
+  });
+  expect(f.events.filter((event) => event.event === "delta.turn_done")).toHaveLength(1);
+  expect(f.invokes.size).toBe(0);
+  expect(f.calls.filter((call) => call.method === "chat.stream")).toHaveLength(1);
+  expect(f.calls.filter((call) => call.method === "chat.subscribe")).toHaveLength(0);
+});
+
+it("never recovers a host-observed gap into a different committed account", async () => {
+  const f = fixture();
+  await admission(f);
+  f.rpc.isReady = false;
+  f.bridge.observeDisconnect({ authority: f.authority });
+  f.setCommittedAccount("foreign-account");
+  f.rpc.isReady = true;
+  await f.tick();
+  f.emit("delta.turn_done", {
+    session_id: "primary",
+    reply_to_message_id: "user-1",
+    status: "completed",
+  });
+  expect(f.events.some((event) => event.event === "transport.reconnected")).toBe(false);
+  expect(f.events.filter((event) => event.event === "delta.turn_done")).toHaveLength(0);
+  expect(() => f.bridge.connectionId({ authority: f.authority })).toThrow("account_changed");
+});
 
 describe("native root task ownership", () => {
   const rootTask = (status: string) => ({

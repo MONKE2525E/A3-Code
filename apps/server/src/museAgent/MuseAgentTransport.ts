@@ -329,6 +329,7 @@ const hashAuthority = (value: string) =>
 
 interface MuseAgentPageBridge {
   authority(): string | null;
+  observeDisconnect(input: unknown): void;
   request(input: unknown): Promise<unknown>;
   watch(input: unknown): Promise<unknown>;
   unwatch(input?: unknown): void;
@@ -575,8 +576,17 @@ export const makeMuseAgentTransportLayer = (
                     // Keep its watcher alive for the bridge's fenced reconnect loop;
                     // no operation may use the cached authority while it is absent.
                     if (registration) registration.active = false;
-                    for (const box of mailboxes)
-                      box.offer({ event: "transport.disconnected", payload: {} });
+                    if (mailboxes.size && authority) {
+                      try {
+                        await callPageBridge(page, "observeDisconnect", { authority });
+                      } catch {
+                        // If local recovery cannot be fenced, retire the old readers
+                        // rather than leave them waiting without a recovery signal.
+                        const failure = new MuseAgentTransportError({ kind: "disconnected" });
+                        await reset(failure);
+                        throw failure;
+                      }
+                    }
                   } else
                     await reset(
                       isTransportError(cause)

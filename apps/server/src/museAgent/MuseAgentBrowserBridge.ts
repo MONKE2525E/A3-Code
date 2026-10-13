@@ -161,6 +161,14 @@ export const museAgentBrowserBridge = String.raw`(() => {
   const registrationParams = (clientId, commands) => ({client_id:clientId,platform:'linux',display_name:'T3 Code',version:'1',capabilities:{device_commands:commands,data_sources:{},hatch_app_commands:{},rendering:{}}});
   window.__t3Muse = {
     authority: () => discover()?.authority ?? null,
+    observeDisconnect: ({authority}) => {
+      if (location.origin !== 'https://muse.ai' || pinned !== authority) throw Error('account_changed');
+      if (!active) return;
+      // Host checks can see a readiness gap between interval ticks. Detach the
+      // old generation so the existing loop must reattach before reporting ready.
+      cleanup(); generation = crypto.randomUUID(); physicalConnectionId = null; owned = null; clearTools();
+      emit({event:'transport.disconnected',authority});
+    },
     connectionId: ({authority}) => connection(check(authority)),
     openComputerStream: async ({authority,id,connectionId,sessionId,taskId,takeoverId}) => {
       const rpc = check(authority);
