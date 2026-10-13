@@ -2457,6 +2457,8 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
 it.effect("cancels tracked setup before provider work is released", () =>
   Effect.gen(function* () {
     const entered = yield* Deferred.make<void>();
+    const releaseBranchName = yield* Deferred.make<void>();
+    const renameSettled = yield* Deferred.make<void>();
     const renameStarted = yield* Deferred.make<void>();
     const renameStopped = yield* Deferred.make<void>();
     const harness = makeHarness({
@@ -2498,6 +2500,13 @@ it.effect("cancels tracked setup before provider work is released", () =>
       assert.isTrue(yield* tracker.cancel(launched.threadId));
       assert.equal((yield* tracker.get(launched.threadId))?.phase, "cancelled");
       assert.isTrue(yield* Deferred.isDone(renameStopped));
+      assert.deepEqual(
+        harness.removeWorktree.mock.calls.map(([input]) => input.path),
+        ["/repo-worktrees/feature"],
+      );
+      // Branch generation can finish after cancellation has removed its checkout.
+      yield* Deferred.succeed(releaseBranchName, undefined);
+      yield* Deferred.await(renameSettled);
       const projection = yield* threads.getThreadProjection(launched.threadId);
       assert.equal(projection.runs[0]?.status, "failed");
       assert.isNull(projection.thread.worktreePath);
