@@ -11,6 +11,7 @@ import {
   type MuseAgentDictationLanguage,
   type MuseAgentConnectionStatus,
   type MuseAgentClientProfile,
+  type NativeAgentOpenThreadInput,
   type NativeAgentReference,
   type NativeAgentOpenThreadResult,
   type NativeAgentFeatureReadInput,
@@ -32,6 +33,7 @@ import * as Stream from "effect/Stream";
 import * as Muse from "../museAgent/MuseAgentNativeRuntimeService.ts";
 import * as MuseTransport from "../museAgent/MuseAgentTransport.ts";
 import * as Features from "../museAgent/MuseAgentFeatureService.ts";
+import { museIdentityOfThread, museThreadIdForSession } from "../museAgent/MuseAgentThreadIds.ts";
 import * as Connectors from "../museAgent/MuseAgentConnectorService.ts";
 import * as Computer from "../museAgent/MuseAgentComputerService.ts";
 import * as Dictation from "../museAgent/MuseAgentDictation.ts";
@@ -186,7 +188,7 @@ const make = Effect.gen(function* () {
     if (!context) return blocked("legacy_context");
     if (
       context.providerInstanceId !== selection.instanceId ||
-      context.threadId !== ThreadId.make(`muse-agent:${yield* canonicalIdentity(selection)}`)
+      museIdentityOfThread(context.threadId) !== (yield* canonicalIdentity(selection))
     )
       return blocked("context_changed");
     const thread = yield* projections
@@ -465,7 +467,7 @@ const make = Effect.gen(function* () {
     });
     observed.set(threadId, providerSessionId);
   });
-  const open = Effect.fnUntraced(function* (reference: NativeAgentReference) {
+  const open = Effect.fnUntraced(function* (reference: NativeAgentOpenThreadInput) {
     if (reference.source === "grok-bot") {
       const snapshot = (yield* providers.getProviders).find(
         (item) => item.instanceId === reference.providerInstanceId,
@@ -484,9 +486,14 @@ const make = Effect.gen(function* () {
     return yield* lock.withPermits(1)(
       Effect.gen(function* () {
         const selection = yield* selected(reference.providerInstanceId);
-        yield* native.resolveSession(selection.binding).pipe(Effect.mapError(nativeFailure));
+        // Main chat is the primary session; a side chat opens its own session and its own thread.
+        const target = yield* native
+          .resolveSession(selection.binding, reference.sessionId)
+          .pipe(Effect.mapError(nativeFailure));
         const identity = yield* canonicalIdentity(selection);
-        const threadId = ThreadId.make(`muse-agent:${identity}`);
+        const threadId = ThreadId.make(
+          museThreadIdForSession(identity, target.is_primary ? undefined : target.session_id),
+        );
         const previous = yield* projections
           .getThread(threadId)
           .pipe(
@@ -517,10 +524,10 @@ const make = Effect.gen(function* () {
           yield* orchestrator
             .dispatch({
               type: "thread.create",
-              commandId: CommandId.make(`muse-agent:open:${identity}`),
+              commandId: CommandId.make(`muse-agent:open:${threadId}`),
               threadId,
               projectId,
-              title: assistant.name,
+              title: target.is_primary ? assistant.name : target.title?.trim() || assistant.name,
               modelSelection: { instanceId: selection.instanceId, model: "muse" },
               runtimeMode: "full-access",
               interactionMode: "default",
@@ -653,10 +660,10 @@ const make = Effect.gen(function* () {
       threadId: ThreadId,
       beforeSeq?: number,
     ) {
-      const canonicalThread = ThreadId.make(`muse-agent:${yield* canonicalIdentity(selection)}`);
+      const identity = yield* canonicalIdentity(selection);
       const shell = yield* projections.getThreadShell(threadId);
       if (
-        threadId !== canonicalThread ||
+        museIdentityOfThread(threadId) !== identity ||
         !shell ||
         shell.deletedAt !== null ||
         shell.archivedAt !== null ||

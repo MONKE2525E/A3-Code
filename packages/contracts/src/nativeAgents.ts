@@ -12,7 +12,14 @@ export const NativeAgentReference = Schema.Struct({
 });
 export type NativeAgentReference = typeof NativeAgentReference.Type;
 
-export const NativeAgentOpenThreadInput = NativeAgentReference;
+export const NativeAgentOpenThreadInput = Schema.Struct({
+  ...NativeAgentReference.fields,
+  /** Muse only: the conversation to open. Omitted opens Main chat. */
+  sessionId: Schema.optionalKey(
+    Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
+  ),
+});
+export type NativeAgentOpenThreadInput = typeof NativeAgentOpenThreadInput.Type;
 export const NativeAgentOpenThreadResult = Schema.Struct({
   threadId: ThreadId,
   providerInstanceId: ProviderInstanceId,

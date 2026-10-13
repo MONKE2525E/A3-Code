@@ -641,6 +641,7 @@ const layerGrokExtensionsRpc = Layer.mergeAll(
           source: "muse-agent",
           providerInstanceId: input.providerInstanceId,
           agentId: "muse",
+          ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
         }),
     ),
   ),

@@ -63,6 +63,7 @@ export const MuseAgentNativeSession = Schema.Struct({
   status: Schema.String,
   is_primary: Schema.Boolean,
   is_thread: Schema.Boolean,
+  title: Schema.optionalKey(Schema.NullOr(Schema.String)),
   archived: Schema.optionalKey(Schema.Boolean),
   can_send_messages: Schema.optionalKey(Schema.Boolean),
   can_send_actions: Schema.optionalKey(Schema.Boolean),

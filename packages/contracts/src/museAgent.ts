@@ -36,7 +36,13 @@ export const MuseAgentProfile = Schema.Struct({
 });
 export type MuseAgentProfile = typeof MuseAgentProfile.Type;
 
-export const MuseAgentOpenThreadInput = Schema.Struct({ providerInstanceId: ProviderInstanceId });
+export const MuseAgentOpenThreadInput = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  /** A side chat's native session. Omitted opens Main chat. */
+  sessionId: Schema.optionalKey(
+    Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
+  ),
+});
 export type MuseAgentOpenThreadInput = typeof MuseAgentOpenThreadInput.Type;
 export const MuseAgentOpenThreadResult = Schema.Struct({
   threadId: ThreadId,

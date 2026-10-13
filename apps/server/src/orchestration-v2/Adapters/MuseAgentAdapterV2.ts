@@ -22,6 +22,7 @@ import * as Native from "../../museAgent/MuseAgentNativeRuntimeService.ts";
 import * as Transport from "../../museAgent/MuseAgentTransport.ts";
 import { importMuseAttachmentPresentation } from "../../museAgent/MuseAgentAttachmentImport.ts";
 import * as DirectToolsPort from "../../museAgent/MuseAgentDirectToolsPort.ts";
+import { museSessionOfThread } from "../../museAgent/MuseAgentThreadIds.ts";
 import { NativeAgentDirectToolsError } from "../../mcp/direct/NativeAgentDirectTools.ts";
 import {
   MUSE_AGENT_DRIVER_KIND,
@@ -169,7 +170,8 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
         yield* validateSelection(input.modelSelection, input.runtimePolicy);
         if (!binding || (yield* native.accountBinding) !== binding)
           return yield* new Native.MuseAgentRuntimeError({ kind: "account_changed" });
-        const session = yield* native.resolveSession(binding);
+        // A side chat runs on its own native session; Main chat has none and uses the primary.
+        const session = yield* native.resolveSession(binding, museSessionOfThread(input.threadId));
         const ownership = yield* native.historyOwnership({
           binding,
           sessionId: session.session_id,

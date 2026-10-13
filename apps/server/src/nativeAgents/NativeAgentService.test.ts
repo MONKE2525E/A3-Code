@@ -167,12 +167,20 @@ const fixture = (
             avatarVideoVariants: { idle: "workspace/avatars/synthetic/idle.mp4" },
           };
         }),
-      resolveSession: () =>
+      resolveSession: (_binding, sessionId) =>
         Effect.suspend(() => {
           if (state.forbidChatResolution)
             return Effect.die("Computer ownership must not use chat sendability.");
           return Effect.sync(() => {
             if (state.rotateOnResolve) state.binding = "b".repeat(64);
+            if (sessionId !== undefined && sessionId !== "primary")
+              return {
+                session_id: sessionId,
+                status: "idle",
+                is_primary: false,
+                is_thread: true,
+                title: "Side research",
+              };
             return {
               session_id: "primary",
               status: "idle",
@@ -1676,4 +1684,20 @@ it.effect(
       assert.deepEqual(after.turnItems, before.turnItems);
       assert.deepEqual(h.state.historyCursors, [undefined, 10]);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect("opens a side chat as its own thread and keeps Main chat canonical", () =>
+  Effect.gen(function* () {
+    const h = yield* fixture();
+    const main = yield* h.service.open(reference);
+    const side = yield* h.service.open({ ...reference, sessionId: "side:1" });
+    const again = yield* h.service.open({ ...reference, sessionId: "side:1" });
+    const primary = yield* h.service.open({ ...reference, sessionId: "primary" });
+    assert.notStrictEqual(side.threadId, main.threadId);
+    assert.strictEqual(again.threadId, side.threadId);
+    assert.strictEqual(primary.threadId, main.threadId);
+    assert.isTrue(side.threadId.endsWith(`:${encodeURIComponent("side:1")}`));
+    const shell = yield* h.projections.getThreadShell(side.threadId);
+    assert.strictEqual(shell?.title, "Side research");
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
