@@ -61,6 +61,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { WorktreeBaseBranchPicker } from "../WorktreeBaseBranchPicker";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { GrokBotNativeRoutines } from "../grokBot/GrokBotNativeRoutines";
+import { MuseNativeRoutines } from "../agents/MuseNativeRoutines";
 import { resolveGrokBotSelectedEnvironment } from "../grokBot/grokBotPresentation";
 import { useSelectedGrokBotEnvironmentId } from "../grokBot/useGrokBotEnvironment";
 import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
@@ -318,6 +319,9 @@ export function ScheduledTasksSettings(target: {
             ))}
             {nativeRoutinesEnvironmentId ? (
               <GrokBotNativeRoutines environmentId={nativeRoutinesEnvironmentId} />
+            ) : null}
+            {nativeRoutinesEnvironmentId ? (
+              <MuseNativeRoutines environmentId={nativeRoutinesEnvironmentId} />
             ) : null}
           </div>
         )}
