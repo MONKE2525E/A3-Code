@@ -15,7 +15,7 @@ import * as Transport from "./MuseAgentTransport.ts";
 import * as Source from "./MuseAgentSessionSource.ts";
 
 vi.mock("playwright-core", () => ({
-  chromium: { launchPersistentContext: vi.fn(), executablePath: () => "/usr/bin/node" },
+  chromium: { launchPersistentContext: vi.fn(), executablePath: () => process.execPath },
 }));
 const decodeStreamMetadata = Schema.decodeUnknownEffect(
   Schema.Struct({ authority: Schema.String, id: Schema.String, connectionId: Schema.String }),
@@ -118,7 +118,7 @@ const fixture = () => {
       fingerprint: sourceFingerprint,
     })),
   });
-  const layer = Transport.makeMuseAgentTransportLayer({ executablePath: "/usr/bin/node" }).pipe(
+  const layer = Transport.makeMuseAgentTransportLayer({ executablePath: process.execPath }).pipe(
     Layer.provide(Layer.succeed(Source.MuseAgentSessionSource, source)),
   );
   return {
