@@ -35,6 +35,12 @@ import {
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Schema from "effect/Schema";
+
+/** Admission has not been attempted; inline handoffs can be restored as unsent. */
+export class ProviderPromptNotSubmittedError extends Schema.TaggedError<ProviderPromptNotSubmittedError>()(
+  "ProviderPromptNotSubmittedError",
+  { cause: Schema.Defect() },
+) {}
 import type * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
 import type * as Stream from "effect/Stream";
@@ -621,6 +627,18 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly readThreadSnapshot: (
     input: ProviderAdapterV2ReadThreadSnapshotInput,
   ) => Effect.Effect<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>;
+  /** Imports an older native page through this runtime's existing event stream. */
+  readonly loadHistoryPage?: (input: {
+    readonly threadId: ThreadId;
+    readonly beforeSeq?: number;
+  }) => Effect.Effect<
+    {
+      readonly nextBeforeSeq: number | null;
+      readonly hasMore: boolean;
+      readonly importedMessages: number;
+    },
+    ProviderAdapterV2Error
+  >;
   /**
    * Providers that accept product feedback for a thread (#7949, Codex → OpenAI)
    * expose it here; absent means the driver has no feedback channel.
