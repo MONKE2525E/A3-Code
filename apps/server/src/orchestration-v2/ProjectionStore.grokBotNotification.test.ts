@@ -186,6 +186,25 @@ const notificationMarkers = Effect.gen(function* () {
     threadId: lastSender,
     createdAt: completedAt,
   });
+  // Equal timestamps keep insertion order; an update to the earlier send keeps its position.
+  const tiedSender = ThreadId.make("bot:tied-later-sender");
+  yield* message({
+    id: MessageId.make("a:later-send"),
+    role: "user",
+    senderThreadId: tiedSender,
+    createdAt: completedAt,
+  });
+  yield* message({
+    id: MessageId.make("sender:last"),
+    role: "user",
+    senderThreadId: lastSender,
+    createdAt: completedAt,
+    updatedAt: importedAt,
+  });
+  assert.deepEqual(yield* store.getLastThreadSender(nativeId), {
+    threadId: tiedSender,
+    createdAt: completedAt,
+  });
 });
 
 it.effect("SQL shell publishes bounded completed native GrokBot notification markers", () =>

@@ -4840,7 +4840,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         FROM orchestration_v2_projection_messages
         WHERE thread_id = ${threadId} AND role = 'user'
           AND json_extract(payload_json, '$.senderThreadId') IS NOT NULL
-        ORDER BY created_at DESC, message_id DESC LIMIT 1`.pipe(
+        ORDER BY created_at DESC, rowid DESC LIMIT 1`.pipe(
         Effect.map((rows) =>
           rows[0] === undefined
             ? undefined
@@ -6400,11 +6400,8 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               ?.messages.filter(
                 (message) => message.role === "user" && message.senderThreadId !== undefined,
               )
-              .toSorted(
-                (left, right) =>
-                  DateTime.Order(right.createdAt, left.createdAt) ||
-                  right.id.localeCompare(left.id),
-              )[0];
+              .toReversed()
+              .toSorted((left, right) => DateTime.Order(right.createdAt, left.createdAt))[0];
             return sender?.senderThreadId === undefined
               ? undefined
               : { threadId: sender.senderThreadId, createdAt: sender.createdAt };
