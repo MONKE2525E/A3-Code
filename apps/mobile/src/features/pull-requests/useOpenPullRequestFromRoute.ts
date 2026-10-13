@@ -1,7 +1,7 @@
 import { useRoute } from "@react-navigation/native";
 import { useCallback } from "react";
-import { type ExternalUrlTarget, tryOpenExternalUrl } from "../lib/openExternalUrl";
-import { useOpenPullRequest as useResolvedPullRequest } from "../features/pull-requests/useOpenPullRequest";
+import { type ExternalUrlTarget, tryOpenExternalUrl } from "../../lib/openExternalUrl";
+import { useOpenPullRequest as useResolvedPullRequest } from "./useOpenPullRequest";
 
 /** Resolve links in their originating environment and carry the thread into the shared viewer. */
 export function useOpenPullRequest(options?: {
