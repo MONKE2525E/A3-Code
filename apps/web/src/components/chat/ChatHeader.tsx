@@ -339,7 +339,7 @@ export const ChatHeader = memo(function ChatHeader({
         {/* Project threads lead the header with their project: knowing which
             project a thread lives in is priority zero, and the thread title
             alone doesn't answer it. Bot threads show the bot's identity instead. */}
-        {activeProject && grokBotId === null ? (
+        {activeProject && grokBotId === null && !isMuseAgentThread ? (
           <>
             <WorkspaceBreadcrumbItem className="shrink">
               <Tooltip>

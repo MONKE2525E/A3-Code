@@ -34,6 +34,7 @@ import {
   resolveMuseAgentStatusDot,
 } from "./aiAgents";
 import { MuseAgentAvatar } from "./MuseAgentAvatar";
+import { MuseAgentConversations } from "./MuseAgentConversations";
 import { useMuseAgentAvatar } from "./useMuseAgentAvatar";
 
 const MUSE_PINNED_STORAGE_KEY = "t3code:muse-agent-pinned";
@@ -236,20 +237,31 @@ function MuseAgentRoster({
     />
   );
 
+  const conversations = (
+    <MuseAgentConversations
+      environmentId={environmentId}
+      providerInstanceId={ProviderInstanceId.make(instanceId)}
+      threads={threads}
+      routeThreadId={routeEnvironmentId === environmentId ? routeThreadId : null}
+    />
+  );
   if (pinned) {
     return (
-      <ul className="grid grid-cols-[repeat(auto-fit,minmax(80px,1fr))] gap-x-1 gap-y-3 py-1.5">
-        <li>
-          <AgentPinnedTile
-            name={name}
-            avatar={avatarNode("xl")}
-            selected={selected}
-            statusDot={statusDot}
-            menu={menu("tile")}
-            onOpen={() => void open()}
-          />
-        </li>
-      </ul>
+      <>
+        <ul className="grid grid-cols-[repeat(auto-fit,minmax(80px,1fr))] gap-x-1 gap-y-3 py-1.5">
+          <li>
+            <AgentPinnedTile
+              name={name}
+              avatar={avatarNode("xl")}
+              selected={selected}
+              statusDot={statusDot}
+              menu={menu("tile")}
+              onOpen={() => void open()}
+            />
+          </li>
+        </ul>
+        {conversations}
+      </>
     );
   }
   return (
@@ -265,6 +277,7 @@ function MuseAgentRoster({
         footer={errorFooter}
         onOpen={() => void open()}
       />
+      {conversations}
     </div>
   );
 }

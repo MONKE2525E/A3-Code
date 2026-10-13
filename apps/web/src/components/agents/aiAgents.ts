@@ -234,6 +234,16 @@ export function resolveMuseAgentStatusDot(input: {
   return resolveAgentStatusDot({ active: input.active, unread });
 }
 
+/**
+ * Whether a Muse thread is the conversation for a native session. A null session is Main chat, the
+ * account's own thread; a side chat's thread id ends with its percent-encoded session id.
+ */
+export function isMuseSessionThread(threadId: string, sessionId: string | null): boolean {
+  if (sessionId === null) return /^muse-agent:[0-9a-f]{64}$/.test(threadId);
+  const match = /^muse-agent:[0-9a-f]{64}:(.+)$/.exec(threadId);
+  return match?.[1] === encodeURIComponent(sessionId);
+}
+
 /** Route search for opening a source-aware agent chat; Grok keeps its `/grok-bots/$botId` route. */
 export function museAgentOpenSearch(environmentId: string | null | undefined): {
   readonly environmentId?: string;

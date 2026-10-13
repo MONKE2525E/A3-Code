@@ -5,6 +5,7 @@ import type { AgentUnreadThreadShell } from "./agentStatusDot";
 
 import {
   findCachedMuseAgentThread,
+  isMuseSessionThread,
   museAvatarStateForStatus,
   pickMuseAvatarVideo,
   resolveMuseAgentNotice,
@@ -239,5 +240,22 @@ describe("resolveMuseAgentStatusDot", () => {
         localVisitedAt: "2026-01-01T00:00:03Z",
       }),
     ).toBeNull();
+  });
+});
+
+describe("isMuseSessionThread", () => {
+  const identity = "b".repeat(64);
+  it("matches Main chat only to the account thread, and a side chat to its own session", () => {
+    expect(isMuseSessionThread(`muse-agent:${identity}`, null)).toBe(true);
+    expect(isMuseSessionThread(`muse-agent:${identity}:${encodeURIComponent("s:1")}`, null)).toBe(
+      false,
+    );
+    expect(isMuseSessionThread(`muse-agent:${identity}:${encodeURIComponent("s:1")}`, "s:1")).toBe(
+      true,
+    );
+    expect(isMuseSessionThread(`muse-agent:${identity}:${encodeURIComponent("s:2")}`, "s:1")).toBe(
+      false,
+    );
+    expect(isMuseSessionThread("grok-bot:abc", null)).toBe(false);
   });
 });
