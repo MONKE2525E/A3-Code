@@ -79,7 +79,22 @@ export function museTerminalStatus(status: string | undefined) {
   return null;
 }
 
+/**
+ * Muse's own UI widgets, such as `[[hatch_widget:…]]`, appear inline in its reply text. T3 cannot
+ * render them, so the marker is dropped and the words around it stay.
+ */
+const MUSE_WIDGET_MARKER = /\[\[hatch_widget:[^\]]*\]\]/g;
+export function stripMuseWidgetMarkers(text: string): string {
+  const stripped = text.replace(MUSE_WIDGET_MARKER, "");
+  return stripped === text ? text : stripped.trimEnd();
+}
+
 function canonicalText(payload: typeof Payload.Type): string | undefined {
+  const text = rawCanonicalText(payload);
+  return text === undefined ? undefined : stripMuseWidgetMarkers(text);
+}
+
+function rawCanonicalText(payload: typeof Payload.Type): string | undefined {
   let transcript: unknown = payload.transcript;
   if (typeof transcript === "string") {
     try {

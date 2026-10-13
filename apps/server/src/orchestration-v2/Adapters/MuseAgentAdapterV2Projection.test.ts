@@ -1,7 +1,11 @@
 import { assert, it } from "@effect/vitest";
 import type { ChatAttachment } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import { makeMuseAgentProjection, museHistoryFrame } from "./MuseAgentAdapterV2Projection.ts";
+import {
+  makeMuseAgentProjection,
+  museHistoryFrame,
+  stripMuseWidgetMarkers,
+} from "./MuseAgentAdapterV2Projection.ts";
 import { instanceId, binding, threadId, makeTurn, receipt } from "./MuseAgentAdapterV2.testkit.ts";
 
 const frame = (event: string, seq: number, payload: Record<string, unknown> = {}) => ({
@@ -645,3 +649,11 @@ it.effect("rejects blank, foreign and delayed prior-delivery supersession notice
     );
   }),
 );
+
+it("drops Muse widget markers and keeps the words around them", () => {
+  assert.strictEqual(
+    stripMuseWidgetMarkers("On it. Which model?\n[[hatch_widget:widget-5419bf8d]]"),
+    "On it. Which model?",
+  );
+  assert.strictEqual(stripMuseWidgetMarkers("plain reply"), "plain reply");
+});
