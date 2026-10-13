@@ -2,6 +2,11 @@ import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
+  AuthOrchestrationReadScope,
+  AuthOrchestrationOperateScope,
+  WS_METHODS,
+  WsRpcGroup,
+  type AuthEnvironmentScope,
   EventId,
   ProjectId,
   ProviderDriverKind,
@@ -29,6 +34,8 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as RpcTest from "effect/rpc/RpcTest";
+import * as RpcAuthorization from "../auth/RpcAuthorization.ts";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as Service from "./NativeAgentService.ts";
 import * as Native from "../museAgent/MuseAgentNativeRuntimeService.ts";
@@ -93,6 +100,7 @@ const fixture = (
       avatarImagePath: "workspace/avatars/synthetic/image.png",
       reads: 0,
       historyPages: false,
+      rotateOnHistoryPage: false,
       historyCursors: [] as Array<number | undefined>,
       watches: 0,
       accountReads: 0,
@@ -177,6 +185,7 @@ const fixture = (
         Effect.sync(() => {
           state.reads++;
           state.historyCursors.push(beforeSeq);
+          if (beforeSeq !== undefined && state.rotateOnHistoryPage) state.binding = "b".repeat(64);
           if (state.historyPages)
             return {
               events: [
@@ -503,15 +512,15 @@ it.effect(
         operation: "history_page",
         data: { nextBeforeSeq: 10, hasMore: true, importedMessages: 0 },
       });
-      const page = yield* h.service.featureRead({
+      const page = yield* h.service.featureUpdate({
         providerInstanceId: instanceId,
         operation: "history_page",
         threadId: opened.threadId,
         beforeSeq: 10,
       });
       assert.deepEqual(page, {
-        operation: "history_page",
-        data: { nextBeforeSeq: 0, hasMore: false, importedMessages: 1 },
+        updated: true,
+        historyPage: { nextBeforeSeq: 0, hasMore: false, importedMessages: 1 },
       });
       yield* h.orchestrator
         .streamStoredEventsFrom({ threadId: opened.threadId, eventType: "turn-item.updated" })
@@ -1536,5 +1545,135 @@ it.effect(
         }),
       );
       assert.equal(h.state.computerStreamClosed, 1);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+const guardedHistoryGroup = WsRpcGroup.omit(
+  ...Array.from(WsRpcGroup.requests.keys()).filter(
+    (
+      tag,
+    ): tag is Exclude<
+      keyof typeof RpcAuthorization.RPC_REQUIRED_SCOPES,
+      typeof WS_METHODS.museAgentsFeatureRead | typeof WS_METHODS.museAgentsFeatureUpdate
+    > => tag !== WS_METHODS.museAgentsFeatureRead && tag !== WS_METHODS.museAgentsFeatureUpdate,
+  ),
+);
+
+it.effect("history RPC inspection cannot import; only operate access persists an older page", () =>
+  Effect.gen(function* () {
+    const h = yield* fixture();
+    h.state.historyPages = true;
+    const opened = yield* h.service.open(reference);
+    yield* h.orchestrator
+      .streamStoredEventsFrom({ threadId: opened.threadId, eventType: "turn-item.updated" })
+      .pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "turn-item.updated" &&
+            stored.event.payload.canonicalNativeSequence === 10,
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+      );
+    const before = yield* h.orchestrator.getThreadProjection(opened.threadId);
+    const client = (scopes: ReadonlyArray<AuthEnvironmentScope>) =>
+      RpcTest.makeClient(guardedHistoryGroup).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            guardedHistoryGroup.toLayerHandler(WS_METHODS.museAgentsFeatureRead, (input) =>
+              h.service.featureRead(input),
+            ),
+            guardedHistoryGroup.toLayerHandler(WS_METHODS.museAgentsFeatureUpdate, (input) =>
+              h.service.featureUpdate(input),
+            ),
+            RpcAuthorization.layer(scopes),
+          ),
+        ),
+      );
+    const reader = yield* client([AuthOrchestrationReadScope]);
+    const forgedRead = {
+      providerInstanceId: instanceId,
+      threadId: opened.threadId,
+      operation: "history_page" as const,
+      beforeSeq: 10,
+    };
+    assert.deepEqual(yield* reader[WS_METHODS.museAgentsFeatureRead](forgedRead), {
+      operation: "history_page",
+      data: { nextBeforeSeq: 10, hasMore: true, importedMessages: 0 },
+    });
+    const request = {
+      providerInstanceId: instanceId,
+      threadId: opened.threadId,
+      operation: "history_page" as const,
+      beforeSeq: 10,
+    };
+    assert.equal(
+      (yield* reader[WS_METHODS.museAgentsFeatureUpdate](request).pipe(Effect.exit))._tag,
+      "Failure",
+    );
+    assert.deepEqual(h.state.historyCursors, [undefined]);
+    const unchanged = yield* h.orchestrator.getThreadProjection(opened.threadId);
+    assert.deepEqual(unchanged.messages, before.messages);
+    assert.deepEqual(unchanged.turnItems, before.turnItems);
+    const operator = yield* client([AuthOrchestrationReadScope, AuthOrchestrationOperateScope]);
+    assert.deepEqual(yield* operator[WS_METHODS.museAgentsFeatureUpdate](request), {
+      updated: true,
+      historyPage: { nextBeforeSeq: 0, hasMore: false, importedMessages: 1 },
+    });
+    yield* h.orchestrator
+      .streamStoredEventsFrom({ threadId: opened.threadId, eventType: "turn-item.updated" })
+      .pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "turn-item.updated" &&
+            stored.event.payload.canonicalNativeSequence === 0,
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+      );
+    const imported = yield* h.orchestrator.getThreadProjection(opened.threadId);
+    assert.deepEqual(
+      imported.turnItems.filter((item) => item.type === "user_message").map((item) => item.text),
+      ["Synthetic paginated history", "Synthetic recent history"],
+    );
+    assert.deepEqual(h.state.historyCursors, [undefined, 10]);
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect(
+  "history import refuses account changes during native fetch before persisting older messages",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* fixture();
+      h.state.historyPages = true;
+      const opened = yield* h.service.open(reference);
+      yield* h.orchestrator
+        .streamStoredEventsFrom({ threadId: opened.threadId, eventType: "turn-item.updated" })
+        .pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "turn-item.updated" &&
+              stored.event.payload.canonicalNativeSequence === 10,
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+        );
+      const before = yield* h.orchestrator.getThreadProjection(opened.threadId);
+      h.state.rotateOnHistoryPage = true;
+      assert.equal(
+        (yield* Effect.flip(
+          h.service.featureUpdate({
+            providerInstanceId: instanceId,
+            threadId: opened.threadId,
+            operation: "history_page",
+            beforeSeq: 10,
+          }),
+        )).reason,
+        "provider_unavailable",
+      );
+      const after = yield* h.orchestrator.getThreadProjection(opened.threadId);
+      assert.deepEqual(after.messages, before.messages);
+      assert.deepEqual(after.turnItems, before.turnItems);
+      assert.deepEqual(h.state.historyCursors, [undefined, 10]);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );

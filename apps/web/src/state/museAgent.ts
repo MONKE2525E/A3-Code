@@ -102,13 +102,13 @@ export const museAgentFeatureUpdate = createEnvironmentRpcCommand(connectionAtom
 });
 
 /**
- * Explicit "load earlier Muse history". Read-scoped on the wire, but a call with a cursor imports
- * one older page into the same T3 thread, so it is a command, never a cached query. The cursor-less
- * inspect stays on `museAgentFeatureReadQuery` and is refreshed once the import finishes.
+ * Explicit "load earlier Muse history". Importing one older page into the same T3 thread writes,
+ * so it is an operate-scoped feature update, never a cached query. The metadata inspect stays on
+ * `museAgentFeatureReadQuery` and is refreshed once the import finishes.
  */
 export const museAgentHistoryPageCommand = createEnvironmentRpcCommand(connectionAtomRuntime, {
   label: "environment-data:muse-agent:history-page",
-  tag: WS_METHODS.museAgentsFeatureRead,
+  tag: WS_METHODS.museAgentsFeatureUpdate,
   concurrency: {
     mode: "serial",
     key: (target) => `${target.environmentId}:muse-history`,

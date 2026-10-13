@@ -34,6 +34,12 @@ import * as RpcAuthorization from "./RpcAuthorization.ts";
 
 describe("RPC authorization scopes", () => {
   it("allows native agent inspection separately from setup and opening a chat", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.museAgentsFeatureRead)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.museAgentsFeatureUpdate)).toBe(
+      AuthOrchestrationOperateScope,
+    );
     expect(requiredScopeForRpcMethod(WS_METHODS.museAgentsStatus)).toBe(AuthOrchestrationReadScope);
     expect(requiredScopeForRpcMethod(WS_METHODS.museAgentsProfile)).toBe(
       AuthOrchestrationReadScope,

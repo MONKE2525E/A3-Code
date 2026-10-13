@@ -1,3 +1,4 @@
+import { useAtomValue } from "@effect/atom-react";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -46,6 +47,15 @@ export function MuseAgentHistoryPagination({
       : null,
   );
   const loadPage = useAtomCommand(museAgentHistoryPageCommand, { reportFailure: false });
+  // Importing writes to the thread, so it needs operate; the cursor value does not affect the scope.
+  const canImport = useAtomValue(
+    museAgentHistoryPageCommand.permissionAtom(
+      environmentId,
+      providerInstanceId === null
+        ? undefined
+        : { operation: "history_page", providerInstanceId, threadId, beforeSeq: 0 },
+    ),
+  );
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   // A failed import belongs to the thread it was started on.
@@ -70,10 +80,14 @@ export function MuseAgentHistoryPagination({
         ? "Retry earlier Muse history"
         : exhausted
           ? "No earlier Muse history"
-          : "Load earlier Muse history";
+          : !canImport
+            ? "Loading earlier Muse history requires operate access"
+            : "Load earlier Muse history";
+  // Read-only clients may inspect whether more exists, but never import it.
+  const blocked = !canImport && !inspectFailed && !exhausted;
 
   const onClick = async () => {
-    if (busy || exhausted) return;
+    if (busy || exhausted || blocked) return;
     if (inspectFailed) {
       inspect.refresh();
       return;
@@ -107,7 +121,7 @@ export function MuseAgentHistoryPagination({
             variant="ghost"
             size="touch-sm"
             aria-label={label}
-            aria-disabled={busy || exhausted}
+            aria-disabled={busy || exhausted || blocked}
             className="shrink-0 [-webkit-app-region:no-drag]"
             onClick={() => void onClick()}
           />

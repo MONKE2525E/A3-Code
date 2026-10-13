@@ -10,6 +10,7 @@ import {
   NativeAgentError,
   MuseAgentDictationRequestError,
   ProviderInstanceId,
+  ThreadId,
   WS_METHODS,
   WsRpcGroup,
   type AuthEnvironmentScope,
@@ -257,15 +258,15 @@ const guardedGroup = WsRpcGroup.omit(
 );
 
 it.effect.each(
-  [false, true].flatMap((delivery) => [
-    { delivery, scopes: [AuthOrchestrationReadScope], expected: [1, 0, 0] },
-    { delivery, scopes: [AuthOrchestrationOperateScope], expected: [0, 1, 0] },
-    { delivery, scopes: [AuthSettingsWriteScope], expected: [0, 0, 1] },
-    { delivery, scopes: [], expected: [0, 0, 0] },
+  (["tasks", "delivery", "history"] as const).flatMap((kind) => [
+    { kind, scopes: [AuthOrchestrationReadScope], expected: [1, 0, 0] },
+    { kind, scopes: [AuthOrchestrationOperateScope], expected: [0, 1, 0] },
+    { kind, scopes: [AuthSettingsWriteScope], expected: [0, 0, 1] },
+    { kind, scopes: [], expected: [0, 0, 0] },
   ]),
 )(
-  "RPC guards enforce separate feature read/update/setup permissions for $scopes (delivery=$delivery)",
-  ({ scopes, expected, delivery }) =>
+  "RPC guards enforce separate feature read/update/setup permissions for $scopes (kind=$kind)",
+  ({ scopes, expected, kind }) =>
     Effect.gen(function* () {
       const calls: [number, number, number] = [0, 0, 0];
       const client = yield* RpcTest.makeClient(guardedGroup).pipe(
@@ -274,12 +275,17 @@ it.effect.each(
             guardedGroup.toLayerHandler(WS_METHODS.museAgentsFeatureRead, () =>
               Effect.sync(() => {
                 calls[0]++;
-                return delivery
+                return kind === "history"
                   ? {
-                      operation: "pending_deliveries" as const,
-                      data: { sessionId: "primary", deliveries: [] },
+                      operation: "history_page" as const,
+                      data: { nextBeforeSeq: 10, hasMore: true, importedMessages: 0 },
                     }
-                  : { operation: "tasks" as const, data: [] };
+                  : kind === "delivery"
+                    ? {
+                        operation: "pending_deliveries" as const,
+                        data: { sessionId: "primary", deliveries: [] },
+                      }
+                    : { operation: "tasks" as const, data: [] };
               }),
             ),
             guardedGroup.toLayerHandler(WS_METHODS.museAgentsFeatureUpdate, () =>
@@ -307,23 +313,36 @@ it.effect.each(
       );
       const results = yield* Effect.all([
         client[WS_METHODS.museAgentsFeatureRead](
-          delivery
+          kind === "history"
             ? {
-                operation: "pending_deliveries",
+                operation: "history_page",
                 providerInstanceId: instanceId,
-                sessionId: "primary",
+                threadId: ThreadId.make("muse-agent:synthetic"),
               }
-            : { operation: "tasks", providerInstanceId: instanceId },
+            : kind === "delivery"
+              ? {
+                  operation: "pending_deliveries",
+                  providerInstanceId: instanceId,
+                  sessionId: "primary",
+                }
+              : { operation: "tasks", providerInstanceId: instanceId },
         ).pipe(Effect.exit),
         client[WS_METHODS.museAgentsFeatureUpdate](
-          delivery
+          kind === "history"
             ? {
-                operation: "delivery_release",
+                operation: "history_page",
                 providerInstanceId: instanceId,
-                sessionId: "primary",
-                deliveryKey: "synthetic-attempt",
+                threadId: ThreadId.make("muse-agent:synthetic"),
+                beforeSeq: 10,
               }
-            : { operation: "task_delete", providerInstanceId: instanceId, jobId: "synthetic" },
+            : kind === "delivery"
+              ? {
+                  operation: "delivery_release",
+                  providerInstanceId: instanceId,
+                  sessionId: "primary",
+                  deliveryKey: "synthetic-attempt",
+                }
+              : { operation: "task_delete", providerInstanceId: instanceId, jobId: "synthetic" },
         ).pipe(Effect.exit),
         client[WS_METHODS.museAgentsSetup]({}).pipe(Effect.exit),
       ]);

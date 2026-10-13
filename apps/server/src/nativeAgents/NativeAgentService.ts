@@ -647,76 +647,76 @@ const make = Effect.gen(function* () {
       return yield* new NativeAgentError({ reason: "account_changed" });
     return result;
   });
+  const historyPage = Effect.fnUntraced(
+    function* (
+      selection: { binding: string; instanceId: ProviderInstanceId },
+      threadId: ThreadId,
+      beforeSeq?: number,
+    ) {
+      const canonicalThread = ThreadId.make(`muse-agent:${yield* canonicalIdentity(selection)}`);
+      const shell = yield* projections.getThreadShell(threadId);
+      if (
+        threadId !== canonicalThread ||
+        !shell ||
+        shell.deletedAt !== null ||
+        shell.archivedAt !== null ||
+        shell.providerInstanceId !== selection.instanceId ||
+        shell.modelSelection.instanceId !== selection.instanceId ||
+        shell.modelSelection.model !== "muse"
+      )
+        return yield* new NativeAgentError({ reason: "thread_changed" });
+      const records = yield* projections.getThreadRecords(threadId, ["providerThreads"]);
+      const boundSessionId = records.providerThreads.find(
+        (thread) =>
+          thread.driver === "muse-agent" &&
+          thread.providerInstanceId === selection.instanceId &&
+          thread.appThreadId === threadId,
+      )?.providerSessionId;
+      let live = Option.none<ProviderAdapter.ProviderAdapterV2SessionRuntime>();
+      for (const sessionId of new Set([boundSessionId, observed.get(threadId)])) {
+        if (!sessionId) continue;
+        live = yield* providerSessions
+          .get(sessionId)
+          .pipe(Effect.mapError(() => new NativeAgentError({ reason: "provider_unavailable" })));
+        if (Option.isSome(live)) break;
+      }
+      if (
+        Option.isNone(live) ||
+        live.value.driver !== "muse-agent" ||
+        live.value.instanceId !== selection.instanceId ||
+        !live.value.loadHistoryPage
+      )
+        return yield* new NativeAgentError({ reason: "provider_unavailable" });
+      const data = yield* live.value
+        .loadHistoryPage({
+          threadId,
+          ...(beforeSeq === undefined ? {} : { beforeSeq }),
+        })
+        .pipe(
+          Effect.mapError(
+            () =>
+              new NativeAgentError({
+                reason: "provider_unavailable",
+                detail:
+                  "Muse could not load this history page. Refresh the history cursor and try again.",
+              }),
+          ),
+        );
+      if ((yield* selected(selection.instanceId)).binding !== selection.binding)
+        return yield* new NativeAgentError({ reason: "account_changed" });
+
+      return data;
+    },
+    Effect.mapError((cause) =>
+      isNativeAgentError(cause) ? cause : new NativeAgentError({ reason: "provider_unavailable" }),
+    ),
+  );
   const featureRead = Effect.fnUntraced(function* (input: typeof NativeAgentFeatureReadInput.Type) {
     const selection = yield* selected(input.providerInstanceId);
     const { binding } = selection;
     switch (input.operation) {
-      case "history_page": {
-        return yield* Effect.gen(function* () {
-          const canonicalThread = ThreadId.make(
-            `muse-agent:${yield* canonicalIdentity(selection)}`,
-          );
-          const shell = yield* projections.getThreadShell(input.threadId);
-          if (
-            input.threadId !== canonicalThread ||
-            !shell ||
-            shell.deletedAt !== null ||
-            shell.archivedAt !== null ||
-            shell.providerInstanceId !== selection.instanceId ||
-            shell.modelSelection.instanceId !== selection.instanceId ||
-            shell.modelSelection.model !== "muse"
-          )
-            return yield* new NativeAgentError({ reason: "thread_changed" });
-          const records = yield* projections.getThreadRecords(input.threadId, ["providerThreads"]);
-          const boundSessionId = records.providerThreads.find(
-            (thread) =>
-              thread.driver === "muse-agent" &&
-              thread.providerInstanceId === selection.instanceId &&
-              thread.appThreadId === input.threadId,
-          )?.providerSessionId;
-          let live = Option.none<ProviderAdapter.ProviderAdapterV2SessionRuntime>();
-          for (const sessionId of new Set([boundSessionId, observed.get(input.threadId)])) {
-            if (!sessionId) continue;
-            live = yield* providerSessions
-              .get(sessionId)
-              .pipe(
-                Effect.mapError(() => new NativeAgentError({ reason: "provider_unavailable" })),
-              );
-            if (Option.isSome(live)) break;
-          }
-          if (
-            Option.isNone(live) ||
-            live.value.driver !== "muse-agent" ||
-            live.value.instanceId !== selection.instanceId ||
-            !live.value.loadHistoryPage
-          )
-            return yield* new NativeAgentError({ reason: "provider_unavailable" });
-          const data = yield* live.value
-            .loadHistoryPage({
-              threadId: input.threadId,
-              ...(input.beforeSeq === undefined ? {} : { beforeSeq: input.beforeSeq }),
-            })
-            .pipe(
-              Effect.mapError(
-                () =>
-                  new NativeAgentError({
-                    reason: "provider_unavailable",
-                    detail:
-                      "Muse could not load this history page. Refresh the history cursor and try again.",
-                  }),
-              ),
-            );
-          if ((yield* selected(selection.instanceId)).binding !== binding)
-            return yield* new NativeAgentError({ reason: "account_changed" });
-          return { operation: input.operation, data };
-        }).pipe(
-          Effect.mapError((cause) =>
-            isNativeAgentError(cause)
-              ? cause
-              : new NativeAgentError({ reason: "provider_unavailable" }),
-          ),
-        );
-      }
+      case "history_page":
+        return { operation: input.operation, data: yield* historyPage(selection, input.threadId) };
       case "dictation":
         return { operation: input.operation, data: yield* dictation.status };
       case "computer_task": {
@@ -841,6 +841,11 @@ const make = Effect.gen(function* () {
     const selection = yield* selected(input.providerInstanceId);
     const { binding } = selection;
     switch (input.operation) {
+      case "history_page":
+        return {
+          updated: true as const,
+          historyPage: yield* historyPage(selection, input.threadId, input.beforeSeq),
+        };
       case "computer_action": {
         const scope = computerScope(selection, input.sessionId, input.taskId);
         const result = yield* computer

@@ -8,11 +8,13 @@ import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import {
   AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
   ThreadId,
   EnvironmentId,
   ScheduledTaskId,
+  ProviderInstanceId,
   WS_METHODS,
   type AuthSessionState,
 } from "@t3tools/contracts";
@@ -59,6 +61,37 @@ const setup = Effect.gen(function* () {
 });
 
 describe("command permissions", () => {
+  it.effect("requires operate on the selected destination to import Muse history", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const readOnly = {
+          ...grant(false),
+          scopes: [AuthOrchestrationReadScope],
+          permissions: [AuthOrchestrationReadScope],
+        };
+        registry.set(sessions(env), AsyncResult.success(readOnly));
+        registry.set(sessions(other), AsyncResult.success(readOnly));
+        const command = createCommandPermissions(runtime, WS_METHODS.museAgentsFeatureUpdate);
+        const input = {
+          operation: "history_page" as const,
+          providerInstanceId: ProviderInstanceId.make("muse-test"),
+          threadId: ThreadId.make("muse-agent:test"),
+          beforeSeq: 10,
+        };
+        expect(registry.get(command.permissionAtom(env, input))).toBe(false);
+        expect((yield* command.authorize(registry, env, input).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        expect(registry.get(command.permissionAtom(env, input))).toBe(true);
+        yield* command.authorize(registry, env, input);
+        expect((yield* command.authorize(registry, other, input).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+      }),
+    ),
+  );
   it.effect("reads native provider status without authorizing setup", () =>
     Effect.scoped(
       Effect.gen(function* () {

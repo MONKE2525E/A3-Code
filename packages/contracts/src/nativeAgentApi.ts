@@ -22,18 +22,21 @@ export type NativeAgentPendingDelivery = typeof NativeAgentPendingDelivery.Type;
 const featureReference = { providerInstanceId: ProviderInstanceId };
 const featureRead = <O extends string>(operation: O) =>
   Schema.Struct({ ...featureReference, operation: Schema.Literal(operation) });
+const NativeAgentHistoryCursor = Schema.Number.check(
+  Schema.isInt(),
+  Schema.isGreaterThanOrEqualTo(0),
+  Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+);
+export const NativeAgentHistoryPage = Schema.Struct({
+  nextBeforeSeq: Schema.NullOr(NativeAgentHistoryCursor),
+  hasMore: Schema.Boolean,
+  importedMessages: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+});
 export const NativeAgentFeatureReadInput = Schema.Union([
   Schema.Struct({
     ...featureReference,
     operation: Schema.Literal("history_page"),
     threadId: ThreadId,
-    beforeSeq: Schema.optionalKey(
-      Schema.Number.check(
-        Schema.isInt(),
-        Schema.isGreaterThanOrEqualTo(0),
-        Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
-      ),
-    ),
   }),
   featureRead("dictation"),
   Schema.Struct({
@@ -89,13 +92,7 @@ export const NativeAgentFeatureReadInput = Schema.Union([
 export const NativeAgentFeatureReadResult = Schema.Union([
   Schema.Struct({
     operation: Schema.Literal("history_page"),
-    data: Schema.Struct({
-      nextBeforeSeq: Schema.NullOr(
-        Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
-      ),
-      hasMore: Schema.Boolean,
-      importedMessages: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
-    }),
+    data: NativeAgentHistoryPage,
   }),
   Schema.Struct({
     operation: Schema.Literal("dictation"),
@@ -154,6 +151,12 @@ export const NativeAgentFeatureReadResult = Schema.Union([
   Schema.Struct({ operation: Schema.Literal("memory_read"), data: Features.MuseAgentMemory }),
 ]);
 export const NativeAgentFeatureUpdateInput = Schema.Union([
+  Schema.Struct({
+    ...featureReference,
+    operation: Schema.Literal("history_page"),
+    threadId: ThreadId,
+    beforeSeq: NativeAgentHistoryCursor,
+  }),
   Schema.Struct({
     ...featureReference,
     operation: Schema.Literal("computer_action"),
@@ -224,6 +227,7 @@ export const NativeAgentFeatureUpdateInput = Schema.Union([
 ]);
 export const NativeAgentFeatureUpdateResult = Schema.Struct({
   updated: Schema.Literal(true),
+  historyPage: Schema.optionalKey(NativeAgentHistoryPage),
   computerState: Schema.optionalKey(Computer.MuseAgentComputerState),
   title: Schema.optionalKey(Schema.String),
   authorizationUrl: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(8192))),
