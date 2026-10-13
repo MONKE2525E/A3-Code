@@ -155,13 +155,12 @@ const make = Effect.gen(function* () {
       return yield* unavailable("This provider no longer owns the active run attempt.");
     const saved = yield* store.prepareTurn({
       ...identity,
-      ...(skill === undefined ? {} : { managedSkill: skill }),
+      managedSkill: skill,
     });
     const verifiedSkill =
-      skill === undefined || saved.managedSkill === undefined
+      saved.managedSkill === undefined
         ? undefined
-        : ("workflowPath" in skill ? skill.workflowPath : undefined) ===
-            saved.managedSkill.workflowPath
+        : skill.workflowPath === saved.managedSkill.workflowPath
           ? { ...saved.managedSkill, changed: saved.managedSkill.changed || skill.changed }
           : { ...saved.managedSkill, changed: true };
     const nativePrompt = grokBotManagedPrompt(turn.message.text, verifiedSkill);
