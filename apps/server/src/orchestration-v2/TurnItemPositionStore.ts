@@ -106,10 +106,20 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
             item.runId === null &&
             item.nativeItemRef?.driver === "grok-bot" &&
             (item.type === "user_message" || item.type === "assistant_message");
-          // Native phone/Teach messages have no T3 run. Put them after the preceding
-          // managed run instead of the pre-run history bucket, including on replay.
+          const callParents =
+            item.runId === null && item.type === "assistant_message" && item.nodeId !== null
+              ? yield* sql<{ readonly kind: string }>`
+                  SELECT kind FROM orchestration_v2_projection_nodes
+                  WHERE thread_id = ${item.threadId} AND node_id = ${item.nodeId}
+                    AND kind = 'call_parent'
+                  LIMIT 1
+                `
+              : [];
+          const runlessChatMessage = nativeGrokMessage || callParents.length > 0;
+          // Native phone/Teach and call-posted messages have no T3 run. Put them
+          // after the preceding managed run, including when replaying old positions.
           const precedingRuns =
-            nativeGrokMessage && item.startedAt !== null
+            runlessChatMessage && item.startedAt !== null
               ? yield* sql<{ readonly ordinal: number }>`
                   SELECT ordinal FROM orchestration_v2_projection_runs
                   WHERE thread_id = ${item.threadId}
@@ -123,7 +133,7 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
             turnItemId: item.id,
             runId: item.runId,
             ...(nativeRunOrdinal === undefined ? {} : { runOrdinal: nativeRunOrdinal }),
-            ...(nativeGrokMessage ? { advanceNativePosition: true } : {}),
+            ...(runlessChatMessage ? { advanceNativePosition: true } : {}),
           });
           return item.ordinal === ordinal ? item : { ...item, ordinal };
         }).pipe(
