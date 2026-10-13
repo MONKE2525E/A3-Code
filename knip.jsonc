@@ -17,9 +17,14 @@
       "vitest": { "entry": [".github/**/*.test.cjs"] },
     },
     "scripts": {
-      // Knip loads its preprocessor through a CLI option; native verification and
-      // worktree setup (from t3.json) run directly.
-      "entry": ["knip-schemas.ts", "mobile-native-client.ts", "setup-worktree.ts"],
+      // Knip loads its preprocessor through a CLI option; native verification, worktree
+      // setup (from t3.json), and the custom Android build (apps/mobile/README.md) run directly.
+      "entry": [
+        "build-custom-mobile.ts",
+        "knip-schemas.ts",
+        "mobile-native-client.ts",
+        "setup-worktree.ts",
+      ],
     },
     "apps/server": {
       // Vite+ pack entries and the launcher used by installed background services.

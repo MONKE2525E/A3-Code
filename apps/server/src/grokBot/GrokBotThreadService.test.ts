@@ -184,7 +184,9 @@ const runtime = (database: DatabaseLayer = Sqlite.layerMemory) =>
 
 const seedProjects = Effect.gen(function* () {
   const projects = yield* Projects.ProjectStoreV2;
+  const fs = yield* FileSystem.FileSystem;
   for (const id of [projectId, otherProjectId, scratchProjectId]) {
+    const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: `t3-${id}-` });
     yield* projects.apply({
       sequence: 1,
       eventId: EventId.make(`project:${id}`),
@@ -199,7 +201,7 @@ const seedProjects = Effect.gen(function* () {
       payload: {
         projectId: id,
         title: id,
-        workspaceRoot: `/tmp/${id}`,
+        workspaceRoot,
         defaultModelSelection: null,
         scripts: [],
         createdAt: "2026-10-10T00:00:00.000Z",
@@ -299,7 +301,9 @@ it.effect(
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const initial = yield* orchestrator.getThreadProjection(first.threadId!);
       const run = initial.runs[0]!;
-      const providerThread = initial.providerThreads[0]!;
+      const providerThread = initial.providerThreads.find(
+        (thread) => thread.id === run.providerThreadId,
+      )!;
       const now = yield* DateTime.now;
       yield* (yield* EventSink.EventSinkV2).write({
         commandId: CommandId.make("agent-followup-seed"),
@@ -333,8 +337,10 @@ it.effect(
         ],
       });
       const sessions = yield* ProviderSessions.ProviderSessionManagerV2;
+      const observedSession = initial.providerSessions[0];
+      assert.isDefined(observedSession);
       const providerSession = {
-        ...initial.providerSessions[0]!,
+        ...observedSession,
         id: providerThread.providerSessionId!,
         capabilities: GrokBotCapabilitiesV2,
       };
@@ -1049,9 +1055,6 @@ it.effect(
 const observing = Effect.gen(function* () {
   observedSessions.length = 0;
   yield* seedProjects;
-  const fileSystem = yield* FileSystem.FileSystem;
-  for (const id of [projectId, scratchProjectId])
-    yield* fileSystem.makeDirectory(`/tmp/${id}`, { recursive: true });
 });
 
 it.effect(
@@ -1277,7 +1280,8 @@ it.effect("observation switches to a live bound session instead of doubling the 
       runtimePolicy: {
         runtimeMode: "full-access",
         interactionMode: "default",
-        cwd: `/tmp/${scratchProjectId}`,
+        cwd: Option.getOrThrow(yield* (yield* Projects.ProjectStoreV2).get(scratchProjectId))
+          .workspaceRoot,
       },
     });
     yield* projections.apply({

@@ -58,6 +58,7 @@ it.effect.each([
     const settled = yield* Deferred.make<SettlementFrame>();
     const completed = yield* Deferred.make<void>();
     const disconnect = yield* Deferred.make<void>();
+    const transcriptReattached = yield* Deferred.make<void>();
     const transcriptVisible = yield* Deferred.make<void>();
     let prepared: GrokBotManagedTurn | undefined;
     let writes = 0;
@@ -168,7 +169,10 @@ it.effect.each([
                   : Stream.fail(new NativeRuntimeError({ kind: "uncertain" })),
               ),
             )
-          : Stream.never;
+          : Stream.fromEffect(Deferred.succeed(transcriptReattached, undefined)).pipe(
+              Stream.drain,
+              Stream.concat(Stream.never),
+            );
       },
       openSettlementWatch: () =>
         Effect.sync(() => {
@@ -351,7 +355,19 @@ it.effect.each([
         );
         return;
       }
-      if (scenario === "eof" || scenario === "transport") {
+      if (scenario === "eof") {
+        // Clean EOF renews the transcript inside the live adapter. It does not
+        // lose the provider session or reopen the settlement watch.
+        yield* Deferred.succeed(disconnect, undefined);
+        yield* TestClock.adjust("1 second");
+        yield* Deferred.await(transcriptReattached);
+        const held = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(held.runs[0]?.status, "running");
+        assert.equal(transcriptWatches, 2);
+        assert.equal(watches, 1);
+        assert.equal(writes, 1);
+      }
+      if (scenario === "transport") {
         const originalEffects = yield* outbox.listByCommandId(CommandId.make("grok-bot:dispatch"));
         for (const _effect of originalEffects) {
           yield* outbox.awaitAvailable;
