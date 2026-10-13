@@ -53,6 +53,7 @@ import {
   isGrokBotReactionReplyToSend,
   isGrokBotReplyAfterSend,
   isGrokBotSendDelivered,
+  isGrokBotSettledTextTurn,
   type GrokBotPeer,
   type GrokBotSentMessage,
   type GrokBotTimelineItem,
@@ -109,8 +110,8 @@ export function GrokBotConversationView({
   const wasStreaming = useRef(false);
   const lastMessage = messages.at(-1);
   const lastMessageId = lastMessage?.id;
-  // Any settled bot turn answers a waiting message, including reaction-only turns.
-  const botSettled = lastMessage?.role === "assistant" && lastMessage.streaming !== true;
+  // A settled bot text reply answers a waiting send; a reaction alone does not.
+  const botSettled = isGrokBotSettledTextTurn(lastMessage);
   const [outgoing, setOutgoing] = useState<readonly OutgoingMessage[]>([]);
   const outgoingSequence = useRef(0);
   const sendMessage = useAtomCommand(grokBotsSend, { reportFailure: false });
@@ -143,9 +144,9 @@ export function GrokBotConversationView({
     }
     wasStreaming.current = streaming;
   }, [streaming, surfaceKey]);
-  // A reply answers the send when a message arrived after it, or when the bot reacted to the
-  // message the send produced. The transcript's last settled message from before the send does
-  // not count, and neither does a reaction on any other message.
+  // A reply answers the send when a settled text message arrived after it, or when the bot
+  // reacted to the message the send produced. The transcript's last settled message from before
+  // the send does not count, and neither does a reaction on any other message.
   useEffect(() => {
     const awaiting = replyAwaiting.current;
     if (
@@ -155,11 +156,7 @@ export function GrokBotConversationView({
         lastMessageId,
         lastMessageSettled: botSettled,
       }) ||
-        isGrokBotReactionReplyToSend({
-          sent: awaiting.sent,
-          afterMessageId: awaiting.afterMessageId,
-          messages,
-        }))
+        isGrokBotReactionReplyToSend({ sent: awaiting.sent, messages }))
     ) {
       replyAwaiting.current = null;
       setGrokBotActivity(surfaceKey, "finished", GROK_BOT_SETTLE_LINGER_MS);

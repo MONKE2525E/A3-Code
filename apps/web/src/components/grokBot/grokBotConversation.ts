@@ -158,27 +158,27 @@ export function grokBotReactionTitle(reactions: ReactionList | undefined, emoji:
 }
 
 /**
- * A bot reaction answers a send only on the message the send produced, or as a standalone
- * reaction after the send began. The server makes a standalone reaction only when its target is
- * missing from the transcript. A reaction on any other message is not a reply, however new it is.
- * If the anchor message has left the transcript, only the echo counts.
+ * A bot reaction answers a send only when it sits on the user message the send produced. A
+ * standalone reaction (its target missing from the transcript) cannot prove which send it
+ * answers, so it shows as a pill but never settles a wait.
  */
 export function isGrokBotReactionReplyToSend(input: {
   readonly sent: GrokBotSentMessage;
-  readonly afterMessageId: string | undefined;
   readonly messages: readonly (typeof GrokBotMessage.Type)[];
 }): boolean {
-  const botReacted = (message: typeof GrokBotMessage.Type): boolean =>
-    (message.reactions ?? []).some((reaction) => reaction.from === "bot");
-  if (grokBotSendEchoes(input.messages, input.sent).some(botReacted)) return true;
-  const anchor =
-    input.afterMessageId === undefined
-      ? -1
-      : input.messages.findIndex((message) => message.id === input.afterMessageId);
-  if (input.afterMessageId !== undefined && anchor === -1) return false;
-  return input.messages
-    .slice(anchor + 1)
-    .some((message) => message.reactionOnly === true && botReacted(message));
+  return grokBotSendEchoes(input.messages, input.sent).some((message) =>
+    (message.reactions ?? []).some((reaction) => reaction.from === "bot"),
+  );
+}
+
+/**
+ * A finished bot text turn. A reaction-only turn does not count: its target is not in the
+ * transcript, so it cannot be tied to the send it would answer.
+ */
+export function isGrokBotSettledTextTurn(message: typeof GrokBotMessage.Type | undefined): boolean {
+  return (
+    message?.role === "assistant" && message.streaming !== true && message.reactionOnly !== true
+  );
 }
 
 /**

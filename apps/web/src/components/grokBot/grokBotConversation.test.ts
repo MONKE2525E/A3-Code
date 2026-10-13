@@ -14,6 +14,7 @@ import {
   isGrokBotReactionReplyToSend,
   isGrokBotReplyAfterSend,
   isGrokBotSendDelivered,
+  isGrokBotSettledTextTurn,
 } from "./grokBotConversation";
 
 const user = { kind: "user" as const };
@@ -255,8 +256,7 @@ describe("isGrokBotReactionReplyToSend", () => {
   ];
   // "ship it" was sent after u1 and a1 were in the transcript.
   const sent = { text: "ship it", baselineUserIds: new Set(["u1"]) };
-  const reply = (messages: readonly Row[], afterMessageId: string | undefined = "a1") =>
-    isGrokBotReactionReplyToSend({ sent, afterMessageId, messages });
+  const reply = (messages: readonly Row[]) => isGrokBotReactionReplyToSend({ sent, messages });
 
   it("does not count a new bot reaction on an old message the send did not produce", () => {
     const messages = [
@@ -298,30 +298,43 @@ describe("isGrokBotReactionReplyToSend", () => {
     expect(reply(messages)).toBe(false);
   });
 
-  it("counts a standalone bot reaction that arrived after the send", () => {
-    const messages = [
-      row("a1", self),
-      row("u2", user, { text: "ship it" }),
-      row("r1", self, {
+  it("does not count a standalone bot reaction, whose target is not in the transcript", () => {
+    const standalone = (id: string) =>
+      row(id, self, {
         text: "👍",
         reactions: [{ emoji: "👍", from: "bot", messageId: "gone" }],
         reactionOnly: true,
-      }),
-    ];
-    expect(reply(messages)).toBe(true);
-  });
-
-  it("does not count a standalone bot reaction from before the send", () => {
+      });
     const messages = [
-      row("r0", self, {
-        text: "👍",
-        reactions: [{ emoji: "👍", from: "bot", messageId: "gone" }],
-        reactionOnly: true,
-      }),
+      standalone("r0"),
       row("a1", self),
       row("u2", user, { text: "ship it" }),
+      standalone("r1"),
     ];
     expect(reply(messages)).toBe(false);
+  });
+});
+
+describe("isGrokBotSettledTextTurn", () => {
+  const turn = (fields: Partial<typeof GrokBotMessage.Type>) => ({
+    id: "a1",
+    role: "assistant" as const,
+    sender: self,
+    text: "done",
+    timestampMs: 0,
+    streaming: false,
+    ...fields,
+  });
+
+  it("settles on a finished bot text reply", () => {
+    expect(isGrokBotSettledTextTurn(turn({}))).toBe(true);
+  });
+
+  it("does not settle on a streaming, user, reaction-only, or missing turn", () => {
+    expect(isGrokBotSettledTextTurn(turn({ streaming: true }))).toBe(false);
+    expect(isGrokBotSettledTextTurn(turn({ role: "user", sender: user }))).toBe(false);
+    expect(isGrokBotSettledTextTurn(turn({ reactionOnly: true }))).toBe(false);
+    expect(isGrokBotSettledTextTurn(undefined)).toBe(false);
   });
 });
 
