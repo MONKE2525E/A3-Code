@@ -134,7 +134,7 @@ export function grokBotSetupView(status: GrokBotSetupStatus): GrokBotSetupView {
   }
 }
 
-export const GROK_BOT_OAUTH_PATH = "/settings/marketplace?grokBotOAuth=1";
+const GROK_BOT_OAUTH_PATH = "/settings/marketplace?grokBotOAuth=1";
 
 /**
  * OAuth accepts HTTPS or loopback HTTP. A remote HTTP connection returns through the owning
