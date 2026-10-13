@@ -259,7 +259,13 @@ const make = Effect.gen(function* () {
               if (exit._tag === "Failure") {
                 if (calls.get(input.callId) === entry) calls.delete(input.callId);
                 if (entry.scope !== undefined)
-                  yield* orchestrator.releaseCallInvocation(entry.scope).pipe(Effect.ignore);
+                  yield* orchestrator
+                    .releaseCallInvocation(entry.scope)
+                    .pipe(
+                      Effect.catch((error) =>
+                        Effect.logWarning("Failed to release the voice call invocation", { error }),
+                      ),
+                    );
               }
               yield* Deferred.succeed(entry.ready, undefined);
             }),

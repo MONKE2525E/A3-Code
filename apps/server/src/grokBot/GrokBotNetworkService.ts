@@ -353,7 +353,9 @@ const make = Effect.gen(function* () {
       );
     },
     Effect.timeout("2 seconds"),
-    Effect.ignoreCause(),
+    Effect.catchCause((cause) =>
+      Effect.logWarning("Grok Bot network claim did not complete", { cause }),
+    ),
   );
   return GrokBotNetworkService.of({ read, set, claimIfEnabled });
 });

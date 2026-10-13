@@ -184,7 +184,11 @@ const make = Effect.gen(function* () {
     if (call.connectedAtMs !== undefined)
       yield* backend
         .setPresence(call.binding, { botId: call.botId, callId, onTheLine: false })
-        .pipe(Effect.ignore);
+        .pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("Failed to clear the voice call presence", { error }),
+          ),
+        );
   });
 
   const forget = Effect.fnUntraced(function* (callId: string) {
@@ -274,13 +278,19 @@ const make = Effect.gen(function* () {
     }
     const presence = { botId: call.botId, callId };
     yield* backend.setPresence(call.binding, { ...presence, onTheLine: true }).pipe(
-      Effect.ignore,
+      Effect.catch((error) =>
+        Effect.logWarning("Failed to put the voice call on the line", { error }),
+      ),
       Effect.onExit((exit) =>
         Effect.gen(function* () {
           if (Exit.isFailure(exit) || (yield* Ref.get(calls)).get(callId) !== call)
             yield* backend
               .setPresence(call.binding, { ...presence, onTheLine: false })
-              .pipe(Effect.ignore);
+              .pipe(
+                Effect.catch((error) =>
+                  Effect.logWarning("Failed to clear the voice call presence", { error }),
+                ),
+              );
         }),
       ),
       Effect.forkIn(scope),

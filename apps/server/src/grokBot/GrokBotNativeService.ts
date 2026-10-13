@@ -888,7 +888,12 @@ const make = Effect.gen(function* () {
     if (method === "SendGrokBotUserMessage") {
       const network = yield* Effect.serviceOption(Network.GrokBotNetworkService);
       if (network._tag === "Some")
-        yield* network.value.claimIfEnabled(binding).pipe(Effect.ignoreCause, Effect.forkIn(scope));
+        yield* network.value.claimIfEnabled(binding).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Grok Bot network claim failed", { cause }),
+          ),
+          Effect.forkIn(scope),
+        );
     }
     const result = yield* request(
       auth,
