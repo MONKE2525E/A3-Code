@@ -2,6 +2,7 @@ import { ThreadFindTimelineContext } from "./ThreadFindProvider";
 import { AgentSenderAttribution, GrokBotPeerMessageLink } from "../grokBot/GrokBotPeerMessageLink";
 import { GrokBotVoiceCallMarkerLabel } from "../grokBot/GrokBotVoiceCallMarkerLabel";
 import { GrokBotWorkflowReferenceChips } from "../grokBot/GrokBotWorkflowReferenceChips";
+import { GrokBotReactions } from "../grokBot/GrokBotReactions";
 import { shouldPreserveAssistantLineBreaks } from "@t3tools/shared/markdownPipeline";
 import { MarkdownFindContext, useFindRevealRef } from "./markdownFindContext";
 import { ComputerUseAppIcon } from "~/components/Icons";
@@ -2612,6 +2613,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           />
         </div>
       </div>
+      <GrokBotReactions reactions={row.message.grokBotReactions} />
       {row.projectedItem &&
       row.projectedItem.item.status !== "completed" &&
       row.projectedItem.item.status !== "pending" &&

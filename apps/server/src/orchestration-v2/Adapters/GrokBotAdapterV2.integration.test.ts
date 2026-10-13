@@ -173,7 +173,10 @@ it.effect.each([
                   : Stream.fail(new NativeRuntimeError({ kind: "uncertain" })),
               ),
             )
-          : Stream.never;
+          : Stream.fromEffect(Deferred.succeed(transcriptReopened, undefined)).pipe(
+              Stream.drain,
+              Stream.concat(Stream.never),
+            );
       },
       openSettlementWatch: () =>
         Effect.sync(() => {

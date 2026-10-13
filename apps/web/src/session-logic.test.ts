@@ -223,6 +223,51 @@ describe("V2 session presentation", () => {
     expect(isWaiting(reading(runStartedAtMs + 5_000, true), runStartedAtMs + 6_000)).toBe(false);
   });
 
+  it("carries a bot's reactions on a user message into its timeline entry", () => {
+    const now = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
+    const threadId = ThreadId.make("thread-reactions");
+    const userItem = {
+      id: TurnItemId.make("item-user-reacted"),
+      threadId,
+      runId: RunId.make("run-reactions"),
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 0,
+      status: "completed" as const,
+      title: null,
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      type: "user_message" as const,
+      messageId: MessageId.make("message-reacted"),
+      inputIntent: "turn_start" as const,
+      text: "Ship it",
+      attachments: [],
+      createdBy: "user" as const,
+      creationSource: "web" as const,
+      grokBotReactions: [{ emoji: "👍", from: "bot" as const, messageId: "message-reacted" }],
+    } satisfies OrchestrationV2TurnItem;
+    const [entry] = deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: [
+        {
+          item: userItem,
+          position: 0,
+          visibility: "local",
+          sourceThreadId: threadId,
+          sourceItemId: userItem.id,
+        },
+      ],
+      optimisticMessages: [],
+    });
+    if (entry?.kind !== "message") throw new Error("Expected a user message entry");
+    expect(entry.message.grokBotReactions).toEqual([
+      { emoji: "👍", from: "bot", messageId: "message-reacted" },
+    ]);
+  });
+
   it("labels provider retry progress, delay, recovery, and exhaustion", () => {
     const now = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
     const retryItem = {

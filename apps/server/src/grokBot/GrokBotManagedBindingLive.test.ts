@@ -17,8 +17,11 @@ import {
   type ServerSettings as Settings,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as TestClock from "effect/testing/TestClock";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Endpoint from "../cloud/ManagedEndpointAddress.ts";
 import * as Registry from "../mcp/McpSessionRegistry.ts";
 import * as Projection from "../orchestration-v2/ProjectionStore.ts";
@@ -62,6 +65,7 @@ const harness = Effect.gen(function* () {
     restoreFail: false,
     switchOnIssue: false,
     replaceAttemptOnIssue: false,
+    pauseAfterIssue: false,
     skill: undefined as { skillId: string; changed: boolean } | undefined,
     switchOnSkill: false,
     shell: { ...input.appThread, activeRunId: input.runId } as OrchestrationV2ThreadShell,
@@ -102,6 +106,7 @@ const harness = Effect.gen(function* () {
   >[0][] = [];
   const active = new Set<string>();
   const revoked: string[] = [];
+  const postIssueRead = yield* Deferred.make<void>();
   const registry = Layer.mock(Registry.McpSessionRegistry)({
     issue: (request) =>
       Effect.sync(() => {
@@ -165,7 +170,14 @@ const harness = Effect.gen(function* () {
               }),
             ),
             Layer.mock(Projection.ProjectionStoreV2)({
-              getThreadShell: () => Effect.sync(() => state.shell),
+              getThreadShell: () =>
+                Effect.gen(function* () {
+                  if (state.pauseAfterIssue && active.size > 0) {
+                    yield* Deferred.succeed(postIssueRead, undefined);
+                    return yield* Effect.never;
+                  }
+                  return state.shell;
+                }),
               getThreadRecords: (() =>
                 Effect.sync(() => ({
                   runs: [state.run],
@@ -228,8 +240,27 @@ const harness = Effect.gen(function* () {
     input,
     fixture,
     skillRequests,
+    postIssueRead,
   };
 });
+
+it.effect("revokes an issued credential if preparation is interrupted before handoff", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* h.resolve();
+    h.state.pauseAfterIssue = true;
+    const fiber = yield* Effect.forkChild(h.prepare());
+    yield* Deferred.await(h.postIssueRead);
+    assert.equal(h.active.size, 1);
+    yield* Fiber.interrupt(fiber);
+    assert.deepStrictEqual(h.revoked, ["remote-1"]);
+    assert.equal(h.active.size, 0);
+    h.state.pauseAfterIssue = false;
+    const retried = yield* h.prepare();
+    assert.equal(h.active.size, 1);
+    assert.equal(retried.messageId, (yield* h.store.restoreTurns(nativeSession))[0]?.messageId);
+  }).pipe(Effect.provide(storeLayer)),
+);
 
 it.effect(
   "sends user text first without installing a skill and keeps retries compact after restart",
@@ -628,6 +659,37 @@ it.effect("keeps the durable protocol receipt when a retry sees a newer skill", 
     const retry = yield* h.prepare();
     assert.equal(retry.managedSkill?.hash, oldHash);
     assert.equal(retry.nativePrompt, grokBotManagedPrompt(h.input.message.text));
+  }).pipe(Effect.provide(storeLayer)),
+);
+
+it.effect("restores the initiating user message for legacy managed transcript identities", () =>
+  Effect.gen(function* () {
+    const h = yield* harness;
+    yield* h.resolve();
+    const turn = yield* h.prepare();
+    const identity = grokBotTurnIdentity(turn);
+    assert.equal(
+      (yield* h.store.lookupTranscriptTurn(nativeSession, turn.messageId))?.userMessageId,
+      h.input.message.messageId,
+    );
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`UPDATE grok_bot_managed_turns SET identity_json = json_remove(identity_json, '$.userMessageId')`;
+    assert.equal(
+      (yield* h.store.lookupTranscriptTurn(nativeSession, turn.messageId))?.userMessageId,
+      undefined,
+    );
+    const reopened = yield* h.make();
+    assert.deepStrictEqual(yield* reopened.restoreTranscriptTurns(nativeSession), [identity]);
+    assert.deepStrictEqual(
+      yield* reopened.lookupTranscriptTurn!(nativeSession, turn.messageId),
+      identity,
+    );
+    assert.deepStrictEqual(yield* reopened.restoreTurns(nativeSession), [identity]);
+    h.state.run = { ...h.state.run, rootNodeId: NodeId.make("foreign-root") };
+    assert.equal(
+      (yield* reopened.lookupTranscriptTurn!(nativeSession, turn.messageId))?.userMessageId,
+      undefined,
+    );
   }).pipe(Effect.provide(storeLayer)),
 );
 

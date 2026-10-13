@@ -54,3 +54,23 @@ it.effect("dispatches CR-only SSE terminators across chunk boundaries", () =>
     assert.deepStrictEqual(frames, [{ channel: "heartbeat", payload: {} }]);
   }),
 );
+
+it.effect("bounds unfinished events made of empty data lines across chunks", () =>
+  Effect.gen(function* () {
+    const chunk = new TextEncoder().encode("data:\n".repeat(32768));
+    const error = yield* Gateway.decodeEvents(
+      Stream.fromIterable(Array.from({ length: 65 }, () => chunk)),
+    ).pipe(Stream.runCollect, Effect.flip);
+    assert.strictEqual(error._tag, "GrokBotGatewayFrameError");
+  }),
+);
+
+it.effect("rejects a truncated UTF-8 sequence when the gateway closes", () =>
+  Effect.gen(function* () {
+    const error = yield* Gateway.decodeEvents(Stream.make(Uint8Array.of(0xf0, 0x9f))).pipe(
+      Stream.runCollect,
+      Effect.flip,
+    );
+    assert.strictEqual(error._tag, "GrokBotGatewayFrameError");
+  }),
+);
