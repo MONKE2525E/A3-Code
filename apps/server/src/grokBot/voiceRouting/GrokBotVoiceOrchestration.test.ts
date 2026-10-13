@@ -1,7 +1,10 @@
 import { assert, it } from "@effect/vitest";
 import { EnvironmentId, OrchestratorMcpFailure } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Config from "../../config.ts";
@@ -22,75 +25,76 @@ import * as Voice from "./GrokBotVoiceOrchestration.ts";
 // Real checked MCP handlers; external services would fail if either refusal reached execution.
 let acquisitionFailure: OrchestratorMcpFailure | undefined;
 let threadWaitTimedOut = true;
-const harness = Voice.layer.pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      Access.HandlersLayer.layer(OrchestratorHandlers.layer),
-      Access.HandlersLayer.layer(ProjectHandlers.layer),
+const harness = (getEnvironmentId = Effect.succeed(EnvironmentId.make("voice-env"))) =>
+  Voice.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Access.HandlersLayer.layer(OrchestratorHandlers.layer),
+        Access.HandlersLayer.layer(ProjectHandlers.layer),
+      ),
     ),
-  ),
-  Layer.provide(
-    Layer.mergeAll(
-      Layer.succeed(Environment.ServerEnvironment, {
-        getEnvironmentId: Effect.succeed(EnvironmentId.make("voice-env")),
-      } as never),
-      Layer.succeed(Crypto.Crypto, {} as never),
-      Layer.succeed(FileSystem.FileSystem, {} as never),
-      Layer.succeed(Config.ServerConfig, {} as never),
-      Layer.succeed(Orchestrator.OrchestratorMcpService, {
-        acquireCallInvocation: () =>
-          acquisitionFailure !== undefined
-            ? Effect.fail(acquisitionFailure)
-            : Effect.succeed({
-                environmentId: EnvironmentId.make("voice-env"),
-                issuedAt: 0,
-                capabilities: new Set(["orchestration"]),
-                requestNamespace: "voice-call",
-                thread: undefined,
-                client: { sessionId: "call", label: "Voice call", access: "approval-required" },
-              }),
-        validateCallInvocation: () => Effect.void,
-        restrictCallInvocation: (
-          scope: import("../../mcp/McpInvocationContext.ts").McpInvocationScope,
-        ) => Effect.succeed({ ...scope, client: { ...scope.client!, access: "read-only" } }),
-        releaseCallInvocation: () => Effect.void,
-        waitForThread: () =>
-          Effect.succeed({
-            threadId: "observed-thread",
-            runId: "observed-run",
-            status: threadWaitTimedOut ? "running" : "completed",
-            timedOut: threadWaitTimedOut,
-          }),
-        capabilities: () =>
-          Effect.succeed({
-            parentThreadId: null,
-            inheritedProviderInstanceId: null,
-            inheritedModel: null,
-            runtimeMode: "approval-required",
-            interactionMode: "default",
-            providers: [],
-            features: {
-              appOwnedSubagents: true,
-              asyncPolling: true,
-              cancellation: true,
-              batchThreadCreation: true,
-              threadManagement: true,
-              incrementalThreadRead: true,
-              scheduledTasks: true,
-              maxBatchThreads: 20,
-            },
-          }),
-      } as never),
-      Layer.succeed(Metadata.ThreadMetadataMcpService, {} as never),
-      Layer.succeed(Threads.ThreadManagementService, {} as never),
-      Layer.succeed(Launches.ThreadLaunchService, {} as never),
-      Layer.succeed(Projects.ProjectService, {} as never),
-      Layer.succeed(Folders.ManagedProjectFolders, {} as never),
-      Layer.succeed(Settings.ServerSettingsService, {} as never),
-      Layer.succeed(Git.GitVcsDriver, {} as never),
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.succeed(Environment.ServerEnvironment, {
+          getEnvironmentId,
+        } as never),
+        Layer.succeed(Crypto.Crypto, {} as never),
+        Layer.succeed(FileSystem.FileSystem, {} as never),
+        Layer.succeed(Config.ServerConfig, {} as never),
+        Layer.succeed(Orchestrator.OrchestratorMcpService, {
+          acquireCallInvocation: () =>
+            acquisitionFailure !== undefined
+              ? Effect.fail(acquisitionFailure)
+              : Effect.succeed({
+                  environmentId: EnvironmentId.make("voice-env"),
+                  issuedAt: 0,
+                  capabilities: new Set(["orchestration"]),
+                  requestNamespace: "voice-call",
+                  thread: undefined,
+                  client: { sessionId: "call", label: "Voice call", access: "approval-required" },
+                }),
+          validateCallInvocation: () => Effect.void,
+          restrictCallInvocation: (
+            scope: import("../../mcp/McpInvocationContext.ts").McpInvocationScope,
+          ) => Effect.succeed({ ...scope, client: { ...scope.client!, access: "read-only" } }),
+          releaseCallInvocation: () => Effect.void,
+          waitForThread: () =>
+            Effect.succeed({
+              threadId: "observed-thread",
+              runId: "observed-run",
+              status: threadWaitTimedOut ? "running" : "completed",
+              timedOut: threadWaitTimedOut,
+            }),
+          capabilities: () =>
+            Effect.succeed({
+              parentThreadId: null,
+              inheritedProviderInstanceId: null,
+              inheritedModel: null,
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              providers: [],
+              features: {
+                appOwnedSubagents: true,
+                asyncPolling: true,
+                cancellation: true,
+                batchThreadCreation: true,
+                threadManagement: true,
+                incrementalThreadRead: true,
+                scheduledTasks: true,
+                maxBatchThreads: 20,
+              },
+            }),
+        } as never),
+        Layer.succeed(Metadata.ThreadMetadataMcpService, {} as never),
+        Layer.succeed(Threads.ThreadManagementService, {} as never),
+        Layer.succeed(Launches.ThreadLaunchService, {} as never),
+        Layer.succeed(Projects.ProjectService, {} as never),
+        Layer.succeed(Folders.ManagedProjectFolders, {} as never),
+        Layer.succeed(Settings.ServerSettingsService, {} as never),
+        Layer.succeed(Git.GitVcsDriver, {} as never),
+      ),
     ),
-  ),
-);
+  );
 
 const caller = {
   binding: "account",
@@ -122,7 +126,7 @@ it.effect("keeps watching a checked thread wait that timed out, but not a comple
     }
     yield* voice.forget(caller.callId);
   }).pipe(
-    Effect.provide(harness),
+    Effect.provide(harness()),
     Effect.ensuring(
       Effect.sync(() => {
         threadWaitTimedOut = true;
@@ -158,7 +162,7 @@ it.effect("preserves an authority acquisition failure and can acquire again afte
     assert.strictEqual(recovered.result.kind, "served");
     yield* voice.forget(caller.callId);
   }).pipe(
-    Effect.provide(harness),
+    Effect.provide(harness()),
     Effect.ensuring(
       Effect.sync(() => {
         acquisitionFailure = undefined;
@@ -212,7 +216,41 @@ it.effect(
         "thread_credential_required",
       );
       assert.isUndefined(noParent.target);
-    }).pipe(Effect.provide(harness)),
+    }).pipe(Effect.provide(harness())),
+);
+
+it.effect.each(["defect", "interruption"] as const)(
+  "allows activation to retry after environment lookup ends with %s",
+  (outcome) =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      let lookups = 0;
+      const environmentId = Effect.gen(function* () {
+        if (++lookups === 1) {
+          yield* Deferred.succeed(started, undefined);
+          return yield* outcome === "defect" ? Effect.die("fixture") : Effect.never;
+        }
+        return EnvironmentId.make("voice-env");
+      });
+      yield* Effect.gen(function* () {
+        const voice = yield* Voice.GrokBotVoiceOrchestration;
+        const first = yield* Effect.forkChild(voice.activate(caller));
+        yield* Deferred.await(started);
+        if (outcome === "defect") assert.isTrue(Exit.isFailure(yield* Fiber.await(first)));
+        else yield* Fiber.interrupt(first);
+        yield* voice.activate(caller);
+        assert.strictEqual(lookups, 2);
+        const response = yield* voice.call({
+          ...caller,
+          access: "read",
+          name: "t3_thread_launch",
+          input: { title: "Read-only launch", scratch: true, runtimeMode: "full-access" },
+        });
+        assert.strictEqual(response.result.kind, "invalid_input");
+        assert.strictEqual((response.result.output as { code: string }).code, "capability_denied");
+        yield* voice.forget(caller.callId);
+      }).pipe(Effect.provide(harness(environmentId)));
+    }),
 );
 
 it("realtime definitions reuse the MCP catalog and include direct launch and read functions", () => {

@@ -6,7 +6,6 @@ import {
   type GrokBotVoiceToolResult,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -224,7 +223,6 @@ const make = Effect.gen(function* () {
           entry.scope = scope;
           activationFailures.delete(input.callId);
         }).pipe(
-          Effect.uninterruptible,
           Effect.onExit((exit) =>
             Effect.gen(function* () {
               if (exit._tag === "Failure") {
@@ -232,13 +230,12 @@ const make = Effect.gen(function* () {
                 if (entry.scope !== undefined)
                   yield* orchestrator.releaseCallInvocation(entry.scope).pipe(Effect.ignore);
               }
-              yield* Deferred.succeed(entry.ready, undefined);
             }),
           ),
+          Effect.ensuring(Deferred.succeed(entry.ready, undefined)),
         );
       }).pipe(
-        Effect.catchCause((cause) => {
-          const error = Option.getOrUndefined(Cause.findErrorOption(cause));
+        Effect.catch((error) => {
           activationFailures.set(
             input.callId,
             isOrchestratorFailure(error)

@@ -2,6 +2,7 @@ import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -155,13 +156,12 @@ const make = Effect.gen(function* () {
       return yield* unavailable("This provider no longer owns the active run attempt.");
     const saved = yield* store.prepareTurn({
       ...identity,
-      ...(skill === undefined ? {} : { managedSkill: skill }),
+      managedSkill: skill,
     });
     const verifiedSkill =
-      skill === undefined || saved.managedSkill === undefined
+      saved.managedSkill === undefined
         ? undefined
-        : ("workflowPath" in skill ? skill.workflowPath : undefined) ===
-            saved.managedSkill.workflowPath
+        : skill.workflowPath === saved.managedSkill.workflowPath
           ? { ...saved.managedSkill, changed: saved.managedSkill.changed || skill.changed }
           : { ...saved.managedSkill, changed: true };
     const nativePrompt = grokBotManagedPrompt(turn.message.text, verifiedSkill);
@@ -182,48 +182,61 @@ const make = Effect.gen(function* () {
     ]);
     if (access.browser) capabilities.add("preview");
     if (access.device) capabilities.add("device");
-    const credential = yield* registry.issue({
-      threadId: input.native.threadId,
-      providerInstanceId: input.native.providerInstanceId,
-      remoteRun: { runId: saved.runId, attemptId: saved.attemptId },
-      // The same thread preference limits both local and cloud agent browser access.
-      browserToolsAvailable: access.browser,
-      capabilities,
-    });
-    // Settings and credential issuance yield; the run may have been replaced in that time.
-    yield* Effect.gen(function* () {
-      if (!(yield* validateIdentity(saved)))
-        return yield* unavailable("This provider no longer owns the active run attempt.");
-    }).pipe(
-      Effect.tapError(() => registry.revokeProviderSession(credential.config.providerSessionId)),
+    // Own the grant from issuance through handoff; failed or interrupted validation revokes it.
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const credential = yield* registry.issue({
+          threadId: input.native.threadId,
+          providerInstanceId: input.native.providerInstanceId,
+          remoteRun: { runId: saved.runId, attemptId: saved.attemptId },
+          // The same thread preference limits both local and cloud agent browser access.
+          browserToolsAvailable: access.browser,
+          capabilities,
+        });
+        return yield* restore(
+          Effect.gen(function* () {
+            // Settings and credential issuance yield; the run may have been replaced in that time.
+            if (!(yield* validateIdentity(saved)))
+              return yield* unavailable("This provider no longer owns the active run attempt.");
+          }),
+        ).pipe(
+          Effect.map(() => {
+            const mcpEndpoint = new URL("/mcp", publicEndpoint.httpBaseUrl);
+            // Native cloud discovery caches by URL. Version the managed tool contract so an
+            // older catalog cannot hide the completion tool after an integration upgrade.
+            mcpEndpoint.searchParams.set("t3-managed-protocol", "2");
+            const handles = leases.get(input.providerSessionId) ?? new Set<string>();
+            handles.add(credential.config.providerSessionId);
+            leases.set(input.providerSessionId, handles);
+            return {
+              native: saved.native,
+              input: turn,
+              providerTurnId: saved.providerTurnId,
+              messageId: saved.messageId,
+              sentAtMs: saved.sentAtMs,
+              nativePrompt,
+              ...(saved.managedSkill === undefined ? {} : { managedSkill: saved.managedSkill }),
+              mcpConfig: {
+                mcpServers: {
+                  // A saved native connector can shadow a per-turn connector with the same name.
+                  [GROK_BOT_MANAGED_MCP_SERVER]: {
+                    type: "http" as const,
+                    url: mcpEndpoint.href,
+                    headers: { Authorization: credential.config.authorizationHeader },
+                    placement: "server" as const,
+                  },
+                },
+              },
+            };
+          }),
+          Effect.onExit((exit) =>
+            Exit.isFailure(exit)
+              ? registry.revokeProviderSession(credential.config.providerSessionId)
+              : Effect.void,
+          ),
+        );
+      }),
     );
-    const handles = leases.get(input.providerSessionId) ?? new Set<string>();
-    handles.add(credential.config.providerSessionId);
-    leases.set(input.providerSessionId, handles);
-    const mcpEndpoint = new URL("/mcp", publicEndpoint.httpBaseUrl);
-    // Native cloud discovery caches by URL. Version the managed tool contract so an
-    // older catalog cannot hide the completion tool after an integration upgrade.
-    mcpEndpoint.searchParams.set("t3-managed-protocol", "2");
-    return {
-      native: saved.native,
-      input: turn,
-      providerTurnId: saved.providerTurnId,
-      messageId: saved.messageId,
-      sentAtMs: saved.sentAtMs,
-      nativePrompt,
-      ...(saved.managedSkill === undefined ? {} : { managedSkill: saved.managedSkill }),
-      mcpConfig: {
-        mcpServers: {
-          // A saved native connector can shadow a per-turn connector with the same name.
-          [GROK_BOT_MANAGED_MCP_SERVER]: {
-            type: "http" as const,
-            url: mcpEndpoint.href,
-            headers: { Authorization: credential.config.authorizationHeader },
-            placement: "server" as const,
-          },
-        },
-      },
-    };
   });
   return GrokBotManagedBinding.of({
     availability: Effect.gen(function* () {
