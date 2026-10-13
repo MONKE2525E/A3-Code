@@ -7,6 +7,7 @@ import {
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -145,8 +146,8 @@ const make = Effect.gen(function* () {
           scope: undefined as Invocation.McpInvocationScope | undefined,
         };
         calls.set(input.callId, entry);
-        const environmentId = yield* environment.getEnvironmentId;
         yield* Effect.gen(function* () {
+          const environmentId = yield* environment.getEnvironmentId;
           const scope = yield* orchestrator.acquireCallInvocation({
             environmentId,
             accountId: input.binding,
@@ -163,7 +164,15 @@ const make = Effect.gen(function* () {
             });
           }
           entry.scope = scope;
-        }).pipe(Effect.ensuring(Deferred.succeed(entry.ready, undefined)));
+        }).pipe(
+          Effect.onExit((exit) =>
+            Effect.sync(() => {
+              if (Exit.isFailure(exit) && calls.get(input.callId) === entry)
+                calls.delete(input.callId);
+            }),
+          ),
+          Effect.ensuring(Deferred.succeed(entry.ready, undefined)),
+        );
       }).pipe(Effect.orElseSucceed(() => undefined)),
     forget: (callId) =>
       Effect.gen(function* () {
