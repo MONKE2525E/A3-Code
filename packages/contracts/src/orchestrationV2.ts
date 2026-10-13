@@ -3270,6 +3270,26 @@ const OrchestrationV2InternalCommand = Schema.Union([
     completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
     createdAt: Schema.optional(Schema.DateTimeUtc),
   }),
+  Schema.Struct({
+    type: Schema.Literal("call.chat-message.append"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    parentNodeId: NodeId,
+    authority: OrchestrationV2CallParent,
+    messageId: MessageId,
+    text: TrimmedNonEmptyString.check(Schema.isMaxLength(120_000)),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("call.runtime-request.respond"),
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    parentNodeId: NodeId,
+    authority: OrchestrationV2CallParent,
+    taskId: NodeId,
+    threadId: ThreadId,
+    requestId: RuntimeRequestId,
+    decision: Schema.Literals(["accept", "decline"]),
+  }),
   /** Moves an idle canonical bot conversation to its environment's No project storage. */
   Schema.Struct({
     type: Schema.Literal("grok-bot.thread.rebind"),

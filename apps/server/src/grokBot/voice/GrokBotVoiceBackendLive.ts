@@ -87,7 +87,13 @@ const make = Effect.gen(function* () {
     native.runtimeRequest(binding, method, input).pipe(Effect.mapError(toVoiceError));
 
   return GrokBotVoiceBackend.of({
-    accountBinding: native.accountBinding.pipe(Effect.mapError(toVoiceError)),
+    accountBinding: native.accountBinding.pipe(
+      Effect.mapError((error) =>
+        error._tag === "GrokBotNativeSignedOutError"
+          ? new GrokBotVoiceError({ reason: "account_unavailable" })
+          : unavailable,
+      ),
+    ),
 
     mintCredential: Effect.fn("GrokBotVoiceBackend.mintCredential")(function* (binding) {
       const minted = yield* request(binding, "MintSandVoiceCallSecret", {}).pipe(

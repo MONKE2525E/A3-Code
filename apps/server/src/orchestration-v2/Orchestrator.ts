@@ -63,7 +63,7 @@ import {
   RuntimeMode,
   ThreadLinkedPullRequest,
   ThreadId,
-  type TurnItemId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import {
@@ -510,6 +510,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "queued-run.cancel":
     case "queued-run.edit":
     case "runtime-request.respond":
+    case "call.chat-message.append":
     case "thread.user-input.dismiss":
     case "checkpoint.rollback":
     case "checkpoint.rollback.fail":
@@ -519,6 +520,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
       return command.threadId;
     case "delegated_task.request":
     case "call.delegated_task.request":
+    case "call.runtime-request.respond":
     case "delegated_task.wake-policy":
     case "delegated_task.completion-delivery.acknowledge":
     case "delegated_task.completion-delivery.dispose":
@@ -10827,6 +10829,120 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
       | undefined;
     switch (command.type) {
+      case "call.runtime-request.respond": {
+        const parentProjection = yield* projectionStore
+          .getThreadRecords(command.parentThreadId, ["nodes", "subagents"])
+          .pipe(mapDispatchError(command));
+        const parent = parentProjection.nodes.find((node) => node.id === command.parentNodeId);
+        const task = parentProjection.subagents.find(
+          (task) =>
+            task.id === command.taskId &&
+            task.parentNodeId === command.parentNodeId &&
+            task.childThreadId === command.threadId,
+        );
+        if (
+          parentProjection.thread.deletedAt !== null ||
+          parentProjection.thread.archivedAt !== null ||
+          parent?.kind !== "call_parent" ||
+          parent.status !== "running" ||
+          parent.callParent === undefined ||
+          !callParentEqual(parent.callParent, command.authority) ||
+          task === undefined
+        )
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "This live call no longer owns that approval.",
+          });
+        yield* dispatchRuntimeRequestRespond(
+          {
+            type: "runtime-request.respond",
+            commandId: command.commandId,
+            threadId: command.threadId,
+            requestId: command.requestId,
+            decision: command.decision,
+          },
+          events,
+          effects,
+        );
+        break;
+      }
+      case "call.chat-message.append": {
+        const projection = yield* projectionStore
+          .getThreadRecords(command.threadId, ["nodes", "turnItems"])
+          .pipe(mapDispatchError(command));
+        const parent = projection.nodes.find((node) => node.id === command.parentNodeId);
+        if (
+          projection.thread.deletedAt !== null ||
+          projection.thread.archivedAt !== null ||
+          parent?.kind !== "call_parent" ||
+          parent.status !== "running" ||
+          parent.callParent === undefined ||
+          !callParentEqual(parent.callParent, command.authority)
+        )
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "This live call no longer owns the chat.",
+          });
+        const now = yield* DateTime.now;
+        const message = {
+          createdBy: "agent" as const,
+          creationSource: "mcp" as const,
+          id: command.messageId,
+          threadId: command.threadId,
+          runId: null,
+          nodeId: command.parentNodeId,
+          role: "assistant" as const,
+          text: command.text,
+          attachments: [],
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        };
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "message.updated",
+          threadId: command.threadId,
+          nodeId: command.parentNodeId,
+          occurredAt: now,
+          payload: message,
+        });
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "turn-item.updated",
+          threadId: command.threadId,
+          nodeId: command.parentNodeId,
+          occurredAt: now,
+          payload: {
+            createdBy: "agent",
+            creationSource: "mcp",
+            id: TurnItemId.make(command.messageId),
+            threadId: command.threadId,
+            runId: null,
+            nodeId: command.parentNodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: yield* nextTurnItemOrdinal(projection),
+            status: "completed",
+            title: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            type: "assistant_message",
+            messageId: command.messageId,
+            text: command.text,
+            streaming: false,
+          },
+        });
+        break;
+      }
       case "call-parent.acquire":
       case "call-parent.release": {
         const projection = yield* projectionStore
