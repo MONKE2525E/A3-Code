@@ -18,7 +18,7 @@ export interface VoiceCallEntry<Target, State> {
   readonly state: State;
 }
 
-export function voiceCallTargetKey(target: VoiceCallTarget): string {
+function voiceCallTargetKey(target: VoiceCallTarget): string {
   return JSON.stringify([target.environmentId, target.botId]);
 }
 
