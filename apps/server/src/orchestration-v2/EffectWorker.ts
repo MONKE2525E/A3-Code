@@ -39,6 +39,11 @@ export class OrchestrationEffectExecutionError extends Schema.TaggedError<Orches
   },
 ) {}
 
+export class OrchestrationEffectCapacityDeferred extends Schema.TaggedError<OrchestrationEffectCapacityDeferred>()(
+  "OrchestrationEffectCapacityDeferred",
+  { effectId: Schema.String },
+) {}
+
 /**
  * Pure interrupt races with hard process teardown or a dead session produce
  * "not active" protocol errors. Retrying those only delays recovery.
@@ -71,7 +76,7 @@ export interface OrchestrationEffectExecutorV2Shape {
   readonly execute: (
     effect: EffectOutbox.OrchestrationEffectV2,
     options?: { readonly willRetry: boolean },
-  ) => Effect.Effect<void, OrchestrationEffectExecutionError>;
+  ) => Effect.Effect<void, OrchestrationEffectExecutionError | OrchestrationEffectCapacityDeferred>;
 }
 
 export class OrchestrationEffectExecutorV2 extends Context.Service<
@@ -105,6 +110,7 @@ export const layerExecutor: Layer.Layer<
       yield* ThreadTitleRegenerationService.ThreadTitleRegenerationService;
     const threads = yield* ThreadManagementService.ThreadManagementService;
     const settings = yield* ServerSettings.ServerSettingsService;
+    const admission = yield* ResourceAdmission.ResourceAdmission;
     return OrchestrationEffectExecutorV2.of({
       execute: (effect, options) => {
         const willRetry = options?.willRetry ?? false;
@@ -345,7 +351,8 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
-          case "provider-turn.restart":
+          case "provider-turn.restart": {
+            const request = effect.request;
             return providerTurnControl
               .interruptAndAwaitTerminal({
                 threadId: effect.threadId,
@@ -377,21 +384,36 @@ export const layerExecutor: Layer.Layer<
                       : Effect.void,
                 ),
                 Effect.andThen(
-                  providerTurnStart.start({
-                    threadId: effect.threadId,
-                    runId: effect.request.runId,
-                    willRetry,
+                  Effect.gen(function* () {
+                    // Teardown always runs before admission, so a restart can free scarce resources.
+                    if (
+                      !(yield* admission.acquire({
+                        threadId: effect.threadId,
+                        runId: request.runId,
+                      }))
+                    ) {
+                      return yield* new OrchestrationEffectCapacityDeferred({
+                        effectId: effect.id,
+                      });
+                    }
+                    yield* providerTurnStart.start({
+                      threadId: effect.threadId,
+                      runId: request.runId,
+                      willRetry,
+                    });
                   }),
                 ),
-                Effect.mapError(
-                  (cause) =>
-                    new OrchestrationEffectExecutionError({
-                      effectId: effect.id,
-                      effectType: effect.request.type,
-                      cause,
-                    }),
+                Effect.mapError((cause) =>
+                  cause._tag === "OrchestrationEffectCapacityDeferred"
+                    ? cause
+                    : new OrchestrationEffectExecutionError({
+                        effectId: effect.id,
+                        effectType: effect.request.type,
+                        cause,
+                      }),
                 ),
               );
+          }
           case "runtime-request.respond":
             return runtimeRequests
               .respond({
@@ -687,6 +709,27 @@ export const layerWithOptions = (
           ? requeueClaim(effect, cause)
           : terminalizeClaim(effect, cause);
 
+      const deferForCapacity = (effect: EffectOutbox.OrchestrationEffectV2) =>
+        Effect.gen(function* () {
+          const deferred = yield* outbox
+            .retry({
+              effectId: effect.id,
+              workerId,
+              error: "Waiting for host resources",
+              delayMs: 5_000,
+              consumeAttempt: false,
+            })
+            .pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
+          if (!deferred && !(yield* wasCancelled(effect.id))) {
+            return yield* new OrchestrationEffectWorkerError({
+              operation: "reschedule",
+              effectId: effect.id,
+              cause: "The worker no longer owns the capacity-deferred effect lease.",
+            });
+          }
+          return true;
+        });
+
       const runOnce = (excludeRestartContinuations = false) =>
         Effect.gen(function* () {
           const claimExit = yield* Effect.exit(
@@ -741,41 +784,37 @@ export const layerWithOptions = (
           if (cancelledBeforeExecution) return true;
 
           const startRunId =
-            effect.request.type === "provider-turn.start" ? effect.request.runId : undefined;
-          if (startRunId !== undefined) {
+            effect.request.type === "provider-turn.start" ||
+            effect.request.type === "provider-turn.restart"
+              ? effect.request.runId
+              : undefined;
+          if (startRunId !== undefined && effect.request.type === "provider-turn.start") {
             const admitted = yield* admission
               .acquire({ runId: startRunId, threadId: effect.threadId })
               .pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
             if (!admitted) {
-              const deferred = yield* outbox
-                .retry({
-                  effectId: effect.id,
-                  workerId,
-                  error: "Waiting for host resources",
-                  delayMs: 5_000,
-                  consumeAttempt: false,
-                })
-                .pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
-              if (!deferred && !(yield* wasCancelled(effect.id))) {
-                return yield* new OrchestrationEffectWorkerError({
-                  operation: "reschedule",
-                  effectId: effect.id,
-                  cause: "The worker no longer owns the capacity-deferred effect lease.",
-                });
-              }
-              return true;
+              return yield* deferForCapacity(effect);
             }
           }
 
           const execution = executor
             .execute(effect, { willRetry: effect.attemptCount < maxAttempts })
-            .pipe(Effect.as("executed" as const));
+            .pipe(
+              Effect.as("executed" as const),
+              Effect.catchTags({
+                OrchestrationEffectCapacityDeferred: () => Effect.succeed("deferred" as const),
+              }),
+            );
           const exit = yield* Effect.exit(Effect.raceFirst(execution, cancellation)).pipe(
             Effect.ensuring(outbox.clearCancellation(effect.id)),
           );
           if (Exit.isSuccess(exit) && exit.value === "cancelled") {
             if (startRunId !== undefined) yield* admission.release(startRunId);
             return true;
+          }
+          if (Exit.isSuccess(exit) && exit.value === "deferred") {
+            if (startRunId !== undefined) yield* admission.release(startRunId);
+            return yield* deferForCapacity(effect);
           }
           if (Exit.isSuccess(exit)) {
             return yield* Effect.gen(function* () {

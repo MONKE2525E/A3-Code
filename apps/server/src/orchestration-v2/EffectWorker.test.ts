@@ -948,6 +948,66 @@ it.effect("backs off briefly when a due deadline loses a claim race", () =>
   }).pipe(Effect.provide(TestClock.layer())),
 );
 
+it.effect(
+  "cleans up a restart immediately and queues only its replacement start for capacity",
+  () =>
+    Effect.gen(function* () {
+      const events = yield* Ref.make<ReadonlyArray<string>>([]);
+      const allowed = yield* Ref.make(false);
+      const gate = Layer.succeed(ResourceAdmission.ResourceAdmission, {
+        acquire: () => Ref.get(allowed),
+        release: () => Effect.void,
+      });
+      const executor = layerExecutorFor({ events }).pipe(Layer.provide(gate));
+      const outboxLayer = EffectOutbox.layer.pipe(
+        Layer.provideMerge(
+          Layer.effectDiscard(runMigrations()).pipe(
+            Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const restart = restartEffect(yield* DateTime.now, {
+          type: "replace",
+          replacementProviderSessionId: replacementSessionId,
+        });
+        yield* outbox.enqueue([
+          { id: restart.id, commandId: restart.commandId, threadId, request: restart.request },
+        ]);
+        for (let attempt = 0; attempt < 2; attempt++) {
+          assert.isTrue(yield* worker.runOnce);
+          assert.equal(Option.getOrThrow(yield* outbox.get(restart.id)).attemptCount, 0);
+          assert.deepEqual(
+            yield* Ref.get(events),
+            Array.from({ length: attempt + 1 }, () => [
+              `interrupt:${replacementSessionId}`,
+              "detach",
+            ]).flat(),
+          );
+          yield* TestClock.adjust("5 seconds");
+        }
+        yield* Ref.set(allowed, true);
+        assert.isTrue(yield* worker.runOnce);
+        assert.equal(Option.getOrThrow(yield* outbox.get(restart.id)).status, "succeeded");
+        assert.deepEqual(yield* Ref.get(events), [
+          `interrupt:${replacementSessionId}`,
+          "detach",
+          `interrupt:${replacementSessionId}`,
+          "detach",
+          `interrupt:${replacementSessionId}`,
+          "detach",
+          "start",
+        ]);
+      }).pipe(
+        Effect.provide(
+          EffectWorker.layer.pipe(Layer.provideMerge(Layer.mergeAll(outboxLayer, executor, gate))),
+        ),
+      );
+    }).pipe(Effect.provide(TestClock.layer())),
+);
+
 it.effect("safely retries after replacement cleanup succeeds and start fails", () =>
   Effect.gen(function* () {
     const now = yield* DateTime.now;

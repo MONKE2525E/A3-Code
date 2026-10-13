@@ -1,7 +1,7 @@
 // Read-only, bounded sampling with the same native counter binary as Settings > Diagnostics.
 // Usage: node scripts/perf-diagnostics.mjs <monitor-binary> <server-pid> [desktop-pid]
-import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeReadline from "node:readline";
 
 const [binary, serverArg, desktopArg] = process.argv.slice(2);
 const serverPid = Number(serverArg);
@@ -17,7 +17,7 @@ if (
   );
 }
 
-const child = spawn(binary, [], { stdio: ["pipe", "pipe", "inherit"] });
+const child = NodeChildProcess.spawn(binary, [], { stdio: ["pipe", "pipe", "inherit"] });
 const samples = [];
 const send = (version, command) =>
   child.stdin.write(`${JSON.stringify({ version, ...command })}\n`);
@@ -31,7 +31,7 @@ child.on("error", (error) => {
   process.exitCode = 1;
 });
 try {
-  for await (const line of createInterface({ input: child.stdout })) {
+  for await (const line of NodeReadline.createInterface({ input: child.stdout })) {
     const event = JSON.parse(line);
     if (event.type === "hello") {
       send(event.version, {

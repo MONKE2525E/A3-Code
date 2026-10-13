@@ -39,13 +39,7 @@ describe("agent work capacity", () => {
     expect(
       ResourceAdmission.agentWorkCapacity({ ...host, cpuCount: 12, availableMemoryBytes: 4 * GiB }),
     ).toBe(1);
-    expect(
-      ResourceAdmission.agentWorkCapacity(
-        { ...host, cpuCount: 12, availableMemoryBytes: 4 * GiB },
-        2,
-      ),
-    ).toBe(3);
-    expect(ResourceAdmission.agentWorkCapacity({ ...host, cpuUtilization: 0.99 }, 1)).toBe(1);
+    expect(ResourceAdmission.agentWorkCapacity({ ...host, cpuUtilization: 0.99 })).toBe(0);
   });
 });
 
@@ -142,6 +136,15 @@ it.effect.each(["memory", "sqlite"] as const)(
         expect(yield* admission.acquire(a)).toBe(false);
         yield* Ref.set(resources, host);
         expect(yield* admission.acquire(a)).toBe(true);
+        const d = yield* put("d", "starting");
+        yield* put("c", "completed", false);
+        yield* Ref.set(resources, { ...host, availableMemoryBytes: 4 * GiB });
+        expect(yield* admission.acquire(d)).toBe(false);
+        yield* put("a", "running", false);
+        // Publishing running must not grant another slot from the same host sample.
+        expect(yield* admission.acquire(d)).toBe(false);
+        yield* put("a", "completed", false);
+        expect(yield* admission.acquire(d)).toBe(true);
       }).pipe(
         Effect.provide(
           ResourceAdmission.layer.pipe(

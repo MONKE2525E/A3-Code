@@ -1,20 +1,21 @@
 // Linux/systemd live regression proof; creates and reaps only its own detached sleeper.
 // Usage: node scripts/verify-agent-scope.mjs <native-monitor-binary>
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { fileURLToPath } from "node:url";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeUtil from "node:util";
+import * as NodeURL from "node:url";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as ProcessRunner from "../apps/server/src/processRunner.ts";
 import { make } from "../apps/server/src/process/agentScope.ts";
 
 const binary = process.argv[2];
-if (process.platform !== "linux" || !binary) {
+if (HostProcess.Platform.defaultValue() !== "linux" || !binary) {
   throw new Error(
     "Usage on Linux with a systemd user manager: node scripts/verify-agent-scope.mjs <native-monitor-binary>",
   );
 }
-const execute = promisify(execFile);
+const execute = NodeUtil.promisify(NodeChildProcess.execFile);
 await Effect.runPromise(
   Effect.gen(function* () {
     const scopes = yield* make;
@@ -35,7 +36,11 @@ await Effect.runPromise(
       Effect.promise(async () => {
         const output = await execute(
           process.execPath,
-          [fileURLToPath(new URL("./perf-diagnostics.mjs", import.meta.url)), binary, String(pid)],
+          [
+            NodeURL.fileURLToPath(new URL("./perf-diagnostics.mjs", import.meta.url)),
+            binary,
+            String(pid),
+          ],
           { timeout: 8_000 },
         );
         return JSON.parse(output.stdout);

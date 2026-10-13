@@ -10,15 +10,17 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 const GiB = 1024 ** 3;
 
 /** A coarse turn budget: provider-native shell commands cannot be individually scheduled. */
-export function agentWorkCapacity(host: HostResourcesSnapshot, running = 0): number {
+export function agentWorkCapacity(host: HostResourcesSnapshot): number {
   if (host.totalMemoryBytes === 0) return 0;
-  if (host.cpuUtilization !== null && host.cpuUtilization >= 0.95) return running;
+  if (host.cpuUtilization !== null && host.cpuUtilization >= 0.95) return 0;
   const reserve = Math.min(2 * GiB, host.totalMemoryBytes / 4);
   const perTurn = Math.min(2 * GiB, host.totalMemoryBytes / 4);
   const additional = Math.max(0, Math.floor((host.availableMemoryBytes - reserve) / perTurn));
   const cores = Math.max(1, Math.floor(host.cpuCount / 2));
   const memory = Math.max(1, Math.floor((host.totalMemoryBytes - reserve) / perTurn));
-  return Math.min(cores, memory, running + additional);
+  // Count live work against current headroom too: a cached reading must not
+  // grant another memory budget every time a new start publishes "running".
+  return Math.min(cores, memory, additional);
 }
 
 export class ResourceAdmission extends Context.Reference<{
@@ -54,7 +56,7 @@ const make = Effect.gen(function* () {
           const running = runs.filter((run) => run.status === "running");
           if (running.some((run) => run.runId === input.runId)) return true;
           // Waiting parents/approvals consume no admission slot, so delegated children can run.
-          const capacity = agentWorkCapacity(yield* host.read, running.length);
+          const capacity = agentWorkCapacity(yield* host.read);
           if (running.length + reservations.size >= capacity) return false;
           reservations.set(input.runId, input.threadId);
           return true;
