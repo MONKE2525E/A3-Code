@@ -1148,6 +1148,10 @@ export const layer: Layer.Layer<
             deferInline: compact,
             providerThread: runningProviderThread,
             budget: Effect.gen(function* () {
+              // Grok owns the persistent bot's context and compaction. Its mirrored
+              // transcript cannot measure current occupancy; bound imported history
+              // without charging that transcript or blocking the current request.
+              if (session.driver === "grok-bot") return tokenCap;
               return handoffBudget({
                 tokenCap,
                 modelContextWindow,

@@ -44,6 +44,7 @@ import {
 } from "../Adapters/CodexAdapterV2.ts";
 import { AcpProviderCapabilitiesV2 } from "@t3tools/provider-acp/server/adapter";
 import { CursorProviderCapabilitiesV2 } from "@t3tools/provider-cursor/testing";
+import { GrokBotCapabilitiesV2 } from "../Adapters/GrokBotAdapterV2.ts";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
 import * as LegacyV1ThreadImporter from "../legacy/LegacyV1ThreadImporter.ts";
@@ -392,6 +393,154 @@ const waitForIdle = Effect.fn("ProviderSwitchTest.waitForIdle")(function* (
 });
 
 describe("orchestration v2 provider switching", () => {
+  it.live.each(["grok-bot", "codex"] as const)(
+    "recovers missed messages with large persistent history for %s",
+    (driver) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace(`persistent-context-${driver}`);
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const failStartOnce = yield* Ref.make(false);
+          const selection =
+            driver === "grok-bot"
+              ? { instanceId: ProviderInstanceId.make("grok-bot-test"), model: "persistent-bot" }
+              : CODEX_MODEL_SELECTION;
+          const registry = ProviderAdapterRegistry.layerFromAdapters([
+            makeTestAdapter({
+              instanceId: selection.instanceId,
+              driver: ProviderDriverKind.make(driver),
+              capabilities:
+                driver === "grok-bot" ? GrokBotCapabilitiesV2 : CodexProviderCapabilitiesV2,
+              modelSelection: selection,
+              responseByRunOrdinal: {},
+              capturedTurns,
+              failStartOnce,
+            }),
+          ]);
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const dispatch = (
+              ordinal: number,
+              text: string,
+              attachments: ReadonlyArray<ChatAttachment> = [],
+            ) =>
+              orchestrator.dispatch({
+                type: "message.dispatch",
+                commandId: CommandId.make(`persistent-context:${ordinal}`),
+                threadId,
+                messageId: MessageId.make(`persistent-context:${ordinal}`),
+                text,
+                attachments,
+                modelSelection: selection,
+                createdBy: "user",
+                creationSource: "web",
+                dispatchMode: { type: "start_immediately" },
+              });
+            const wait = (ordinal: number, status: "failed" | "completed") =>
+              orchestrator.streamStoredEvents.pipe(
+                Stream.filter(
+                  ({ event }) =>
+                    event.type === "run.updated" &&
+                    event.payload.ordinal === ordinal &&
+                    (event.payload.status === "completed" || event.payload.status === "failed"),
+                ),
+                Stream.runHead,
+                Effect.andThen(worker.drain()),
+                Effect.andThen(
+                  Effect.gen(function* () {
+                    const projection = yield* orchestrator.getThreadProjection(threadId);
+                    assert.equal(projection.runs.at(-1)?.status, status);
+                    return projection;
+                  }),
+                ),
+              );
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              commandId: CommandId.make("persistent-context:create"),
+              threadId,
+              projectId,
+              title: "Persistent bot context",
+              modelSelection: selection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+              createdBy: "user",
+              creationSource: "web",
+            });
+            const screenshots: ChatAttachment[] = Array.from({ length: 24 }, (_, index) => ({
+              type: "image",
+              id: `screenshot-${index}`,
+              name: `screenshot-${index}.png`,
+              mimeType: "image/png",
+              sizeBytes: 100_000,
+            }));
+            yield* dispatch(1, "Existing native history ".repeat(5_000), screenshots);
+            yield* wait(1, "completed");
+            yield* Ref.set(failStartOnce, true);
+            yield* dispatch(2, "Recover this missed request");
+            yield* wait(2, "failed");
+            yield* dispatch(3, "uhh?");
+            const recovered = yield* wait(3, driver === "grok-bot" ? "completed" : "failed");
+            if (driver === "codex") {
+              assert.isTrue(
+                recovered.turnItems.some(
+                  (item) =>
+                    item.type === "error" &&
+                    item.runId === recovered.runs.at(-1)?.id &&
+                    item.failure.message.includes("Insufficient context allowance"),
+                ),
+              );
+              assert.equal((yield* Ref.get(capturedTurns)).length, 1);
+              return;
+            }
+            const turns = yield* Ref.get(capturedTurns);
+            assert.equal(turns.length, 2);
+            assert.equal(turns[1]?.nativeThreadId, turns[0]?.nativeThreadId);
+            assert.include(turns[1]!.text, "Recover this missed request");
+            assert.isTrue(turns[1]!.text.endsWith("User message:\nuhh?"));
+            assert.notInclude(turns[1]!.text, "Existing native history");
+            assert.isBelow(Buffer.byteLength(turns[1]!.text), 16_000);
+            assert.equal(recovered.contextHandoffs.at(-1)?.delivery?.status, "inline");
+            yield* dispatch(4, "Fresh follow-up");
+            const followup = yield* wait(4, "completed");
+            assert.equal((yield* Ref.get(capturedTurns)).at(-1)?.text, "Fresh follow-up");
+            assert.equal(followup.contextHandoffs.length, recovered.contextHandoffs.length);
+            yield* Ref.set(failStartOnce, true);
+            const oversizedMissedRequest = "Oversized missed request ".repeat(2_000);
+            yield* dispatch(5, oversizedMissedRequest);
+            yield* wait(5, "failed");
+            const currentRequest = "Preserve the entire current request ".repeat(1_000);
+            yield* dispatch(6, currentRequest, screenshots);
+            const bounded = yield* wait(6, "completed");
+            const lastTurn = (yield* Ref.get(capturedTurns)).at(-1)!;
+            assert.isTrue(lastTurn.text.endsWith(`User message:\n${currentRequest}`));
+            assert.deepEqual(lastTurn.attachments, screenshots);
+            assert.isBelow(
+              Buffer.byteLength(lastTurn.text) - Buffer.byteLength(currentRequest),
+              16_000,
+            );
+            assert.notInclude(lastTurn.text, oversizedMissedRequest);
+            const missedItem = bounded.turnItems.find(
+              (item) => item.type === "user_message" && item.text === oversizedMissedRequest,
+            )!;
+            assert.include(
+              bounded.contextHandoffs.at(-1)!.delivery!.omittedItemIds ?? [],
+              missedItem.id,
+            );
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                { name: `persistent-context-${driver}`, runtimePolicyOverride: { cwd } },
+                registry,
+              ),
+            ),
+          );
+        }),
+      ),
+  );
+
   it.live.each([
     "compact-native",
     "compact-fallback",
