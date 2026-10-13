@@ -51,9 +51,8 @@ import {
   groupGrokBotPeerCounts,
   groupGrokBotTimeline,
   isGrokBotReactionReplyToSend,
-  isGrokBotReplyAfterSend,
   isGrokBotSendDelivered,
-  isGrokBotSettledTextTurn,
+  isGrokBotTextReplyAfterSend,
   type GrokBotPeer,
   type GrokBotSentMessage,
   type GrokBotTimelineItem,
@@ -110,14 +109,12 @@ export function GrokBotConversationView({
   const wasStreaming = useRef(false);
   const lastMessage = messages.at(-1);
   const lastMessageId = lastMessage?.id;
-  // A settled bot text reply answers a waiting send; a reaction alone does not.
-  const botSettled = isGrokBotSettledTextTurn(lastMessage);
   const [outgoing, setOutgoing] = useState<readonly OutgoingMessage[]>([]);
   const outgoingSequence = useRef(0);
   const sendMessage = useAtomCommand(grokBotsSend, { reportFailure: false });
   /**
-   * Set while a send waits for its reply; cleared when a newer message settles, a bot reaction
-   * lands on the send's message, or the send fails.
+   * Set while a send waits for its reply; cleared when a settled text reply follows the send, a
+   * bot reaction lands on the send's message, or the send fails.
    */
   const replyAwaiting = useRef<{
     readonly sent: GrokBotSentMessage;
@@ -145,23 +142,23 @@ export function GrokBotConversationView({
     wasStreaming.current = streaming;
   }, [streaming, surfaceKey]);
   // A reply answers the send when a settled text message arrived after it, or when the bot
-  // reacted to the message the send produced. The transcript's last settled message from before
-  // the send does not count, and neither does a reaction on any other message.
+  // reacted to the message the send produced. Rows from before the send do not count, and neither
+  // does a reaction on any other message. A standalone reaction after the reply does not hide it.
   useEffect(() => {
     const awaiting = replyAwaiting.current;
     if (
       awaiting !== null &&
-      (isGrokBotReplyAfterSend({
+      (isGrokBotTextReplyAfterSend({
         afterMessageId: awaiting.afterMessageId,
-        lastMessageId,
-        lastMessageSettled: botSettled,
+        botId,
+        messages,
       }) ||
         isGrokBotReactionReplyToSend({ sent: awaiting.sent, messages }))
     ) {
       replyAwaiting.current = null;
       setGrokBotActivity(surfaceKey, "finished", GROK_BOT_SETTLE_LINGER_MS);
     }
-  }, [botSettled, lastMessageId, messages, surfaceKey]);
+  }, [botId, messages, surfaceKey]);
   // Leaving the chat ends what only this view could observe; a pending
   // "thinking" survives so the sidebar keeps showing the bot at work.
   useEffect(

@@ -12,9 +12,9 @@ import {
   groupGrokBotReactions,
   groupGrokBotTimeline,
   isGrokBotReactionReplyToSend,
-  isGrokBotReplyAfterSend,
   isGrokBotSendDelivered,
   isGrokBotSettledTextTurn,
+  isGrokBotTextReplyAfterSend,
 } from "./grokBotConversation";
 
 const user = { kind: "user" as const };
@@ -25,6 +25,29 @@ const transcript = [
   { id: "u1", role: "user" as const, sender: user, text: "hello" },
   { id: "a1", role: "assistant" as const, sender: self, text: "hi" },
 ];
+
+type Row = typeof GrokBotMessage.Type;
+const row = (
+  id: string,
+  sender: Row["sender"],
+  fields: {
+    readonly text?: string;
+    readonly reactions?: Row["reactions"];
+    readonly reactionOnly?: true;
+    readonly streaming?: true;
+    readonly addressee?: Row["addressee"];
+  } = {},
+): Row => ({
+  id,
+  role: sender.kind === "user" ? "user" : "assistant",
+  sender,
+  text: fields.text ?? id,
+  timestampMs: 0,
+  streaming: fields.streaming ?? false,
+  ...(fields.reactions === undefined ? {} : { reactions: fields.reactions }),
+  ...(fields.reactionOnly === undefined ? {} : { reactionOnly: fields.reactionOnly }),
+  ...(fields.addressee === undefined ? {} : { addressee: fields.addressee }),
+});
 
 describe("isGrokBotSendDelivered", () => {
   it("matches only a user message that was not in the baseline", () => {
@@ -177,45 +200,82 @@ describe("groupGrokBotReactions", () => {
   });
 });
 
-describe("isGrokBotReplyAfterSend", () => {
-  it("does not treat the settled reply from before the send as the answer", () => {
-    expect(
-      isGrokBotReplyAfterSend({
-        afterMessageId: "a1",
-        lastMessageId: "a1",
-        lastMessageSettled: true,
-      }),
-    ).toBe(false);
+describe("isGrokBotTextReplyAfterSend", () => {
+  const botId = self.id;
+  // The send follows a1, the last row from before it.
+  const before = [row("u1", user, { text: "hello" }), row("a1", self)];
+  const sentRow = row("u2", user, { text: "ship it" });
+  const standalone = (id: string) =>
+    row(id, self, {
+      text: "👍",
+      reactions: [{ emoji: "👍", from: "bot", messageId: "gone" }],
+      reactionOnly: true,
+    });
+  // `afterMessageId` is the send's boundary; it is required so each case states it.
+  const answers = (afterMessageId: string | undefined, messages: readonly Row[]) =>
+    isGrokBotTextReplyAfterSend({ afterMessageId, botId, messages });
+
+  it("settles on a settled text reply after the send", () => {
+    expect(answers("a1", [...before, sentRow, row("a2", self, { text: "shipped" })])).toBe(true);
   });
 
-  it("settles on a newer settled message, including a reaction-only reply", () => {
+  it("settles on a text reply even when a standalone reaction follows it", () => {
     expect(
-      isGrokBotReplyAfterSend({
-        afterMessageId: "a1",
-        lastMessageId: "a2",
-        lastMessageSettled: true,
-      }),
+      answers("a1", [...before, sentRow, row("a2", self, { text: "shipped" }), standalone("r1")]),
     ).toBe(true);
   });
 
-  it("waits while the newer message is still streaming", () => {
+  it("does not settle on a standalone reaction alone", () => {
+    expect(answers("a1", [...before, sentRow, standalone("r1")])).toBe(false);
+  });
+
+  it("does not treat the settled reply from before the send as the answer", () => {
+    expect(answers("a1", [...before, sentRow])).toBe(false);
+  });
+
+  it("does not settle on an older text reply that sits before the send's boundary", () => {
     expect(
-      isGrokBotReplyAfterSend({
-        afterMessageId: "a1",
-        lastMessageId: "a2",
-        lastMessageSettled: false,
-      }),
+      answers("a1", [
+        row("a0", self, { text: "old answer" }),
+        row("u1", user),
+        row("a1", self),
+        sentRow,
+      ]),
+    ).toBe(false);
+  });
+
+  it("waits while the reply after the send is still streaming", () => {
+    expect(
+      answers("a1", [...before, sentRow, row("a2", self, { text: "shi", streaming: true })]),
     ).toBe(false);
   });
 
   it("settles on the first reply to a conversation that had no messages before the send", () => {
-    expect(
-      isGrokBotReplyAfterSend({
-        afterMessageId: undefined,
-        lastMessageId: "a1",
-        lastMessageSettled: true,
-      }),
-    ).toBe(true);
+    expect(answers(undefined, [sentRow, row("a1", self)])).toBe(true);
+    expect(answers(undefined, [sentRow])).toBe(false);
+  });
+
+  it("settles nothing when the boundary is missing from the transcript", () => {
+    const messages = [row("a0", self, { text: "old answer" }), sentRow, row("a2", self)];
+    expect(answers("gone", messages)).toBe(false);
+  });
+
+  it("does not settle on this bot's message to a peer after the send", () => {
+    const toPeer = row("o1", self, { text: "hi chicken", addressee: chicken });
+    expect(answers("a1", [...before, sentRow, toPeer])).toBe(false);
+  });
+
+  it("settles on this bot's reply after it messaged a peer", () => {
+    const toPeer = row("o1", self, { text: "hi chicken", addressee: chicken });
+    const reply = row("a2", self, { text: "shipped" });
+    expect(answers("a1", [...before, sentRow, toPeer, reply])).toBe(true);
+  });
+
+  it("does not settle on a peer bot's message that reached this chat", () => {
+    const fromPeer = row("p1", chicken, { text: "cluck" });
+    // The wire marks a peer's message role user; the assistant-role copy is rejected by sender.
+    expect(answers("a1", [...before, sentRow, fromPeer])).toBe(false);
+    expect(answers("a1", [...before, sentRow, { ...fromPeer, role: "user" }])).toBe(false);
   });
 });
 
@@ -232,25 +292,6 @@ describe("grokBotReactionTitle", () => {
 });
 
 describe("isGrokBotReactionReplyToSend", () => {
-  type Row = typeof GrokBotMessage.Type;
-  const row = (
-    id: string,
-    sender: Row["sender"],
-    fields: {
-      readonly text?: string;
-      readonly reactions?: Row["reactions"];
-      readonly reactionOnly?: true;
-    } = {},
-  ): Row => ({
-    id,
-    role: sender.kind === "user" ? "user" : "assistant",
-    sender,
-    text: fields.text ?? id,
-    timestampMs: 0,
-    streaming: false,
-    ...(fields.reactions === undefined ? {} : { reactions: fields.reactions }),
-    ...(fields.reactionOnly === undefined ? {} : { reactionOnly: fields.reactionOnly }),
-  });
   const botReaction = (messageId: string): NonNullable<Row["reactions"]> => [
     { emoji: "👍", from: "bot", messageId },
   ];

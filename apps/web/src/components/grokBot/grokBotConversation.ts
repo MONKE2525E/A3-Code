@@ -182,17 +182,41 @@ export function isGrokBotSettledTextTurn(message: typeof GrokBotMessage.Type | u
 }
 
 /**
- * A settled message settles the wait only when it arrived after the send began.
- * The last message from before the send is an old reply, however settled it is.
+ * This bot's own text to the user. A message it sent to a peer carries an `addressee`, and a
+ * peer's message is not this bot's, so neither answers the user's send.
  */
-export function isGrokBotReplyAfterSend(input: {
-  readonly afterMessageId: string | undefined;
-  readonly lastMessageId: string | undefined;
-  readonly lastMessageSettled: boolean;
-}): boolean {
+function isGrokBotOwnTextReply(
+  message: typeof GrokBotMessage.Type | undefined,
+  botId: string,
+): boolean {
   return (
-    input.lastMessageSettled &&
-    input.lastMessageId !== undefined &&
-    input.lastMessageId !== input.afterMessageId
+    message !== undefined &&
+    isGrokBotSettledTextTurn(message) &&
+    message.sender.kind === "bot" &&
+    message.sender.id === botId &&
+    message.addressee === undefined
   );
+}
+
+/**
+ * A settled text reply settles the wait only when it sits after the send's boundary, the last
+ * message from before the send. Reaction-only rows after it are skipped, so a standalone reaction
+ * does not hide the reply. A boundary missing from the transcript cannot tell old replies from
+ * new ones, so it settles nothing; the wait then ends at its timeout.
+ */
+export function isGrokBotTextReplyAfterSend(input: {
+  readonly afterMessageId: string | undefined;
+  readonly botId: string;
+  readonly messages: readonly (typeof GrokBotMessage.Type)[];
+}): boolean {
+  let start = 0;
+  if (input.afterMessageId !== undefined) {
+    const boundary = input.messages.findIndex((message) => message.id === input.afterMessageId);
+    if (boundary === -1) return false;
+    start = boundary + 1;
+  }
+  for (let index = start; index < input.messages.length; index += 1) {
+    if (isGrokBotOwnTextReply(input.messages[index], input.botId)) return true;
+  }
+  return false;
 }
