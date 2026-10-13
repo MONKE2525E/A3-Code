@@ -660,6 +660,9 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
         ...(item.grokBotWorkflowReferences === undefined
           ? {}
           : { grokBotWorkflowReferences: item.grokBotWorkflowReferences }),
+        ...(item.type === "user_message" && item.grokBotReactions !== undefined
+          ? { grokBotReactions: item.grokBotReactions }
+          : {}),
         ...(item.type === "assistant_message" && item.grokBotVoiceCall !== undefined
           ? { grokBotVoiceCall: item.grokBotVoiceCall }
           : {}),

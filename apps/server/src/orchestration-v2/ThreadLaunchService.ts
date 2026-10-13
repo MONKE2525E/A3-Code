@@ -523,6 +523,7 @@ const make = Effect.gen(function* () {
               threadId,
               branch: renamed.branch,
               worktreePath: worktreeCwd,
+              expectedWorktreePath: worktreeCwd,
             }),
           ),
           Effect.catchCause((cause) =>
