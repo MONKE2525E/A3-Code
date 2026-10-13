@@ -102,7 +102,7 @@ it("resolves automatic message delivery from authoritative provider capabilities
   );
 });
 
-it.each(["preparing", "starting", "waiting"] as const)(
+it.each(["preparing", "starting", "resource-wait"] as const)(
   "queues an automatic message while the handoff run is %s",
   (status) => {
     const projection = dispatchProjection(baseCapabilities);
@@ -112,8 +112,8 @@ it.each(["preparing", "starting", "waiting"] as const)(
           ...projection,
           runs: projection.runs.map((run) => ({
             ...run,
-            status,
-            resourceWait: status === "waiting",
+            status: status === "resource-wait" ? "starting" : status,
+            resourceWait: status === "resource-wait",
           })),
         },
         { type: "start_immediately" },

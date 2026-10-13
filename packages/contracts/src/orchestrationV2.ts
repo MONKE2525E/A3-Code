@@ -573,7 +573,7 @@ export const OrchestrationV2Run = Schema.Struct({
   queuePosition: Schema.optional(Schema.NullOr(PositiveInt)),
   /** Restart recovery holds the queue until the user explicitly resumes it. */
   queueHeld: Schema.optional(Schema.Boolean),
-  /** The provider has not started; the server is waiting for host capacity. */
+  /** While starting, the provider is waiting for host capacity. */
   resourceWait: Schema.optional(Schema.Boolean),
   requestedAt: Schema.DateTimeUtc,
   startedAt: Schema.NullOr(Schema.DateTimeUtc),

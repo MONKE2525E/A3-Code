@@ -236,7 +236,7 @@ export const layer: Layer.Layer<
         return yield* new ProviderTurnStartError({ runId, cause: `Run ${runId} was not found.` });
       }
       let run = selectedRun;
-      if (run.status !== "starting" && !(run.status === "waiting" && run.resourceWait === true)) {
+      if (run.status !== "starting") {
         // The effect is idempotent once the run has advanced or terminalized.
         return;
       }
@@ -291,7 +291,9 @@ export const layer: Layer.Layer<
         });
       }
       const admitted = yield* admission.acquire({ threadId: input.threadId, runId });
-      const resourceWait = run.status === "waiting" && run.resourceWait === true;
+      // Capacity waits precede the provider turn. Keep "starting" so steering,
+      // fork, and merge rules cannot mistake them for post-provider waiting.
+      const resourceWait = run.resourceWait === true;
       if (!admitted && resourceWait) return "deferred" as const;
       if (!admitted || resourceWait) {
         const now = yield* DateTime.now;
@@ -323,7 +325,7 @@ export const layer: Layer.Layer<
         };
         const nextRun = {
           ...run,
-          status: admitted ? ("starting" as const) : ("waiting" as const),
+          status: "starting" as const,
           resourceWait: !admitted,
         };
         const payloads = [
@@ -1383,13 +1385,7 @@ export const layer: Layer.Layer<
     }) {
       const projection = yield* projectionStore.getTurnStartContext(input.threadId, input.runId);
       const run = projection.runs.find((candidate) => candidate.id === input.runId);
-      if (
-        run === undefined ||
-        (run.status !== "running" &&
-          run.status !== "starting" &&
-          !(run.status === "waiting" && run.resourceWait === true))
-      )
-        return;
+      if (run === undefined || (run.status !== "running" && run.status !== "starting")) return;
       const attempt = projection.attempts.find((candidate) => candidate.id === run.activeAttemptId);
       const rootNode = projection.nodes.find((candidate) => candidate.id === run.rootNodeId);
       const providerThread = projection.providerThreads.find(
@@ -1415,7 +1411,7 @@ export const layer: Layer.Layer<
       // A prior observer may have consumed a settlement whose ingestion failed.
       // Reopen its snapshot rather than trusting an in-memory delivered nonce.
       if (Option.isSome(live)) yield* providerSessions.close(providerThread.providerSessionId);
-      if (run.status === "starting" || (run.status === "waiting" && run.resourceWait === true)) {
+      if (run.status === "starting") {
         return yield* start({ ...input, willRetry: true });
       }
       const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);

@@ -3349,12 +3349,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const emitEvent = emit(events, command);
       const activeRunIds = new Set(
         projection.runs
-          .filter(
-            (run) =>
-              run.status === "queued" ||
-              run.status === "starting" ||
-              (run.status === "waiting" && run.resourceWait === true),
-          )
+          .filter((run) => run.status === "queued" || run.status === "starting")
           .map((run) => run.id),
       );
       for (const run of projection.runs.filter((candidate) => activeRunIds.has(candidate.id))) {
@@ -9338,7 +9333,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         providerThread.driver === "grok-bot" &&
         providerTurn === undefined &&
         run.status !== "preparing" &&
-        !(run.status === "waiting" && run.resourceWait === true)
+        run.resourceWait !== true
       ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -9457,10 +9452,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
       if (
         providerTurn === undefined &&
-        (run.status === "preparing" ||
-          run.status === "starting" ||
-          run.status === "running" ||
-          (run.status === "waiting" && run.resourceWait === true))
+        (run.status === "preparing" || run.status === "starting" || run.status === "running")
       ) {
         const attempt = projection.attempts.find(
           (candidate) => candidate.id === run.activeAttemptId,
@@ -9709,10 +9701,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const target =
         projection.runs.findLast(
           (run) =>
-            run.status === "preparing" ||
-            run.status === "starting" ||
-            run.status === "running" ||
-            (run.status === "waiting" && run.resourceWait === true),
+            run.status === "preparing" || run.status === "starting" || run.status === "running",
         ) ??
         (derivePendingBackgroundWork({
           latestRun,

@@ -576,7 +576,7 @@ effectIt.effect(
       });
       expect(yield* harness.start).toBe("deferred");
       expect(harness.projection().runs.at(-1)).toMatchObject({
-        status: "waiting",
+        status: "starting",
         resourceWait: true,
       });
       expect(harness.projection().turnItems).toHaveLength(1);

@@ -4902,7 +4902,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
               threadId,
               runId: run.id,
               occurredAt: yield* DateTime.now,
-              payload: { ...run, status: "waiting", resourceWait: true },
+              payload: { ...run, status: "starting", resourceWait: true },
             },
           ],
         });
@@ -5014,7 +5014,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
                 threadId,
                 runId: activeRun.id,
                 occurredAt: now,
-                payload: { ...activeRun, status: "waiting", resourceWait: true },
+                payload: { ...activeRun, status: "starting", resourceWait: true },
               },
             ],
           });

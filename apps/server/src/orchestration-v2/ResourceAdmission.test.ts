@@ -139,8 +139,8 @@ it.effect.each(["memory", "sqlite"] as const)(
           { concurrency: "unbounded" },
         );
         expect(results).toEqual([true, true, false]);
-        yield* put("b", "waiting", false, true);
-        // Keep the reservation while an admitted resource-waiting run commits starting.
+        yield* put("b", "starting", false, true);
+        // Keep the reservation while an admitted resource-waiting run prepares its provider.
         expect(yield* admission.acquire(c)).toBe(false);
         yield* put("b", "starting", false);
         yield* admission.release(a.runId);

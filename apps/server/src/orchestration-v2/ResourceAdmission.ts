@@ -51,10 +51,7 @@ const make = Effect.gen(function* () {
           const byRun = new Map(runs.map((run) => [run.runId, run]));
           for (const [runId, threadId] of reservations) {
             const run = byRun.get(runId);
-            if (
-              run?.threadId !== threadId ||
-              (run.status !== "starting" && !(run.status === "waiting" && run.resourceWait))
-            ) {
+            if (run?.threadId !== threadId || run.status !== "starting") {
               reservations.delete(runId);
             }
           }

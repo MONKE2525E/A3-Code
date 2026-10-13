@@ -78,7 +78,7 @@ export class ProviderRuntimeRecoveryService extends Context.Service<
 function nonterminalRuns(projection: ProjectionStore.ProjectionRuntimeRecoveryState) {
   return projection.runs.filter((run) => {
     const status: string = run.status;
-    if (run.status === "waiting" && run.resourceWait === true) return false;
+    if (run.status === "starting" && run.resourceWait === true) return false;
     return (
       status === "preparing" ||
       run.status === "starting" ||
@@ -431,7 +431,7 @@ export const make = Effect.gen(function* () {
       // identities and order, but require explicit consent before draining them.
       const queuedRuns = [
         ...projection.runs
-          .filter((run) => run.status === "waiting" && run.resourceWait === true)
+          .filter((run) => run.status === "starting" && run.resourceWait === true)
           .toSorted((a, b) => a.ordinal - b.ordinal),
         ...projection.runs
           .filter((run) => run.status === "queued")
