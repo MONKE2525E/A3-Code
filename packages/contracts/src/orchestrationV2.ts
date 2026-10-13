@@ -1238,6 +1238,10 @@ export const OrchestrationV2Notification = Schema.Struct({
 });
 export type OrchestrationV2Notification = typeof OrchestrationV2Notification.Type;
 
+const GrokBotMessageAuthor = Schema.Struct({
+  botId: TrimmedNonEmptyString.check(Schema.isMaxLength(1024)),
+  name: Schema.String.check(Schema.isMaxLength(1024)),
+});
 const GrokBotMessagePeer = Schema.Struct({
   botId: TrimmedNonEmptyString.check(Schema.isMaxLength(1024)),
   name: Schema.String.check(Schema.isMaxLength(1024)),
@@ -1249,6 +1253,7 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   /** Native spoken input stays in chat history but is not a written-message voice update. */
   grokBotVoiceUtterance: Schema.optionalKey(Schema.Literal(true)),
   grokBotPeer: Schema.optional(GrokBotMessagePeer),
+  grokBotAuthor: Schema.optional(GrokBotMessageAuthor),
   grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
   /** A voice call row; its text is empty and native's summary arrives as the next message. */
   grokBotVoiceCall: Schema.optionalKey(GrokBotVoiceCallMarker),
@@ -1524,6 +1529,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     ...OrchestrationV2CreationFields,
     type: Schema.Literal("user_message"),
     grokBotPeer: Schema.optional(GrokBotMessagePeer),
+    grokBotAuthor: Schema.optional(GrokBotMessageAuthor),
     grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
     messageId: MessageId,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
@@ -1538,6 +1544,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("assistant_message"),
     grokBotPeer: Schema.optional(GrokBotMessagePeer),
+    grokBotAuthor: Schema.optional(GrokBotMessageAuthor),
     grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
     grokBotVoiceCall: Schema.optionalKey(GrokBotVoiceCallMarker),
     grokBotVoiceCallId: Schema.optionalKey(GrokBotVoiceCallId),
@@ -2311,6 +2318,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     ...OrchestrationV2CreationFields,
     type: Schema.Literal("user_message"),
     grokBotPeer: Schema.optional(GrokBotMessagePeer),
+    grokBotAuthor: Schema.optional(GrokBotMessageAuthor),
     grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
     messageId: MessageId,
     scheduledTaskId: Schema.optional(ScheduledTaskId),
@@ -2325,6 +2333,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("assistant_message"),
     grokBotPeer: Schema.optional(GrokBotMessagePeer),
+    grokBotAuthor: Schema.optional(GrokBotMessageAuthor),
     grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
     grokBotVoiceCall: Schema.optionalKey(GrokBotVoiceCallMarker),
     grokBotVoiceCallId: Schema.optionalKey(GrokBotVoiceCallId),

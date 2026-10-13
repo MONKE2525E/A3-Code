@@ -14,7 +14,14 @@ const MintResponse = Schema.Struct({
 });
 const Roster = Schema.Struct({
   agents: Schema.optionalKey(
-    Schema.Array(Schema.Struct({ agentId: Schema.String, name: OptionalString })),
+    Schema.Array(
+      Schema.Struct({
+        agentId: Schema.String,
+        name: OptionalString,
+        isGroup: Schema.optionalKey(Schema.Boolean),
+        memberAgentIds: Schema.optionalKey(Schema.Array(Schema.String)),
+      }),
+    ),
   ),
 });
 const SessionResponse = Schema.Struct({
@@ -111,7 +118,12 @@ const make = Effect.gen(function* () {
       );
       // The bot must be on this account's roster, and speaks as the name native holds for it.
       const bot = roster.agents?.find((agent) => agent.agentId === input.botId);
-      if (bot === undefined || !bot.name)
+      if (
+        bot === undefined ||
+        !bot.name ||
+        bot.isGroup === true ||
+        bot.memberAgentIds !== undefined
+      )
         return yield* new GrokBotVoiceError({ reason: "refused" });
       const session = yield* request(binding, "VoiceCallHarnessSession", {
         agentId: input.botId,

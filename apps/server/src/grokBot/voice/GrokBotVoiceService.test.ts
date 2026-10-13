@@ -189,6 +189,9 @@ it.effect("ties tool calls to the bot and account the call was opened for", () =
       assert.isFalse((yield* voice.end({ callId: first.callId })).ended);
       const error = yield* Effect.flip(voice.tool({ callId: first.callId, ...request }, "operate"));
       assert.strictEqual(error.reason, "unknown_call");
+      assert.isDefined(yield* voice.refresh(second.callId));
+      yield* voice.tool({ callId: second.callId, ...request }, "operate");
+      assert.strictEqual(backend.toolCalls.at(-1)?.botId, "bot-b");
     }).pipe(Effect.provide(serviceLayer(backend)));
   }),
 );

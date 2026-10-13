@@ -70,6 +70,10 @@ const fixtureFor = (platform: NodeJS.Platform) =>
     const remote = {
       bots: [bot] as Array<{
         id: string;
+        kind?: "bot" | "group";
+        members?: string[];
+        isGroup?: boolean;
+        memberIds?: string[];
         nativeProfileId?: string;
         name: string;
         title?: string;
@@ -136,7 +140,13 @@ const fixtureFor = (platform: NodeJS.Platform) =>
         if (input.args.includes("list")) {
           if (remote.listStarted) yield* Deferred.succeed(remote.listStarted, undefined);
           if (remote.listGate) yield* Deferred.await(remote.listGate);
-          return output(JSON.stringify(remote.bots));
+          return output(
+            JSON.stringify(
+              remote.bots.filter((bot) =>
+                input.args.includes("groups") ? bot.kind === "group" : bot.kind !== "group",
+              ),
+            ),
+          );
         }
         if (input.args.includes("create")) {
           if (remote.createFailure !== undefined)
@@ -797,6 +807,33 @@ it.layer(NodeServices.layer)("Grok Bot bridge", (it) => {
       assert.strictEqual(calls.length, 0);
     }),
   );
+  it.effect(
+    "lists native groups on CLI fallback and creates through the existing group command",
+    () =>
+      Effect.gen(function* () {
+        const { service, remote, calls } = yield* fixture;
+        remote.bots.push({ id: "group-1", name: "Team", kind: "group", members: [bot.id] });
+        const listed = yield* service.list;
+        assert.deepStrictEqual(
+          listed.map((entry) => [entry.id, entry.isGroup, entry.memberIds]),
+          [
+            [bot.id, false, []],
+            ["group-1", true, [bot.id]],
+          ],
+        );
+        remote.created = { id: "group-created", name: "Team", kind: "group", members: [bot.id] };
+        const created = yield* service.create({ name: "Team", memberIds: [bot.id] });
+        assert.isTrue(created.isGroup);
+        assert.deepStrictEqual(created.memberIds, [bot.id]);
+        assert.include(calls.at(-1)?.args ?? [], "groups");
+        assert.include(calls.at(-1)?.args ?? [], `--member=${bot.id}`);
+        assert.include(
+          (yield* service.list).map((entry) => entry.id),
+          "group-1",
+        );
+      }),
+  );
+
   it.effect("creates one bot through the gateway CLI and rejects shapes it does not accept", () =>
     Effect.gen(function* () {
       const { service, remote, calls } = yield* fixture;
@@ -973,7 +1010,7 @@ it.layer(NodeServices.layer)("Grok Bot bridge", (it) => {
       yield* Deferred.await(remote.listStarted);
       yield* Deferred.succeed(remote.listGate, undefined);
       yield* Fiber.join(reads);
-      assert.strictEqual(calls.filter((call) => call.args.includes("list")).length, 1);
+      assert.strictEqual(calls.filter((call) => call.args.includes("list")).length, 2);
       assert.strictEqual(calls.filter((call) => call.args.includes("thread")).length, 1);
       assert.strictEqual(calls.filter((call) => call.args.includes("--version")).length, 1);
       yield* service.read(bot.id);
@@ -981,7 +1018,7 @@ it.layer(NodeServices.layer)("Grok Bot bridge", (it) => {
       yield* TestClock.adjust("300 millis");
       yield* service.read(bot.id);
       assert.strictEqual(calls.filter((call) => call.args.includes("thread")).length, 2);
-      assert.strictEqual(calls.filter((call) => call.args.includes("list")).length, 1);
+      assert.strictEqual(calls.filter((call) => call.args.includes("list")).length, 2);
     }),
   );
   it.effect("refreshes cached roster and transcript after sends and updates", () =>

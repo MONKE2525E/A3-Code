@@ -44,6 +44,8 @@ const OptionalBoolean = Schema.optionalKey(Schema.Boolean);
 const Millis = Schema.Union([Schema.String, Schema.Number]);
 const encodeUploadIdentity = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 const NativeAgent = Schema.Struct({
+  memberAgentIds: Schema.optionalKey(Schema.Array(GrokBotId)),
+  isGroup: OptionalBoolean,
   id: OptionalString,
   agentId: GrokBotId,
   name: OptionalString,
@@ -322,6 +324,8 @@ type NativeBotProfile = {
   readonly id: string;
   /** Profile mutations use the roster record id; messaging uses agentId. */
   readonly nativeProfileId?: string;
+  readonly isGroup?: boolean;
+  readonly memberIds?: readonly string[];
   readonly name: string;
   readonly title?: string;
   readonly description?: string;
@@ -752,6 +756,8 @@ const make = Effect.gen(function* () {
       const status = byId.get(agent.agentId);
       return {
         id: agent.agentId,
+        isGroup: agent.isGroup === true || agent.memberAgentIds !== undefined,
+        memberIds: agent.memberAgentIds ?? [],
         ...(agent.id === undefined ? {} : { nativeProfileId: agent.id }),
         name: agent.name ?? "",
         ...(agent.title === undefined ? {} : { title: agent.title }),

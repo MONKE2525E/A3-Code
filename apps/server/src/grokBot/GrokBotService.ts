@@ -111,6 +111,10 @@ const CLI_CREATE_SHAPES: ReadonlySet<string> = new Set([
   "leaf",
 ]);
 const RawBot = Schema.Struct({
+  kind: Schema.optionalKey(Schema.Literals(["bot", "group"])),
+  members: Schema.optionalKey(Schema.Array(GrokBotId)),
+  isGroup: Schema.optionalKey(Schema.Boolean),
+  memberIds: Schema.optionalKey(Schema.Array(GrokBotId)),
   id: GrokBotId,
   name: Schema.String,
   title: Schema.optionalKey(Schema.String),
@@ -304,7 +308,9 @@ export function messagesFrom(
     const toAgent = record(entry.toAgent) ? participantFrom(entry.toAgent, roster) : undefined;
     const sender =
       entry.kind === "send-message"
-        ? me
+        ? record(entry.author)
+          ? participantFrom(entry.author, roster)
+          : me
         : fromAgent !== undefined
           ? fromAgent
           : entry.role === "user"
@@ -608,8 +614,15 @@ const make = Effect.gen(function* () {
     Effect.catchTags({
       GrokBotNativeSignedOutError: () => Effect.fail(new GrokBotError({ reason: "signed_out" })),
       GrokBotNativeReadError: () =>
-        cli(["bots", "list", "--gateway", "--json"]).pipe(
-          Effect.flatMap((text) => decodeRoster(text).pipe(Effect.mapError(invalidResponse))),
+        Effect.all(
+          ["bots", "groups"].map((kind) =>
+            cli([kind, "list", "--gateway", "--json"]).pipe(
+              Effect.flatMap((text) => decodeRoster(text).pipe(Effect.mapError(invalidResponse))),
+            ),
+          ),
+          { concurrency: 2 },
+        ).pipe(
+          Effect.map((lists) => [...new Map(lists.flat().map((bot) => [bot.id, bot])).values()]),
         ),
     }),
   );
@@ -619,6 +632,8 @@ const make = Effect.gen(function* () {
     desktopPinned: ReadonlySet<string>,
   ): GrokBot => ({
     id: bot.id,
+    isGroup: bot.isGroup ?? bot.kind === "group",
+    memberIds: bot.memberIds ?? bot.members ?? [],
     name: bot.name,
     label: bot.title ?? "",
     description: bot.description ?? "",
@@ -780,11 +795,12 @@ const make = Effect.gen(function* () {
       )
         return yield* new GrokBotError({ reason: "invalid_avatar" });
       const text = yield* cli([
-        "bots",
+        input.memberIds === undefined ? "bots" : "groups",
         "create",
         "--gateway",
         "--json",
         `--name=${input.name}`,
+        ...(input.memberIds?.map((id) => `--member=${id}`) ?? []),
         ...(input.description ? [`--description=${input.description}`] : []),
         ...(input.avatarShape === undefined ? [] : [`--avatar-shape=${input.avatarShape}`]),
         ...(input.avatarColor === undefined ? [] : [`--avatar-color=${input.avatarColor}`]),
