@@ -10,6 +10,7 @@ import * as ManagedEndpointAddress from "../cloud/ManagedEndpointAddress.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { derive } from "@t3tools/provider-core/server/IdAllocator";
 import {
   GROK_BOT_MANAGED_MCP_SERVER,
   GROK_BOT_NATIVE_MESSAGE_LIMIT,
@@ -96,6 +97,20 @@ const make = Effect.gen(function* () {
       ["pending", "running"].includes(attempt.status)
     );
   });
+  const withUserMessage = Effect.fnUntraced(function* (identity: GrokBotTurnIdentity) {
+    if (identity.userMessageId !== undefined) return identity;
+    const records = yield* projections.getThreadRecords(identity.native.threadId, ["runs"], {
+      runIds: [identity.runId],
+    });
+    const run = records.runs.find(
+      (run) =>
+        run.id === identity.runId &&
+        run.providerInstanceId === identity.native.providerInstanceId &&
+        run.providerThreadId === identity.providerThreadId &&
+        run.rootNodeId === identity.rootNodeId,
+    );
+    return run === undefined ? identity : { ...identity, userMessageId: run.userMessageId };
+  });
   const prepareTurn = Effect.fnUntraced(function* (input: {
     readonly native: GrokBotBoundSession;
     readonly turn: GrokBotManagedTurn["input"];
@@ -132,6 +147,7 @@ const make = Effect.gen(function* () {
     const messageId = `t3-${Buffer.from(hash).toString("hex")}`;
     const identity: GrokBotTurnIdentity = {
       native: input.native,
+      userMessageId: turn.message.messageId,
       messageId,
       sentAtMs: yield* Clock.currentTimeMillis,
       runId: turn.runId,
@@ -319,10 +335,30 @@ const make = Effect.gen(function* () {
         });
         return records.messages;
       }).pipe(Effect.mapError(() => unavailable("The existing native message could not be read."))),
+    existingMessage: (owned, id) =>
+      Effect.gen(function* () {
+        yield* accountIsCurrent(owned.binding);
+        const records = yield* projections.getThreadRecords(owned.threadId, ["messages"], {
+          messageIds: [id],
+          messageRoles: ["user"],
+        });
+        return records.messages[0];
+      }).pipe(Effect.mapError(() => unavailable("The existing native message could not be read."))),
+    existingUserTurnItem: (owned, messageId) =>
+      Effect.gen(function* () {
+        yield* accountIsCurrent(owned.binding);
+        return yield* projections.getTurnItem({
+          threadId: owned.threadId,
+          itemId: derive.userTurnItem({ messageId }),
+        });
+      }).pipe(
+        Effect.mapError(() => unavailable("The initiating message timeline could not be read.")),
+      ),
     lookupTranscriptTurn: (owned, messageId) =>
       Effect.gen(function* () {
         yield* accountIsCurrent(owned.binding);
-        return yield* store.lookupTranscriptTurn(owned, messageId);
+        const identity = yield* store.lookupTranscriptTurn(owned, messageId);
+        return identity === undefined ? undefined : yield* withUserMessage(identity);
       }).pipe(
         Effect.mapError(() => unavailable("The native message ownership could not be read.")),
       ),
@@ -338,7 +374,7 @@ const make = Effect.gen(function* () {
     restoreTranscriptTurns: (owned) =>
       Effect.gen(function* () {
         yield* accountIsCurrent(owned.binding);
-        return yield* store.restoreTranscriptTurns(owned);
+        return yield* Effect.forEach(yield* store.restoreTranscriptTurns(owned), withUserMessage);
       }).pipe(
         Effect.mapError(() =>
           unavailable("The durable native transcript ownership could not be restored."),
@@ -348,7 +384,8 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const turns = yield* store.restoreTurns(owned);
         const live: GrokBotTurnIdentity[] = [];
-        for (const turn of turns) if (yield* validateIdentity(turn)) live.push(turn);
+        for (const turn of turns)
+          if (yield* validateIdentity(turn)) live.push(yield* withUserMessage(turn));
         return live;
       }).pipe(
         Effect.mapError(() =>

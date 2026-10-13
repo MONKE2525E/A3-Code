@@ -1,4 +1,5 @@
 import {
+  MessageId,
   NodeId,
   ProviderInstanceId,
   ProviderThreadId,
@@ -31,6 +32,7 @@ const Native = Schema.Struct({
 });
 const Identity = Schema.Struct({
   native: Native,
+  userMessageId: Schema.optionalKey(MessageId),
   messageId: NonEmpty,
   sentAtMs: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   runId: RunId,

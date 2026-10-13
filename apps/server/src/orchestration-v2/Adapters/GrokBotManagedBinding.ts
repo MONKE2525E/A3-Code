@@ -1,6 +1,7 @@
 import type {
   ProviderInstanceId,
   OrchestrationV2ConversationMessage,
+  OrchestrationV2TurnItem,
   ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
@@ -193,6 +194,14 @@ export class GrokBotManagedBinding extends Context.Service<
       native: GrokBotBoundSession,
       ids: ReadonlyArray<OrchestrationV2ConversationMessage["id"]>,
     ) => Effect.Effect<ReadonlyArray<OrchestrationV2ConversationMessage>, GrokBotBindingError>;
+    readonly existingMessage?: (
+      native: GrokBotBoundSession,
+      id: OrchestrationV2ConversationMessage["id"],
+    ) => Effect.Effect<OrchestrationV2ConversationMessage | undefined, GrokBotBindingError>;
+    readonly existingUserTurnItem?: (
+      native: GrokBotBoundSession,
+      messageId: OrchestrationV2ConversationMessage["id"],
+    ) => Effect.Effect<OrchestrationV2TurnItem | null, GrokBotBindingError>;
     readonly lookupCompletion: (
       identity: GrokBotTurnIdentity,
     ) => Effect.Effect<GrokBotManagedCompletion | undefined, GrokBotBindingError>;

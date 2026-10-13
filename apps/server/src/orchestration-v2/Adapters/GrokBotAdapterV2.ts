@@ -2,6 +2,7 @@ import {
   ProviderDriverKind,
   ProviderTurnId,
   type OrchestrationV2ConversationMessage,
+  type OrchestrationV2TurnItem,
   type ChatAttachment,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderThread,
@@ -162,6 +163,7 @@ const NativeTextEntry = Schema.Struct({
   call: Schema.optionalKey(Schema.Unknown),
   clientNonce: Schema.optionalKey(Schema.String),
   requestId: Schema.optionalKey(Schema.String),
+  reactions: Schema.optionalKey(Schema.Unknown),
   content: Schema.optionalKey(Schema.String),
   richText: Schema.optionalKey(Schema.Unknown),
   message: Schema.optionalKey(
@@ -197,6 +199,82 @@ const NativeTextEntry = Schema.Struct({
 });
 const decodeTextEntry = Schema.decodeUnknownOption(NativeTextEntry);
 
+type ProjectedGrokBotReaction = NonNullable<
+  OrchestrationV2ConversationMessage["grokBotReactions"]
+>[number];
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+function grokBotNativeReactions(
+  value: unknown,
+  botId: string,
+  messageId: OrchestrationV2ConversationMessage["id"],
+):
+  | {
+      readonly reactions: readonly ProjectedGrokBotReaction[];
+      readonly ownedBotReactionKeys: ReadonlySet<string>;
+    }
+  | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const reactions: ProjectedGrokBotReaction[] = [];
+  const seen = new Set<string>();
+  const ownedBotReactionKeys = new Set<string>();
+  for (const candidate of value.slice(0, 32)) {
+    if (!isRecord(candidate)) continue;
+    const emoji = candidate.emoji;
+    const by = candidate.by;
+    if (typeof emoji !== "string" || emoji.length === 0 || emoji.length > 128) continue;
+    if (typeof by !== "string" || by.length === 0) continue;
+    const from = by === "me" || by === "user" ? "user" : "bot";
+    const id =
+      typeof candidate.id === "string" && candidate.id.length > 0 ? candidate.id : undefined;
+    const identity = id === undefined ? `${from}\u0000${emoji}` : `id\u0000${id}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    const reaction: ProjectedGrokBotReaction = {
+      emoji,
+      from,
+      messageId,
+      ...(id === undefined ? {} : { id }),
+      ...(typeof candidate.timestampMs === "number" && Number.isFinite(candidate.timestampMs)
+        ? { timestampMs: candidate.timestampMs }
+        : {}),
+    };
+    reactions.push(reaction);
+    if (from === "bot" && by === botId) ownedBotReactionKeys.add(identity);
+  }
+  return { reactions, ownedBotReactionKeys };
+}
+
+function reactionIdentity(reaction: ProjectedGrokBotReaction): string {
+  return reaction.id === undefined
+    ? `${reaction.from}\u0000${reaction.emoji}`
+    : `id\u0000${reaction.id}`;
+}
+
+function sameReactions(
+  left: readonly ProjectedGrokBotReaction[] | undefined,
+  right: readonly ProjectedGrokBotReaction[],
+): boolean {
+  const leftByIdentity = new Map(
+    (left ?? []).map((reaction) => [reactionIdentity(reaction), reaction]),
+  );
+  return (
+    leftByIdentity.size === right.length &&
+    right.every((reaction) => {
+      const previous = leftByIdentity.get(reactionIdentity(reaction));
+      return (
+        previous !== undefined &&
+        previous.emoji === reaction.emoji &&
+        previous.from === reaction.from &&
+        previous.messageId === reaction.messageId &&
+        previous.timestampMs === reaction.timestampMs
+      );
+    })
+  );
+}
+
 /** Stable identities are scoped to account, bot, native session, and transcript generation. */
 export function grokBotNativeThreadId(native: GrokBotBoundSession): string {
   return [native.binding, native.botId, native.sessionId].map(encodeURIComponent).join("/");
@@ -219,10 +297,17 @@ export const makeGrokBotTranscriptProjection = (input: {
   readonly existingMessages?: (
     ids: ReadonlyArray<OrchestrationV2ConversationMessage["id"]>,
   ) => Effect.Effect<ReadonlyArray<OrchestrationV2ConversationMessage>, GrokBotBindingError>;
+  readonly existingMessage?: (
+    id: OrchestrationV2ConversationMessage["id"],
+  ) => Effect.Effect<OrchestrationV2ConversationMessage | undefined, GrokBotBindingError>;
+  readonly existingUserTurnItem?: (
+    messageId: OrchestrationV2ConversationMessage["id"],
+  ) => Effect.Effect<OrchestrationV2TurnItem | null, GrokBotBindingError>;
   /** Native answer rows attributed to a managed turn; replayed history carries its own write time. */
   readonly onOwnedOutput?: (turn: GrokBotTurnIdentity, streaming: boolean, atMs: number) => void;
 }) => {
   const messages = new Map<string, OrchestrationV2ConversationMessage>();
+  const managedReactionMessages = new Map<string, OrchestrationV2ConversationMessage>();
   const versions = new Map<string, bigint>();
   const managedMessageIds = new Set<string>();
   const turns = new Map<string, GrokBotTurnIdentity>();
@@ -369,6 +454,93 @@ export const makeGrokBotTranscriptProjection = (input: {
         entry.role === "user" &&
         grokBotMessagePeer(input.native.botId, entry) === undefined &&
         entry.clientNonce !== undefined &&
+        managedMessageIds.has(entry.clientNonce)
+      ) {
+        const turn = turns.get(entry.clientNonce);
+        const appMessageId = turn?.userMessageId;
+        if (
+          turn !== undefined &&
+          appMessageId !== undefined &&
+          input.existingMessage !== undefined
+        ) {
+          const stored =
+            managedReactionMessages.get(appMessageId) ??
+            (yield* input.existingMessage(appMessageId));
+          if (
+            stored?.id === appMessageId &&
+            stored.threadId === input.native.threadId &&
+            stored.role === "user"
+          ) {
+            const projected = grokBotNativeReactions(
+              entry.reactions ?? [],
+              input.native.botId,
+              appMessageId,
+            );
+            const requestTurn =
+              entry.requestId === undefined ? undefined : requests.get(entry.requestId);
+            const previousReactionKeys = new Set(
+              (stored.grokBotReactions ?? []).map(reactionIdentity),
+            );
+            const addedOwnedReaction = [...(projected?.ownedBotReactionKeys ?? [])].some(
+              (key) => !previousReactionKeys.has(key),
+            );
+            if (
+              projected !== undefined &&
+              !sameReactions(stored.grokBotReactions, projected.reactions)
+            ) {
+              const { grokBotReactions: _previous, ...messageWithoutReactions } = stored;
+              const updated: OrchestrationV2ConversationMessage = {
+                ...messageWithoutReactions,
+                ...(projected.reactions.length === 0
+                  ? {}
+                  : { grokBotReactions: projected.reactions }),
+              };
+              managedReactionMessages.set(appMessageId, updated);
+              events.push({
+                type: "message.updated",
+                driver: GROK_BOT_DRIVER_KIND,
+                message: updated,
+              });
+              const item = yield* (
+                input.existingUserTurnItem?.(appMessageId) ?? Effect.succeed(null)
+              );
+              if (
+                item?.type === "user_message" &&
+                item.threadId === input.native.threadId &&
+                item.messageId === appMessageId
+              ) {
+                const { grokBotReactions: _previousReactions, ...withoutReactions } = item;
+                events.push({
+                  type: "turn_item.updated",
+                  driver: GROK_BOT_DRIVER_KIND,
+                  turnItem: {
+                    ...withoutReactions,
+                    ...(projected.reactions.length === 0
+                      ? {}
+                      : { grokBotReactions: projected.reactions }),
+                  },
+                });
+              }
+            }
+            // Recovery must remember an owned reply even if its pill was already persisted.
+            // Use the historical write time so replay never advances the progress clock.
+            if (
+              requestTurn?.messageId === turn.messageId &&
+              (frame.replay ? (projected?.ownedBotReactionKeys.size ?? 0) > 0 : addedOwnedReaction)
+            )
+              input.onOwnedOutput?.(
+                turn,
+                false,
+                frame.replay ? (entry.timestampMs ?? 0) : DateTime.toEpochMillis(now),
+              );
+          }
+        }
+      }
+      if (
+        entry.kind === "message" &&
+        entry.role === "user" &&
+        grokBotMessagePeer(input.native.botId, entry) === undefined &&
+        entry.clientNonce !== undefined &&
         managedMessageIds.has(entry.clientNonce) &&
         // A previously imported echo may predate durable ownership. Repair that exact existing
         // provider bubble through normal events while still suppressing all new owned echoes.
@@ -462,19 +634,27 @@ export const makeGrokBotTranscriptProjection = (input: {
       const existing = messages.get(key);
       const requestId = entry.requestId || messageRequests.get(key);
       const turn = assistant && requestId !== undefined ? requests.get(requestId) : undefined;
+      const nativeMessageId = input.idAllocator.derive.messageFromProviderItem({
+        driver: GROK_BOT_DRIVER_KIND,
+        nativeItemId: `${grokBotNativeThreadId(input.native)}/${key}`,
+      });
+      const reactions =
+        entry.kind === "message" && entry.role === "user"
+          ? grokBotNativeReactions(entry.reactions, input.native.botId, nativeMessageId)?.reactions
+          : undefined;
       const timestamp =
         entry.timestampMs === undefined ? now : DateTime.makeUnsafe(entry.timestampMs);
       const message: OrchestrationV2ConversationMessage = {
-        id: input.idAllocator.derive.messageFromProviderItem({
-          driver: GROK_BOT_DRIVER_KIND,
-          nativeItemId: `${grokBotNativeThreadId(input.native)}/${key}`,
-        }),
+        id: nativeMessageId,
         threadId: input.native.threadId,
         runId: turn?.runId ?? null,
         nodeId: turn?.rootNodeId ?? null,
         role: assistant ? "assistant" : "user",
         createdBy: assistant || peer !== undefined ? "agent" : "user",
         ...(peer === undefined ? {} : { grokBotPeer: peer }),
+        ...(reactions === undefined || reactions.length === 0
+          ? {}
+          : { grokBotReactions: reactions }),
         creationSource: "provider",
         ...(entry.kind === "message" &&
         entry.role === "user" &&
@@ -719,6 +899,12 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
           ...(bindings.existingMessages === undefined
             ? {}
             : { existingMessages: (ids) => bindings.existingMessages!(owned, ids) }),
+          ...(bindings.existingMessage === undefined
+            ? {}
+            : { existingMessage: (id) => bindings.existingMessage!(owned, id) }),
+          ...(bindings.existingUserTurnItem === undefined
+            ? {}
+            : { existingUserTurnItem: (id) => bindings.existingUserTurnItem!(owned, id) }),
         });
         const settlements = makeGrokBotSettlementProjection(owned, bindings.lookupCompletion);
         const approvals = makeGrokBotApprovalProjection({

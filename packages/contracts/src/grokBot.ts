@@ -58,11 +58,14 @@ export const GrokBotStatus = Schema.Struct({
   nativeAvailable: Schema.optionalKey(Schema.Boolean),
 });
 export const GrokBotReadInput = Schema.Struct({ botId: GrokBotId });
-const GrokBotReaction = Schema.Struct({
+export const GrokBotReaction = Schema.Struct({
   emoji: Schema.String,
   from: Schema.Literals(["bot", "user"]),
   messageId: Schema.String,
+  id: Schema.optionalKey(Schema.String),
+  timestampMs: Schema.optionalKey(Schema.Number.check(Schema.isFinite())),
 });
+export const GrokBotReactions = Schema.Array(GrokBotReaction);
 /**
  * Another bot in a bot-to-bot exchange. `bot` is resolved on id against the roster, so its
  * name is the current one; `unknown` keeps the wire name when the id is not in the roster.
@@ -125,7 +128,7 @@ export const GrokBotMessage = Schema.Struct({
   text: Schema.String,
   timestampMs: Schema.Number,
   streaming: Schema.Boolean,
-  reactions: Schema.optionalKey(Schema.Array(GrokBotReaction)),
+  reactions: Schema.optionalKey(GrokBotReactions),
   reactionOnly: Schema.optionalKey(Schema.Boolean),
 });
 export const GrokBotConversation = Schema.Struct({
