@@ -50,12 +50,14 @@ import {
   grokBotInlineHandoffBudget,
   grokBotManagedPrompt,
 } from "../Adapters/GrokBotManagedBinding.ts";
+import * as ContextHandoffService from "../ContextHandoffService.ts";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
 import * as LegacyV1ThreadImporter from "../legacy/LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "../Orchestrator.ts";
 import * as EffectWorker from "../EffectWorker.ts";
 import * as EffectOutbox from "../EffectOutbox.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionMaintenance from "../ProjectionMaintenance.ts";
 import * as ProjectionStore from "../ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
@@ -500,6 +502,8 @@ describe("orchestration v2 provider switching", () => {
               assert.equal((yield* Ref.get(capturedTurns)).length, 1);
               return;
             }
+            const contextHandoffService = yield* ContextHandoffService.ContextHandoffServiceV2;
+            const eventSink = yield* EventSink.EventSinkV2;
             const restartNote = "A background run was cancelled while restarting this turn.";
             const restartBudget = grokBotInlineHandoffBudget({
               tokenCap: GROK_BOT_NATIVE_MESSAGE_LIMIT,
@@ -576,11 +580,76 @@ describe("orchestration v2 provider switching", () => {
               retryable.contextHandoffs.at(-1)!.delivery!.itemIds ?? [],
               nearLimitMissedItem.id,
             );
+
+            const durableContextMarker = "Manual context handoff.";
+            const durableCurrentRequest = "y".repeat(
+              GROK_BOT_NATIVE_MESSAGE_LIMIT - grokBotManagedPrompt("").length,
+            );
+            const completedSourceRun = retryable.runs.at(-1)!;
+            const sourceProviderThread = retryable.providerThreads.find(
+              (candidate) => candidate.id === completedSourceRun.providerThreadId,
+            )!;
+            const durableHandoff = yield* contextHandoffService.prepare({
+              threadId,
+              targetRunId: completedSourceRun.id,
+              fromProviderThreadIds: [sourceProviderThread.id],
+              toProviderThreadId: sourceProviderThread.id,
+            });
+            yield* eventSink.write({
+              events: [
+                {
+                  id: EventId.make("persistent-context:durable-manual-handoff"),
+                  type: "context-handoff.updated",
+                  threadId,
+                  runId: completedSourceRun.id,
+                  providerInstanceId: completedSourceRun.providerInstanceId,
+                  occurredAt: durableHandoff.createdAt,
+                  payload: durableHandoff,
+                },
+              ],
+            });
+            yield* dispatch(10, durableCurrentRequest, screenshots);
+            const durableSkipped = yield* wait(10, "completed");
+            const durableSkippedTurn = (yield* Ref.get(capturedTurns)).at(-1)!;
+            assert.equal(durableSkippedTurn.nativeThreadId, nearLimitTurn.nativeThreadId);
+            assert.equal(durableSkippedTurn.text, durableCurrentRequest);
+            assert.deepEqual(durableSkippedTurn.attachments, screenshots);
+            assert.equal(
+              grokBotManagedPrompt(durableSkippedTurn.text).length,
+              GROK_BOT_NATIVE_MESSAGE_LIMIT,
+            );
+            assert.isFalse(durableSkippedTurn.text.includes(durableContextMarker));
+            const durableSkippedHandoff = durableSkipped.contextHandoffs.at(-1)!;
+            assert.equal(durableSkippedHandoff.strategy, "manual_context");
+            assert.equal(durableSkippedHandoff.status, "ready");
+            assert.isUndefined(durableSkippedHandoff.delivery);
+
+            yield* dispatch(11, "Short follow-up for completed manual context");
+            const durableRecovered = yield* wait(11, "completed");
+            const durableRecoveredTurn = (yield* Ref.get(capturedTurns)).at(-1)!;
+            assert.equal(durableRecoveredTurn.nativeThreadId, nearLimitTurn.nativeThreadId);
+            assert.equal(durableRecoveredTurn.text.split(durableContextMarker).length - 1, 1);
+            assert.isTrue(
+              durableRecoveredTurn.text.endsWith(
+                "User message:\nShort follow-up for completed manual context",
+              ),
+            );
+            assert.equal(durableRecovered.contextHandoffs.at(-1)?.delivery?.status, "inline");
+
+            yield* dispatch(12, "Follow-up after manual context delivery");
+            const durableFollowup = yield* wait(12, "completed");
+            const durableFollowupTurn = (yield* Ref.get(capturedTurns)).at(-1)!;
+            assert.equal(durableFollowupTurn.nativeThreadId, nearLimitTurn.nativeThreadId);
+            assert.isFalse(durableFollowupTurn.text.includes(durableContextMarker));
+            assert.equal(durableFollowup.contextHandoffs.at(-1)?.delivery?.status, "inline");
           }).pipe(
             Effect.provide(
-              ProviderReplayHarness.layerWithRegistry(
-                { name: `persistent-context-${driver}`, runtimePolicyOverride: { cwd } },
-                registry,
+              Layer.merge(
+                ProviderReplayHarness.layerWithRegistry(
+                  { name: `persistent-context-${driver}`, runtimePolicyOverride: { cwd } },
+                  registry,
+                ),
+                ContextHandoffService.layer.pipe(Layer.provide(IdAllocator.layer)),
               ),
             ),
           );

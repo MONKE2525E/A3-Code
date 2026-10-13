@@ -258,12 +258,13 @@ export const layer: Layer.Layer<
                     source.status === "interrupted" ||
                     (source.status === "completed" &&
                       handoff.delivery === undefined &&
-                      projection.messages.some(
-                        (message) =>
-                          message.id === source.userMessageId &&
-                          message.attachments.length === 0 &&
-                          message.text.trim().toLowerCase() === "/compact",
-                      ))),
+                      (providerThread?.driver === "grok-bot" ||
+                        projection.messages.some(
+                          (message) =>
+                            message.id === source.userMessageId &&
+                            message.attachments.length === 0 &&
+                            message.text.trim().toLowerCase() === "/compact",
+                        )))),
               ))),
       );
       const nativeForkTransfer = projection.contextTransfers.find(
