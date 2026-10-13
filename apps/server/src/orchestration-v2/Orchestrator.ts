@@ -3348,7 +3348,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
       const emitEvent = emit(events, command);
       const activeRunIds = new Set(
-        projection.runs.filter((run) => run.status === "queued").map((run) => run.id),
+        projection.runs
+          .filter((run) => run.status === "queued" || run.status === "starting")
+          .map((run) => run.id),
       );
       for (const run of projection.runs.filter((candidate) => activeRunIds.has(candidate.id))) {
         yield* emitEvent({
@@ -9330,7 +9332,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (
         providerThread.driver === "grok-bot" &&
         providerTurn === undefined &&
-        run.status !== "preparing"
+        run.status !== "preparing" &&
+        run.resourceWait !== true
       ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -9560,7 +9563,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* stopRemainingWork();
         yield* Ref.update(effects, (existing) => [...existing, ...otherProviderInterrupts]);
         return {
-          effectTypes: ["provider-turn.start", "provider-turn.restart"],
+          effectTypes: [
+            "provider-turn.start",
+            "provider-turn.restart",
+            "provider-runtime.reconnect",
+          ],
           reason: `Run ${run.id} was interrupted before its provider turn started.`,
         } satisfies {
           readonly effectTypes: ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
@@ -11253,6 +11260,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.model-selection.set":
       case "provider.switch":
         yield* dispatchThreadMutation(command, events, effects);
+        if (command.type === "thread.archive") {
+          cancelUnsettledEffects = {
+            effectTypes: ["provider-turn.start", "provider-turn.restart"],
+            reason: "Thread was archived before the provider turn started.",
+          };
+        }
         break;
       case "thread.pull-request-watch.sync":
         yield* dispatchPullRequestWatchSync(command, events, effects);
