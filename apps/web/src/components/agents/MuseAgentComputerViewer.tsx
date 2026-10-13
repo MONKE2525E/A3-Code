@@ -319,7 +319,7 @@ export function MuseAgentComputerViewer({
     const heldLease = heldRef.current;
     if (heldLease === null) return;
     setPhase("connecting");
-    void (async () => {
+    const connect = async () => {
       const ticket = await prepareStream({
         environmentId,
         input: { providerInstanceId, sessionId, taskId, takeoverId: heldLease.takeoverId },
@@ -358,7 +358,12 @@ export function MuseAgentComputerViewer({
             : "The live view disconnected. Take control again to reconnect.",
         );
       });
-    })();
+    };
+    // Module load or RFB construction can throw; never leave an unhandled rejection or a view
+    // stuck on "Connecting…".
+    void connect().catch(() => {
+      if (!cancelled) endView("The live view could not be opened.");
+    });
     return () => {
       cancelled = true;
       disconnect?.();
