@@ -63,19 +63,23 @@ export function responsePayloads<E>(
     );
   }
   return Stream.unwrap(
-    bytes.pipe(
-      Stream.decodeText(),
-      Stream.runFold(
-        () => "",
-        (text, chunk) => text + chunk,
-      ),
-      Effect.flatMap((text) =>
-        text.trim().length === 0
-          ? Effect.succeed(Stream.empty)
-          : Effect.try({ try: () => JSON.parse(text) as unknown, catch: onError }).pipe(
-              Effect.map((payload) => Stream.fromIterable([payload])),
-            ),
-      ),
-    ),
+    Effect.suspend(() => {
+      const decoder = new TextDecoder();
+      return bytes.pipe(
+        Stream.map((chunk) => decoder.decode(chunk, { stream: true })),
+        Stream.concat(Stream.sync(() => decoder.decode())),
+        Stream.runFold(
+          () => "",
+          (text, chunk) => text + chunk,
+        ),
+        Effect.flatMap((text) =>
+          text.trim().length === 0
+            ? Effect.succeed(Stream.empty)
+            : Effect.try({ try: () => JSON.parse(text) as unknown, catch: onError }).pipe(
+                Effect.map((payload) => Stream.fromIterable([payload])),
+              ),
+        ),
+      );
+    }),
   );
 }

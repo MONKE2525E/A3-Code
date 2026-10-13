@@ -63,3 +63,33 @@ it.effect("cancels an acknowledgement body without parsing it", () =>
     assert.isTrue(cancelled);
   }),
 );
+
+it.effect("rejects an incomplete UTF-8 suffix instead of dropping it from a JSON response", () =>
+  Effect.gen(function* () {
+    const response = new Response(Uint8Array.of(0x7b, 0x7d, 0xe2), {
+      headers: { "content-type": "application/json" },
+    });
+    const error = yield* responsePayloads(response, () => "invalid-response").pipe(
+      Stream.runDrain,
+      Effect.flip,
+    );
+    assert.strictEqual(error, "invalid-response");
+  }),
+);
+
+it.effect("decodes a JSON response with multibyte text split between chunks", () =>
+  Effect.gen(function* () {
+    const value = { id: 1, result: { text: "Monke 👋" } };
+    const body = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        for (const byte of new TextEncoder().encode(JSON.stringify(value)))
+          controller.enqueue(Uint8Array.of(byte));
+        controller.close();
+      },
+    });
+    const response = new Response(body, { headers: { "content-type": "application/json" } });
+    assert.deepStrictEqual(yield* responsePayloads(response, String).pipe(Stream.runCollect), [
+      value,
+    ]);
+  }),
+);
