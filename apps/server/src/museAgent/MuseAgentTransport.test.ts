@@ -1,0 +1,661 @@
+import { assert, it } from "@effect/vitest";
+import * as TestClock from "effect/testing/TestClock";
+import * as NodeVM from "node:vm";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Verify the native Playwright profile is removed after its context closes.
+import * as NodeFSP from "node:fs/promises";
+import { vi } from "vite-plus/test";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
+import { chromium, type BrowserContext, type Route } from "playwright-core";
+import * as Transport from "./MuseAgentTransport.ts";
+import * as Source from "./MuseAgentSessionSource.ts";
+
+vi.mock("playwright-core", () => ({
+  chromium: { launchPersistentContext: vi.fn(), executablePath: () => "/usr/bin/node" },
+}));
+const decodeStreamMetadata = Schema.decodeUnknownEffect(
+  Schema.Struct({ authority: Schema.String, id: Schema.String, connectionId: Schema.String }),
+);
+const decodeStreamPayload = Schema.decodeUnknownEffect(Schema.Struct({ base64: Schema.String }));
+
+const fixture = () => {
+  const calls: { method: string; input: unknown }[] = [];
+  let performRegistration: () => Promise<unknown> = async () => ({
+    accepted: 1,
+    connectionId: "generation-1",
+  });
+  let computerPreview: unknown = { base64: btoa("synthetic-preview"), contentType: "image/png" };
+  let performUnregistration: () => Promise<unknown> = async () => undefined;
+  const exposed = new Map<string, (raw: unknown) => unknown>();
+  let handleRoute: ((route: Route) => Promise<void>) | undefined;
+  let sourceFingerprint = "synthetic-fingerprint";
+  let pageAuthority: string | null = "synthetic-authority";
+  const bridge = {
+    authority: () => pageAuthority,
+    ...Object.fromEntries(
+      [
+        "request",
+        "watch",
+        "unwatch",
+        "connectionId",
+        "register",
+        "unregister",
+        "readComputerPreview",
+        "openComputerStream",
+        "sendComputerStream",
+        "closeComputerStream",
+      ].map((method) => [
+        method,
+        async (input: unknown) => {
+          calls.push({ method, input });
+          if (method === "register") return performRegistration();
+          if (method === "request") return { nativeResult: true };
+          if (method === "connectionId") return "generation-1";
+          if (method === "readComputerPreview") return computerPreview;
+          if (method === "unregister") return performUnregistration();
+          return undefined;
+        },
+      ]),
+    ),
+  };
+  const evaluate = async (fn: (input: unknown) => unknown, input?: unknown) => {
+    assert.strictEqual(typeof fn, "function");
+    const value: unknown = NodeVM.runInNewContext(`(${fn.toString()})(input)`, {
+      __t3Muse: bridge,
+      input,
+    });
+    return value;
+  };
+  const page = {
+    route: async (_pattern: string, handler: (route: Route) => Promise<void>) => {
+      handleRoute = handler;
+    },
+    exposeFunction: async (name: string, fn: (raw: unknown) => unknown) => {
+      exposed.set(name, fn);
+    },
+    addInitScript: async () => {},
+    goto: async () => {},
+    waitForFunction: async (fn: (input: unknown) => unknown) => {
+      assert.strictEqual(await evaluate(fn), true);
+    },
+    evaluate,
+  };
+  let profilePath: string | undefined;
+  let closed = false;
+  const context = {
+    addCookies: async () => {},
+    newPage: async () => page,
+    close: async () => {
+      closed = true;
+    },
+  };
+  vi.mocked(chromium.launchPersistentContext).mockImplementation(async (path) => {
+    profilePath = path;
+    return context as unknown as BrowserContext;
+  });
+  const source = Source.MuseAgentSessionSource.of({
+    inspect: Effect.succeed({ installed: true, sessionPresent: true }),
+    read: Effect.sync(() => ({
+      profilePath: "/synthetic/profile",
+      cookies: [],
+      fingerprint: sourceFingerprint,
+    })),
+  });
+  const layer = Transport.makeMuseAgentTransportLayer({ executablePath: "/usr/bin/node" }).pipe(
+    Layer.provide(Layer.succeed(Source.MuseAgentSessionSource, source)),
+  );
+  return {
+    layer,
+    calls,
+    setAuthority: (value: string | null) => {
+      pageAuthority = value;
+    },
+    setFingerprint: (value: string) => {
+      sourceFingerprint = value;
+    },
+    nativeEvent: (raw: unknown) => exposed.get("__t3MuseEvent")!(raw),
+    computerEvent: (raw: unknown) => exposed.get("__t3MuseComputerStreamEvent")!(raw),
+    routeEvent: (route: Route) => handleRoute!(route),
+    profilePath: () => profilePath,
+    closed: () => closed,
+    setRegistration: (callback: () => Promise<unknown>) => {
+      performRegistration = callback;
+    },
+    setComputerPreview: (value: unknown) => {
+      computerPreview = value;
+    },
+    setUnregistration: (callback: () => Promise<unknown>) => {
+      performUnregistration = callback;
+    },
+  };
+};
+
+const registration: Transport.MuseAgentToolRegistration = {
+  clientId: "t3-turn",
+  connectionId: "generation-1",
+  nativeSessionId: "primary",
+  commands: { "t3.probe": {} },
+  invoke: () =>
+    Effect.succeed({
+      method: "client.invoke.result",
+      params: { invoke_id: "synthetic-invoke", ok: true },
+      options: { expectedConnectionId: "generation-1" },
+    }),
+};
+
+it.effect(
+  "keeps warm observers and computer streams alive across transient native unreadiness",
+  () => {
+    const f = fixture();
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const transport = yield* Transport.MuseAgentTransport;
+        const binding = yield* transport.connect;
+        const watch = yield* transport.watch(binding, "primary");
+        const computer = yield* transport.openComputerStream(binding, {
+          sessionId: "worker",
+          taskId: "task",
+          takeoverId: "takeover",
+        });
+        const watcher = yield* watch.events.pipe(
+          Stream.take(3),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        const viewer = yield* computer.events.pipe(
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        f.setAuthority(null);
+        assert.strictEqual((yield* transport.connect.pipe(Effect.flip)).kind, "disconnected");
+        assert.strictEqual(f.closed(), false);
+        assert.strictEqual(
+          yield* transport.request(binding, "sessions.list", {}).pipe(
+            Effect.match({
+              onSuccess: () => "unexpected_success",
+              onFailure: (error) => error.kind,
+            }),
+          ),
+          "disconnected",
+        );
+        assert.strictEqual(f.calls.filter((call) => call.method === "request").length, 0);
+        f.setAuthority("synthetic-authority");
+        assert.strictEqual(yield* transport.connect, binding);
+        yield* Effect.promise(async () =>
+          f.nativeEvent({
+            authority: "synthetic-authority",
+            event: "transport.reconnected",
+            payload: {},
+          }),
+        );
+        const opening = f.calls.find((call) => call.method === "openComputerStream");
+        const metadata = yield* decodeStreamMetadata(opening?.input);
+        yield* Effect.promise(async () =>
+          f.computerEvent({ ...metadata, type: "data", base64: "UkZC" }),
+        );
+        assert.deepStrictEqual(
+          (yield* Fiber.join(watcher)).map((event) => event.event),
+          ["transport.disconnected", "transport.disconnected", "transport.reconnected"],
+        );
+        assert.deepStrictEqual(yield* Fiber.join(viewer), [Buffer.from("RFB")]);
+        assert.strictEqual(f.calls.filter((call) => call.method === "watch").length, 1);
+      }),
+    ).pipe(Effect.provide(f.layer));
+  },
+);
+
+it.effect(
+  "fails existing watchers when ready native authority changes instead of adopting another account",
+  () => {
+    const f = fixture();
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const transport = yield* Transport.MuseAgentTransport;
+        const binding = yield* transport.connect;
+        const watch = yield* transport.watch(binding, "primary");
+        const watcher = yield* watch.events.pipe(Stream.runCollect, Effect.forkScoped);
+        f.setAuthority("foreign-authority");
+        assert.strictEqual((yield* transport.connect.pipe(Effect.flip)).kind, "account_changed");
+        assert.strictEqual((yield* Fiber.join(watcher).pipe(Effect.flip)).kind, "account_changed");
+        assert.strictEqual(f.closed(), true);
+        assert.strictEqual(f.calls.filter((call) => call.method === "request").length, 0);
+      }),
+    ).pipe(Effect.provide(f.layer));
+  },
+);
+
+it.effect(
+  "retires old source-bound observers with a disconnected error when copied cookies change",
+  () => {
+    const f = fixture();
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const transport = yield* Transport.MuseAgentTransport;
+        const binding = yield* transport.connect;
+        const watch = yield* transport.watch(binding, "primary");
+        const watcher = yield* watch.events.pipe(Stream.runCollect, Effect.forkScoped);
+        f.setFingerprint("changed-source");
+        yield* transport.connect;
+        assert.strictEqual((yield* Fiber.join(watcher).pipe(Effect.flip)).kind, "disconnected");
+      }),
+    ).pipe(Effect.provide(f.layer));
+  },
+);
+
+it.effect("decodes a bounded native computer preview without exposing native URLs", () => {
+  const f = fixture();
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const transport = yield* Transport.MuseAgentTransport;
+      const binding = yield* transport.connect;
+      const result = yield* transport.readComputerPreview(binding, {
+        taskId: "task-1",
+        sha256: "a".repeat(64),
+      });
+      assert.deepStrictEqual(result, {
+        bytes: Buffer.from("synthetic-preview"),
+        contentType: "image/png",
+      });
+      assert.deepStrictEqual(f.calls.at(-1), {
+        method: "readComputerPreview",
+        input: { authority: "synthetic-authority", taskId: "task-1", sha256: "a".repeat(64) },
+      });
+      f.setComputerPreview({ base64: btoa("html"), contentType: "text/html" });
+      assert.strictEqual(
+        (yield* transport
+          .readComputerPreview(binding, { taskId: "task-1", sha256: "a".repeat(64) })
+          .pipe(Effect.flip)).kind,
+        "protocol",
+      );
+    }),
+  ).pipe(Effect.provide(f.layer));
+});
+
+it.effect("carries scoped computer stream frames and rejects stale callback bindings", () => {
+  const f = fixture();
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const transport = yield* Transport.MuseAgentTransport;
+      const binding = yield* transport.connect;
+      const native = yield* transport.openComputerStream(binding, {
+        sessionId: "worker",
+        taskId: "task",
+        takeoverId: "takeover",
+      });
+      const opened = f.calls.find((call) => call.method === "openComputerStream");
+      const metadata = yield* decodeStreamMetadata(opened!.input);
+      f.computerEvent({ ...metadata, authority: "foreign", type: "data", base64: "CQkJ" });
+      f.computerEvent({ ...metadata, type: "data", base64: "UkZC" });
+      assert.deepStrictEqual(yield* native.events.pipe(Stream.take(1), Stream.runCollect), [
+        Buffer.from("RFB"),
+      ]);
+      assert.deepStrictEqual(f.calls.at(-1), { method: "closeComputerStream", input: metadata });
+    }),
+  ).pipe(Effect.provide(f.layer));
+});
+it.effect("bounds outgoing computer bytes and sends only the selected native stream", () => {
+  const f = fixture();
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const transport = yield* Transport.MuseAgentTransport;
+      const binding = yield* transport.connect;
+      const native = yield* transport.openComputerStream(binding, {
+        sessionId: "worker",
+        taskId: "task",
+        takeoverId: "takeover",
+      });
+      yield* native.send(new Uint8Array([1, 2, 3]));
+      const sent = f.calls.find((call) => call.method === "sendComputerStream");
+      const payload = yield* decodeStreamPayload(sent?.input);
+      assert.strictEqual(payload.base64, "AQID");
+      assert.strictEqual(
+        (yield* native.send(new Uint8Array(256 * 1024 + 1)).pipe(Effect.flip)).kind,
+        "protocol",
+      );
+      assert.strictEqual(f.calls.filter((call) => call.method === "sendComputerStream").length, 1);
+    }),
+  ).pipe(Effect.provide(f.layer));
+});
+
+it.effect(
+  "revokes local tools before bounded cleanup when native removal never acknowledges",
+  () => {
+    const f = fixture();
+    let reached: () => void = () => {};
+    const entered = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    f.setUnregistration(() => {
+      reached();
+      return new Promise(() => {});
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const transport = yield* Transport.MuseAgentTransport;
+        const binding = yield* transport.connect;
+        yield* transport.registerTools(binding, registration);
+        const cleanup = yield* transport
+          .unregisterTools(binding, "t3-turn")
+          .pipe(Effect.forkScoped);
+        yield* Effect.promise(() => entered);
+        // The stalled old registration no longer prevents admission of the next turn.
+        assert.deepStrictEqual(
+          yield* transport.registerTools(binding, { ...registration, clientId: "next-turn" }),
+          { accepted: 1, connectionId: "generation-1" },
+        );
+        yield* TestClock.adjust("2 seconds");
+        yield* Fiber.join(cleanup);
+        assert.deepStrictEqual(
+          f.calls.filter((call) => call.method === "unregister"),
+          [
+            {
+              method: "unregister",
+              input: {
+                authority: "synthetic-authority",
+                clientId: "t3-turn",
+                connectionId: "generation-1",
+              },
+            },
+          ],
+        );
+        f.setUnregistration(async () => undefined);
+        yield* transport.unregisterTools(binding, "next-turn");
+      }),
+    ).pipe(Effect.provide(f.layer));
+  },
+);
+
+it.effect(
+  "bounds cleanup after an invalid capability receipt instead of retaining the failed registration",
+  () => {
+    const f = fixture();
+    let reached: () => void = () => {};
+    const entered = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    f.setRegistration(async () => ({ accepted: "invalid", connectionId: "generation-1" }));
+    f.setUnregistration(() => {
+      reached();
+      return new Promise(() => {});
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const transport = yield* Transport.MuseAgentTransport;
+        const binding = yield* transport.connect;
+        const failed = yield* transport
+          .registerTools(binding, registration)
+          .pipe(Effect.forkScoped);
+        yield* Effect.promise(() => entered);
+        yield* TestClock.adjust("2 seconds");
+        assert.strictEqual((yield* Fiber.join(failed).pipe(Effect.flip)).kind, "protocol");
+        f.setRegistration(async () => ({ accepted: 1, connectionId: "generation-1" }));
+        assert.deepStrictEqual(
+          yield* transport.registerTools(binding, { ...registration, clientId: "next-turn" }),
+          { accepted: 1, connectionId: "generation-1" },
+        );
+        assert.deepStrictEqual(
+          f.calls.map((call) => call.method),
+          ["register", "unregister", "register"],
+        );
+        f.setUnregistration(async () => undefined);
+        yield* transport.unregisterTools(binding, "next-turn");
+      }),
+    ).pipe(Effect.provide(f.layer));
+  },
+);
+
+it.effect("waits without CSP eval and invokes the native page request to return its result", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const transport = yield* Transport.MuseAgentTransport;
+    const binding = yield* transport.connect;
+    assert.deepStrictEqual(yield* transport.request(binding, "sessions.list", {}), {
+      nativeResult: true,
+    });
+    assert.strictEqual(yield* transport.connectionId(binding), "generation-1");
+    const request = f.calls.find((call) => call.method === "request");
+    assert.deepStrictEqual(request?.input, {
+      authority: "synthetic-authority",
+      method: "sessions.list",
+      params: {},
+    });
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("closes only the owned persistent context and removes its temporary profile", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    yield* Effect.gen(function* () {
+      const transport = yield* Transport.MuseAgentTransport;
+      yield* transport.connect;
+      assert.notStrictEqual(f.profilePath(), "/synthetic/profile");
+      yield* Effect.promise(() => NodeFSP.access(f.profilePath()!));
+      assert.strictEqual(f.closed(), false);
+    }).pipe(Effect.provide(f.layer));
+    assert.strictEqual(f.closed(), true);
+    assert.strictEqual(
+      yield* Effect.promise(() =>
+        NodeFSP.access(f.profilePath()!).then(
+          () => true,
+          () => false,
+        ),
+      ),
+      false,
+    );
+  });
+});
+
+it.effect(
+  "aborts a failed route fetch once and suppresses disposal without losing owned cleanup",
+  () => {
+    const f = fixture(),
+      handled: string[] = [];
+    // This test boundary substitutes the external Playwright route, including its
+    // consumed/disposed failure behavior; the transport and its real profile scope run unchanged.
+    const route = {
+      request: () => ({ resourceType: () => "script" }),
+      fetch: async () => {
+        handled.push("fetch");
+        throw new Error("Network request failed");
+      },
+      abort: async (code: string) => {
+        handled.push(`abort:${code}`);
+        throw new Error("Route is already handled!");
+      },
+      continue: async () => {
+        handled.push("continue");
+      },
+      fulfill: async () => {
+        handled.push("fulfill");
+      },
+    } as unknown as Route;
+    return Effect.gen(function* () {
+      yield* Effect.gen(function* () {
+        const transport = yield* Transport.MuseAgentTransport;
+        yield* transport.connect;
+        yield* Effect.promise(() => f.routeEvent(route));
+      }).pipe(Effect.provide(f.layer));
+      assert.deepStrictEqual(handled, ["fetch", "abort:failed"]);
+      assert.strictEqual(f.closed(), true);
+      assert.strictEqual(
+        yield* Effect.promise(() =>
+          NodeFSP.access(f.profilePath()!).then(
+            () => true,
+            () => false,
+          ),
+        ),
+        false,
+      );
+    });
+  },
+);
+
+it.effect("does not continue a consumed route when fulfillment or page disposal fails", () => {
+  const f = fixture(),
+    handled: string[] = [];
+  const route = {
+    request: () => ({ resourceType: () => "document" }),
+    fetch: async () => {
+      handled.push("fetch");
+      return {
+        headers: () => ({ "content-type": "text/html" }),
+        body: async () => Buffer.from("<!doctype html><title>Synthetic</title>"),
+      };
+    },
+    fulfill: async () => {
+      handled.push("fulfill");
+      throw new Error("Target page, context or browser has been closed");
+    },
+    continue: async () => {
+      handled.push("continue");
+      throw new Error("Route is already handled!");
+    },
+    abort: async () => {
+      handled.push("abort");
+    },
+  } as unknown as Route;
+  return Effect.gen(function* () {
+    yield* Effect.gen(function* () {
+      const transport = yield* Transport.MuseAgentTransport;
+      yield* transport.connect;
+      yield* Effect.promise(() => f.routeEvent(route));
+    }).pipe(Effect.provide(f.layer));
+    assert.deepStrictEqual(handled, ["fetch", "fulfill"]);
+    assert.strictEqual(f.closed(), true);
+    assert.strictEqual(
+      yield* Effect.promise(() =>
+        NodeFSP.access(f.profilePath()!).then(
+          () => true,
+          () => false,
+        ),
+      ),
+      false,
+    );
+  });
+});
+
+it.effect("contains continuation disposal for unrelated resources without retrying them", () => {
+  const f = fixture(),
+    handled: string[] = [];
+  const route = {
+    request: () => ({ resourceType: () => "image" }),
+    continue: async () => {
+      handled.push("continue");
+      throw new Error("Target closed");
+    },
+    fetch: async () => {
+      handled.push("fetch");
+    },
+    fulfill: async () => {
+      handled.push("fulfill");
+    },
+    abort: async () => {
+      handled.push("abort");
+    },
+  } as unknown as Route;
+  return Effect.gen(function* () {
+    const transport = yield* Transport.MuseAgentTransport;
+    yield* transport.connect;
+    yield* Effect.promise(() => f.routeEvent(route));
+    assert.deepStrictEqual(handled, ["continue"]);
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect(
+  "shares the canonical native subscription between observer and managed turn until both close",
+  () => {
+    const f = fixture();
+    return Effect.gen(function* () {
+      const transport = yield* Transport.MuseAgentTransport;
+      const binding = yield* transport.connect;
+      const [observer, turn] = yield* Effect.all(
+        [transport.watch(binding, "primary"), transport.watch(binding, "primary")],
+        { concurrency: "unbounded" },
+      );
+      assert.strictEqual(f.calls.filter((call) => call.method === "watch").length, 1);
+      assert.strictEqual(
+        (yield* Effect.flip(transport.watch(binding, "other-session"))).kind,
+        "protocol",
+      );
+      yield* observer.close;
+      yield* observer.close;
+      assert.strictEqual(f.calls.filter((call) => call.method === "unwatch").length, 0);
+      yield* turn.close;
+      assert.strictEqual(f.calls.filter((call) => call.method === "unwatch").length, 1);
+      const replacement = yield* transport.watch(binding, "other-session");
+      assert.strictEqual(f.calls.filter((call) => call.method === "watch").length, 2);
+      yield* replacement.close;
+    }).pipe(Effect.provide(f.layer));
+  },
+);
+
+it.effect(
+  "removes page registration after response validation fails and permits a later clean registration",
+  () => {
+    const f = fixture();
+    return Effect.gen(function* () {
+      const transport = yield* Transport.MuseAgentTransport;
+      const binding = yield* transport.connect;
+      f.setRegistration(async () => ({ accepted: "invalid", connectionId: "generation-1" }));
+      assert.strictEqual(
+        (yield* Effect.flip(transport.registerTools(binding, registration))).kind,
+        "protocol",
+      );
+      const removals = f.calls.filter((call) => call.method === "unregister");
+      assert.strictEqual(removals.length, 1);
+      assert.deepStrictEqual(removals[0]?.input, {
+        authority: "synthetic-authority",
+        clientId: "t3-turn",
+        connectionId: "generation-1",
+      });
+      f.setRegistration(async () => ({ accepted: 1, connectionId: "generation-1" }));
+      assert.strictEqual((yield* transport.registerTools(binding, registration)).accepted, 1);
+      yield* transport.unregisterTools(binding, "t3-turn");
+      assert.strictEqual(f.calls.filter((call) => call.method === "unregister").length, 2);
+    }).pipe(Effect.provide(f.layer));
+  },
+);
+
+it.effect(
+  "interruption revokes partially installed page callbacks before the host slot can be reused",
+  () => {
+    const f = fixture();
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const transport = yield* Transport.MuseAgentTransport;
+        const binding = yield* transport.connect;
+        const entering = yield* Deferred.make<void>();
+        let begin: (() => void) | undefined;
+        const entered = new Promise<void>((resolve) => {
+          begin = resolve;
+        });
+        let complete: ((value: unknown) => void) | undefined;
+        f.setRegistration(() => {
+          begin!();
+          return new Promise((resolve) => {
+            complete = resolve;
+          });
+        });
+        yield* Effect.promise(() => entered).pipe(
+          Effect.andThen(Deferred.succeed(entering, undefined)),
+          Effect.forkScoped,
+        );
+        const registering = yield* transport
+          .registerTools(binding, registration)
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(entering);
+        yield* Fiber.interrupt(registering);
+        assert.strictEqual(f.calls.filter((call) => call.method === "unregister").length, 1);
+        complete!({ accepted: 1, connectionId: "generation-1" });
+        f.setRegistration(async () => ({ accepted: 1, connectionId: "generation-1" }));
+        assert.strictEqual((yield* transport.registerTools(binding, registration)).accepted, 1);
+        yield* transport.unregisterTools(binding, "t3-turn");
+      }),
+    ).pipe(Effect.provide(f.layer));
+  },
+);
