@@ -18,6 +18,7 @@ import {
   ThreadId,
   type GrokBot,
   type GrokBotOrchestratorConfig,
+  type OrchestrationV2ProviderSession,
 } from "@t3tools/contracts";
 import type { ProviderAdapterV2 } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Context from "effect/Context";
@@ -304,6 +305,7 @@ it.effect(
       const providerThread = initial.providerThreads.find(
         (thread) => thread.id === run.providerThreadId,
       )!;
+      assert.isDefined(providerThread);
       const now = yield* DateTime.now;
       yield* (yield* EventSink.EventSinkV2).write({
         commandId: CommandId.make("agent-followup-seed"),
@@ -337,19 +339,27 @@ it.effect(
         ],
       });
       const sessions = yield* ProviderSessions.ProviderSessionManagerV2;
-      const observedSession = initial.providerSessions[0];
-      assert.isDefined(observedSession);
       const providerSession = {
-        ...observedSession,
         id: providerThread.providerSessionId!,
+        driver: GROK_BOT_DRIVER_KIND,
+        providerInstanceId: instanceId,
+        status: "ready",
+        cwd: "/tmp/bot-project",
+        model: selection.model,
         capabilities: GrokBotCapabilitiesV2,
-      };
+        createdAt: now,
+        updatedAt: now,
+        lastError: null,
+      } satisfies OrchestrationV2ProviderSession;
+      const getSession = sessions.get;
       const sessionSpy = vi
         .spyOn(sessions, "get")
-        .mockReturnValue(
-          Effect.succeed(
-            Option.some({ providerSession, interruptTurn: () => Effect.void } as never),
-          ),
+        .mockImplementation((id) =>
+          id === providerSession.id
+            ? Effect.succeed(
+                Option.some({ providerSession, interruptTurn: () => Effect.void } as never),
+              )
+            : getSession(id),
         );
       yield* Effect.addFinalizer(() => Effect.sync(() => sessionSpy.mockRestore()));
       const next = yield* service.send(
