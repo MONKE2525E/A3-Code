@@ -13,7 +13,7 @@ const STATUS_LABEL: Record<GrokBotVoicePhase, string> = {
   reconnecting: "Reconnecting…",
 };
 
-function voiceCallStatusLabel(state: GrokBotVoiceCallState): string {
+export function voiceCallStatusLabel(state: GrokBotVoiceCallState): string {
   return state.phase === "live" && state.muted ? "Muted" : STATUS_LABEL[state.phase];
 }
 

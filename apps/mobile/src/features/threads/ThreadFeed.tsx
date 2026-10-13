@@ -1950,6 +1950,11 @@ function renderFeedEntry(
         )}
         {...(enterAnimated ? { entering: FadeIn.duration(220) } : {})}
       >
+        {message.grokBotAuthor?.name ? (
+          <Text className="mb-1 font-t3-medium text-sm text-foreground-secondary">
+            {message.grokBotAuthor.name}
+          </Text>
+        ) : null}
         {renderedText.trim().length > 0 ? (
           <MarkdownImageAvailableWidthContext value={props.markdownContentWidth}>
             <AssistantMarkdownContent

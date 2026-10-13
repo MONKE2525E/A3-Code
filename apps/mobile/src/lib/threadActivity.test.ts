@@ -219,6 +219,15 @@ function assistantMessage(updatedAt = "2026-06-20T00:00:03.000Z") {
 }
 
 describe("buildThreadFeed", () => {
+  it("preserves the author of a managed group reply for message presentation", () => {
+    const author = { botId: "member-bot", name: "Group researcher" };
+    const feed = buildThreadFeed([projected({ ...assistantMessage(), grokBotAuthor: author }, 0)]);
+    expect(feed).toHaveLength(1);
+    expect(feed[0]).toMatchObject({
+      type: "message",
+      message: { role: "assistant", text: "Done", grokBotAuthor: author },
+    });
+  });
   it("keeps async answers in question history instead of user bubbles", () => {
     const requestId = RuntimeRequestId.make("question");
     const question: OrchestrationV2TurnItem = {

@@ -791,6 +791,7 @@ describe("V2 session presentation", () => {
             type: "assistant_message",
             streaming: false,
             grokBotPeer: { botId: "peer-bot", name: "Research Bot", direction: "to" },
+            grokBotAuthor: { botId: "member-bot", name: "Group researcher" },
           },
         },
       ],
@@ -798,6 +799,10 @@ describe("V2 session presentation", () => {
     });
     expect(assistantPeerEntries[0]?.kind).toBe("message");
     if (assistantPeerEntries[0]?.kind === "message") {
+      expect(assistantPeerEntries[0].message.grokBotAuthor).toEqual({
+        botId: "member-bot",
+        name: "Group researcher",
+      });
       expect(assistantPeerEntries[0].message.grokBotPeer).toEqual({
         botId: "peer-bot",
         name: "Research Bot",

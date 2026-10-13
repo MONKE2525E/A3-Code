@@ -18,6 +18,7 @@ import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL, APP_VERSION } from ".
 import { resolveServerBackedAppDisplayName } from "../branding.logic";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
 import { GrokBotVoiceCallProvider } from "../components/grokBot/GrokBotVoiceCallProvider";
+import { GrokBotVoiceCallDock } from "../components/grokBot/GrokBotVoiceCallDock";
 import { CommandPalette } from "../components/CommandPalette";
 import { CustomSnoozeDialogHost } from "../components/CustomSnoozeDialog";
 import { ConfirmDialogHost } from "../components/ConfirmDialogHost";
@@ -212,6 +213,7 @@ function RootRouteView() {
             <div className="flex min-h-0 min-w-0 flex-1 [&>[data-slot=sidebar-inset]]:h-full!">
               <Outlet />
             </div>
+            <GrokBotVoiceCallDock />
           </div>
         </AppSidebarLayout>
       </CommandPalette>
