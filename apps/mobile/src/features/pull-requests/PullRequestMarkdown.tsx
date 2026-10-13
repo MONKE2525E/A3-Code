@@ -19,7 +19,7 @@ import {
 } from "react-native-nitro-markdown";
 import { markdownHtmlContent } from "@t3tools/mobile-markdown-text/markdown";
 
-import { useRouteOpenPullRequest } from "./useRouteOpenPullRequest";
+import { useOpenPullRequest } from "./useOpenPullRequestFromRoute";
 import {
   hasNativeSelectableMarkdownText,
   SelectableMarkdownText,
@@ -153,7 +153,7 @@ function PullRequestMarkdownContent(props: {
     () => githubMarkdownLinks(props.markdown, repositoryUrl),
     [props.markdown, repositoryUrl],
   );
-  const openPullRequest = useRouteOpenPullRequest();
+  const openPullRequest = useOpenPullRequest();
   const openLink = useCallback(
     (href: string) => {
       void openPullRequest(href);
