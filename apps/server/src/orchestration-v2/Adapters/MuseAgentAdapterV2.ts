@@ -296,6 +296,32 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
           captured = projection.capturePresentation(frame),
         ) =>
           Effect.gen(function* () {
+            const refreshOwnership = () =>
+              Effect.gen(function* () {
+                const nativeMessageId = projection.unknownAssistantIdentity(frame);
+                if (frame.event !== "message.user" && nativeMessageId === undefined) return;
+                const fresh = yield* native.historyOwnership(
+                  {
+                    binding,
+                    sessionId: session.session_id,
+                    threadId: input.threadId,
+                    providerInstanceId: options.instanceId,
+                  },
+                  {
+                    awaitAdmissions: true,
+                    ...(nativeMessageId === undefined
+                      ? { receiptsOnly: true }
+                      : { nativeMessageId }),
+                  },
+                );
+                yield* Effect.try({
+                  try: () => projection.retainOwnedAssistantAssociations(fresh),
+                  catch: (cause) => new Native.MuseAgentRuntimeError({ kind: "protocol", cause }),
+                });
+                // Receipts can precede the sibling's first assistant snapshot.
+                projection.unknownAssistantIdentity(frame);
+              });
+            yield* refreshOwnership();
             if (!projection.canImportPresentation(frame, captured)) return 0;
             const imported = yield* importMuseAttachmentPresentation({
               binding,
@@ -305,6 +331,9 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
               frame,
               readAttachment: native.readAttachment,
             });
+            // Attachment IO can outlive a sibling's durable ownership write.
+            if (imported) yield* refreshOwnership();
+            if (!projection.canImportPresentation(frame, captured)) return 0;
             const batch = yield* Effect.try({
               try: () => {
                 const attached = imported

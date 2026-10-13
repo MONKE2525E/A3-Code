@@ -176,3 +176,116 @@ it.effect("preserves a managed assistant's run association when reopening native
     assert.strictEqual(persisted.get(owned.id)?.text, "Synthetic answer");
   }),
 );
+
+it.effect(
+  "a preexisting observer suppresses receipt-linked output before its snapshot and rejects later foreign ID reuse",
+  () =>
+    Effect.gen(function* () {
+      const observer = makeProjection();
+      const managed = makeProjection();
+      const turn = yield* makeTurn;
+      const providerTurnId = managed.begin(turn);
+      managed.admit(receipt);
+      const context = {
+        threadId,
+        providerInstanceId: instanceId,
+        runId: turn.runId,
+        nodeId: turn.rootNodeId,
+        providerThreadId: turn.providerThread.id,
+        providerTurnId,
+        userMessageId: turn.message.messageId,
+      };
+      observer.retainOwnedUserReceipts([{ ...receipt, context }]);
+      assert.strictEqual(observer.unknownAssistantIdentity(answer), undefined);
+      assert.deepStrictEqual(observer.project(answer), []);
+      const original = managed.project(answer);
+      assert.ok(
+        original.some(
+          (event) => event.type === "message.updated" && event.message.runId === turn.runId,
+        ),
+      );
+      const foreign = {
+        ...answer,
+        payload: {
+          ...answer.payload,
+          reply_to_message_id: "foreign-receipt",
+          display_text: "Foreign replacement",
+        },
+        meta: { seq: 9, ts_ms: 9000 },
+      };
+      assert.deepStrictEqual(observer.project(foreign), []);
+      const unrelated = {
+        ...foreign,
+        payload: { ...foreign.payload, message_id: "foreign-assistant" },
+      };
+      assert.strictEqual(
+        observer.project(unrelated).filter((event) => event.type === "message.updated").length,
+        1,
+      );
+    }),
+);
+
+it.effect(
+  "targeted association refresh blocks an empty-reply assistant reuse without publishing stale snapshots",
+  () =>
+    Effect.gen(function* () {
+      const observer = makeProjection();
+      const managed = makeProjection();
+      const turn = yield* makeTurn;
+      const providerTurnId = managed.begin(turn);
+      managed.admit(receipt);
+      const events = managed.project(answer);
+      const message = events.find((event) => event.type === "message.updated");
+      const item = events.find((event) => event.type === "turn_item.updated");
+      assert.ok(message && item);
+      const noReply = { ...answer, payload: { ...answer.payload, reply_to_message_id: "" } };
+      assert.strictEqual(observer.unknownAssistantIdentity(noReply), answer.payload.message_id);
+      observer.project(noReply);
+      const priorText = observer.snapshot()[0]?.text;
+      if (item.turnItem.type !== "assistant_message") throw new Error("expected assistant_message");
+      const ownership: MuseAgentHistoryOwnership = {
+        receipts: [],
+        messages: [
+          {
+            nativeMessageId: answer.payload.message_id,
+            deliveryKey: turn.attemptId,
+            context: {
+              threadId,
+              providerInstanceId: instanceId,
+              runId: turn.runId,
+              nodeId: turn.rootNodeId,
+              providerThreadId: turn.providerThread.id,
+              providerTurnId,
+              userMessageId: turn.message.messageId,
+            },
+            snapshot: {
+              message: { ...message.message, text: "Older persisted body" },
+              turnItem: { ...item.turnItem, text: "Older persisted body" },
+            },
+            frozen: true,
+          },
+        ],
+      };
+      observer.retainOwnedAssistantAssociations(ownership);
+      assert.strictEqual(observer.snapshot()[0]?.text, priorText);
+      assert.strictEqual(observer.unknownAssistantIdentity(noReply), undefined);
+      assert.deepStrictEqual(
+        observer.project({
+          ...noReply,
+          payload: { ...noReply.payload, display_text: "Foreign replacement" },
+          meta: { seq: 10, ts_ms: 10000 },
+        }),
+        [],
+      );
+      assert.deepStrictEqual(
+        observer.project({
+          event: "delta.presentation",
+          payload: { session_id: "primary", host_message_id: answer.payload.message_id },
+          meta: { seq: 11, ts_ms: 11000 },
+        }),
+        [],
+      );
+      managed.retainOwnedAssistantAssociations(ownership);
+      assert.strictEqual(managed.snapshot()[0]?.text, "Synthetic answer");
+    }),
+);

@@ -184,6 +184,7 @@ export function makeMuseAgentProjection(input: {
     | undefined;
   const ownedAssistantIds = new Set<string>();
   const ownedUserIds = new Set<string>();
+  const observerProtectedAssistantIds = new Set<string>();
   const historicalContexts = new Map<string, MuseAgentDeliveryContext>();
   const frozenMessageIds = new Set<string>();
   const ownedDeliveryKeys = new Map<string, string>();
@@ -195,11 +196,14 @@ export function makeMuseAgentProjection(input: {
     )
       throw new Error("muse_history_ownership_scope");
   };
-  for (const receipt of input.ownership?.receipts ?? []) {
-    validateContext(receipt.context);
-    ownedUserIds.add(receipt.messageId);
-    ownedUserIds.add(receipt.replyToMessageId);
-  }
+  const retainOwnedUserReceipts = (receipts: MuseAgentHistoryOwnership["receipts"]) => {
+    for (const receipt of receipts) {
+      validateContext(receipt.context);
+      ownedUserIds.add(receipt.messageId);
+      ownedUserIds.add(receipt.replyToMessageId);
+    }
+  };
+  retainOwnedUserReceipts(input.ownership?.receipts ?? []);
   for (const message of input.ownership?.messages ?? []) {
     validateContext(message.context);
     if (!message.nativeMessageId || message.nativeMessageId.length > 1024)
@@ -533,6 +537,15 @@ export function makeMuseAgentProjection(input: {
       ].includes(frame.event)
     )
       return [];
+    if (
+      role === "assistant" &&
+      !active &&
+      payload.reply_to_message_id &&
+      ownedUserIds.has(payload.reply_to_message_id)
+    ) {
+      observerProtectedAssistantIds.add(nativeId);
+    }
+    if (role === "assistant" && observerProtectedAssistantIds.has(nativeId)) return [];
     const presentation = frame.event === "delta.presentation";
     const captured =
       presentation && presentationOwner?.nativeMessageId === nativeId
@@ -726,7 +739,11 @@ export function makeMuseAgentProjection(input: {
       const decoded = decodePayload(frame.payload);
       if (decoded._tag === "None") return false;
       const nativeId = decoded.value.host_message_id ?? decoded.value.message_id;
-      return !nativeId || !ownedDeliveryKeys.has(nativeId) || captured !== undefined;
+      return (
+        !nativeId ||
+        (!observerProtectedAssistantIds.has(nativeId) &&
+          (!ownedDeliveryKeys.has(nativeId) || captured !== undefined))
+      );
     },
     restore: (): ProviderAdapter.ProviderAdapterV2Event[] =>
       (input.ownership?.messages ?? []).flatMap(({ snapshot }) => [
@@ -741,6 +758,61 @@ export function makeMuseAgentProjection(input: {
           turnItem: snapshot.turnItem,
         },
       ]),
+    retainOwnedUserReceipts,
+    /** Refresh identities only; a sibling's older persisted body must never replace live text. */
+    retainOwnedAssistantAssociations(ownership: MuseAgentHistoryOwnership) {
+      retainOwnedUserReceipts(ownership.receipts);
+      for (const message of ownership.messages) {
+        validateContext(message.context);
+        if (!message.nativeMessageId || message.nativeMessageId.length > 1024)
+          throw new Error("muse_history_message_identity");
+        if (!active) observerProtectedAssistantIds.add(message.nativeMessageId);
+        else if (active.id !== message.context.providerTurnId) {
+          historicalContexts.set(message.nativeMessageId, message.context);
+          ownedDeliveryKeys.set(message.nativeMessageId, message.deliveryKey);
+          if (message.frozen) frozenMessageIds.add(message.nativeMessageId);
+        }
+      }
+    },
+    unknownAssistantIdentity(frame: MuseAgentNativeEvent) {
+      if (
+        ![
+          "message.assistant",
+          "delta.message_start",
+          "delta.text_append",
+          "delta.message_done",
+          "delta.presentation",
+        ].includes(frame.event)
+      )
+        return;
+      const decoded = decodePayload(frame.payload);
+      if (decoded._tag === "None") return;
+      const payload = decoded.value;
+      if (
+        payload.session_id !== input.sessionId ||
+        payload.stream_lane === "subagent" ||
+        payload.transcript_surface === "subagent"
+      )
+        return;
+      const nativeId =
+        frame.event === "delta.text_append"
+          ? (payload.parent_message_id ?? payload.message_id)
+          : frame.event === "delta.presentation"
+            ? (payload.host_message_id ?? payload.message_id)
+            : payload.message_id;
+      if (
+        !nativeId ||
+        nativeId.length > 1024 ||
+        ownedDeliveryKeys.has(nativeId) ||
+        observerProtectedAssistantIds.has(nativeId)
+      )
+        return;
+      if (!active && payload.reply_to_message_id && ownedUserIds.has(payload.reply_to_message_id)) {
+        observerProtectedAssistantIds.add(nativeId);
+        return;
+      }
+      return nativeId;
+    },
     /** Only server-imported metadata enters here; native JSON cannot supply T3 attachment IDs. */
     attach(
       nativeId: string,
