@@ -241,8 +241,8 @@ function ProfileDocuments({
     return <p className="py-4 text-sm text-muted-foreground">Muse files are not available here.</p>;
   }
   return (
-    <section className="grid gap-3">
-      <h3 className="text-sm font-medium text-foreground">Files</h3>
+    <section className="grid gap-3 rounded-2xl bg-muted/50 p-4">
+      <h3 className="text-base font-semibold text-foreground">Files</h3>
       <div role="group" aria-label="Muse file" className="flex gap-1">
         {DOCUMENTS.map((item) => (
           <Button

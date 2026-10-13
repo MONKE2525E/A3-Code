@@ -18,6 +18,8 @@ import {
   ChevronRightIcon,
   FingerprintIcon,
   ListIcon,
+  MessageSquareIcon,
+  PencilIcon,
   SettingsIcon,
   ShieldCheckIcon,
   SparklesIcon,
@@ -153,10 +155,19 @@ function FeatureState<T>({
   );
 }
 
-function Row({ children }: { readonly children: ReactNode }) {
+/** A list row: a rounded icon tile, then the content. Matches the original Muse app's lists. */
+function Row({ children, icon }: { readonly children: ReactNode; readonly icon?: ReactNode }) {
   return (
-    <li className="flex min-w-0 flex-wrap items-start justify-between gap-2 rounded-lg border px-3 py-2.5">
-      {children}
+    <li className="flex min-w-0 items-start gap-3 rounded-xl px-1 py-2">
+      <span
+        aria-hidden="true"
+        className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground [&_svg]:size-4"
+      >
+        {icon ?? <SparklesIcon />}
+      </span>
+      <div className="flex min-w-0 flex-1 flex-wrap items-start justify-between gap-2">
+        {children}
+      </div>
     </li>
   );
 }
@@ -366,14 +377,14 @@ function ConversationRow({
   const actions = resolveMuseSessionActions(session);
   const title = museSessionTitle(session);
   return (
-    <Row>
+    <Row icon={<MessageSquareIcon />}>
       <div className="grid min-w-0 flex-1 gap-0.5">
         <span className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-sm font-medium text-foreground">{title}</span>
+          <span className="truncate text-sm font-semibold text-foreground">{title}</span>
           {actions.stateLabel ? <Badge variant="outline">{actions.stateLabel}</Badge> : null}
         </span>
         {session.snippet && session.title ? (
-          <span className="line-clamp-1 text-xs text-muted-foreground">{session.snippet}</span>
+          <span className="line-clamp-2 text-sm text-muted-foreground">{session.snippet}</span>
         ) : null}
         {session.canSendMessages === false ? (
           <span className="text-xs text-muted-foreground">
@@ -441,18 +452,21 @@ function ConversationsSection({
         providerInstanceId={providerInstanceId}
         canWrite={canWrite}
       />
-      <div role="group" aria-label="Conversation list" className="flex gap-1">
-        {(["active", "archived"] as const).map((option) => (
-          <Button
-            key={option}
-            size="sm"
-            variant={view === option ? "secondary" : "ghost-muted"}
-            aria-pressed={view === option}
-            onClick={() => setView(option)}
-          >
-            {option === "active" ? "Active" : "Archived"}
-          </Button>
-        ))}
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-base font-semibold text-foreground">Conversations</h3>
+        <div role="group" aria-label="Conversation list" className="flex gap-1">
+          {(["active", "archived"] as const).map((option) => (
+            <Button
+              key={option}
+              size="sm"
+              variant={view === option ? "secondary" : "ghost-muted"}
+              aria-pressed={view === option}
+              onClick={() => setView(option)}
+            >
+              {option === "active" ? "Active" : "Archived"}
+            </Button>
+          ))}
+        </div>
       </div>
       {error ? (
         <p role="alert" className="text-xs text-destructive">
@@ -468,7 +482,7 @@ function ConversationsSection({
         }
       >
         {(items) => (
-          <ul className="grid gap-2">
+          <ul className="grid gap-1">
             {items.map((session) => (
               <ConversationRow
                 key={session.sessionId}
@@ -644,14 +658,14 @@ function MuseAgentFeaturesBody({
   let body: ReactNode;
   if (detail === "computer") {
     body = (
-      <div className="flex flex-col gap-4 px-6 pb-6">
+      <div className="flex flex-col gap-4 px-5 pb-6">
         <BackToProfile onBack={() => requestLeave({ kind: "go", tab: "profile", detail: null })} />
         <MuseAgentComputerSection {...target} canWrite={canWrite} />
       </div>
     );
   } else if (detail !== null) {
     body = (
-      <div className="flex flex-col gap-4 px-6 pb-6">
+      <div className="flex flex-col gap-4 px-5 pb-6">
         <BackToProfile onBack={() => requestLeave({ kind: "go", tab: "profile", detail: null })} />
         {panelSupport(detail) === "unavailable" ? (
           unavailable
@@ -673,20 +687,33 @@ function MuseAgentFeaturesBody({
     );
   } else if (tab === "approvals") {
     body = (
-      <p role="status" className="px-6 py-10 text-center text-sm text-muted-foreground">
-        Muse hasn't shared its approval history with T3 yet.
-      </p>
+      <div className="grid gap-3 px-5 pb-6">
+        <h3 className="text-base font-semibold text-foreground">Approvals history</h3>
+        <div className="flex flex-col items-center gap-3 rounded-2xl bg-muted/50 px-6 py-10 text-center">
+          <span
+            aria-hidden="true"
+            className="flex size-10 items-center justify-center rounded-xl bg-muted text-muted-foreground"
+          >
+            <ShieldCheckIcon className="size-4" />
+          </span>
+          <p role="status" className="text-sm text-muted-foreground">
+            Muse hasn't shared its approval history with T3 yet.
+          </p>
+        </div>
+      </div>
     );
   } else if (tab === "activity") {
     body =
       panelSupport(PANEL_FEATURE.activity) === "unavailable" ? (
         unavailable
       ) : (
-        <ConversationsSection {...target} canWrite={canWrite} />
+        <div className="px-5 pb-6">
+          <ConversationsSection {...target} canWrite={canWrite} />
+        </div>
       );
   } else {
     body = (
-      <div className="flex flex-col gap-6 px-6 pb-6">
+      <div className="flex flex-col gap-6 px-5 pb-6">
         {panelSupport(PANEL_FEATURE.profile) === "unavailable" ? (
           unavailable
         ) : (
@@ -697,21 +724,21 @@ function MuseAgentFeaturesBody({
             onDirtyChange={setProfileDirty}
           />
         )}
-        <ul className="flex flex-col gap-px border-t pt-4">
+        <ul className="flex flex-col gap-1">
           {MUSE_ABILITIES.map((item) => (
             <li key={item.id}>
               <button
                 type="button"
-                className="flex w-full items-center gap-3 rounded-md px-2 py-2.5 text-left hover:bg-accent"
+                className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                 onClick={() => requestLeave({ kind: "go", tab: "profile", detail: item.id })}
               >
                 <span className="min-w-0 flex-1">
-                  <span className="block text-sm font-medium">{item.label}</span>
+                  <span className="block text-sm font-semibold">{item.label}</span>
                   <span className="block truncate text-xs text-muted-foreground">
                     {item.description}
                   </span>
                 </span>
-                <ChevronRightIcon className="size-4 text-muted-foreground" />
+                <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground" />
               </button>
             </li>
           ))}
@@ -722,7 +749,7 @@ function MuseAgentFeaturesBody({
 
   return (
     <>
-      <div className="flex flex-col items-center gap-2 px-6 pt-8 pb-6">
+      <div className="flex flex-col items-center gap-1 px-5 pt-4 pb-5">
         <div className="relative w-full">
           <Tooltip>
             <TooltipTrigger
@@ -748,21 +775,39 @@ function MuseAgentFeaturesBody({
             <TooltipPopup side="bottom">Muse's computer</TooltipPopup>
           </Tooltip>
         </div>
-        <MuseAgentAvatar
-          name={agentName}
-          imageUrl={avatar.imageUrl}
-          videoUrl={avatar.videoUrl}
-          size="2xl"
-        />
-        <p className="text-lg font-semibold">{agentName}</p>
-        <p className="flex items-center gap-1 text-sm text-success">
+        <div className="relative mt-2 mb-2">
+          <MuseAgentAvatar
+            name={agentName}
+            imageUrl={avatar.imageUrl}
+            videoUrl={avatar.videoUrl}
+            size="2xl"
+          />
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="icon-xs"
+                  variant="secondary"
+                  aria-label="Edit Muse's profile"
+                  className="absolute right-0 bottom-1"
+                  onClick={() => requestLeave({ kind: "go", tab: "profile", detail: null })}
+                />
+              }
+            >
+              <PencilIcon />
+            </TooltipTrigger>
+            <TooltipPopup side="bottom">Edit profile</TooltipPopup>
+          </Tooltip>
+        </div>
+        <p className="text-xl font-semibold">{agentName}</p>
+        <p className="flex items-center gap-1.5 text-sm text-success">
           <ZapIcon className="size-3.5 fill-current" /> Connected
         </p>
       </div>
       <div
         role="tablist"
         aria-label="Muse features"
-        className="mx-6 mb-4 flex rounded-full bg-muted p-1"
+        className="mx-5 mb-5 flex gap-1 rounded-full bg-muted p-1"
       >
         {MUSE_PANEL_TABS.map((item) => {
           const Icon = item.icon;
@@ -777,7 +822,7 @@ function MuseAgentFeaturesBody({
                     aria-selected={selected}
                     aria-label={item.label}
                     className={cn(
-                      "flex flex-1 items-center justify-center rounded-full py-2 transition-colors",
+                      "flex flex-1 items-center justify-center rounded-full py-2 transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
                       selected
                         ? "bg-background text-foreground shadow-sm"
                         : "text-muted-foreground hover:text-foreground",
