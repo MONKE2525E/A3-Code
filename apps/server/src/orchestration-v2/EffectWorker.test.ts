@@ -109,6 +109,7 @@ function layerExecutorFor(input: {
         open: () => Effect.die("unused open"),
         get: () => Effect.succeed(Option.none()),
         close: () => Effect.void,
+        closeNativeDeliverySession: () => Effect.succeed(false),
         closeInstance: () => Effect.void,
         release: () => record("release"),
         detach: () => record("detach"),

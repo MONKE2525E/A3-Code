@@ -34,7 +34,10 @@ function productionTypeScriptFiles(directory: string): ReadonlyArray<string> {
   return NodeFS.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = NodePath.join(directory, entry.name);
     if (entry.isDirectory()) return productionTypeScriptFiles(path);
-    return entry.isFile() && entry.name.endsWith(".ts") && !entry.name.includes(".test.")
+    return entry.isFile() &&
+      entry.name.endsWith(".ts") &&
+      !entry.name.includes(".test.") &&
+      !entry.name.endsWith(".testkit.ts")
       ? [path]
       : [];
   });

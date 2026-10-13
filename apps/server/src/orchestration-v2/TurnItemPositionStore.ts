@@ -1,4 +1,10 @@
-import { OrchestrationV2TurnItem, RunId, ThreadId, TurnItemId } from "@t3tools/contracts";
+import {
+  OrchestrationV2TurnItem,
+  RunId,
+  ThreadId,
+  TurnItemId,
+  nativeAgentSourceForDriver,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -24,6 +30,7 @@ export interface TurnItemPositionStoreV2Shape {
     readonly runId: RunId | null;
     readonly runOrdinal?: number;
     readonly advanceNativePosition?: boolean;
+    readonly nativeSequence?: number;
   }) => Effect.Effect<number, TurnItemPositionStoreError>;
   readonly normalize: (
     item: OrchestrationV2TurnItem,
@@ -47,6 +54,7 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
       runId,
       runOrdinal: suppliedRunOrdinal,
       advanceNativePosition = false,
+      nativeSequence,
     }) =>
       Effect.gen(function* () {
         const runRows =
@@ -66,14 +74,17 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
           SELECT
             ${threadId},
             ${turnItemId},
-            COALESCE(MAX(ordinal), ${lowerBound}) + 1
+            COALESCE(${nativeSequence === undefined ? null : lowerBound + nativeSequence + 1},
+              COALESCE(MAX(ordinal), ${lowerBound}) + 1)
           FROM orchestration_v2_turn_item_positions
           WHERE thread_id = ${threadId}
             AND ordinal >= ${lowerBound}
             AND ordinal <= ${upperBound}
           ON CONFLICT(thread_id, turn_item_id) DO UPDATE SET ordinal = excluded.ordinal
-          WHERE ${advanceNativePosition ? 1 : 0} = 1
-            AND orchestration_v2_turn_item_positions.ordinal < ${lowerBound}
+          WHERE (${advanceNativePosition ? 1 : 0} = 1
+            AND orchestration_v2_turn_item_positions.ordinal < ${lowerBound})
+            OR (${nativeSequence === undefined ? 0 : 1} = 1
+              AND orchestration_v2_turn_item_positions.ordinal BETWEEN ${lowerBound} AND ${upperBound})
         `;
         const rows = yield* sql<{ readonly ordinal: number }>`
           SELECT ordinal
@@ -102,14 +113,14 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
       allocate,
       normalize: (item, runOrdinal) =>
         Effect.gen(function* () {
-          const nativeGrokMessage =
-            item.runId === null &&
-            item.nativeItemRef?.driver === "grok-bot" &&
+          const nativeMessage =
+            item.nativeItemRef?.driver !== undefined &&
+            nativeAgentSourceForDriver(item.nativeItemRef.driver) !== undefined &&
             (item.type === "user_message" || item.type === "assistant_message");
           // Native phone/Teach messages have no T3 run. Put them after the preceding
           // managed run instead of the pre-run history bucket, including on replay.
           const precedingRuns =
-            nativeGrokMessage && item.startedAt !== null
+            nativeMessage && item.runId === null && item.startedAt !== null
               ? yield* sql<{ readonly ordinal: number }>`
                   SELECT ordinal FROM orchestration_v2_projection_runs
                   WHERE thread_id = ${item.threadId}
@@ -118,12 +129,25 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
                 `
               : [];
           const nativeRunOrdinal = runOrdinal ?? precedingRuns[0]?.ordinal;
+          const nativeSequence =
+            item.runId === null &&
+            item.nativeItemRef?.driver === "muse-agent" &&
+            nativeMessage &&
+            item.canonicalNativeSequence !== undefined &&
+            Number.isSafeInteger(item.canonicalNativeSequence) &&
+            item.canonicalNativeSequence >= 0 &&
+            item.canonicalNativeSequence < 999_999
+              ? item.canonicalNativeSequence
+              : undefined;
           const ordinal = yield* allocate({
             threadId: item.threadId,
             turnItemId: item.id,
             runId: item.runId,
             ...(nativeRunOrdinal === undefined ? {} : { runOrdinal: nativeRunOrdinal }),
-            ...(nativeGrokMessage ? { advanceNativePosition: true } : {}),
+            ...(nativeSequence === undefined ? {} : { nativeSequence }),
+            ...(nativeMessage && (item.runId === null || item.nativeItemRef?.strength === "strong")
+              ? { advanceNativePosition: true }
+              : {}),
           });
           return item.ordinal === ordinal ? item : { ...item, ordinal };
         }).pipe(

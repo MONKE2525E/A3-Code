@@ -272,6 +272,7 @@ it.effect(
               providerSessionId === oldSessionId ? Option.some(runtime) : Option.none(),
             ),
           close: () => Effect.void,
+          closeNativeDeliverySession: () => Effect.succeed(false),
           closeInstance: () => Effect.void,
           release: () => Effect.void,
           detach: () => Effect.void,
