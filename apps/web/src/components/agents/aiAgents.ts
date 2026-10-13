@@ -1,3 +1,10 @@
+import {
+  type AgentStatusDot,
+  type AgentUnreadThreadShell,
+  hasUnseenAssistantMessage,
+  resolveAgentStatusDot,
+} from "./agentStatusDot";
+
 /** Shared vocabulary for the AI Agents sidebar section, which lists Grok Bots and native Muse. */
 export const AI_AGENTS_SECTION_LABEL = "AI Agents";
 
@@ -175,6 +182,20 @@ export function pickMuseAvatarVideo(
   if (!variants) return null;
   const active = working ? (variants.working ?? variants.talk) : undefined;
   return active ?? variants.idle ?? variants.default ?? Object.values(variants)[0] ?? null;
+}
+
+/**
+ * Muse's sidebar dot, under the same rule as Grok Bots: green while its run is active, blue for a
+ * reply the user has not opened. Without a thread there is nothing to be unread.
+ */
+export function resolveMuseAgentStatusDot(input: {
+  readonly active: boolean;
+  readonly thread: AgentUnreadThreadShell | null;
+  readonly localVisitedAt: string | undefined;
+}): AgentStatusDot | null {
+  const unread =
+    input.thread !== null && hasUnseenAssistantMessage(input.thread, input.localVisitedAt);
+  return resolveAgentStatusDot({ active: input.active, unread });
 }
 
 /** Route search for opening a source-aware agent chat; Grok keeps its `/grok-bots/$botId` route. */

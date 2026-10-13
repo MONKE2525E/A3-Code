@@ -1,10 +1,14 @@
+import { DateTime } from "effect";
 import { describe, expect, it } from "vite-plus/test";
+
+import type { AgentUnreadThreadShell } from "./agentStatusDot";
 
 import {
   findCachedMuseAgentThread,
   pickMuseAvatarVideo,
   resolveMuseAgentNotice,
   resolveMuseAgentSidebarState,
+  resolveMuseAgentStatusDot,
   resolveMuseAvatarPlayback,
 } from "./aiAgents";
 
@@ -166,5 +170,52 @@ describe("resolveMuseAvatarPlayback", () => {
       expect(resolveMuseAvatarPlayback({ ...all, [key]: false })).toBe("parked");
     }
     expect(resolveMuseAvatarPlayback({ ...all, reducedMotion: true })).toBe("parked");
+  });
+});
+
+describe("resolveMuseAgentStatusDot", () => {
+  // A pre-tracking server reports no lastVisitedAt, so the browser's watermark decides.
+  const reply: AgentUnreadThreadShell = {
+    archivedAt: null,
+    latestVisibleMessage: {
+      createdAt: DateTime.makeUnsafe("2026-01-01T00:00:02Z"),
+      updatedAt: DateTime.makeUnsafe("2026-01-01T00:00:02Z"),
+    },
+  } as AgentUnreadThreadShell;
+
+  it("shows no dot without a thread, but still shows active while a run is in flight", () => {
+    expect(
+      resolveMuseAgentStatusDot({ active: false, thread: null, localVisitedAt: undefined }),
+    ).toBeNull();
+    expect(
+      resolveMuseAgentStatusDot({ active: true, thread: null, localVisitedAt: undefined }),
+    ).toBe("active");
+  });
+
+  it("lets an active run win over an unread reply", () => {
+    expect(
+      resolveMuseAgentStatusDot({
+        active: true,
+        thread: reply,
+        localVisitedAt: "2026-01-01T00:00:01Z",
+      }),
+    ).toBe("active");
+  });
+
+  it("marks a reply newer than the last local visit as unread, and clears once visited", () => {
+    expect(
+      resolveMuseAgentStatusDot({
+        active: false,
+        thread: reply,
+        localVisitedAt: "2026-01-01T00:00:01Z",
+      }),
+    ).toBe("unread");
+    expect(
+      resolveMuseAgentStatusDot({
+        active: false,
+        thread: reply,
+        localVisitedAt: "2026-01-01T00:00:03Z",
+      }),
+    ).toBeNull();
   });
 });

@@ -1,15 +1,17 @@
 import { useAtomValue } from "@effect/atom-react";
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { type EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useCallback, useMemo, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import { useSidebar } from "~/components/ui/sidebar";
+import { useLocalStorage } from "~/hooks/useLocalStorage";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import {
   museAgentOpenThread,
@@ -21,10 +23,16 @@ import {
 import { useEnvironmentQuery } from "~/state/query";
 import { environmentThreadShells } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { useUiStateStore } from "~/uiStateStore";
 import { buildThreadRouteParams } from "~/threadRoutes";
 
-import { findCachedMuseAgentThread, resolveMuseAgentSidebarState } from "./aiAgents";
-import { MuseAgentSetupNotice, MuseAgentSidebarRow } from "./MuseAgentSidebarRow";
+import { AgentPinnedTile, AgentRosterNotice, AgentRosterRow, AgentRowMenu } from "./AgentRoster";
+import {
+  findCachedMuseAgentThread,
+  resolveMuseAgentSidebarState,
+  resolveMuseAgentStatusDot,
+} from "./aiAgents";
+import { MuseAgentAvatar } from "./MuseAgentAvatar";
 import { useMuseAgentAvatar } from "./useMuseAgentAvatar";
 
 const ACTIVE_RUN_STATUSES: ReadonlySet<string> = new Set([
@@ -35,14 +43,18 @@ const ACTIVE_RUN_STATUSES: ReadonlySet<string> = new Set([
   "waiting",
 ]);
 
+const MUSE_PINNED_STORAGE_KEY = "t3code:muse-agent-pinned";
+
 /**
  * Native Muse inside the AI Agents section. Detection is automatic: nothing renders until Muse
  * is installed, then it guides sign-in or one-click enable, then shows the personal agent row.
  */
 export function MuseAgentSidebarSection({
   environmentId,
+  onOpenSettings,
 }: {
   readonly environmentId: EnvironmentId;
+  readonly onOpenSettings: () => void;
 }) {
   const status = useEnvironmentQuery(museAgentStatusQuery({ environmentId, input: {} }));
   const state = resolveMuseAgentSidebarState({ status: status.data, error: status.error });
@@ -64,11 +76,16 @@ export function MuseAgentSidebarSection({
 
   if (state.kind === "hidden") return null;
   if (state.kind === "setup") {
-    return (
-      <MuseAgentSetupNotice
-        notice={state.notice}
+    return state.notice.actionLabel ? (
+      <AgentRosterNotice
+        message={state.notice.message}
+        actionLabel={state.notice.actionLabel}
         onAction={() => refreshMuseAgent(appAtomRegistry, environmentId)}
       />
+    ) : (
+      <p className="px-2 py-2 text-xs leading-4.5 text-sidebar-muted-foreground">
+        {state.notice.message}
+      </p>
     );
   }
   if (state.kind === "enable") {
@@ -107,20 +124,29 @@ export function MuseAgentSidebarSection({
       </div>
     );
   }
-  return <MuseAgentRosterRow environmentId={environmentId} instanceId={state.instanceId} />;
+  return (
+    <MuseAgentRoster
+      environmentId={environmentId}
+      instanceId={state.instanceId}
+      onOpenSettings={onOpenSettings}
+    />
+  );
 }
 
-function MuseAgentRosterRow({
+function MuseAgentRoster({
   environmentId,
   instanceId,
+  onOpenSettings,
 }: {
   readonly environmentId: EnvironmentId;
   readonly instanceId: string;
+  readonly onOpenSettings: () => void;
 }) {
   const navigate = useNavigate();
   const { isMobile, setOpenMobile } = useSidebar();
   const profile = useEnvironmentQuery(museAgentProfileQuery({ environmentId, input: {} }));
   const threads = useAtomValue(environmentThreadShells.environmentThreadsAtom(environmentId));
+  const localLastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById);
   const routeThreadId = useParams({ strict: false, select: (params) => params.threadId ?? null });
   const routeEnvironmentId = useParams({
     strict: false,
@@ -128,16 +154,18 @@ function MuseAgentRosterRow({
   });
   const openThread = useAtomCommand(museAgentOpenThread, { reportFailure: false });
   const canOpen = useAtomValue(museAgentOpenThread.permissionAtom(environmentId));
+  // Pinning is a browser-local layout choice; Muse has one personal agent per machine.
+  const [pinned, setPinned] = useLocalStorage(MUSE_PINNED_STORAGE_KEY, false, Schema.Boolean);
+
+  const thread = useMemo(
+    () => findCachedMuseAgentThread(threads, instanceId),
+    [instanceId, threads],
+  );
 
   const selected = useMemo(() => {
     if (routeThreadId === null || routeEnvironmentId !== environmentId) return false;
-    const thread = threads.find((entry) => entry.id === routeThreadId);
-    return (
-      thread !== undefined &&
-      thread.id.startsWith("muse-agent:") &&
-      thread.providerInstanceId === instanceId
-    );
-  }, [environmentId, instanceId, routeEnvironmentId, routeThreadId, threads]);
+    return thread !== null && thread.id === routeThreadId;
+  }, [environmentId, routeEnvironmentId, routeThreadId, thread]);
 
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
@@ -171,25 +199,80 @@ function MuseAgentRosterRow({
   }, [environmentId, instanceId, isMobile, navigate, opening, openThread, setOpenMobile]);
 
   // Working comes from the canonical thread's run, never from the selected route.
-  const working = useMemo(() => {
-    const shell = findCachedMuseAgentThread(threads, instanceId);
-    return shell !== null && shell.status !== "idle" && ACTIVE_RUN_STATUSES.has(shell.status);
-  }, [instanceId, threads]);
+  const working =
+    thread !== null && thread.status !== "idle" && ACTIVE_RUN_STATUSES.has(thread.status);
+  const statusDot = resolveMuseAgentStatusDot({
+    active: working,
+    thread,
+    localVisitedAt:
+      thread === null
+        ? undefined
+        : localLastVisitedAt[scopedThreadKey(scopeThreadRef(environmentId, thread.id))],
+  });
 
   const data = profile.data;
+  const name = data?.name?.trim() || "Muse";
   const avatar = useMuseAgentAvatar(environmentId, data, { loadVideo: working });
-  return (
-    <MuseAgentSidebarRow
-      name={data?.name?.trim() || "Muse"}
+  const errorFooter = openError ? (
+    <div className="relative z-10 flex items-center gap-2 pr-2 pb-2 pl-(--sidebar-row-content-inset)">
+      <p role="alert" className="min-w-0 flex-1 text-xs leading-4.5 text-destructive">
+        {openError}
+      </p>
+      <Button size="xs" variant="outline" onClick={() => void open()}>
+        Retry
+      </Button>
+    </div>
+  ) : null;
+  const menu = (variant: "row" | "tile") => (
+    <AgentRowMenu
+      name={name}
+      variant={variant}
+      pinned={pinned}
+      canUpdate
+      onTogglePin={() => setPinned(!pinned)}
+      onEdit={onOpenSettings}
+    />
+  );
+  const avatarNode = (size: "lg" | "xl") => (
+    <MuseAgentAvatar
+      name={name}
       imageUrl={avatar.imageUrl}
       videoUrl={avatar.videoUrl}
       active={working}
-      selected={selected}
-      disabled={!canOpen}
-      pending={opening}
-      error={openError}
-      onOpen={() => void open()}
+      size={size}
     />
+  );
+
+  if (pinned) {
+    return (
+      <ul className="grid grid-cols-[repeat(auto-fit,minmax(80px,1fr))] gap-x-1 gap-y-3 py-1.5">
+        <li>
+          <AgentPinnedTile
+            name={name}
+            avatar={avatarNode("xl")}
+            selected={selected}
+            statusDot={statusDot}
+            menu={menu("tile")}
+            onOpen={() => void open()}
+          />
+        </li>
+      </ul>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-px">
+      <AgentRosterRow
+        name={name}
+        avatar={avatarNode("lg")}
+        selected={selected}
+        statusDot={statusDot}
+        disabled={!canOpen}
+        pending={opening}
+        menu={menu("row")}
+        footer={errorFooter}
+        onOpen={() => void open()}
+      />
+    </div>
   );
 }
 
