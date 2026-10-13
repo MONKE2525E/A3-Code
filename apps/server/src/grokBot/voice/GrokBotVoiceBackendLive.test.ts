@@ -5,6 +5,29 @@ import * as Native from "../GrokBotNativeService.ts";
 import * as BackendLive from "./GrokBotVoiceBackendLive.ts";
 import { GrokBotVoiceBackend } from "./GrokBotVoiceService.ts";
 
+it.effect("distinguishes an unreadable account cache from an actual sign-out", () =>
+  Effect.gen(function* () {
+    for (const [error, reason] of [
+      [new Native.NativeReadError({ stage: "session" }), "unavailable"],
+      [new Native.NativeSignedOutError({}), "account_unavailable"],
+    ] as const) {
+      const failed = yield* Effect.gen(function* () {
+        return yield* (yield* GrokBotVoiceBackend).accountBinding;
+      }).pipe(
+        Effect.flip,
+        Effect.provide(
+          BackendLive.layer.pipe(
+            Layer.provide(
+              Layer.mock(Native.GrokBotNativeService)({ accountBinding: Effect.fail(error) }),
+            ),
+          ),
+        ),
+      );
+      assert.equal(failed.reason, reason);
+    }
+  }),
+);
+
 const line = {
   theyJustTalked: true,
   newsOwed: false,

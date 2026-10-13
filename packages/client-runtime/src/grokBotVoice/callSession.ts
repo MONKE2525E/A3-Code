@@ -98,7 +98,7 @@ const failureSpeech = (output: string): string | null => {
     let result = JSON.parse(output);
     if (typeof result?.output === "string") result = JSON.parse(result.output);
     return typeof result?.error === "string"
-      ? `The T3 operation failed. ${result.error.slice(0, 500)}`
+      ? `The T3 operation failed. ${(typeof result.message === "string" ? result.message : result.error).slice(0, 500)}`
       : null;
   } catch {
     return null;
@@ -108,11 +108,16 @@ const failureSpeech = (output: string): string | null => {
 const completionSpeech = (output: string): string | null => {
   try {
     const result = JSON.parse(output);
-    if (result?.status !== "landed") return null;
+    if (result?.status !== "landed" && result?.status !== "approval_required") return null;
     const name =
       typeof result.title === "string" && result.title.trim()
         ? result.title.trim().slice(0, 100)
         : "That task";
+    if (result.status === "approval_required") {
+      const request = Array.isArray(result.approvals) ? result.approvals[0] : undefined;
+      const title = typeof request?.title === "string" ? request.title.trim().slice(0, 200) : "";
+      return `${name} needs your approval${title ? `: ${title}` : ""}. Say approve or decline.`;
+    }
     if (result.runStatus === "interrupted")
       return `${name} was interrupted. Check its result in T3.`;
     if (result.runStatus === "cancelled") return `${name} was cancelled.`;
@@ -274,7 +279,14 @@ export function createVoiceCallSession(input: VoiceCallSessionInput) {
     requestResponse(
       "Briefly tell the caller the newly delivered T3 work result now. Say clearly if it failed or was cancelled. Do not stay silent, launch another task, or claim failed work succeeded.",
       ids.map((id) => failureSpeech(work.get(id)!)).find((message) => message !== null) ??
-        (ids.length > 1 && ids.every((id) => completionSpeech(work.get(id)!) !== null)
+        (ids.length > 1 &&
+        ids.every((id) => {
+          try {
+            return JSON.parse(work.get(id)!).status === "landed";
+          } catch {
+            return false;
+          }
+        })
           ? `${ids.length} tasks finished. Their results are ready in T3.`
           : (ids.map((id) => completionSpeech(work.get(id)!)).find((message) => message !== null) ??
             null)),

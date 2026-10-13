@@ -69,6 +69,9 @@ interface ActiveCall {
   assistantTurns: Map<string, VoiceTurn>;
   pendingWork: Set<string>;
   watchingWork: Set<string>;
+  seenApprovalIds: Set<string>;
+  workRetryTimers: Map<string, ReturnType<typeof setTimeout>>;
+  workRetryAttempts: Map<string, number>;
   chatAfterSequence: number | null;
   watchingChat: boolean;
   recoveryEpoch: number;
@@ -102,6 +105,8 @@ export function createGrokBotVoiceCall(options: {
   const release = (current: ActiveCall, ending: VoiceEndInput["ending"]) => {
     current.stopRecovery();
     current.pendingWork.clear();
+    for (const timer of current.workRetryTimers.values()) clearTimeout(timer);
+    current.workRetryTimers.clear();
     current.watchingWork.clear();
     current.chatAfterSequence = null;
     current.audio?.clear();
@@ -214,7 +219,7 @@ export function createGrokBotVoiceCall(options: {
           callId: current.callId,
           toolCallId: `wait:${requestToolCallId}`.slice(0, 256),
           name: "t3_task_progress",
-          input: { requestToolCallId },
+          input: { requestToolCallId, seenApprovalIds: [...current.seenApprovalIds] },
           line: {
             theyJustTalked: current.theyJustTalked,
             newsOwed: false,
@@ -227,6 +232,13 @@ export function createGrokBotVoiceCall(options: {
           result.kind !== "served" ||
           result.completion?.requestToolCallId !== requestToolCallId
         ) {
+          if (
+            typeof result.output === "object" &&
+            result.output !== null &&
+            "retryable" in result.output &&
+            result.output.retryable === true
+          )
+            throw new GrokBotVoiceError({ reason: "unavailable" });
           if (result.kind === "served") return;
           const message =
             "T3 could not retrieve this call's work result. Its status is unknown; ask for task_status before retrying.";
@@ -237,7 +249,31 @@ export function createGrokBotVoiceCall(options: {
           );
           return;
         }
-        if (result.completion.pending) continue;
+        current.workRetryAttempts.delete(requestToolCallId);
+        if (result.completion.pending) {
+          const output = result.output;
+          if (
+            typeof output === "object" &&
+            output !== null &&
+            "status" in output &&
+            output.status === "approval_required" &&
+            "approvals" in output &&
+            Array.isArray(output.approvals)
+          ) {
+            for (const approval of output.approvals) {
+              if (typeof approval?.requestId !== "string") continue;
+              current.seenApprovalIds.add(approval.requestId);
+              if (current.seenApprovalIds.size > 512)
+                current.seenApprovalIds.delete(current.seenApprovalIds.values().next().value!);
+              emit({ ...state, notice: "A delegated task needs your approval." });
+              current.session?.deliverWork(
+                `approval:${approval.requestId}`,
+                JSON.stringify({ ...output, approvals: [approval] }),
+              );
+            }
+          }
+          continue;
+        }
         const output =
           result.output !== null && typeof result.output === "object"
             ? (result.output as Record<string, unknown>)
@@ -264,8 +300,23 @@ export function createGrokBotVoiceCall(options: {
       if (!recoverable) current.pendingWork.delete(requestToolCallId);
       current.watchingWork.delete(requestToolCallId);
       // A replacement session may arrive before the rejected wait settles. Use that edge once.
-      if (recoverable && call === current && current.recoveryEpoch !== epoch)
-        void waitForWork(current, requestToolCallId);
+      if (recoverable && call === current) {
+        if (current.recoveryEpoch !== epoch) void waitForWork(current, requestToolCallId);
+        else {
+          const attempts = current.workRetryAttempts.get(requestToolCallId) ?? 0;
+          if (attempts < 5 && !current.workRetryTimers.has(requestToolCallId)) {
+            current.workRetryAttempts.set(requestToolCallId, attempts + 1);
+            const timer = setTimeout(
+              () => {
+                current.workRetryTimers.delete(requestToolCallId);
+                if (call === current) void waitForWork(current, requestToolCallId);
+              },
+              500 * 2 ** attempts,
+            );
+            current.workRetryTimers.set(requestToolCallId, timer);
+          }
+        }
+      }
     }
   };
 
@@ -398,6 +449,9 @@ export function createGrokBotVoiceCall(options: {
       assistantTurns: new Map(),
       pendingWork: new Set(),
       watchingWork: new Set(),
+      seenApprovalIds: new Set(),
+      workRetryTimers: new Map(),
+      workRetryAttempts: new Map(),
       chatAfterSequence: null,
       watchingChat: false,
       recoveryEpoch: 0,
@@ -574,6 +628,8 @@ function isAuthorityDenial(error: unknown): boolean {
 function isRecoverableRpcError(error: unknown): boolean {
   if (typeof error !== "object" || error === null || !("_tag" in error)) return false;
   if (error._tag === "ConnectionTransientError" || error._tag === "EnvironmentRpcUnavailableError")
+    return true;
+  if (error._tag === "GrokBotVoiceError" && "reason" in error && error.reason === "unavailable")
     return true;
   return (
     error._tag === "RpcClientError" &&

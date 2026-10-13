@@ -9,6 +9,7 @@ import {
   ProviderInstanceId,
   ProviderThreadId,
   ProviderTurnId,
+  RuntimeRequestId,
   ThreadId,
   TurnItemId,
   OrchestratorMcpDelegateTaskResult,
@@ -123,6 +124,7 @@ const setup = Effect.gen(function* () {
     readonly turn: ProviderAdapter.ProviderAdapterV2TurnInput;
     readonly events: Queue.Queue<ProviderAdapter.ProviderAdapterV2Event>;
   }> = [];
+  const approvalResponses: ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput[] = [];
   const adapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
     instanceId,
     driver,
@@ -189,7 +191,10 @@ const setup = Effect.gen(function* () {
             }),
           steerTurn: () => Effect.die("unused"),
           interruptTurn: () => Effect.void,
-          respondToRuntimeRequest: () => Effect.die("unused"),
+          respondToRuntimeRequest: (input) =>
+            Effect.sync(() => {
+              approvalResponses.push(input);
+            }),
           readThreadSnapshot: () => Effect.die("unused"),
           rollbackThread: () => Effect.die("unused"),
           forkThread: () => Effect.die("unused"),
@@ -375,6 +380,8 @@ const setup = Effect.gen(function* () {
     threads,
     turns,
     invoke,
+    watch,
+    approvalResponses,
     delegate,
     expectDenied,
     start,
@@ -383,6 +390,122 @@ const setup = Effect.gen(function* () {
     serviceScope,
   };
 }).pipe(Effect.provide(NodeServices.layer));
+
+it.effect("a live call posts one visible assistant message without starting a bot turn", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const h = yield* setup;
+      const scope = yield* h.service.acquireCallInvocation({ ...identity, access: "full-access" });
+      assert.equal((yield* h.service.capabilities(scope)).runtimeMode, "full-access");
+      const first = yield* h.service.postCallChat(scope, {
+        text: "Written call summary.",
+        clientRequestId: "post-chat",
+      });
+      const duplicate = yield* h.service.postCallChat(scope, {
+        text: "Written call summary.",
+        clientRequestId: "post-chat",
+      });
+      assert.deepEqual(first, duplicate);
+      const projection = yield* h.orchestrator.getThreadProjection(parentThreadId);
+      assert.equal(projection.messages.length, 1);
+      assert.equal(projection.messages[0]?.role, "assistant");
+      assert.equal(projection.messages[0]?.text, "Written call summary.");
+      assert.equal(projection.runs.length, 0);
+      assert.equal(h.turns.length, 0);
+      const readonly = yield* h.service.restrictCallInvocation(scope, "read-only");
+      assert.equal(
+        (yield* Effect.flip(
+          h.service.postCallChat(readonly, { text: "Denied", clientRequestId: "denied" }),
+        )).code,
+        "capability_denied",
+      );
+      yield* h.service.releaseCallInvocation(scope);
+      assert.equal(
+        (yield* Effect.flip(
+          h.service.postCallChat(scope, { text: "Ended", clientRequestId: "ended" }),
+        )).code,
+        "parent_not_active",
+      );
+    }),
+  ),
+);
+
+it.effect(
+  "a call observes and approves only its own pending request with explicit caller consent",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* setup;
+        const scope = yield* h.service.acquireCallInvocation(identity);
+        const task = yield* h.delegate(scope);
+        const child = yield* h.start(task);
+        const projection = yield* h.orchestrator.getThreadProjection(task.childThreadId);
+        const requestId = RuntimeRequestId.make("call-command-approval");
+        const wait = yield* h.service
+          .waitForTask(scope, task.taskId, 20_000, [])
+          .pipe(Effect.forkScoped);
+        const persisted = yield* h.watch(
+          (event) => event.type === "runtime-request.updated" && event.payload.id === requestId,
+        );
+        const now = yield* DateTime.now;
+        yield* Queue.offer(child.events, {
+          type: "runtime_request.updated",
+          driver,
+          runtimeRequest: {
+            id: requestId,
+            nodeId: child.turn.rootNodeId,
+            providerTurnId: projection.providerTurns[0]!.id,
+            nativeRequestRef: { driver, nativeId: "native-command-approval", strength: "strong" },
+            kind: "command",
+            status: "pending",
+            responseCapability: {
+              type: "live",
+              providerSessionId: child.turn.providerThread.providerSessionId!,
+            },
+            createdAt: now,
+            resolvedAt: null,
+          },
+        });
+        yield* Fiber.join(persisted);
+        const noticed = yield* Fiber.join(wait);
+        assert.equal(noticed.pendingApprovals?.[0]?.requestId, requestId);
+        assert.equal(noticed.waitTimedOut, false);
+        const request = {
+          taskId: task.taskId,
+          requestId,
+          decision: "accept" as const,
+          userConfirmed: false,
+          clientRequestId: "approve-command",
+        };
+        assert.equal(
+          (yield* Effect.flip(h.service.respondToCallApproval(scope, request))).code,
+          "capability_denied",
+        );
+        const other = yield* h.service.acquireCallInvocation({
+          ...identity,
+          callId: "another-call",
+          threadId: task.childThreadId,
+        });
+        assert.equal(
+          (yield* Effect.flip(
+            h.service.respondToCallApproval(other, { ...request, userConfirmed: true }),
+          )).code,
+          "task_not_found",
+        );
+        yield* h.service.respondToCallApproval(scope, { ...request, userConfirmed: true });
+        yield* h.service.respondToCallApproval(scope, { ...request, userConfirmed: true });
+        yield* h.worker.drain();
+        assert.equal(h.approvalResponses.length, 1);
+        assert.equal(h.approvalResponses[0]?.requestId, requestId);
+        assert.equal(h.approvalResponses[0]?.decision, "accept");
+        const resolved = yield* h.service.taskStatus(scope, task.taskId);
+        assert.deepEqual(resolved.pendingApprovals, []);
+        yield* h.finish(task);
+        const completed = yield* h.service.waitForTask(scope, task.taskId, 20_000, [requestId]);
+        assert.equal(completed.status, "completed");
+      }),
+    ),
+);
 
 it.effect("startup recovers an idle persisted call once without starting a provider", () =>
   Effect.scoped(
@@ -1032,6 +1155,7 @@ it.effect(
           status: "landed",
           runStatus: "completed",
           updates: ["Child result"],
+          title: "Inspect call authority",
         });
         assert.deepEqual(completion.completion, {
           requestToolCallId: "voice-tool",

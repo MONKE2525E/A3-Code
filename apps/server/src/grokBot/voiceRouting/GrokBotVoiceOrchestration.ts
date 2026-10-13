@@ -1,5 +1,6 @@
 import {
   NodeId,
+  RuntimeRequestId,
   OrchestratorMcpFailure,
   ThreadId,
   type GrokBotVoiceToolResult,
@@ -44,20 +45,59 @@ const names = [
   "delete_scheduled_task",
   "t3_project_list",
 ] as const;
-export const isTool = (name: string): name is (typeof names)[number] =>
-  names.some((candidate) => candidate === name);
+const postChatSchema = Schema.Struct({
+  text: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(120_000)),
+});
+const respondApprovalSchema = Schema.Struct({
+  taskId: Schema.String,
+  requestId: Schema.String,
+  decision: Schema.Literals(["accept", "decline"]),
+  userConfirmed: Schema.Boolean,
+});
+const decodePostChat = Schema.decodeUnknownEffect(postChatSchema);
+const decodeRespondApproval = Schema.decodeUnknownEffect(respondApprovalSchema);
+export const isTool = (
+  name: string,
+): name is (typeof names)[number] | "t3_post_call_message" | "t3_respond_call_approval" =>
+  names.some((candidate) => candidate === name) ||
+  name === "t3_post_call_message" ||
+  name === "t3_respond_call_approval";
 
 /** The actual MCP catalog schemas and descriptions, exposed as client-brokered realtime functions. */
-export const tools = names.map((name) => {
-  const tool = toolkit.tools[name];
-  const document = Schema.toJsonSchemaDocument(tool.parametersSchema);
-  return {
-    type: "function",
-    name,
-    description: tool.description ?? "",
-    parameters: { ...document.schema, $defs: document.definitions },
-  };
-});
+export const tools = [
+  ...names.map((name) => {
+    const tool = toolkit.tools[name];
+    const document = Schema.toJsonSchemaDocument(tool.parametersSchema);
+    return {
+      type: "function",
+      name,
+      description: tool.description ?? "",
+      parameters: { ...document.schema, $defs: document.definitions },
+    };
+  }),
+  ...[
+    {
+      name: "t3_post_call_message",
+      description:
+        "Post text directly into this bot's T3 chat when the caller asks for a written message. Does not start another agent turn. Do not send a user request to the bot itself with t3_thread_send.",
+      schema: postChatSchema,
+    },
+    {
+      name: "t3_respond_call_approval",
+      description:
+        "Approve or decline one pending request from a child delegated by this call, only after the caller explicitly tells you to. Use taskId and requestId from the approval notice. userConfirmed must reflect the caller's actual instruction. Never infer consent or approve all future requests.",
+      schema: respondApprovalSchema,
+    },
+  ].map(({ name, description, schema }) => {
+    const document = Schema.toJsonSchemaDocument(schema);
+    return {
+      type: "function",
+      name,
+      description,
+      parameters: { ...document.schema, $defs: document.definitions },
+    };
+  }),
+];
 const decodeRunTarget = Schema.decodeUnknownEffect(
   Schema.Struct({
     threadId: Schema.String,
@@ -83,7 +123,11 @@ export class GrokBotVoiceOrchestration extends Context.Service<
     ) => Effect.Effect<void>;
     readonly forget: (callId: string) => Effect.Effect<void>;
     readonly wait: (
-      input: CallIdentity & { readonly taskId: string; readonly access: "read" | "operate" },
+      input: CallIdentity & {
+        readonly taskId: string;
+        readonly access: "read" | "operate";
+        readonly seenApprovalIds?: readonly string[];
+      },
     ) => Effect.Effect<{
       readonly result: typeof GrokBotVoiceToolResult.Type;
       readonly pending: boolean;
@@ -167,7 +211,8 @@ const make = Effect.gen(function* () {
             botId: input.botId,
             callId: input.callId,
             threadId: ThreadId.make(input.canonicalThreadId),
-            access: "approval-required",
+            // The service clamps this to the canonical bot thread's configured mode.
+            access: "full-access",
           });
           if (calls.get(input.callId) !== entry) {
             yield* orchestrator.releaseCallInvocation(scope);
@@ -218,28 +263,61 @@ const make = Effect.gen(function* () {
     wait: (input) =>
       Effect.gen(function* () {
         const scope = yield* scopeFor(input);
-        const result = yield* orchestrator.waitForTask(scope, NodeId.make(input.taskId), 20_000);
+        const result = yield* orchestrator.waitForTask(
+          scope,
+          NodeId.make(input.taskId),
+          20_000,
+          input.seenApprovalIds,
+        );
         yield* scopeFor(input);
+        const approvals =
+          input.seenApprovalIds === undefined
+            ? []
+            : (result.pendingApprovals?.filter(
+                (request) => !input.seenApprovalIds!.includes(request.requestId),
+              ) ?? []);
         return {
           result: {
             kind: "served",
-            output: result.waitTimedOut
-              ? null
-              : {
-                  status: "landed",
-                  runStatus: result.status,
-                  ...(result.status === "failed"
-                    ? {
-                        error:
-                          "A delegated task from this call failed. Open its T3 thread for the error. That task has not been completed.",
-                      }
-                    : {}),
-                  updates: result.summary === null ? [] : [result.summary.slice(0, 16_000)],
-                },
+            output:
+              approvals.length > 0
+                ? {
+                    status: "approval_required",
+                    title: result.title,
+                    taskId: input.taskId,
+                    approvals,
+                  }
+                : result.waitTimedOut
+                  ? null
+                  : {
+                      status: "landed",
+                      title: result.title,
+                      runStatus: result.status,
+                      ...(result.status === "failed"
+                        ? {
+                            error:
+                              "A delegated task from this call failed. Open its T3 thread for the error. That task has not been completed.",
+                          }
+                        : {}),
+                      updates: result.summary === null ? [] : [result.summary.slice(0, 16_000)],
+                    },
           },
-          pending: result.waitTimedOut,
+          pending: result.waitTimedOut || approvals.length > 0,
         } as const;
       }).pipe(
+        Effect.catch((error) =>
+          Effect.succeed({
+            result: {
+              kind: "invalid_input" as const,
+              output: {
+                code: error.code,
+                retryable: error.code === "orchestration_error",
+                error: "T3 could not check this task's result. Its status is unknown.",
+              },
+            },
+            pending: false,
+          }),
+        ),
         Effect.catchCause(() =>
           Effect.succeed({
             result: {
@@ -261,6 +339,37 @@ const make = Effect.gen(function* () {
             result: { kind: "unknown_tool", output: { error: "unknown orchestration tool" } },
           } as const;
         const scope = yield* scopeFor(input);
+        if (input.name === "t3_post_call_message") {
+          const params = yield* decodePostChat(input.input);
+          const result = yield* orchestrator.postCallChat(scope, {
+            ...params,
+            clientRequestId: input.toolCallId,
+          });
+          return {
+            result: { kind: "served", output: { ...result, spoken: "Sent in chat." } },
+          } as const;
+        }
+        if (input.name === "t3_respond_call_approval") {
+          const params = yield* decodeRespondApproval(input.input);
+          const result = yield* orchestrator.respondToCallApproval(scope, {
+            ...params,
+            taskId: NodeId.make(params.taskId),
+            requestId: RuntimeRequestId.make(params.requestId),
+            clientRequestId: input.toolCallId,
+          });
+          return {
+            result: {
+              kind: "served",
+              output: {
+                ...result,
+                spoken:
+                  params.decision === "accept"
+                    ? "Approved that request."
+                    : "Declined that request.",
+              },
+            },
+          } as const;
+        }
         const params =
           typeof input.input === "object" && input.input !== null && !Array.isArray(input.input)
             ? input.input

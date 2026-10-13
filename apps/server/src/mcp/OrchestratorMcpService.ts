@@ -8,6 +8,7 @@ import {
   MessageId,
   type ModelSelection,
   NodeId,
+  RuntimeRequestId,
   TurnItemId,
   type OrchestrationV2Run,
   type OrchestrationV2Subagent,
@@ -155,7 +156,22 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     taskId: NodeId,
     timeoutMs: number,
+    seenApprovalIds?: readonly string[],
   ) => Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure>;
+  readonly postCallChat: (
+    scope: McpInvocationScope,
+    input: { text: string; clientRequestId: string },
+  ) => Effect.Effect<{ messageId: MessageId }, OrchestratorMcpFailure>;
+  readonly respondToCallApproval: (
+    scope: McpInvocationScope,
+    input: {
+      taskId: NodeId;
+      requestId: RuntimeRequestId;
+      decision: "accept" | "decline";
+      userConfirmed: boolean;
+      clientRequestId: string;
+    },
+  ) => Effect.Effect<{ resolved: true }, OrchestratorMcpFailure>;
   readonly capabilities: (
     scope: McpInvocationScope,
   ) => Effect.Effect<OrchestratorMcpCapabilitiesResult, OrchestratorMcpFailure>;
@@ -1620,7 +1636,14 @@ const make = Effect.gen(function* () {
       const childControls = yield* threadManagement
         .getThreadRecords(
           task.childThreadId,
-          ["runs", "messages", "contextTransfers", "subagents", "providerThreads"],
+          [
+            "runs",
+            "messages",
+            "contextTransfers",
+            "subagents",
+            "providerThreads",
+            ...(scope.call === undefined ? [] : (["runtimeRequests", "turnItems"] as const)),
+          ],
           { messageRoles: ["user"] },
         )
         .pipe(Effect.mapError(threadManagementFailure));
@@ -1726,6 +1749,31 @@ const make = Effect.gen(function* () {
           : null,
         latestTerminalResultContextTransferId: resultTransferForRun(terminalRun)?.id ?? null,
         waitTimedOut,
+        title: childProjection.thread.title,
+        ...(scope.call === undefined
+          ? {}
+          : {
+              pendingApprovals: childControls.runtimeRequests
+                .filter(
+                  (request) =>
+                    request.status === "pending" &&
+                    [
+                      "command",
+                      "file-read",
+                      "file-change",
+                      "permission",
+                      "mcp-elicitation",
+                    ].includes(request.kind),
+                )
+                .map((request) => ({
+                  requestId: request.id,
+                  title: (
+                    childControls.turnItems.find(
+                      (item) => item.type === "approval_request" && item.requestId === request.id,
+                    )?.title ?? `${request.kind} approval`
+                  ).slice(0, 500),
+                })),
+            }),
       } satisfies OrchestratorMcpDelegateTaskResult;
       if (
         acknowledgeTerminal &&
@@ -1766,7 +1814,12 @@ const make = Effect.gen(function* () {
 
   // Re-read the task only when an event on the parent or child thread can
   // change its status, instead of polling the projections every 50 ms.
-  const waitForTask = (scope: McpDelegationInvocationScope, taskId: NodeId, timeoutMs: number) =>
+  const waitForTask = (
+    scope: McpDelegationInvocationScope,
+    taskId: NodeId,
+    timeoutMs: number,
+    seenApprovalIds?: readonly string[],
+  ) =>
     Effect.gen(function* () {
       const streamError = (error: unknown) =>
         failure(
@@ -1779,10 +1832,21 @@ const make = Effect.gen(function* () {
         .getThreadEventSequence(delegationThreadId(scope))
         .pipe(Effect.mapError(streamError));
       const initial = yield* withCallAuthority(scope, readTask(scope, taskId, false, true));
-      if (isTerminalTaskStatus(initial.status)) return Option.some(initial);
+      const ready = (result: OrchestratorMcpDelegateTaskResult) =>
+        isTerminalTaskStatus(result.status) ||
+        (seenApprovalIds !== undefined &&
+          result.pendingApprovals?.some(
+            (request) => !seenApprovalIds.includes(request.requestId),
+          ) === true);
+      if (ready(initial)) return Option.some(initial);
       // One stream per event type, so transcript events never fill a buffer.
       const waiting = Stream.mergeAll(
-        TASK_WAKE_EVENTS.map(({ thread, eventType }) =>
+        [
+          ...TASK_WAKE_EVENTS,
+          ...(seenApprovalIds === undefined
+            ? []
+            : [{ thread: "child" as const, eventType: "runtime-request.updated" as const }]),
+        ].map(({ thread, eventType }) =>
           threadManagement.streamStoredEventsFrom({
             threadId: thread === "parent" ? delegationThreadId(scope) : initial.childThreadId,
             afterSequence,
@@ -1793,7 +1857,7 @@ const make = Effect.gen(function* () {
       ).pipe(
         Stream.mapError(streamError),
         Stream.mapEffect(() => withCallAuthority(scope, readTask(scope, taskId, false, true))),
-        Stream.filter((result) => isTerminalTaskStatus(result.status)),
+        Stream.filter(ready),
         Stream.runHead,
       );
       const entry = calls.get(scope);
@@ -1899,7 +1963,82 @@ const make = Effect.gen(function* () {
     releaseCallInvocation,
     restrictCallInvocation,
     validateCallInvocation,
-    waitForTask: (callerScope, taskId, timeoutMs) =>
+    postCallChat: (callerScope, input) =>
+      Effect.gen(function* () {
+        const scope = yield* requireDelegationScope(callerScope, "post-call-chat");
+        yield* assertCallMayObserveTasks(scope);
+        if (scope.call === undefined || scope.client?.access === "read-only")
+          return yield* failure(
+            "capability_denied",
+            "Only an authorized live call can post to its chat.",
+          );
+        yield* validateCallInvocation(scope);
+        const text = input.text.trim();
+        if (!text || text.length > 120_000)
+          return yield* failure(
+            "invalid_request",
+            "Chat text must be non-empty and within the message limit.",
+          );
+        const messageId = stableMessageId({ scope, requestKey: input.clientRequestId, index: 0 });
+        yield* threadManagement
+          .dispatch({
+            type: "call.chat-message.append",
+            commandId: stableCommandId({
+              scope,
+              requestKey: input.clientRequestId,
+              operation: "post-call-chat",
+            }),
+            threadId: delegationThreadId(scope),
+            parentNodeId: scope.call.parentNodeId,
+            authority: scope.call,
+            messageId,
+            text,
+          })
+          .pipe(Effect.mapError(threadManagementFailure));
+        return { messageId };
+      }),
+    respondToCallApproval: (callerScope, input) =>
+      Effect.gen(function* () {
+        const scope = yield* requireDelegationScope(callerScope, "respond-call-approval");
+        yield* assertCallMayObserveTasks(scope);
+        if (
+          scope.call === undefined ||
+          scope.client?.access === "read-only" ||
+          !input.userConfirmed
+        )
+          return yield* failure(
+            "capability_denied",
+            "A live call needs the caller's explicit approval instruction.",
+          );
+        yield* validateCallInvocation(scope);
+        const task = yield* readTask(scope, input.taskId);
+        const commandId = stableCommandId({
+          scope,
+          requestKey: input.clientRequestId,
+          operation: "respond-call-approval",
+        });
+        if (yield* threadManagement.hasReceipt(commandId)) return { resolved: true as const };
+        if (!task.pendingApprovals?.some((request) => request.requestId === input.requestId))
+          return yield* failure(
+            "invalid_request",
+            "That approval is not pending in this call's delegated task.",
+          );
+        yield* threadManagement
+          .dispatch({
+            type: "call.runtime-request.respond",
+            commandId,
+            threadId: task.childThreadId,
+            parentThreadId: delegationThreadId(scope),
+            parentNodeId: scope.call.parentNodeId,
+            authority: scope.call,
+            taskId: input.taskId,
+            requestId: input.requestId,
+            decision: input.decision,
+          })
+          .pipe(Effect.mapError(threadManagementFailure));
+        return { resolved: true as const };
+      }),
+    waitForTask: (callerScope, taskId, timeoutMs, seenApprovalIds) =>
       Effect.gen(function* () {
         const scope = yield* requireDelegationScope(callerScope, "task_status");
         yield* assertCallMayObserveTasks(scope);
@@ -1907,6 +2046,7 @@ const make = Effect.gen(function* () {
           scope,
           taskId,
           Math.min(MAX_WAIT_TIMEOUT_MS, Math.max(1, timeoutMs)),
+          seenApprovalIds,
         );
         yield* scope.call === undefined ? Effect.void : validateCallInvocation(scope);
         return Option.isSome(result)

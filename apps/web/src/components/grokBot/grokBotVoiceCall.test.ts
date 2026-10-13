@@ -2,7 +2,7 @@ import type { VoiceSocket } from "@t3tools/client-runtime/grok-bot-voice/call-se
 import type { GrokBotVoiceStartResult as StartResultSchema } from "@t3tools/contracts";
 
 type StartResult = typeof StartResultSchema.Type;
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { VoiceAudioError, type VoiceAudio } from "./grokBotVoiceAudio";
 import {
@@ -900,6 +900,96 @@ describe("voice call messages and tool output", () => {
 });
 
 describe("voice environment authority and subscription recovery", () => {
+  it("announces an approval once, acknowledges it, and still announces the later completion", async () => {
+    const terminal = deferred<Result>();
+    const inputs: Parameters<GrokBotVoiceCallPorts["runTool"]>[0][] = [];
+    let waits = 0;
+    const h = harness({
+      runTool: async (input) => {
+        inputs.push(input);
+        if (input.name !== "t3_task_progress") return launched;
+        if (++waits === 1)
+          return {
+            kind: "served",
+            output: {
+              status: "approval_required",
+              title: "Read project metadata",
+              taskId: "child-task",
+              approvals: [{ requestId: "approval-1", title: "Look for project files" }],
+            },
+            completion: { requestToolCallId: "launch", pending: true },
+          };
+        return terminal.promise;
+      },
+    });
+    await h.call.start();
+    const fake = h.sockets[0]!.fake;
+    configure(fake);
+    fake.listeners.message(JSON.stringify({ type: "response.done" }));
+    fake.listeners.message(launch);
+    await flush();
+    expect(
+      inputs.filter((input) => input.name === "t3_task_progress").map((input) => input.input),
+    ).toEqual([
+      { requestToolCallId: "launch", seenApprovalIds: [] },
+      { requestToolCallId: "launch", seenApprovalIds: ["approval-1"] },
+    ]);
+    fake.listeners.message(JSON.stringify({ type: "response.done" }));
+    const notifications = () =>
+      fake.sent
+        .map((frame) => JSON.parse(frame))
+        .filter((frame) => frame.item?.type === "force_message");
+    expect(notifications()).toHaveLength(1);
+    expect(notifications()[0].item.content[0].text).toContain(
+      "needs your approval: Look for project files",
+    );
+    terminal.resolve({
+      ...completed,
+      output: { status: "landed", title: "Read project metadata", runStatus: "completed" },
+    });
+    await flush();
+    fake.listeners.message(JSON.stringify({ type: "response.done" }));
+    expect(notifications()).toHaveLength(2);
+    expect(notifications()[1].item.content[0].text).toContain("finished");
+    expect(inputs.some((input) => input.name === "t3_respond_call_approval")).toBe(false);
+    h.call.hangUp();
+  });
+  it("recovers a transient result read while the audio socket stays connected", async () => {
+    vi.useFakeTimers();
+    let waits = 0;
+    let launches = 0;
+    const h = harness({
+      runTool: async (input) => {
+        if (input.name === "t3_task_progress") {
+          if (++waits === 1) throw { _tag: "GrokBotVoiceError", reason: "unavailable" };
+          return completed;
+        }
+        launches++;
+        return launched;
+      },
+    });
+    try {
+      await h.call.start();
+      const fake = h.sockets[0]!.fake;
+      configure(fake);
+      fake.listeners.message(launch);
+      await flush();
+      expect(waits).toBe(1);
+      await vi.advanceTimersByTimeAsync(500);
+      await flush();
+      expect(waits).toBe(2);
+      expect(launches).toBe(1);
+      expect(h.sockets).toHaveLength(1);
+      expect(h.call.state.phase).toBe("live");
+      fake.listeners.message(JSON.stringify({ type: "response.done" }));
+      expect(
+        fake.sent.map((f) => JSON.parse(f)).filter((f) => f.item?.name === "work_landed"),
+      ).toHaveLength(2);
+    } finally {
+      h.call.hangUp();
+      vi.useRealTimers();
+    }
+  });
   type Result = Awaited<ReturnType<GrokBotVoiceCallPorts["runTool"]>>;
   const chat = (sequence = 42): Result => ({
     kind: "served",

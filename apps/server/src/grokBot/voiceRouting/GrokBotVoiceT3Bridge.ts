@@ -70,7 +70,7 @@ export const T3_VOICE_TOOLS: ReadonlyArray<VoiceToolDescriptor> = [
 
 /** Execution belongs to this call; independent threads still require an explicit request. */
 export const T3_VOICE_INSTRUCTIONS =
-  "Use the T3 orchestration functions on this call directly. First discover providers and exact model IDs with orchestrator_capabilities and find the project with t3_project_list. Delegate work with delegate_task in async mode; use task_status and task_cancel for this call’s tasks. Completed delegated work is delivered back to this live call automatically. A running receipt means the operation continues in the background: acknowledge it briefly, then keep answering the caller. Use t3_task_progress for this call's pending-work count. Tell the caller immediately when a tool fails, explain its error and the next step, and never claim that rejected or unknown work succeeded. Do not silently stop or repeatedly retry a failed write. This call has approval-required permissions; explain when a child needs the user's approval in T3. send_task and t3_run_task are disabled. Use t3_thread_launch only when the caller requests independent work in a new thread. Read, message, interrupt and update existing threads using the direct tools; scheduling requires the caller's explicit request. Recall and search read this bot’s canonical chat in this T3 environment.";
+  "Use the T3 orchestration functions on this call directly. Discover providers, exact model IDs and the available runtimeMode with orchestrator_capabilities. Find the project with t3_project_list. Delegate in async mode with that runtimeMode unless the caller asks for a narrower mode. Do not silently choose Supervised for a caller asking you to perform authorized work. Use task_status and task_cancel for this call’s tasks. Completion and approval notices arrive automatically. Acknowledge running work once and keep answering the caller. Announce an approval notice promptly; use t3_respond_call_approval only after the caller explicitly asks you to approve or decline that specific request. Never infer consent from a task's prompt. Use t3_post_call_message when the caller wants something written in this bot's T3 chat; this posts text without launching another turn. Tell the caller when a tool fails, never claim rejected work succeeded, and never repeat a failed write automatically. Use t3_task_progress for pending-work count. send_task and t3_run_task are disabled. Use t3_thread_launch only for requested independent threads. Read, message, interrupt and update existing threads using direct tools; scheduling requires an explicit request. Recall and search read this bot's canonical T3 chat.";
 
 /**
  * A session's tools are an allowlist: only native conversation controls (plain `function` tools by
@@ -128,6 +128,9 @@ export type VoiceToolOutcome = typeof GrokBotVoiceToolResult.Type;
 const decodeCompletionRequest = Schema.decodeUnknownEffect(
   Schema.Struct({
     requestToolCallId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
+    seenApprovalIds: Schema.optionalKey(
+      Schema.Array(Schema.String.check(Schema.isMaxLength(512))).check(Schema.isMaxLength(512)),
+    ),
   }),
 );
 const decodeChatWait = Schema.decodeUnknownEffect(
@@ -363,7 +366,13 @@ const make = Effect.gen(function* () {
               kind: "invalid_input",
               output: { error: "voice request unavailable" },
             } as const;
-          const result = yield* direct.value.wait({ ...input, taskId: target.target.taskId });
+          const result = yield* direct.value.wait({
+            ...input,
+            taskId: target.target.taskId,
+            ...(requested.value.seenApprovalIds === undefined
+              ? {}
+              : { seenApprovalIds: requested.value.seenApprovalIds }),
+          });
           // Ending a call removes the entry while its wait is in flight.
           if (pending.get(key(input, requestToolCallId)) !== target)
             return { kind: "invalid_input", output: { error: "unknown voice request" } } as const;

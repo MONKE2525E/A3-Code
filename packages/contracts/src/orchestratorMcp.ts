@@ -11,6 +11,7 @@ import {
   PositiveInt,
   ProjectId,
   RunId,
+  RuntimeRequestId,
   ScheduledTaskId,
   SecretRef,
   ThreadId,
@@ -225,6 +226,15 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
     description:
       "True only on that mode=wait call when timeoutMs elapsed. The timeout does not cancel the child. Later task_status reads return false and use status for liveness.",
   }),
+  title: Schema.optionalKey(Schema.String),
+  pendingApprovals: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        requestId: RuntimeRequestId,
+        title: Schema.String.check(Schema.isMaxLength(500)),
+      }),
+    ),
+  ),
 });
 export type OrchestratorMcpDelegateTaskResult = typeof OrchestratorMcpDelegateTaskResult.Type;
 

@@ -31,11 +31,16 @@ const makeBackend = (websocketUrl: string, expiresIn = 600) =>
     const presence: { botId: string; callId: string; onTheLine: boolean }[] = [];
     const records: { binding: string; record: Voice.VoiceCallRecord }[] = [];
     const failRecord = { value: false };
+    const failBinding = { value: false };
     // Holds a presence-true in flight so a test can end the call underneath it.
     const presenceDelay = { ms: 0 };
     let mints = 0;
     const layer = Layer.succeed(Voice.GrokBotVoiceBackend, {
-      accountBinding: Ref.get(binding),
+      accountBinding: Effect.suspend(() =>
+        failBinding.value
+          ? Effect.fail(new GrokBotVoiceError({ reason: "unavailable" }))
+          : Ref.get(binding),
+      ),
       mintCredential: () =>
         Effect.all([Clock.currentTimeMillis, Ref.get(minted)]).pipe(
           Effect.map(([now, next]) => ({
@@ -60,7 +65,17 @@ const makeBackend = (websocketUrl: string, expiresIn = 600) =>
           ? Effect.fail(new GrokBotVoiceError({ reason: "unavailable" }))
           : Effect.sync(() => void records.push({ binding: boundTo, record })),
     });
-    return { layer, toolCalls, presence, records, failRecord, presenceDelay, binding, minted };
+    return {
+      layer,
+      toolCalls,
+      presence,
+      records,
+      failRecord,
+      failBinding,
+      presenceDelay,
+      binding,
+      minted,
+    };
   });
 type Backend = Effect.Success<ReturnType<typeof makeBackend>>;
 const routed: { botId: string; callId: string; name: string; access: string }[] = [];
@@ -84,6 +99,24 @@ const serviceLayer = (backend: Backend) =>
 
 const start = { botId: "bot-a" };
 const url = "wss://api.x.ai/v1/realtime";
+
+it.effect("keeps the registered call through a temporary account-read failure", () =>
+  Effect.gen(function* () {
+    const backend = yield* makeBackend(url);
+    yield* Effect.gen(function* () {
+      const voice = yield* Voice.GrokBotVoiceService;
+      const call = yield* voice.start(start);
+      backend.failBinding.value = true;
+      const failure = yield* Effect.flip(voice.refresh(call.callId));
+      assert.equal(failure.reason, "unavailable");
+      backend.failBinding.value = false;
+      const credential = yield* voice.refresh(call.callId);
+      assert.equal(credential.model, "grok-voice");
+      assert.isTrue((yield* voice.connected(call.callId)).first);
+      yield* voice.end({ callId: call.callId });
+    }).pipe(Effect.provide(serviceLayer(backend)));
+  }),
+);
 const request = { toolCallId: "t1", name: "stay_silent", input: {}, line };
 
 it.effect("rejects delayed results after hang-up or an account switch", () =>

@@ -205,8 +205,12 @@ const make = Effect.gen(function* () {
       yield* forget(callId);
       return yield* new GrokBotVoiceError({ reason: "unknown_call" });
     }
-    const current = yield* Effect.exit(backend.accountBinding);
-    if (current._tag === "Failure" || current.value !== call.binding) {
+    const current = yield* Effect.result(backend.accountBinding);
+    if (current._tag === "Failure") {
+      if (current.failure.reason === "account_unavailable") yield* forget(callId);
+      return yield* current.failure;
+    }
+    if (current.success !== call.binding) {
       yield* forget(callId);
       return yield* new GrokBotVoiceError({ reason: "account_unavailable" });
     }
