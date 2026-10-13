@@ -38,7 +38,7 @@ const DRIVER = ProviderDriverKind.make("grok-bot");
  *   that the orchestrator already recorded; the card is then cleared silently, so the recorded
  *   transcript is never overwritten by a native cleanup.
  */
-export const GROK_BOT_APPROVAL_PLATFORM = "desktop";
+const GROK_BOT_APPROVAL_PLATFORM = "desktop";
 
 export interface GrokBotNativeApproval {
   readonly entryId: string;
@@ -72,7 +72,7 @@ export function decodeGrokBotApproval(value: unknown): GrokBotNativeApproval | u
 }
 
 /** Always-allow needs the native client's rule store, which T3 cannot write; approve or deny only. */
-export const GROK_BOT_APPROVAL_OPTIONS: readonly ProviderApprovalOption[] = [
+const GROK_BOT_APPROVAL_OPTIONS: readonly ProviderApprovalOption[] = [
   { decision: "accept", label: "Approve" },
   { decision: "decline", label: "Deny" },
 ];

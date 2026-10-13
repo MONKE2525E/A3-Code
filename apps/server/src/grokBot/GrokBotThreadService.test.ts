@@ -182,6 +182,33 @@ const runtime = (database: DatabaseLayer = Sqlite.layerMemory) =>
     ThreadSearch.layer.pipe(Layer.provide(database)),
   ).pipe(Layer.provideMerge(NodeServices.layer));
 
+const threadManagementLayer = (
+  orchestrator: Orchestrator.OrchestratorV2["Service"],
+  logSendFailures: boolean,
+) => {
+  const serviceLayer = Threads.layer.pipe(
+    Layer.provide(Layer.succeed(Orchestrator.OrchestratorV2, orchestrator)),
+  );
+  if (!logSendFailures) return serviceLayer;
+  return Layer.effect(
+    Threads.ThreadManagementService,
+    Effect.gen(function* () {
+      const service = yield* Threads.ThreadManagementService;
+      return {
+        ...service,
+        sendToThread: (input: Threads.ThreadManagementSendInput) =>
+          service
+            .sendToThread(input)
+            .pipe(
+              Effect.tapError((error) =>
+                Effect.logError("Grok pending-send diagnostic", { error }),
+              ),
+            ),
+      };
+    }),
+  ).pipe(Layer.provide(serviceLayer));
+};
+
 const seedProjects = Effect.gen(function* () {
   const projects = yield* Projects.ProjectStoreV2;
   for (const id of [projectId, otherProjectId, scratchProjectId]) {
@@ -217,6 +244,7 @@ const fixture = (
     readonly orchestrator?: Orchestrator.OrchestratorV2["Service"];
     readonly scratchUnavailable?: boolean;
     readonly providerSessions?: ProviderSessions.ProviderSessionManagerV2["Service"];
+    readonly logSendFailures?: boolean;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -227,9 +255,7 @@ const fixture = (
       options.providerSessions ?? (yield* ProviderSessions.ProviderSessionManagerV2);
     const layer = Service.layer.pipe(
       Layer.provide(Layer.succeed(ProviderSessions.ProviderSessionManagerV2, providerSessions)),
-      Layer.provide(
-        Threads.layer.pipe(Layer.provide(Layer.succeed(Orchestrator.OrchestratorV2, orchestrator))),
-      ),
+      Layer.provide(threadManagementLayer(orchestrator, options.logSendFailures ?? false)),
       Layer.provide(Layer.succeed(Orchestrator.OrchestratorV2, orchestrator)),
       Layer.provide(Layer.succeed(Projections.ProjectionStoreV2, projections)),
       Layer.provide(Layer.succeed(Projects.ProjectStoreV2, projects)),
@@ -290,7 +316,7 @@ it.effect(
   () =>
     Effect.gen(function* () {
       yield* seedProjects;
-      const service = yield* fixture();
+      const service = yield* fixture({ logSendFailures: true });
       const caller = { requestNamespace: "agent-followup" };
       const first = yield* service.send(
         { botId: bot.id, message: "first", clientRequestId: "first" },
@@ -299,7 +325,24 @@ it.effect(
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const initial = yield* orchestrator.getThreadProjection(first.threadId!);
       const run = initial.runs[0]!;
-      const providerThread = initial.providerThreads[0]!;
+      if (run.rootNodeId === null || run.providerThreadId === null)
+        return yield* Effect.die("The first Grok run must retain its root and provider thread.");
+      const rootNode = initial.nodes.find((node) => node.id === run.rootNodeId);
+      const providerThread = initial.providerThreads.find(
+        (candidate) => candidate.id === run.providerThreadId,
+      );
+      if (rootNode?.providerThreadId !== run.providerThreadId || providerThread === undefined)
+        return yield* Effect.die("The pending Grok turn must reference the run's provider thread.");
+      const providerSessionId = providerThread.providerSessionId;
+      if (providerSessionId === null)
+        return yield* Effect.die("The pending Grok provider thread must retain its session.");
+      const providerSession = initial.providerSessions.find(
+        (candidate) =>
+          candidate.driver === providerThread.driver &&
+          candidate.providerInstanceId === providerThread.providerInstanceId,
+      );
+      if (providerSession === undefined)
+        return yield* Effect.die("The pending Grok provider thread must have a matching session.");
       const now = yield* DateTime.now;
       yield* (yield* EventSink.EventSinkV2).write({
         commandId: CommandId.make("agent-followup-seed"),
@@ -321,7 +364,7 @@ it.effect(
             payload: {
               id: ProviderTurnId.make("agent-followup-pending"),
               providerThreadId: providerThread.id,
-              nodeId: run.rootNodeId!,
+              nodeId: rootNode.id,
               runAttemptId: run.activeAttemptId,
               nativeTurnRef: null,
               ordinal: 1,
@@ -333,14 +376,16 @@ it.effect(
         ],
       });
       const sessions = yield* ProviderSessions.ProviderSessionManagerV2;
-      const providerSession = {
-        ...initial.providerSessions[0]!,
-        id: providerThread.providerSessionId!,
+      const selectedProviderSession = {
+        ...providerSession,
+        id: providerSessionId,
         capabilities: GrokBotCapabilitiesV2,
       };
       const sessionSpy = vi
         .spyOn(sessions, "get")
-        .mockReturnValue(Effect.succeed(Option.some({ providerSession } as never)));
+        .mockReturnValue(
+          Effect.succeed(Option.some({ providerSession: selectedProviderSession } as never)),
+        );
       yield* Effect.addFinalizer(() => Effect.sync(() => sessionSpy.mockRestore()));
       const next = yield* service.send(
         { botId: bot.id, message: "follow up", clientRequestId: "followup" },

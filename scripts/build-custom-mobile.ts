@@ -7,14 +7,14 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 
 import { assertCustomMobileCloudConfig } from "./lib/custom-mobile-config.ts";
 import { loadRepoEnv, resolvePublicConfig } from "./lib/public-config.ts";
 
-const hostPlatform = Effect.runSync(HostProcessPlatform);
+const hostPlatform = Effect.runSync(HostProcess.Platform);
 const root = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "..");
 const repoEnv = loadRepoEnv({ repoRoot: root });
 assertCustomMobileCloudConfig(

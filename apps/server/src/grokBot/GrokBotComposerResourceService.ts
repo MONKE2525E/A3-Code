@@ -34,9 +34,7 @@ const isManagedSkill = (name: string, id: string) =>
   id.endsWith(`/${GROK_BOT_MANAGED_COMPOSER_SKILL_NAME}`) ||
   id === `sand-workflow:${GROK_BOT_MANAGED_COMPOSER_SKILL_NAME}`;
 
-export const parseComposerSkills = (
-  entries: readonly unknown[],
-): readonly GrokBotComposerSkill[] => {
+const parseComposerSkills = (entries: readonly unknown[]): readonly GrokBotComposerSkill[] => {
   const skills: GrokBotComposerSkill[] = [];
   const seen = new Set<string>();
   for (const entry of decodeRecords(entries)) {
@@ -60,7 +58,7 @@ export const parseComposerSkills = (
 // Only explicit native IDs can be serialized as individual workflow references.
 const pluginSkillEntries = (plugin: Rec): readonly Rec[] => recordsAt(plugin, "skills");
 
-export const parseComposerBots = (
+const parseComposerBots = (
   currentBotId: string,
   agents: readonly unknown[],
 ): readonly GrokBotComposerBot[] =>
@@ -98,7 +96,7 @@ const connectorType = (value: unknown): GrokBotComposerConnector["connectorType"
   return "unspecified";
 };
 
-export const parseComposerConnectors = (
+const parseComposerConnectors = (
   entries: readonly unknown[],
 ): readonly GrokBotComposerConnector[] => {
   const connectors: GrokBotComposerConnector[] = [];
