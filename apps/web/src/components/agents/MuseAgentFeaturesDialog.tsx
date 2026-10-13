@@ -13,7 +13,17 @@ import {
   type ProviderInstanceId,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
-import { SparklesIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  ChevronRightIcon,
+  ClockIcon,
+  FingerprintIcon,
+  ListIcon,
+  PencilIcon,
+  ShieldCheckIcon,
+  SparklesIcon,
+  ZapIcon,
+} from "lucide-react";
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 
 import {
@@ -37,6 +47,8 @@ import {
   DialogTitle,
 } from "~/components/ui/dialog";
 import { Input } from "~/components/ui/input";
+import { Sheet, SheetDescription, SheetPopup, SheetTitle } from "~/components/ui/sheet";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { Spinner } from "~/components/ui/spinner";
 import { toastManager } from "~/components/ui/toast";
@@ -44,22 +56,25 @@ import {
   museAgentFeatureReadQuery,
   museAgentFeatureUpdate,
   museAgentOpenThread,
+  museAgentProfileQuery,
   museAgentStatusQuery,
 } from "~/state/museAgent";
 import { useComposerDraftStore } from "~/composerDraftStore";
+import { cn } from "~/lib/utils";
 import { buildThreadRouteParams } from "~/threadRoutes";
 import { useEnvironmentQuery } from "~/state/query";
 import { useEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 import ChatMarkdown from "~/components/ChatMarkdown";
 
+import { MuseAgentAvatar } from "./MuseAgentAvatar";
+import { useMuseAgentAvatar } from "./useMuseAgentAvatar";
 import { MuseAgentDeliveryRecovery } from "./MuseAgentDeliveryRecovery";
 import { MuseAgentComputerSection } from "./MuseAgentComputerSection";
 import { MuseAgentConnectionsSection } from "./MuseAgentConnectionsSection";
 import { MuseAgentDictationSection } from "./MuseAgentDictationSection";
 import { MuseAgentProfileSection } from "./MuseAgentProfileSection";
 import {
-  MUSE_FEATURE_TABS,
   MUSE_ROUTINE_CREATE_PROMPT,
   museRoutineEditPrompt,
   describeMuseSkill,
@@ -709,10 +724,51 @@ function ConversationsSection({
   );
 }
 
+/** The top-level panel tabs, matching the original Muse app. Abilities open from the Profile tab. */
+type MusePanelTab = "activity" | "approvals" | "schedules" | "profile";
+type MuseAbility = Extract<
+  MuseFeatureTabId,
+  "memory" | "connections" | "skills" | "computer" | "dictation"
+>;
+
+const MUSE_PANEL_TABS: ReadonlyArray<{
+  readonly id: MusePanelTab;
+  readonly label: string;
+  readonly icon: typeof ListIcon;
+}> = [
+  { id: "activity", label: "Activity", icon: ListIcon },
+  { id: "approvals", label: "Approvals", icon: ShieldCheckIcon },
+  { id: "schedules", label: "Schedules", icon: ClockIcon },
+  { id: "profile", label: "Profile", icon: FingerprintIcon },
+];
+
+const MUSE_ABILITIES: ReadonlyArray<{
+  readonly id: MuseAbility;
+  readonly label: string;
+  readonly description: string;
+}> = [
+  { id: "memory", label: "Memory", description: "Search what Muse remembers" },
+  { id: "connections", label: "Connections", description: "Accounts Muse can reach" },
+  { id: "skills", label: "Skills", description: "What Muse can do" },
+  { id: "computer", label: "Computer", description: "Tasks Muse runs on this machine" },
+  { id: "dictation", label: "Dictation", description: "Speak to Muse" },
+];
+
+/** The inventory feature each panel tab reads; Approvals has none, because Muse does not share it yet. */
+const PANEL_FEATURE: Record<Exclude<MusePanelTab, "approvals">, MuseFeatureTabId> = {
+  activity: "conversations",
+  schedules: "routines",
+  profile: "profile",
+};
+
+type MuseLeave =
+  | { readonly kind: "close" }
+  | { readonly kind: "go"; readonly tab: MusePanelTab; readonly ability: MuseAbility | null };
+
 /**
- * Native Muse features for one connected provider instance. Opens from the Muse thread header and
- * from the selected Muse provider in Settings. Every section reads its own operation, so a tab only
- * claims availability once its query has succeeded.
+ * Native Muse features for one connected provider instance, in a side sheet like the original
+ * Muse app: the agent's face and status, four icon tabs, and the abilities under Profile. Every
+ * section reads its own operation, so a tab only claims availability once its query has succeeded.
  */
 export function MuseAgentFeaturesDialog({
   environmentId,
@@ -720,17 +776,18 @@ export function MuseAgentFeaturesDialog({
   open,
   onOpenChange,
 }: Target & { readonly open: boolean; readonly onOpenChange: (open: boolean) => void }) {
-  const [tab, setTab] = useState<MuseFeatureTabId>("memory");
+  const [tab, setTab] = useState<MusePanelTab>("activity");
+  const [ability, setAbility] = useState<MuseAbility | null>(null);
   const canWrite = useAtomValue(museAgentFeatureUpdate.permissionAtom(environmentId));
   const inventory = useFeatureRead(
     environmentId,
     open ? { operation: "inventory", providerInstanceId } : null,
   );
-  const support = resolveMuseTabSupport(
-    inventory.data?.operation === "inventory" ? inventory.data.data : null,
-    tab,
-  );
+  const inventoryData = inventory.data?.operation === "inventory" ? inventory.data.data : null;
   const target = { environmentId, providerInstanceId };
+  const profileQuery = useEnvironmentQuery(museAgentProfileQuery({ environmentId, input: {} }));
+  const avatar = useMuseAgentAvatar(environmentId, profileQuery.data);
+  const agentName = profileQuery.data?.name?.trim() || "Muse";
   // A successful hand-off to chat already delivered the transcript, so it closes without the guard.
   const [dictationActive, setDictationActive] = useState(false);
   const dictationChat = useOpenMuseChatWithDraft(target, () => {
@@ -738,23 +795,27 @@ export function MuseAgentFeaturesDialog({
     onOpenChange(false);
   });
   const profileOperations =
-    inventory.data?.operation === "inventory"
-      ? (inventory.data.data.features.find((feature) => feature.feature === "profile")
-          ?.operations ?? [])
+    inventoryData !== null
+      ? (inventoryData.features.find((feature) => feature.feature === "profile")?.operations ?? [])
       : null;
   // Unsaved profile text survives only while its tab is open, so confirm before leaving it. The
   // requested change waits in `pendingLeave` while the profile stays mounted with its edits.
   const [profileDirty, setProfileDirty] = useState(false);
-  const [pendingLeave, setPendingLeave] = useState<
-    { readonly kind: "tab"; readonly tab: MuseFeatureTabId } | { readonly kind: "close" } | null
-  >(null);
-  const requestLeave = (leave: NonNullable<typeof pendingLeave>) => {
+  const [pendingLeave, setPendingLeave] = useState<MuseLeave | null>(null);
+  const requestLeave = (leave: MuseLeave) => {
     if (profileDirty || dictationActive) {
       setPendingLeave(leave);
       return;
     }
-    if (leave.kind === "tab") setTab(leave.tab);
-    else onOpenChange(false);
+    applyLeave(leave);
+  };
+  const applyLeave = (leave: MuseLeave) => {
+    if (leave.kind === "close") {
+      onOpenChange(false);
+      return;
+    }
+    setTab(leave.tab);
+    setAbility(leave.ability);
   };
   const confirmLeave = () => {
     const leave = pendingLeave;
@@ -762,84 +823,176 @@ export function MuseAgentFeaturesDialog({
     if (!leave) return;
     setProfileDirty(false);
     setDictationActive(false);
-    if (leave.kind === "tab") setTab(leave.tab);
-    else onOpenChange(false);
+    applyLeave(leave);
   };
+  const panelSupport = (feature: MuseFeatureTabId) => resolveMuseTabSupport(inventoryData, feature);
+
+  let body: ReactNode;
+  if (tab === "approvals") {
+    body = (
+      <p role="status" className="px-6 py-10 text-center text-sm text-muted-foreground">
+        Muse hasn't shared its approval history with T3 yet.
+      </p>
+    );
+  } else if (tab === "activity" || tab === "schedules") {
+    const feature = PANEL_FEATURE[tab];
+    body =
+      panelSupport(feature) === "unavailable" ? (
+        <p role="status" className="px-6 py-10 text-center text-sm text-muted-foreground">
+          This isn't available for Muse yet.
+        </p>
+      ) : tab === "activity" ? (
+        <ConversationsSection {...target} canWrite={canWrite} />
+      ) : (
+        <RoutinesSection {...target} canWrite={canWrite} onClose={() => onOpenChange(false)} />
+      );
+  } else if (ability === null) {
+    body = (
+      <div className="flex flex-col gap-6 px-6 pb-6">
+        {panelSupport("profile") === "unavailable" ? (
+          <p role="status" className="py-6 text-sm text-muted-foreground">
+            This isn't available for Muse yet.
+          </p>
+        ) : (
+          <MuseAgentProfileSection
+            {...target}
+            operations={profileOperations}
+            canWrite={canWrite}
+            onDirtyChange={setProfileDirty}
+          />
+        )}
+        <ul className="flex flex-col gap-px border-t pt-4">
+          {MUSE_ABILITIES.map((item) => (
+            <li key={item.id}>
+              <button
+                type="button"
+                className="flex w-full items-center gap-3 rounded-md px-2 py-2.5 text-left hover:bg-accent"
+                onClick={() => requestLeave({ kind: "go", tab: "profile", ability: item.id })}
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm font-medium">{item.label}</span>
+                  <span className="block truncate text-xs text-muted-foreground">
+                    {item.description}
+                  </span>
+                </span>
+                <ChevronRightIcon className="size-4 text-muted-foreground" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  } else {
+    body = (
+      <div className="flex flex-col gap-4 px-6 pb-6">
+        <button
+          type="button"
+          className="flex w-fit items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+          onClick={() => requestLeave({ kind: "go", tab: "profile", ability: null })}
+        >
+          <ArrowLeftIcon className="size-4" /> Profile
+        </button>
+        {panelSupport(ability) === "unavailable" ? (
+          <p role="status" className="py-6 text-sm text-muted-foreground">
+            This isn't available for Muse yet.
+          </p>
+        ) : ability === "memory" ? (
+          <MemorySection {...target} />
+        ) : ability === "connections" ? (
+          <MuseAgentConnectionsSection {...target} canWrite={canWrite} />
+        ) : ability === "skills" ? (
+          <SkillsSection {...target} />
+        ) : ability === "computer" ? (
+          <MuseAgentComputerSection {...target} canWrite={canWrite} />
+        ) : (
+          <MuseAgentDictationSection
+            key={`${environmentId}:${providerInstanceId}`}
+            {...target}
+            chat={dictationChat}
+            onActiveChange={setDictationActive}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
-    <Dialog
+    <Sheet
       open={open}
       onOpenChange={(next) => {
         if (!next) requestLeave({ kind: "close" });
         else onOpenChange(next);
       }}
     >
-      <DialogPopup className="max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>Muse features</DialogTitle>
-          <DialogDescription>
-            What Muse remembers, runs, and can reach on your account.
-          </DialogDescription>
-          <div
-            role="tablist"
-            aria-label="Muse features"
-            className="-mx-1 flex gap-1 overflow-x-auto px-1 pt-1"
-          >
-            {MUSE_FEATURE_TABS.map((item) => (
-              <Button
-                key={item.id}
-                role="tab"
-                size="sm"
-                variant={tab === item.id ? "secondary" : "ghost-muted"}
-                aria-selected={tab === item.id}
-                onClick={() => {
-                  if (item.id !== tab) requestLeave({ kind: "tab", tab: item.id });
-                }}
-              >
-                {item.label}
-              </Button>
-            ))}
+      <SheetPopup side="right" className="flex w-full max-w-md flex-col">
+        <SheetTitle className="sr-only">Muse features</SheetTitle>
+        <SheetDescription className="sr-only">
+          What Muse remembers, runs, and can reach on your account.
+        </SheetDescription>
+        <div className="flex flex-col items-center gap-2 px-6 pt-10 pb-6">
+          <div className="relative">
+            <MuseAgentAvatar
+              name={agentName}
+              imageUrl={avatar.imageUrl}
+              videoUrl={avatar.videoUrl}
+              size="2xl"
+            />
+            <button
+              type="button"
+              aria-label="Edit Muse's profile"
+              className="absolute right-0 bottom-0 flex size-8 items-center justify-center rounded-full bg-card text-foreground shadow-sm ring-1 ring-border hover:bg-accent"
+              onClick={() => requestLeave({ kind: "go", tab: "profile", ability: null })}
+            >
+              <PencilIcon className="size-4" />
+            </button>
           </div>
-        </DialogHeader>
-        <DialogPanel>
-          <div role="tabpanel" aria-label={tab} className="min-h-48">
-            {support === "unavailable" ? (
-              <p role="status" className="py-6 text-sm text-muted-foreground">
-                This isn't available for Muse yet.
-              </p>
-            ) : tab === "memory" ? (
-              <MemorySection {...target} />
-            ) : tab === "routines" ? (
-              <RoutinesSection
-                {...target}
-                canWrite={canWrite}
-                onClose={() => onOpenChange(false)}
-              />
-            ) : tab === "connections" ? (
-              <MuseAgentConnectionsSection {...target} canWrite={canWrite} />
-            ) : tab === "skills" ? (
-              <SkillsSection {...target} />
-            ) : tab === "conversations" ? (
-              <ConversationsSection {...target} canWrite={canWrite} />
-            ) : tab === "dictation" ? (
-              <MuseAgentDictationSection
-                key={`${environmentId}:${providerInstanceId}`}
-                {...target}
-                chat={dictationChat}
-                onActiveChange={setDictationActive}
-              />
-            ) : tab === "profile" ? (
-              <MuseAgentProfileSection
-                {...target}
-                operations={profileOperations}
-                canWrite={canWrite}
-                onDirtyChange={setProfileDirty}
-              />
-            ) : (
-              <MuseAgentComputerSection {...target} canWrite={canWrite} />
-            )}
-          </div>
-        </DialogPanel>
-      </DialogPopup>
+          <p className="text-lg font-semibold">{agentName}</p>
+          <p className="flex items-center gap-1 text-sm text-success">
+            <ZapIcon className="size-3.5 fill-current" /> Connected
+          </p>
+        </div>
+        <div
+          role="tablist"
+          aria-label="Muse features"
+          className="mx-6 mb-4 flex rounded-full bg-muted p-1"
+        >
+          {MUSE_PANEL_TABS.map((item) => {
+            const Icon = item.icon;
+            const selected = tab === item.id;
+            return (
+              <Tooltip key={item.id}>
+                <TooltipTrigger
+                  render={
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={selected}
+                      aria-label={item.label}
+                      className={cn(
+                        "flex flex-1 items-center justify-center rounded-full py-2 transition-colors",
+                        selected
+                          ? "bg-background text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground",
+                      )}
+                      onClick={() => {
+                        if (item.id !== tab || ability !== null) {
+                          requestLeave({ kind: "go", tab: item.id, ability: null });
+                        }
+                      }}
+                    />
+                  }
+                >
+                  <Icon className="size-4" />
+                </TooltipTrigger>
+                <TooltipPopup side="bottom">{item.label}</TooltipPopup>
+              </Tooltip>
+            );
+          })}
+        </div>
+        <div role="tabpanel" aria-label={tab} className="min-h-0 flex-1 overflow-y-auto">
+          {body}
+        </div>
+      </SheetPopup>
       <AlertDialog
         open={pendingLeave !== null}
         onOpenChange={(next) => (next ? null : setPendingLeave(null))}
@@ -863,7 +1016,7 @@ export function MuseAgentFeaturesDialog({
           </AlertDialogFooter>
         </AlertDialogPopup>
       </AlertDialog>
-    </Dialog>
+    </Sheet>
   );
 }
 
