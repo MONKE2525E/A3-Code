@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { museAgentAvatarQuery } from "~/state/museAgentAvatar";
 import { useEnvironmentQuery } from "~/state/query";
 
-import { pickMuseAvatarVideo } from "./aiAgents";
+import { type MuseAvatarState, pickMuseAvatarVideo } from "./aiAgents";
 
 /** The slice of the client profile the avatar needs; the URL fields only name the variants. */
 export type MuseAgentAvatarProfile = {
@@ -29,9 +29,9 @@ export function instanceFromDescriptor(url: string | undefined): string | null {
 
 export function pickVideoVariant(
   urls: MuseAgentAvatarProfile["avatarVideoUrls"],
-  working = false,
+  state: MuseAvatarState = "idle",
 ): string | null {
-  const picked = pickMuseAvatarVideo(urls, working);
+  const picked = pickMuseAvatarVideo(urls, state);
   if (!urls || picked === null) return null;
   return Object.keys(urls).find((key) => urls[key] === picked) ?? null;
 }
@@ -55,16 +55,17 @@ function useObjectUrl(media: { bytes: Uint8Array; contentType: string } | null):
 
 /**
  * Authenticated avatar URLs for one environment. Bytes go through the selected connection's
- * loader, so remote, tunnel, and relay environments work. The clip loads only when `loadVideo`
- * is set, and both are keyed by profile revision so the profile poll does not refetch them.
+ * loader, so remote, tunnel, and relay environments work. A clip loads only while Muse is out of
+ * idle, and both are keyed by profile revision so the profile poll does not refetch them.
  */
 export function useMuseAgentAvatar(
   environmentId: EnvironmentId | null,
   profile: MuseAgentAvatarProfile | null | undefined,
-  options?: { readonly loadVideo?: boolean },
+  options?: { readonly state?: MuseAvatarState },
 ): { readonly imageUrl: string | null; readonly videoUrl: string | null } {
+  const state = options?.state ?? "idle";
   const revision = profile?.avatarRevision;
-  const videoVariant = pickVideoVariant(profile?.avatarVideoUrls, options?.loadVideo === true);
+  const videoVariant = pickVideoVariant(profile?.avatarVideoUrls, state);
   const providerInstanceId =
     instanceFromDescriptor(profile?.avatarImageUrl) ??
     instanceFromDescriptor(videoVariant ? profile?.avatarVideoUrls?.[videoVariant] : undefined);
@@ -77,7 +78,7 @@ export function useMuseAgentAvatar(
       : null;
 
   const image = useEnvironmentQuery(profile?.avatarImageUrl ? target("image") : null).data;
-  const video = useEnvironmentQuery(options?.loadVideo ? target(videoVariant) : null).data;
+  const video = useEnvironmentQuery(state !== "idle" ? target(videoVariant) : null).data;
   const imageMedia = useMemo(() => (image?._tag === "Available" ? image : null), [image]);
   const videoMedia = useMemo(() => (video?._tag === "Available" ? video : null), [video]);
   return { imageUrl: useObjectUrl(imageMedia), videoUrl: useObjectUrl(videoMedia) };

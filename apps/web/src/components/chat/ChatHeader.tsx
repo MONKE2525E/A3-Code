@@ -431,6 +431,7 @@ export const ChatHeader = memo(function ChatHeader({
             <h2 className="min-w-0 flex-1">
               <MuseAgentThreadHeading
                 environmentId={activeThreadEnvironmentId}
+                threadId={activeThreadId}
                 fallbackTitle={activeThreadTitle}
               />
             </h2>

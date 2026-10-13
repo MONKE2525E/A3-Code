@@ -174,14 +174,50 @@ export function resolveMuseAgentSidebarState(input: {
   return { kind: "setup", notice };
 }
 
-/** One clip from the profile's video variants: a calm idle loop, or a working clip while `working`. */
+/** What Muse is doing, as far as its avatar is concerned. Each state plays its own clip. */
+export type MuseAvatarState = "idle" | "connecting" | "working" | "waiting";
+
+/** Muse's run status to avatar state. Only a status that is actually running leaves idle. */
+export function museAvatarStateForStatus(status: string | null | undefined): MuseAvatarState {
+  switch (status) {
+    case "preparing":
+    case "queued":
+    case "starting":
+      return "connecting";
+    case "running":
+      return "working";
+    case "waiting":
+      return "waiting";
+    default:
+      return "idle";
+  }
+}
+
+/** Variant names to try for each state, in order. Muse's keys may use hyphens or underscores. */
+const AVATAR_VARIANT_CHAIN: Readonly<Record<MuseAvatarState, ReadonlyArray<string>>> = {
+  idle: ["idle", "default"],
+  connecting: ["connecting", "working", "talk"],
+  working: ["working", "talk"],
+  waiting: ["waiting_for_subagents", "working", "talk"],
+};
+
+/**
+ * One clip from the profile's video variants for an avatar state. A state with no clip of its own
+ * falls back to the idle clip, then to any clip Muse sent.
+ */
 export function pickMuseAvatarVideo(
   variants: Readonly<Record<string, string>> | null | undefined,
-  working = false,
+  state: MuseAvatarState = "idle",
 ): string | null {
   if (!variants) return null;
-  const active = working ? (variants.working ?? variants.talk) : undefined;
-  return active ?? variants.idle ?? variants.default ?? Object.values(variants)[0] ?? null;
+  const byName = new Map(
+    Object.entries(variants).map(([key, url]) => [key.toLowerCase().replace(/-/g, "_"), url]),
+  );
+  for (const name of AVATAR_VARIANT_CHAIN[state]) {
+    const url = byName.get(name);
+    if (url) return url;
+  }
+  return byName.get("idle") ?? byName.get("default") ?? Object.values(variants)[0] ?? null;
 }
 
 /**

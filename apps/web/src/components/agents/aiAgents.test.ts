@@ -5,6 +5,7 @@ import type { AgentUnreadThreadShell } from "./agentStatusDot";
 
 import {
   findCachedMuseAgentThread,
+  museAvatarStateForStatus,
   pickMuseAvatarVideo,
   resolveMuseAgentNotice,
   resolveMuseAgentSidebarState,
@@ -143,15 +144,36 @@ describe("sidebar loading and avatar art", () => {
     expect(resolveMuseAgentSidebarState({ status: undefined })).toEqual({ kind: "hidden" });
   });
 
-  it("prefers the idle clip, then default, then any, else none", () => {
+  it("falls back from a state to the idle clip, then default, then any, else none", () => {
     expect(pickMuseAvatarVideo({ talk: "t", idle: "i", default: "d" })).toBe("i");
     expect(pickMuseAvatarVideo({ talk: "t", default: "d" })).toBe("d");
     expect(pickMuseAvatarVideo({ talk: "t" })).toBe("t");
-    expect(pickMuseAvatarVideo({ talk: "t", working: "w", idle: "i" }, true)).toBe("w");
-    expect(pickMuseAvatarVideo({ talk: "t", idle: "i" }, true)).toBe("t");
-    expect(pickMuseAvatarVideo({ idle: "i" }, true)).toBe("i");
+    expect(pickMuseAvatarVideo({ talk: "t", working: "w", idle: "i" }, "working")).toBe("w");
+    expect(pickMuseAvatarVideo({ talk: "t", idle: "i" }, "working")).toBe("t");
+    expect(pickMuseAvatarVideo({ idle: "i" }, "working")).toBe("i");
     expect(pickMuseAvatarVideo({})).toBeNull();
     expect(pickMuseAvatarVideo(null)).toBeNull();
+  });
+
+  it("plays the clip for each state, with hyphenated Muse keys matched", () => {
+    const variants = {
+      idle: "i",
+      connecting: "c",
+      working: "w",
+      "waiting-for-subagents": "s",
+    };
+    expect(pickMuseAvatarVideo(variants, "connecting")).toBe("c");
+    expect(pickMuseAvatarVideo(variants, "waiting")).toBe("s");
+    expect(pickMuseAvatarVideo(variants, "working")).toBe("w");
+    expect(pickMuseAvatarVideo(variants, "idle")).toBe("i");
+  });
+
+  it("maps only a running status out of idle", () => {
+    expect(museAvatarStateForStatus("running")).toBe("working");
+    expect(museAvatarStateForStatus("starting")).toBe("connecting");
+    expect(museAvatarStateForStatus("waiting")).toBe("waiting");
+    expect(museAvatarStateForStatus("idle")).toBe("idle");
+    expect(museAvatarStateForStatus(undefined)).toBe("idle");
   });
 });
 

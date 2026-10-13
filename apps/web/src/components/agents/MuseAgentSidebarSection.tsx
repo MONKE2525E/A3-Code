@@ -29,19 +29,12 @@ import { buildThreadRouteParams } from "~/threadRoutes";
 import { AgentPinnedTile, AgentRosterNotice, AgentRosterRow, AgentRowMenu } from "./AgentRoster";
 import {
   findCachedMuseAgentThread,
+  museAvatarStateForStatus,
   resolveMuseAgentSidebarState,
   resolveMuseAgentStatusDot,
 } from "./aiAgents";
 import { MuseAgentAvatar } from "./MuseAgentAvatar";
 import { useMuseAgentAvatar } from "./useMuseAgentAvatar";
-
-const ACTIVE_RUN_STATUSES: ReadonlySet<string> = new Set([
-  "preparing",
-  "queued",
-  "starting",
-  "running",
-  "waiting",
-]);
 
 const MUSE_PINNED_STORAGE_KEY = "t3code:muse-agent-pinned";
 
@@ -199,8 +192,8 @@ function MuseAgentRoster({
   }, [environmentId, instanceId, isMobile, navigate, opening, openThread, setOpenMobile]);
 
   // Working comes from the canonical thread's run, never from the selected route.
-  const working =
-    thread !== null && thread.status !== "idle" && ACTIVE_RUN_STATUSES.has(thread.status);
+  const avatarState = museAvatarStateForStatus(thread?.status);
+  const working = avatarState !== "idle";
   const statusDot = resolveMuseAgentStatusDot({
     active: working,
     thread,
@@ -212,7 +205,7 @@ function MuseAgentRoster({
 
   const data = profile.data;
   const name = data?.name?.trim() || "Muse";
-  const avatar = useMuseAgentAvatar(environmentId, data, { loadVideo: working });
+  const avatar = useMuseAgentAvatar(environmentId, data, { state: avatarState });
   const errorFooter = openError ? (
     <div className="relative z-10 flex items-center gap-2 pr-2 pb-2 pl-(--sidebar-row-content-inset)">
       <p role="alert" className="min-w-0 flex-1 text-xs leading-4.5 text-destructive">
