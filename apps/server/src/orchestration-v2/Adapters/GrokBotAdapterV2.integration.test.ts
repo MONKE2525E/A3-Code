@@ -58,7 +58,7 @@ it.effect.each([
     const settled = yield* Deferred.make<SettlementFrame>();
     const completed = yield* Deferred.make<void>();
     const disconnect = yield* Deferred.make<void>();
-    const transcriptReattached = yield* Deferred.make<void>();
+    const readReattached = yield* Deferred.make<void>();
     const transcriptVisible = yield* Deferred.make<void>();
     let prepared: GrokBotManagedTurn | undefined;
     let writes = 0;
@@ -169,7 +169,7 @@ it.effect.each([
                   : Stream.fail(new NativeRuntimeError({ kind: "uncertain" })),
               ),
             )
-          : Stream.fromEffect(Deferred.succeed(transcriptReattached, undefined)).pipe(
+          : Stream.fromEffect(Deferred.succeed(readReattached, undefined)).pipe(
               Stream.drain,
               Stream.concat(Stream.never),
             );
@@ -355,33 +355,27 @@ it.effect.each([
         );
         return;
       }
-      if (scenario === "eof") {
-        // Clean EOF renews the transcript inside the live adapter. It does not
-        // lose the provider session or reopen the settlement watch.
+      if (scenario === "eof" || scenario === "transport") {
+        yield* Deferred.await(turnCommitted);
         yield* Deferred.succeed(disconnect, undefined);
-        yield* TestClock.adjust("1 second");
-        yield* Deferred.await(transcriptReattached);
-        const held = yield* orchestrator.getThreadProjection(threadId);
-        assert.equal(held.runs[0]?.status, "running");
-        assert.equal(transcriptWatches, 2);
-        assert.equal(watches, 1);
-        assert.equal(writes, 1);
-      }
-      if (scenario === "transport") {
-        const originalEffects = yield* outbox.listByCommandId(CommandId.make("grok-bot:dispatch"));
-        for (const _effect of originalEffects) {
-          yield* outbox.awaitAvailable;
-          yield* outbox.awaitAvailable;
+        if (scenario === "eof") {
+          // Clean EOF retries the owned read stream in place after its backoff.
+          yield* TestClock.adjust("1 second");
+          yield* Deferred.await(readReattached);
+          assert.equal(transcriptWatches, 2);
+          assert.equal(watches, 1);
+        } else {
+          // Initial effects also leave notifications here. Wait for the persisted
+          // reconnect effect, consuming notifications rather than timing the ingest.
+          while (Option.isNone(yield* worker.nextClaimableAt)) yield* outbox.awaitAvailable;
+          const held = yield* orchestrator.getThreadProjection(threadId);
+          assert.equal(held.runs[0]?.status, "running");
+          assert.isTrue(Option.isSome(yield* worker.nextClaimableAt));
+          yield* TestClock.adjust("5 seconds");
+          yield* worker.drain();
+          assert.equal(watches, 2);
         }
-        yield* Deferred.succeed(disconnect, undefined);
-        yield* outbox.awaitAvailable;
-        const held = yield* orchestrator.getThreadProjection(threadId);
-        assert.equal(held.runs[0]?.status, "running");
-        assert.isTrue(Option.isSome(yield* worker.nextClaimableAt));
-        yield* TestClock.adjust("5 seconds");
-        yield* worker.drain();
         assert.equal(writes, 1);
-        assert.equal(watches, 2);
       }
       if (reconnect) {
         const sessions = yield* ProviderSessions.ProviderSessionManagerV2;

@@ -120,7 +120,13 @@ export const layer: Layer.Layer<
         const interruptProviderThread = targetsRecordedSession
           ? providerThread
           : { ...providerThread, providerSessionId: input.providerSessionId };
-        if (providerTurn.status !== "running") {
+        // Accepted native Grok Bot turns remain pending until settlement.
+        // They still own live work and must receive Stop/restart interrupts.
+        const pendingGrokTurn =
+          providerThread.driver === "grok-bot" &&
+          providerTurn.status === "pending" &&
+          input.operation !== "steer";
+        if (providerTurn.status !== "running" && !pendingGrokTurn) {
           if (input.operation === "steer") {
             return yield* new ProviderTurnControlError({
               threadId: input.threadId,

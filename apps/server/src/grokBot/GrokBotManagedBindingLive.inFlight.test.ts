@@ -161,7 +161,7 @@ const inFlight = (threadId: ThreadId, runId: RunId) =>
     Effect.flatMap((binding) => binding.inFlightWork!(identity(threadId, runId))),
   );
 
-it.effect("inFlightWork reads real projection rows for tools and child tasks", () =>
+it.effect("inFlightWork holds live tools without holding the native turn for async children", () =>
   Effect.gen(function* () {
     const home = ThreadId.make("grok-bot:home");
     const other = ThreadId.make("grok-bot:other");
@@ -187,7 +187,7 @@ it.effect("inFlightWork reads real projection rows for tools and child tasks", (
     yield* child("child:other-thread", other, run, root, "running");
     assert.isFalse(yield* inFlight(home, run), "foreign scope");
 
-    // Each live shape holds the turn on its own.
+    // A blocking MCP tool holds the turn; async children do not.
     yield* tool("tool:live", home, run, "running");
     assert.isTrue(yield* inFlight(home, run), "running root dynamic_tool");
     yield* tool("tool:live", home, run, "completed");
@@ -195,18 +195,18 @@ it.effect("inFlightWork reads real projection rows for tools and child tasks", (
 
     for (const status of ["pending", "running", "waiting"] as const) {
       yield* child("child:live", home, run, root, status);
-      assert.isTrue(yield* inFlight(home, run), `child ${status}`);
+      assert.isFalse(yield* inFlight(home, run), `async child ${status}`);
     }
     yield* child("child:live", home, run, root, "completed");
     assert.isFalse(yield* inFlight(home, run), "child closed releases");
 
-    // A child of this run under a different node still counts (same runId).
+    // Nested async work has its own lifecycle.
     yield* child("child:run-scoped", home, run, NodeId.make("node:nested"), "running");
-    assert.isTrue(yield* inFlight(home, run), "run-scoped child");
-    // A child parented on this root from another run still counts (parent node ownership).
+    assert.isFalse(yield* inFlight(home, run), "async run-scoped child");
+    // Root-parented async work likewise leaves native completion free to settle.
     yield* child("child:run-scoped", home, run, NodeId.make("node:nested"), "completed");
     yield* child("child:parented", home, foreignRun, root, "waiting");
-    assert.isTrue(yield* inFlight(home, run), "root-parented child");
+    assert.isFalse(yield* inFlight(home, run), "async root-parented child");
   }).pipe(Effect.provide(bindingLayer)),
 );
 

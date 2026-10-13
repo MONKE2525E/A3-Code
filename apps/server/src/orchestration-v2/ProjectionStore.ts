@@ -368,6 +368,10 @@ export interface ProjectionStoreV2Shape {
     options: ProjectionTimelinePageOptions,
   ) => Effect.Effect<ProjectionTimelinePage, ProjectionStoreV2Error>;
   readonly getMessageCount: (threadId: ThreadId) => Effect.Effect<number, ProjectionStoreV2Error>;
+  /** Last agent sender, without loading message bodies. Later human messages keep the owner. */
+  readonly getLastThreadSender: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ThreadId | undefined, ProjectionStoreV2Error>;
   readonly getNextTurnItemOrdinal: (
     threadId: ThreadId,
   ) => Effect.Effect<number, ProjectionStoreV2Error>;
@@ -4774,6 +4778,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.map((rows) => rows[0]?.count ?? 0),
         Effect.mapError(controlReadError(threadId)),
       );
+
+    const getLastThreadSender: ProjectionStoreV2Shape["getLastThreadSender"] = (threadId) =>
+      sql<{ sender: string }>`SELECT json_extract(payload_json, '$.senderThreadId') AS sender
+        FROM orchestration_v2_projection_messages
+        WHERE thread_id = ${threadId} AND role = 'user'
+          AND json_extract(payload_json, '$.senderThreadId') IS NOT NULL
+        ORDER BY created_at DESC, message_id DESC LIMIT 1`.pipe(
+        Effect.map((rows) => (rows[0] === undefined ? undefined : ThreadId.make(rows[0].sender))),
+        Effect.mapError(controlReadError(threadId)),
+      );
     const getNextTurnItemOrdinal: ProjectionStoreV2Shape["getNextTurnItemOrdinal"] = (threadId) =>
       sql<{ ordinal: number | null }>`SELECT MAX(ordinal) AS ordinal
         FROM orchestration_v2_projection_turn_items WHERE thread_id = ${threadId}`.pipe(
@@ -6047,6 +6061,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getPendingNativeUserInputs,
       hasUnpairedRunInterruptRequest,
       getMessageCount,
+      getLastThreadSender,
       getNextTurnItemOrdinal,
       getTurnItem,
       getThreadRecords,
@@ -6313,6 +6328,22 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
       getMessageCount: (threadId) =>
         Ref.get(replayState).pipe(
           Effect.map((state) => state.projections.get(threadId)?.messages.length ?? 0),
+        ),
+      getLastThreadSender: (threadId) =>
+        Ref.get(replayState).pipe(
+          Effect.map(
+            (state) =>
+              state.projections
+                .get(threadId)
+                ?.messages.filter(
+                  (message) => message.role === "user" && message.senderThreadId !== undefined,
+                )
+                .toSorted(
+                  (left, right) =>
+                    DateTime.Order(right.createdAt, left.createdAt) ||
+                    right.id.localeCompare(left.id),
+                )[0]?.senderThreadId,
+          ),
         ),
       getNextTurnItemOrdinal: (threadId) =>
         Ref.get(replayState).pipe(

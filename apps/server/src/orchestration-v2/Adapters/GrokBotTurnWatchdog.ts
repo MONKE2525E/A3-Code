@@ -11,7 +11,7 @@ export const GROK_BOT_IDLE_COMPLETE_MS = 120_000;
 export const GROK_BOT_FRESH_IDLE_COMPLETE_MS = 5_000;
 /** Native idle with no answer must hold this long before the turn fails. */
 export const GROK_BOT_IDLE_FAIL_MS = 300_000;
-/** Without any native live state, only silence on every progress signal this long ends the turn. */
+/** Without native live state or a final answer, sustained silence this long fails the turn. */
 export const GROK_BOT_BLIND_TIMEOUT_MS = 3_600_000;
 /** The official client's default when a live record names no stale window. */
 const NATIVE_LIVE_STALE_MS = 90_000;
@@ -22,7 +22,7 @@ export const GROK_BOT_RECOVERY_NATIVE_FAILED_CODE = "native_turn_failed";
 
 export interface GrokBotWatchdogVerdict {
   readonly identity: GrokBotTurnIdentity;
-  /** Success only ever means native finished and an answer was delivered; everything else fails. */
+  /** Success requires an owned final answer and sustained native idle or silence. */
   readonly outcome: "success" | "error";
   readonly code?: string;
 }
@@ -69,7 +69,7 @@ export const makeGrokBotTurnWatchdog = (openedAtMs: number) => {
   const forget = (messageId: string) => {
     tracked.delete(messageId);
   };
-  const observeFrame = (frame: RuntimeFrame, nowMs: number) => {
+  const observeFrame = (frame: RuntimeFrame, _nowMs: number) => {
     switch (frame._tag) {
       case "Live": {
         const state = frame.state;
@@ -90,16 +90,10 @@ export const makeGrokBotTurnWatchdog = (openedAtMs: number) => {
       case "TurnFailed":
         for (const turn of tracked.values()) turn.failedCode = GROK_BOT_RECOVERY_NATIVE_FAILED_CODE;
         return;
-      case "Rows": {
-        // Replayed history only counts as progress at the moment it was written.
-        const replayedAtMs = Math.max(0, ...frame.entries.map((row) => rowTimeMs(row.value)));
-        for (const turn of tracked.values())
-          turn.lastProgressAtMs = Math.max(
-            turn.lastProgressAtMs,
-            frame.replay ? replayedAtMs : nowMs,
-          );
+      // Transcript traffic includes other turns, calls, and replayed history.
+      // Only the projection's correlated output callback advances a turn.
+      case "Rows":
         return;
-      }
       default:
         return;
     }
@@ -112,10 +106,14 @@ export const makeGrokBotTurnWatchdog = (openedAtMs: number) => {
     if (!streaming) {
       turn.outputSeen = true;
       turn.answerAtMs = nowMs;
-    } else turn.idleSinceMs = undefined;
+    } else {
+      turn.outputSeen = false;
+      turn.answerAtMs = undefined;
+      turn.idleSinceMs = undefined;
+    }
   };
   /**
-   * `held` names turns with work T3 can see in flight (managed MCP tool, delegated child), which is
+   * `held` names turns with work T3 can see in flight (managed MCP tool), which is
    * never judged even when native looks idle. `awaitingInput` holds every turn.
    */
   const evaluate = (
@@ -133,6 +131,14 @@ export const makeGrokBotTurnWatchdog = (openedAtMs: number) => {
       }
       if (live === undefined) {
         if (nowMs - openedAtMs < GROK_BOT_WATCHDOG_STARTUP_GRACE_MS) continue;
+        if (
+          turn.outputSeen &&
+          turn.failedCode === undefined &&
+          nowMs - turn.lastProgressAtMs >= GROK_BOT_IDLE_COMPLETE_MS
+        ) {
+          verdicts.push({ identity: turn.identity, outcome: "success" });
+          continue;
+        }
         if (nowMs - turn.lastProgressAtMs >= GROK_BOT_BLIND_TIMEOUT_MS)
           verdicts.push({
             identity: turn.identity,
@@ -172,9 +178,3 @@ export const makeGrokBotTurnWatchdog = (openedAtMs: number) => {
     pending: () => [...tracked.values()].map((turn) => turn.identity),
   };
 };
-
-function rowTimeMs(value: unknown): number {
-  if (typeof value !== "object" || value === null || !("timestampMs" in value)) return 0;
-  const at = value.timestampMs;
-  return typeof at === "number" && Number.isFinite(at) ? at : 0;
-}

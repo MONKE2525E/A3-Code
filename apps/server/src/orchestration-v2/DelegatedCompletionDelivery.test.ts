@@ -14,9 +14,11 @@ import {
   ProviderInstanceId,
   ProviderThreadId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import { GrokBotCapabilitiesV2 } from "./Adapters/GrokBotAdapterV2.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -92,12 +94,31 @@ const providerInstance = {
   textGeneration: {} as ProviderInstance["textGeneration"],
 } satisfies ProviderInstance;
 
+const botSelection = { instanceId: ProviderInstanceId.make("grok-bot"), model: "test-bot" };
+const botInstance = {
+  ...providerInstance,
+  instanceId: botSelection.instanceId,
+  driverKind: ProviderDriverKind.make("grok-bot"),
+  orchestrationAdapter: {
+    ...orchestrationAdapter,
+    instanceId: botSelection.instanceId,
+    driver: ProviderDriverKind.make("grok-bot"),
+    getCapabilities: () => Effect.succeed(GrokBotCapabilitiesV2),
+  },
+};
+
 const layerTestProviderInstanceRegistry = Layer.succeed(
   ProviderInstanceRegistry.ProviderInstanceRegistry,
   {
     getInstance: (instanceId) =>
-      Effect.succeed(instanceId === providerInstance.instanceId ? providerInstance : undefined),
-    listInstances: Effect.succeed([providerInstance]),
+      Effect.succeed(
+        instanceId === botInstance.instanceId
+          ? botInstance
+          : instanceId === providerInstance.instanceId
+            ? providerInstance
+            : undefined,
+      ),
+    listInstances: Effect.succeed([providerInstance, botInstance]),
     listUnavailable: Effect.succeed([]),
     streamChanges: Stream.empty,
     subscribeChanges: Effect.never,
@@ -142,6 +163,7 @@ const layerTest = Layer.mergeAll(RuntimeLayer.layer, RuntimeLayer.layerEventSink
 );
 
 const seedParentWithTerminalTask = (input: {
+  readonly modelSelection?: ModelSelection;
   readonly threadId: ThreadId;
   readonly projectId: ProjectId;
   readonly runId: RunId;
@@ -153,6 +175,10 @@ const seedParentWithTerminalTask = (input: {
   readonly now: DateTime.Utc;
 }) =>
   Effect.gen(function* () {
+    const selection = input.modelSelection ?? modelSelection;
+    const driver = ProviderDriverKind.make(
+      selection.instanceId === botSelection.instanceId ? "grok-bot" : "codex",
+    );
     const projects = yield* ProjectService.ProjectService;
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const eventSink = yield* EventSink.EventSinkV2;
@@ -175,7 +201,7 @@ const seedParentWithTerminalTask = (input: {
       threadId: input.threadId,
       projectId: input.projectId,
       title: "Delegated completion delivery",
-      modelSelection,
+      modelSelection: selection,
       runtimeMode: "full-access",
       interactionMode: "default",
       branch: null,
@@ -190,12 +216,12 @@ const seedParentWithTerminalTask = (input: {
           type: "provider-thread.updated",
           threadId: input.threadId,
           driver,
-          providerInstanceId: modelSelection.instanceId,
+          providerInstanceId: selection.instanceId,
           occurredAt: input.now,
           payload: {
             id: providerThreadId,
             driver,
-            providerInstanceId: modelSelection.instanceId,
+            providerInstanceId: selection.instanceId,
             providerSessionId: null,
             appThreadId: input.threadId,
             ownerNodeId: input.rootNodeId,
@@ -220,14 +246,14 @@ const seedParentWithTerminalTask = (input: {
           threadId: input.threadId,
           runId: input.runId,
           nodeId: input.rootNodeId,
-          providerInstanceId: modelSelection.instanceId,
+          providerInstanceId: selection.instanceId,
           occurredAt: input.now,
           payload: {
             id: input.runId,
             threadId: input.threadId,
             ordinal: 1,
-            providerInstanceId: modelSelection.instanceId,
-            modelSelection,
+            providerInstanceId: selection.instanceId,
+            modelSelection: selection,
             providerThreadId,
             userMessageId: MessageId.make(`message:seed-user:${input.threadId}`),
             rootNodeId: input.rootNodeId,
@@ -259,7 +285,7 @@ const seedParentWithTerminalTask = (input: {
           runId: input.runId,
           nodeId: input.taskId,
           driver,
-          providerInstanceId: modelSelection.instanceId,
+          providerInstanceId: selection.instanceId,
           occurredAt: input.now,
           payload: {
             id: input.taskId,
@@ -269,7 +295,7 @@ const seedParentWithTerminalTask = (input: {
             origin: "app_owned",
             createdBy: "agent",
             driver,
-            providerInstanceId: modelSelection.instanceId,
+            providerInstanceId: selection.instanceId,
             providerThreadId: null,
             childThreadId: null,
             nativeTaskRef: null,
@@ -291,6 +317,348 @@ const seedParentWithTerminalTask = (input: {
       ],
     });
   });
+
+const layerAutoWake = Layer.merge(layerTest, ProviderContinuationRequests.layer);
+const dispatchCompletionOffer = Effect.fnUntraced(function* (threadId: ThreadId) {
+  const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
+  let request = yield* requests.take;
+  while (request.threadId !== threadId) request = yield* requests.take;
+  const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const completion = request.delegatedCompletion!;
+  const parent = yield* orchestrator.getThreadRecords(request.threadId, ["runs"]);
+  const delivery = parent.runs.find((row) => row.id === completion.parentRunId)!
+    .delegatedCompletion!.delivery!;
+  yield* orchestrator.dispatch({
+    type: "message.dispatch",
+    commandId: CommandId.make(`test:deliver:${delivery.messageId}`),
+    threadId: request.threadId,
+    messageId: delivery.messageId,
+    text: "Delegated work finished",
+    attachments: [],
+    createdBy: "agent",
+    creationSource: "server",
+    dispatchMode: { type: "queue_after_active" },
+    delegatedCompletion: {
+      parentRunId: completion.parentRunId,
+      generation: delivery.generation,
+      taskIds: delivery.taskIds,
+    },
+  });
+});
+
+const waitForWake = (threadId: ThreadId, afterSequence: number) =>
+  EventSink.EventSinkV2.use((sink) =>
+    sink.stream({ threadId, afterSequence, eventType: "message.updated" }).pipe(
+      Stream.filter(
+        (stored) =>
+          stored.event.type === "message.updated" &&
+          (stored.event.payload.notification !== undefined ||
+            stored.event.payload.delegatedCompletion !== undefined),
+      ),
+      Stream.runHead,
+    ),
+  );
+
+it.layer(layerAutoWake)("Grok Bot automatic wakes", (it) => {
+  const seedBot = Effect.fnUntraced(function* (name: string) {
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make(`bot:${name}`);
+    const projectId = ProjectId.make(`project:${name}`);
+    const runId = RunId.make(`run:${name}`);
+    const rootNodeId = NodeId.make(`root:${name}`);
+    yield* seedParentWithTerminalTask({
+      threadId,
+      projectId,
+      runId,
+      rootNodeId,
+      taskId: NodeId.make(`delivered:${name}`),
+      deliveryState: "delivered",
+      modelSelection: botSelection,
+      now,
+    });
+    const sink = yield* EventSink.EventSinkV2;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+    yield* sink.write({
+      commandId: reconcileCommandId(`idle:${name}`),
+      events: [
+        {
+          id: EventId.make(`idle:${name}`),
+          type: "run.updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...run, status: "completed", completedAt: now },
+        },
+      ],
+    });
+    return { threadId, projectId, runId, rootNodeId, now };
+  });
+
+  it.effect.each(["completed", "failed", "cancelled", "interrupted"] as const)(
+    "starts an idle bot turn when its child is %s, once",
+    (status) =>
+      Effect.gen(function* () {
+        const bot = yield* seedBot(`child-${status}`);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const child = yield* seedRestartCancelledChild({
+          parentThreadId: bot.threadId,
+          parentRunId: bot.runId,
+          projectId: bot.projectId,
+          rootNodeId: bot.rootNodeId,
+          name: `wake-child-${status}`,
+          completionWake: "always",
+          continuationPending: false,
+          runStatus: status,
+          now: bot.now,
+        });
+        const after = yield* sink.latestSequence();
+        yield* orchestrator.recoverDelegatedTasks;
+        const initial = yield* orchestrator.getThreadProjection(bot.threadId);
+        assert.equal(initial.subagents.find((row) => row.id === child.taskId)?.status, status);
+        assert.isDefined(
+          initial.runs.find((row) => row.id === bot.runId)?.delegatedCompletion?.delivery,
+        );
+        yield* dispatchCompletionOffer(bot.threadId);
+        yield* waitForWake(bot.threadId, after);
+        yield* orchestrator.recoverDelegatedTasks;
+        const parent = yield* orchestrator.getThreadProjection(bot.threadId);
+        const messages = parent.messages.filter((row) =>
+          row.delegatedCompletion?.taskIds.includes(child.taskId),
+        );
+        assert.lengthOf(messages, 1);
+        assert.equal(parent.runs.find((row) => row.id === messages[0]!.runId)?.status, "starting");
+        assert.include(messages[0]!.text, `status: ${status}`);
+        assert.include(messages[0]!.text, child.childThreadId);
+      }),
+  );
+
+  it.effect("offers a deferred terminal result when the spawning bot run finishes", () =>
+    Effect.gen(function* () {
+      const bot = yield* seedBot("deferred");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const parentRun = (yield* orchestrator.getThreadProjection(bot.threadId)).runs[0]!;
+      yield* sink.write({
+        commandId: reconcileCommandId("deferred-running"),
+        events: [
+          {
+            id: EventId.make("deferred-running"),
+            type: "run.updated",
+            threadId: bot.threadId,
+            occurredAt: bot.now,
+            payload: { ...parentRun, status: "running", completedAt: null },
+          },
+        ],
+      });
+      const child = yield* seedRestartCancelledChild({
+        parentThreadId: bot.threadId,
+        parentRunId: bot.runId,
+        projectId: bot.projectId,
+        rootNodeId: bot.rootNodeId,
+        name: "deferred-child",
+        completionWake: "settled_only",
+        continuationPending: false,
+        runStatus: "completed",
+        now: bot.now,
+      });
+      yield* orchestrator.recoverDelegatedTasks;
+      assert.isUndefined(
+        (yield* orchestrator.getThreadProjection(bot.threadId)).subagents.find(
+          (row) => row.id === child.taskId,
+        )?.completionDelivery,
+      );
+      const after = yield* sink.latestSequence();
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("deferred-finished"),
+            type: "run.updated",
+            threadId: bot.threadId,
+            occurredAt: bot.now,
+            payload: parentRun,
+          },
+        ],
+      });
+      yield* dispatchCompletionOffer(bot.threadId);
+      yield* waitForWake(bot.threadId, after);
+      assert.lengthOf(
+        (yield* orchestrator.getThreadProjection(bot.threadId)).messages.filter((row) =>
+          row.delegatedCompletion?.taskIds.includes(child.taskId),
+        ),
+        1,
+      );
+    }),
+  );
+
+  it.effect.each(["user_input", "command"] as const)(
+    "wakes an idle bot for its child's pending %s request",
+    (kind) =>
+      Effect.gen(function* () {
+        const bot = yield* seedBot(`request-${kind}`);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const child = yield* seedRestartCancelledChild({
+          parentThreadId: bot.threadId,
+          parentRunId: bot.runId,
+          projectId: bot.projectId,
+          rootNodeId: bot.rootNodeId,
+          name: `request-child-${kind}`,
+          completionWake: "always",
+          continuationPending: true,
+          now: bot.now,
+        });
+        const requestId = RuntimeRequestId.make(`request:${kind}`);
+        const after = yield* sink.latestSequence();
+        const request = {
+          id: requestId,
+          nodeId: child.taskId,
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind,
+          status: "pending" as const,
+          responseCapability: { type: "not_resumable" as const, reason: "test" },
+          createdAt: bot.now,
+          resolvedAt: null,
+        };
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make(`pending:${kind}`),
+              type: "runtime-request.updated",
+              threadId: child.childThreadId,
+              occurredAt: bot.now,
+              payload: request,
+            },
+          ],
+        });
+        yield* waitForWake(bot.threadId, after);
+        const parent = yield* orchestrator.getThreadProjection(bot.threadId);
+        const message = parent.messages.find((row) =>
+          row.notification?.detail?.includes(requestId),
+        );
+        assert.isDefined(message);
+        assert.include(message!.text, child.taskId);
+        assert.equal(parent.runs.find((row) => row.id === message!.runId)?.status, "starting");
+      }),
+  );
+
+  it.effect(
+    "wakes the last sender for thread completion and attention, deduplicating repeated updates",
+    () =>
+      Effect.gen(function* () {
+        const bot = yield* seedBot("sent-thread");
+        const sink = yield* EventSink.EventSinkV2;
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sourceId = ThreadId.make("thread:sent-target");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("create:sent-target"),
+          threadId: sourceId,
+          projectId: bot.projectId,
+          title: "Sent target",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "agent",
+          creationSource: "mcp",
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("send:sent-target"),
+          threadId: sourceId,
+          messageId: MessageId.make("message:sent-target"),
+          text: "Work on this",
+          senderThreadId: bot.threadId,
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "agent",
+          creationSource: "mcp",
+        });
+        const source = yield* orchestrator.getThreadProjection(sourceId);
+        const after = yield* sink.latestSequence();
+        const completed = {
+          ...source.runs[0]!,
+          status: "completed" as const,
+          completedAt: bot.now,
+        };
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("sent-target:completed"),
+              type: "run.updated",
+              threadId: sourceId,
+              occurredAt: bot.now,
+              payload: completed,
+            },
+          ],
+        });
+        yield* waitForWake(bot.threadId, after);
+        const beforeAttention = yield* sink.latestSequence();
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("sent-target:completed-again"),
+              type: "run.updated",
+              threadId: sourceId,
+              occurredAt: bot.now,
+              payload: completed,
+            },
+          ],
+        });
+        const requestId = RuntimeRequestId.make("sent-target:request");
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make("sent-target:pending"),
+              type: "runtime-request.updated",
+              threadId: sourceId,
+              occurredAt: bot.now,
+              payload: {
+                id: requestId,
+                nodeId: NodeId.make("sent-target:root"),
+                providerTurnId: null,
+                nativeRequestRef: null,
+                kind: "user_input",
+                status: "pending",
+                responseCapability: { type: "message" },
+                createdAt: bot.now,
+                resolvedAt: null,
+              },
+            },
+          ],
+        });
+        yield* waitForWake(bot.threadId, beforeAttention);
+        const parent = yield* orchestrator.getThreadProjection(bot.threadId);
+        const wakes = parent.messages.filter((row) => row.notification !== undefined);
+        assert.lengthOf(wakes, 2);
+        assert.lengthOf(
+          wakes.filter((row) => row.text.includes(`runId: ${completed.id}`)),
+          1,
+        );
+        assert.lengthOf(
+          wakes.filter((row) => row.text.includes(`requestId: ${requestId}`)),
+          1,
+        );
+        assert.equal(
+          parent.runs.find(
+            (run) =>
+              run.id === wakes.find((row) => row.text.includes(`runId: ${completed.id}`))!.runId,
+          )?.status,
+          "starting",
+        );
+        assert.equal(
+          parent.runs.find(
+            (run) =>
+              run.id === wakes.find((row) => row.text.includes(`requestId: ${requestId}`))!.runId,
+          )?.status,
+          "queued",
+        );
+      }),
+  );
+});
 
 it.layer(layerTest)("delegated completion delivery repairs", (it) => {
   it.effect("acceptance batches pending siblings without acknowledging their results", () =>
@@ -802,7 +1170,7 @@ const seedRestartCancelledChild = (input: {
   readonly completionWake: "always" | "settled_only";
   readonly continuationPending: boolean;
   /** "completed" seeds a settled turn whose background work the restart cancelled. */
-  readonly runStatus?: "cancelled" | "completed";
+  readonly runStatus?: "cancelled" | "completed" | "failed" | "interrupted";
   readonly now: DateTime.Utc;
 }) =>
   Effect.gen(function* () {

@@ -353,23 +353,17 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const records = yield* projections.getThreadRecords(
           identity.native.threadId,
-          ["subagents", "turnItems"],
+          ["turnItems"],
           {
             turnItemRunId: identity.runId,
             turnItemTypes: ["dynamic_tool"],
             turnItemStatuses: ["running"],
           },
         );
-        // Tool items are written by McpToolActivity for this run only; children hang off its root node.
-        return (
-          records.turnItems.some(
-            (item) => item.runId === identity.runId && item.nodeId === identity.rootNodeId,
-          ) ||
-          records.subagents.some(
-            (task) =>
-              (task.runId === identity.runId || task.parentNodeId === identity.rootNodeId) &&
-              ["pending", "running", "waiting"].includes(task.status),
-          )
+        // A blocking delegate wait is a live tool. Async children have their
+        // own lifecycle and wake the bot after its native turn has ended.
+        return records.turnItems.some(
+          (item) => item.runId === identity.runId && item.nodeId === identity.rootNodeId,
         );
       }).pipe(Effect.catchCause(() => Effect.succeed(true))),
     openCompletionWatch: (owned) =>

@@ -1302,6 +1302,43 @@ it.effect("preserves settled native message and turn item times when history rep
   }).pipe(Effect.provide(IdAllocator.layer)),
 );
 
+it.effect("keeps timestamp-free bot replies in their original position across reconnects", () =>
+  Effect.gen(function* () {
+    const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    const frame = transcript([
+      {
+        seq: "1",
+        updatedSeq: "1",
+        value: {
+          id: "old-bot-reply",
+          kind: "send-message",
+          message: { type: "text", content: "Starting an audit thread now." },
+        },
+      },
+    ]);
+    yield* TestClock.setTime(1000);
+    const original = makeGrokBotTranscriptProjection({ native: nativeSession, idAllocator });
+    const first = yield* original.project(frame);
+    const oldMessage = first.find((event) => event.type === "message.updated")!.message;
+    const oldItem = first.find((event) => event.type === "turn_item.updated")!.turnItem;
+    for (const nowMs of [2000, 3000]) {
+      yield* TestClock.setTime(nowMs);
+      const reconnected = makeGrokBotTranscriptProjection({
+        native: nativeSession,
+        idAllocator,
+        existingMessage: (id) => Effect.succeed(id === oldMessage.id ? oldMessage : undefined),
+      });
+      const replayed = yield* reconnected.project(frame);
+      const message = replayed.find((event) => event.type === "message.updated")!.message;
+      const item = replayed.find((event) => event.type === "turn_item.updated")!.turnItem;
+      assert.deepEqual(message.createdAt, oldMessage.createdAt);
+      assert.deepEqual(message.updatedAt, oldMessage.updatedAt);
+      assert.deepEqual(item.startedAt, oldItem.startedAt);
+      assert.deepEqual(item.completedAt, oldItem.completedAt);
+    }
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
 // The call end as the native client persists it: the summary has no channel and is linked to the
 // call only by the requestId it shares with the call's voice-channel user rows.
 const voiceUser = (seq: string, id: string, content: string, requestId: string) => ({

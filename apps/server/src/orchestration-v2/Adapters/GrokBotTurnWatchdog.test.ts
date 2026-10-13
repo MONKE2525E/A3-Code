@@ -132,7 +132,7 @@ it.effect("pauses every clock while T3 holds a pending user request", () =>
   }),
 );
 
-it.effect("resets on streaming text and new rows but not on replayed history", () =>
+it.effect("resets on owned streaming text but not on replayed history", () =>
   Effect.gen(function* () {
     const { identity, watchdog } = yield* setup;
     watchdog.observeFrame(live(0, { isRunning: false }), 0);
@@ -153,16 +153,54 @@ it.effect("resets on streaming text and new rows but not on replayed history", (
   }),
 );
 
-it.effect("without native live state it waits out the startup grace, then a long silence", () =>
+it.effect(
+  "infers completion from an owned final answer and quiet when native live state is unavailable",
+  () =>
+    Effect.gen(function* () {
+      const { identity, watchdog } = yield* setup;
+      watchdog.observeOutput(identity.messageId, false, 0);
+      assert.deepEqual(watchdog.evaluate(GROK_BOT_WATCHDOG_STARTUP_GRACE_MS - 1, false), []);
+      assert.deepEqual(watchdog.evaluate(GROK_BOT_IDLE_COMPLETE_MS - 1, false), []);
+      assert.equal(watchdog.evaluate(GROK_BOT_IDLE_COMPLETE_MS, false)[0]?.outcome, "success");
+    }),
+);
+
+it.effect("times out an unobservable turn without any final answer", () =>
+  Effect.gen(function* () {
+    const { watchdog } = yield* setup;
+    assert.deepEqual(watchdog.evaluate(GROK_BOT_BLIND_TIMEOUT_MS - 1, false), []);
+    assert.equal(
+      watchdog.evaluate(GROK_BOT_BLIND_TIMEOUT_MS, false)[0]?.code,
+      GROK_BOT_RECOVERY_TIMEOUT_CODE,
+    );
+  }),
+);
+
+it.effect("unrelated live transcript updates cannot keep a finished turn thinking forever", () =>
   Effect.gen(function* () {
     const { identity, watchdog } = yield* setup;
-    watchdog.observeOutput(identity.messageId, false, 0);
-    assert.deepEqual(watchdog.evaluate(GROK_BOT_WATCHDOG_STARTUP_GRACE_MS - 1, false), []);
-    assert.deepEqual(watchdog.evaluate(GROK_BOT_BLIND_TIMEOUT_MS - 1, false), []);
-    const [verdict] = watchdog.evaluate(GROK_BOT_BLIND_TIMEOUT_MS, false);
-    // An unobservable turn with an answer still never counts as successfully finished.
-    assert.equal(verdict?.outcome, "error");
-    assert.equal(verdict?.code, GROK_BOT_RECOVERY_TIMEOUT_CODE);
+    watchdog.observeOutput(identity.messageId, false, 1000);
+    for (const nowMs of [30_000, 60_000, 90_000, 120_000])
+      watchdog.observeFrame(
+        {
+          _tag: "Rows",
+          generation: 0,
+          replay: false,
+          deletes: [],
+          entries: [{ seq: "2", updatedSeq: String(nowMs), value: { timestampMs: nowMs } }],
+        },
+        nowMs,
+      );
+    assert.equal(watchdog.evaluate(1000 + GROK_BOT_IDLE_COMPLETE_MS, false)[0]?.outcome, "success");
+  }),
+);
+
+it.effect("streaming after a settled answer must finish before completion can be inferred", () =>
+  Effect.gen(function* () {
+    const { identity, watchdog } = yield* setup;
+    watchdog.observeOutput(identity.messageId, false, 1000);
+    watchdog.observeOutput(identity.messageId, true, 2000);
+    assert.deepEqual(watchdog.evaluate(2000 + GROK_BOT_IDLE_COMPLETE_MS, false), []);
   }),
 );
 

@@ -347,14 +347,12 @@ export const makeGrokBotTranscriptProjection = (input: {
         driver: GROK_BOT_DRIVER_KIND,
         nativeItemId,
       });
+      // Native rows can omit their timestamp. Preserve the first import time
+      // across reconnects so old replies cannot move into the newest run.
       const persisted =
-        entry.kind === "message" &&
-        entry.role === "user" &&
-        entry.clientNonce !== undefined &&
-        managedMessageIds.has(entry.clientNonce) &&
-        input.existingMessage !== undefined
-          ? yield* input.existingMessage(messageId)
-          : undefined;
+        messages.has(`${generation}/${row.seq}/${entry.id}`) || input.existingMessage === undefined
+          ? undefined
+          : yield* input.existingMessage(messageId);
       if (
         entry.kind === "message" &&
         entry.role === "user" &&
@@ -1154,6 +1152,24 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
                 providerTurnId: request.providerTurnId,
               });
               yield* native.interrupt(owned);
+              // Stop/restart owns the old attempt's settlement. A late
+              // watchdog verdict must not revive a superseded native turn.
+              for (const identity of watchdog.pending())
+                if (
+                  identity.providerThreadId === request.providerThread.id &&
+                  identity.providerTurnId === request.providerTurnId
+                ) {
+                  yield* Queue.offerAll(
+                    inbox,
+                    yield* settlements.project({
+                      _tag: "Settlement",
+                      clientNonce: identity.messageId,
+                      outcome: "cancelled",
+                      settledAtMs: yield* Clock.currentTimeMillis,
+                    }),
+                  );
+                  watchdog.forget(identity.messageId);
+                }
             }).pipe(
               Effect.mapError(
                 (cause) =>
