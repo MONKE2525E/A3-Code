@@ -1007,9 +1007,14 @@ const make = Effect.gen(function* () {
         }),
       );
       if (binding === undefined) {
-        yield* cli(["bots", "delete", "--gateway", "--json", "--", input.botId]).pipe(
-          Effect.ignore,
-        );
+        yield* cli([
+          current.isGroup ? "groups" : "bots",
+          "delete",
+          "--gateway",
+          "--json",
+          "--",
+          input.botId,
+        ]).pipe(Effect.ignore);
       } else {
         const nativeBot = (yield* native
           .listForBinding(binding)

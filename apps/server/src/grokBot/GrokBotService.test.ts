@@ -153,6 +153,14 @@ const fixtureFor = (platform: NodeJS.Platform) =>
             return { ...output("", 2), stderr: remote.createFailure };
           return output(JSON.stringify(remote.created));
         }
+        if (input.args.includes("delete")) {
+          const id = input.args[input.args.indexOf("--") + 1];
+          const group = input.args.includes("groups");
+          remote.bots = remote.bots.filter(
+            (bot) => bot.id !== id || (bot.kind === "group") !== group,
+          );
+          return output(JSON.stringify({ botId: id }));
+        }
         if (input.args.includes("thread"))
           return output(JSON.stringify({ transcript: remote.transcript }));
         if (input.args.includes("send")) {
@@ -909,6 +917,22 @@ it.layer(NodeServices.layer)("Grok Bot bridge", (it) => {
       assert.deepStrictEqual(remaining?.pullRequests, []);
     }),
   );
+  it.effect.each([
+    { kind: "bot", id: bot.id, remaining: "group-1" },
+    { kind: "group", id: "group-1", remaining: bot.id },
+  ])("deletes a $kind through CLI fallback without removing the other kind", (target) =>
+    Effect.gen(function* () {
+      const { service, remote } = yield* fixture;
+      remote.bots.push({ id: "group-1", name: "Team", kind: "group", members: [bot.id] });
+      assert.deepStrictEqual(yield* service.delete({ botId: target.id }), { botId: target.id });
+      assert.deepStrictEqual(
+        (yield* service.list).map((entry) => entry.id),
+        [target.remaining],
+      );
+      assert.isEmpty(remote.nativeCalls);
+    }),
+  );
+
   it.effect("deletes a bot natively and drops its T3 PR links without touching the PR", () =>
     Effect.gen(function* () {
       const { service, remote, calls } = yield* fixture;
