@@ -78,6 +78,7 @@ export class ProviderRuntimeRecoveryService extends Context.Service<
 function nonterminalRuns(projection: ProjectionStore.ProjectionRuntimeRecoveryState) {
   return projection.runs.filter((run) => {
     const status: string = run.status;
+    if (run.status === "waiting" && run.resourceWait === true) return false;
     return (
       status === "preparing" ||
       run.status === "starting" ||
@@ -428,8 +429,17 @@ export const make = Effect.gen(function* () {
       };
       // Queued runs have not started provider work. Preserve their execution
       // identities and order, but require explicit consent before draining them.
-      for (const run of projection.runs) {
-        if (run.status !== "queued" || run.queueHeld === true) continue;
+      const queuedRuns = [
+        ...projection.runs
+          .filter((run) => run.status === "waiting" && run.resourceWait === true)
+          .toSorted((a, b) => a.ordinal - b.ordinal),
+        ...projection.runs
+          .filter((run) => run.status === "queued")
+          .toSorted((a, b) => (a.queuePosition ?? a.ordinal) - (b.queuePosition ?? b.ordinal)),
+      ];
+      for (const [index, run] of queuedRuns.entries()) {
+        if (run.status === "queued" && run.queueHeld === true && run.queuePosition === index + 1)
+          continue;
         events.push({
           id: yield* allocateEventId(),
           type: "run.updated",
@@ -437,7 +447,13 @@ export const make = Effect.gen(function* () {
           runId: run.id,
           providerInstanceId: run.providerInstanceId,
           occurredAt: now,
-          payload: { ...run, queueHeld: true },
+          payload: {
+            ...run,
+            status: "queued",
+            resourceWait: false,
+            queueHeld: true,
+            queuePosition: index + 1,
+          },
         });
       }
       for (const request of requests) {

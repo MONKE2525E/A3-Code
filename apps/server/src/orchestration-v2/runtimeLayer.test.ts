@@ -4860,8 +4860,8 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
-  it.effect.each(["thread.stop", "run.interrupt"] as const)(
-    "stops resource-waiting work through %s and cancels its pending start",
+  it.effect.each(["thread.stop", "run.interrupt", "shutdown", "startup"] as const)(
+    "handles resource-waiting work through %s and retires its pending start",
     (type) =>
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -4906,6 +4906,36 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
             },
           ],
         });
+        if (type === "shutdown" || type === "startup") {
+          const recovery = yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService;
+          yield* recovery.reconcile(type);
+          const held = yield* orchestrator.getThreadProjection(threadId);
+          assert.equal(held.runs[0]?.status, "queued");
+          assert.isTrue(held.runs[0]?.queueHeld);
+          assert.equal(held.attempts[0]?.status, "pending");
+          assert.equal(held.nodes[0]?.status, "pending");
+          yield* recovery.reconcile(type);
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(threadId)).runs[0]?.status,
+            "queued",
+          );
+          const starts = (yield* (yield* EffectOutbox.EffectOutboxV2).listByCommandId(
+            commandId,
+          )).filter((effect) => effect.request.type === "provider-turn.start");
+          assert.lengthOf(starts, 1);
+          assert.equal(starts[0]?.status, "cancelled");
+          yield* orchestrator.dispatch({
+            type: "queue.resume",
+            threadId,
+            commandId: CommandId.make(`resource-wait-resume:${type}`),
+          });
+          yield* orchestrator.resumeQueuedRuns;
+          const resumed = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+          assert.equal(resumed.status, "starting");
+          assert.equal(resumed.id, run.id);
+          assert.equal(resumed.activeAttemptId, run.activeAttemptId);
+          return;
+        }
         yield* orchestrator.dispatch({
           commandId: CommandId.make(`resource-wait-stop:${type}`),
           threadId,
