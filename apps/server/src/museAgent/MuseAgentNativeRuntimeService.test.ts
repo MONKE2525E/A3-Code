@@ -15,6 +15,24 @@ import * as Schema from "effect/Schema";
 import { ProviderPromptNotSubmittedError } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
+import * as Queue from "effect/Queue";
+import {
+  ProviderSessionId,
+  ProviderTurnId,
+  ThreadId,
+  ProviderInstanceId,
+} from "@t3tools/contracts";
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import * as ToolsPort from "./MuseAgentDirectToolsPort.ts";
+import { createMuseAgentAdapterV2 } from "../orchestration-v2/Adapters/MuseAgentAdapterV2.ts";
+import {
+  makeTurn,
+  options,
+  policy,
+  selection,
+  threadId,
+  host,
+} from "../orchestration-v2/Adapters/MuseAgentAdapterV2.testkit.ts";
 import * as Native from "./MuseAgentNativeRuntimeService.ts";
 import * as Source from "./MuseAgentSessionSource.ts";
 import * as Transport from "./MuseAgentTransport.ts";
@@ -35,6 +53,9 @@ const fixture = () => {
   let authority = binding;
   let failSend = false;
   let stageHook: Effect.Effect<void, Transport.MuseAgentTransportError> = Effect.void;
+  let admissionHook: Effect.Effect<void, Transport.MuseAgentTransportError> = Effect.void;
+  let watch: Transport.MuseAgentTransport["Service"]["watch"] = () =>
+    Effect.succeed({ events: Stream.never, close: Effect.void });
   const remoteSizes = new Map<string, number>();
   const remoteBytes = new Map<string, Uint8Array>();
   let inspections = 0;
@@ -91,10 +112,11 @@ const fixture = () => {
           remoteSizes.delete(String(params.path));
           return {};
         }
+        if (method === "chat.stream") yield* admissionHook;
         if (failSend) return yield* new Transport.MuseAgentTransportError({ kind: "uncertain" });
         return { session_id: "primary", message_id: "user-1", reply_to_message_id: "carrier-1" };
       }),
-    watch: () => Effect.succeed({ events: Stream.never, close: Effect.void }),
+    watch: (binding, sessionId) => watch(binding, sessionId),
     connectionId: () => Effect.succeed("generation-1"),
     cancelOwned: (_, receipt) =>
       Effect.sync(() => {
@@ -149,6 +171,12 @@ const fixture = () => {
     setStageHook: (hook: typeof stageHook) => {
       stageHook = hook;
     },
+    setAdmissionHook: (hook: typeof admissionHook) => {
+      admissionHook = hook;
+    },
+    setWatch: (next: typeof watch) => {
+      watch = next;
+    },
     close: () => db.close(),
     switchAccount: () => {
       authority = "b".repeat(64);
@@ -162,6 +190,211 @@ const fixture = () => {
     },
   };
 };
+
+const ownershipContext = (turn: Effect.Success<typeof makeTurn>) => ({
+  threadId: turn.threadId,
+  providerInstanceId: turn.modelSelection.instanceId,
+  runId: turn.runId,
+  nodeId: turn.rootNodeId,
+  providerThreadId: turn.providerThread.id,
+  providerTurnId: ProviderTurnId.make(
+    `provider-turn/muse-agent/${encodeURIComponent(turn.attemptId)}`,
+  ),
+  userMessageId: turn.message.messageId,
+});
+
+it.effect.each(["success", "error", "interrupt"] as const)(
+  "releases matching receipt readers after admission %s",
+  (outcome) => {
+    const f = fixture();
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const native = yield* Native.MuseAgentNativeRuntimeService;
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const turn = yield* makeTurn;
+        const context = ownershipContext(turn);
+        f.setAdmissionHook(
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+        );
+        const sending = yield* native.send({ ...request, context }).pipe(Effect.forkScoped);
+        yield* Deferred.await(entered);
+        const scope = {
+          binding,
+          sessionId: "primary",
+          threadId,
+          providerInstanceId: selection.instanceId,
+        };
+        const options = { awaitAdmissions: true, receiptsOnly: true };
+        // Other thread and instance readers must not wait behind this delivery.
+        assert.deepStrictEqual(
+          yield* native.historyOwnership(
+            { ...scope, threadId: ThreadId.make("other-thread") },
+            options,
+          ),
+          { receipts: [], messages: [] },
+        );
+        assert.deepStrictEqual(
+          yield* native.historyOwnership(
+            { ...scope, providerInstanceId: ProviderInstanceId.make("other-instance") },
+            options,
+          ),
+          { receipts: [], messages: [] },
+        );
+        const readFinished = yield* Deferred.make<void>();
+        const reading = yield* native.historyOwnership(scope, options).pipe(
+          Effect.tap(() => Deferred.succeed(readFinished, undefined)),
+          Effect.forkScoped,
+        );
+        yield* Effect.yieldNow;
+        assert.isTrue(Option.isNone(yield* Deferred.poll(readFinished)));
+        if (outcome === "interrupt") yield* Fiber.interrupt(sending);
+        else {
+          if (outcome === "error") f.setFailSend();
+          yield* Deferred.succeed(release, undefined);
+          const result = yield* Fiber.join(sending).pipe(Effect.exit);
+          assert.strictEqual(Exit.isSuccess(result), outcome === "success");
+        }
+        const ownership = yield* Fiber.join(reading);
+        assert.strictEqual(ownership.receipts.length, outcome === "success" ? 1 : 0);
+        assert.deepStrictEqual(ownership.messages, []);
+      }),
+    ).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)));
+  },
+);
+
+it.effect("refuses a stale account after a matching admission wait completes", () => {
+  const f = fixture();
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const native = yield* Native.MuseAgentNativeRuntimeService;
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      f.setAdmissionHook(
+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      );
+      const context = ownershipContext(yield* makeTurn);
+      const sending = yield* native.send({ ...request, context }).pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      const reading = yield* native
+        .historyOwnership(
+          { binding, sessionId: "primary", threadId, providerInstanceId: selection.instanceId },
+          { awaitAdmissions: true, receiptsOnly: true },
+        )
+        .pipe(Effect.forkScoped);
+      yield* Effect.yieldNow;
+      f.switchAccount();
+      yield* Fiber.interrupt(sending);
+      assert.strictEqual((yield* Fiber.join(reading).pipe(Effect.flip)).kind, "account_changed");
+    }),
+  ).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)));
+});
+
+it.effect(
+  "an observer opened before managed admission renders one original user and retains a foreign native user",
+  () => {
+    const f = fixture();
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const native = yield* Native.MuseAgentNativeRuntimeService;
+        const watchers = new Set<Queue.Queue<Transport.MuseAgentNativeEvent>>();
+        f.setWatch(() =>
+          Effect.gen(function* () {
+            const queue = yield* Queue.unbounded<Transport.MuseAgentNativeEvent>();
+            watchers.add(queue);
+            return {
+              events: Stream.fromQueue(queue),
+              close: Effect.sync(() => {
+                watchers.delete(queue);
+              }).pipe(Effect.andThen(Queue.shutdown(queue))),
+            };
+          }),
+        );
+        const adapter = yield* createMuseAgentAdapterV2(options).pipe(
+          Effect.provideService(Native.MuseAgentNativeRuntimeService, native),
+          Effect.provideService(ProviderHost.ProviderHost, host),
+          Effect.provideService(
+            ToolsPort.MuseAgentDirectToolsPort,
+            ToolsPort.MuseAgentDirectToolsPort.of({
+              install: () => Effect.succeed({ uninstall: Effect.void }),
+              start: () => Effect.succeed({ revoke: Effect.void, close: Effect.void }),
+            }),
+          ),
+        );
+        const observer = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("observer-before-admission"),
+          modelSelection: selection,
+          runtimePolicy: policy,
+        });
+        const turn = yield* makeTurn;
+        const managed = yield* adapter.openSession({
+          threadId,
+          providerSessionId: turn.providerThread.providerSessionId!,
+          modelSelection: selection,
+          runtimePolicy: policy,
+        });
+        const rendered = new Map([[turn.message.messageId, turn.message.text]]);
+        const observerForeignObserved = yield* Deferred.make<void>();
+        const managedForeignObserved = yield* Deferred.make<void>();
+        const collect = (runtime: typeof observer, foreignObserved: Deferred.Deferred<void>) =>
+          runtime.events.pipe(
+            Stream.runForEach((event) => {
+              if (event.type !== "message.updated" || event.message.role !== "user")
+                return Effect.void;
+              rendered.set(event.message.id, event.message.text);
+              return event.message.text === "Synthetic foreign user"
+                ? Deferred.succeed(foreignObserved, undefined).pipe(Effect.asVoid)
+                : Effect.void;
+            }),
+            Effect.forkScoped,
+          );
+        yield* collect(observer, observerForeignObserved);
+        yield* collect(managed, managedForeignObserved);
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        f.setAdmissionHook(
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+        );
+        const sending = yield* managed.startTurn(turn).pipe(Effect.forkScoped);
+        yield* Deferred.await(entered);
+        for (const queue of watchers) {
+          yield* Queue.offer(queue, {
+            event: "message.user",
+            payload: {
+              session_id: "primary",
+              message_id: "user-1",
+              display_text: "T3 Code context: refer to the user only as Monke. Synthetic own user",
+            },
+            meta: { seq: 2, ts_ms: 2000 },
+          });
+          yield* Queue.offer(queue, {
+            event: "message.user",
+            payload: {
+              session_id: "primary",
+              message_id: "foreign-user",
+              display_text: "Synthetic foreign user",
+            },
+            meta: { seq: 1, ts_ms: 1000 },
+          });
+        }
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(sending);
+        yield* Deferred.await(observerForeignObserved);
+        yield* Deferred.await(managedForeignObserved);
+        assert.strictEqual(rendered.get(turn.message.messageId), turn.message.text);
+        assert.deepStrictEqual(
+          [...rendered.values()].sort(),
+          [turn.message.text, "Synthetic foreign user"].sort(),
+        );
+        assert.strictEqual(
+          [...rendered.values()].some((text) => text.startsWith("T3 Code context:")),
+          false,
+        );
+      }),
+    ).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)));
+  },
+);
 
 const isPromptNotSubmitted = Schema.is(ProviderPromptNotSubmittedError);
 const isNativeRuntimeError = Schema.is(Native.MuseAgentRuntimeError);

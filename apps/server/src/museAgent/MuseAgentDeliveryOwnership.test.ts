@@ -101,6 +101,20 @@ it.effect(
             },
           ],
         });
+        const exact = yield* reopened.historyOwnership(scope, { nativeMessageId: "owned-answer" });
+        assert.deepStrictEqual(
+          exact.messages.map((message) => message.nativeMessageId),
+          ["owned-answer"],
+        );
+        const unrelated = yield* reopened.historyOwnership(scope, {
+          nativeMessageId: "foreign-answer",
+        });
+        assert.deepStrictEqual(unrelated.messages, []);
+        assert.deepStrictEqual(unrelated.receipts, exact.receipts);
+        assert.deepStrictEqual(
+          (yield* reopened.historyOwnership(scope, { receiptsOnly: true })).messages,
+          [],
+        );
         assert.deepStrictEqual(
           yield* reopened.historyOwnership({ ...scope, sessionId: "foreign" }),
           { receipts: [], messages: [] },

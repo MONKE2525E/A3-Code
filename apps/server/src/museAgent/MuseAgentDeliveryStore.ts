@@ -88,6 +88,7 @@ export class MuseAgentDeliveryStore extends Context.Service<
     ) => Effect.Effect<MuseAgentReceipt | null, MuseAgentDeliveryError>;
     readonly historyOwnership: (
       scope: MuseAgentHistoryOwnershipScope,
+      options?: { readonly receiptsOnly?: boolean; readonly nativeMessageId?: string },
     ) => Effect.Effect<MuseAgentHistoryOwnership, MuseAgentDeliveryError>;
     readonly recordManagedMessage: (
       input: MuseAgentDeliveryScope & {
@@ -230,7 +231,7 @@ export const makeMuseAgentDeliveryStore = (
           throw new MuseAgentDeliveryError({ kind: "conflict" });
         return row?.receipt_json ? decodeReceipt(JSON.parse(row.receipt_json)) : null;
       }),
-    historyOwnership: (scope) =>
+    historyOwnership: (scope, options) =>
       operation(() => {
         const rows = db
           .prepare(
@@ -258,11 +259,15 @@ export const makeMuseAgentDeliveryStore = (
           }
         }
         const messages: MuseAgentHistoryOwnership["messages"][number][] = [];
-        const associations = db
-          .prepare(
-            "SELECT native_message_id,delivery_key,snapshot_json FROM muse_managed_messages WHERE binding=? AND session_id=? AND snapshot_json IS NOT NULL",
-          )
-          .all(scope.binding, scope.sessionId);
+        if (options?.receiptsOnly) return { receipts, messages };
+        const associationQuery =
+          "SELECT native_message_id,delivery_key,snapshot_json FROM muse_managed_messages WHERE binding=? AND session_id=? AND snapshot_json IS NOT NULL";
+        const associations =
+          options?.nativeMessageId === undefined
+            ? db.prepare(associationQuery).all(scope.binding, scope.sessionId)
+            : db
+                .prepare(`${associationQuery} AND native_message_id=?`)
+                .all(scope.binding, scope.sessionId, options.nativeMessageId);
         for (const row of associations) {
           const context = contexts.get(String(row.delivery_key));
           if (context)

@@ -11,6 +11,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as Deferred from "effect/Deferred";
 import * as Source from "./MuseAgentSessionSource.ts";
 import * as Transport from "./MuseAgentTransport.ts";
 import * as Delivery from "./MuseAgentDeliveryStore.ts";
@@ -168,6 +169,11 @@ export class MuseAgentNativeRuntimeService extends Context.Service<
     readonly settleDelivery: (deliveryKey: string) => Effect.Effect<void, MuseAgentError>;
     readonly historyOwnership: (
       scope: MuseAgentHistoryOwnershipScope,
+      options?: {
+        readonly awaitAdmissions?: boolean;
+        readonly receiptsOnly?: boolean;
+        readonly nativeMessageId?: string;
+      },
     ) => Effect.Effect<MuseAgentHistoryOwnership, MuseAgentError>;
     readonly recordManagedMessage: (
       input: MuseAgentDeliveryScope & {
@@ -203,6 +209,12 @@ const make = Effect.gen(function* () {
   const source = yield* Source.MuseAgentSessionSource;
   const transport = yield* Transport.MuseAgentTransport;
   const deliveries = yield* Delivery.MuseAgentDeliveryStore;
+  const admissions = new Set<{
+    readonly binding: string;
+    readonly sessionId: string;
+    readonly context: MuseAgentDeliveryContext | undefined;
+    readonly completed: Deferred.Deferred<void>;
+  }>();
   let connectedBinding: string | undefined;
   const accountBinding = transport.connect.pipe(
     Effect.tap((binding) =>
@@ -423,78 +435,95 @@ const make = Effect.gen(function* () {
         const attachmentIdentity = prepared.length
           ? museAttachmentContentIdentity(prepared)
           : undefined;
-        return yield* Effect.uninterruptibleMask((restore) =>
-          Effect.gen(function* () {
-            const existing = yield* deliveries
-              .begin({
-                ...input,
-                ...(attachmentIdentity ? { attachmentIdentity } : {}),
-              })
-              .pipe(
-                Effect.catchTags({
-                  MuseAgentDeliveryError: (cause) =>
-                    cause.kind === "busy" || cause.kind === "conflict"
-                      ? Effect.fail(new ProviderPromptNotSubmittedError({ cause }))
-                      : Effect.fail(cause),
-                }),
-              );
-            if (existing) return { ...existing, replayed: true };
-            let promptAttempted = false;
-            return yield* restore(
+        return yield* Effect.acquireUseRelease(
+          Effect.sync(() => {
+            const pending = {
+              binding: input.binding,
+              sessionId: input.sessionId,
+              context: input.context,
+              completed: Deferred.makeUnsafe<void>(),
+            };
+            admissions.add(pending);
+            return pending;
+          }),
+          () =>
+            Effect.uninterruptibleMask((restore) =>
               Effect.gen(function* () {
-                const items = yield* Effect.forEach(prepared, (attachment) =>
-                  materializeMuseAttachment(input.binding, attachment).pipe(
-                    Effect.provideService(Transport.MuseAgentTransport, transport),
-                    Effect.mapError((cause) => new ProviderPromptNotSubmittedError({ cause })),
+                const existing = yield* deliveries
+                  .begin({
+                    ...input,
+                    ...(attachmentIdentity ? { attachmentIdentity } : {}),
+                  })
+                  .pipe(
+                    Effect.catchTags({
+                      MuseAgentDeliveryError: (cause) =>
+                        cause.kind === "busy" || cause.kind === "conflict"
+                          ? Effect.fail(new ProviderPromptNotSubmittedError({ cause }))
+                          : Effect.fail(cause),
+                    }),
+                  );
+                if (existing) return { ...existing, replayed: true };
+                let promptAttempted = false;
+                return yield* restore(
+                  Effect.gen(function* () {
+                    const items = yield* Effect.forEach(prepared, (attachment) =>
+                      materializeMuseAttachment(input.binding, attachment).pipe(
+                        Effect.provideService(Transport.MuseAgentTransport, transport),
+                        Effect.mapError((cause) => new ProviderPromptNotSubmittedError({ cause })),
+                      ),
+                    );
+                    // No cleanup may abandon the intent once the native chat write is attempted.
+                    promptAttempted = true;
+                    // Muse does not advertise idempotent native chat admission. A persisted intent is never replayed.
+                    const response = yield* transport.request(
+                      input.binding,
+                      "chat.stream",
+                      {
+                        items: [
+                          ...items,
+                          ...(input.text.trim() ? [{ type: "text", text: input.text }] : []),
+                        ],
+                        session_id: input.sessionId,
+                        ...(input.clientId ? { node_id: input.clientId } : {}),
+                        capabilities: [
+                          "chat_cancel",
+                          "delta_stream",
+                          "custom_reactions",
+                          "custom_reactions_facebook_thumbs_up_v1",
+                        ],
+                      },
+                      true,
+                      input.deliveryKey,
+                    );
+                    const admission = yield* decode(response, Admission);
+                    if (admission.session_id !== input.sessionId)
+                      return yield* new MuseAgentRuntimeError({ kind: "protocol" });
+                    const receipt = {
+                      messageId: admission.message_id,
+                      replyToMessageId: admission.reply_to_message_id ?? admission.message_id,
+                      sessionId: admission.session_id,
+                    };
+                    yield* deliveries.accept(input.deliveryKey, receipt);
+                    return { ...receipt, replayed: false };
+                  }),
+                ).pipe(
+                  Effect.onExit((exit) =>
+                    !promptAttempted && Exit.isFailure(exit)
+                      ? deliveries.abandonBeforePrompt(input.deliveryKey)
+                      : Effect.void,
+                  ),
+                  Effect.catchCause((cause) =>
+                    promptAttempted
+                      ? Effect.failCause(cause)
+                      : Effect.fail(new ProviderPromptNotSubmittedError({ cause })),
                   ),
                 );
-                // No cleanup may abandon the intent once the native chat write is attempted.
-                promptAttempted = true;
-                // Muse does not advertise idempotent native chat admission. A persisted intent is never replayed.
-                const response = yield* transport.request(
-                  input.binding,
-                  "chat.stream",
-                  {
-                    items: [
-                      ...items,
-                      ...(input.text.trim() ? [{ type: "text", text: input.text }] : []),
-                    ],
-                    session_id: input.sessionId,
-                    ...(input.clientId ? { node_id: input.clientId } : {}),
-                    capabilities: [
-                      "chat_cancel",
-                      "delta_stream",
-                      "custom_reactions",
-                      "custom_reactions_facebook_thumbs_up_v1",
-                    ],
-                  },
-                  true,
-                  input.deliveryKey,
-                );
-                const admission = yield* decode(response, Admission);
-                if (admission.session_id !== input.sessionId)
-                  return yield* new MuseAgentRuntimeError({ kind: "protocol" });
-                const receipt = {
-                  messageId: admission.message_id,
-                  replyToMessageId: admission.reply_to_message_id ?? admission.message_id,
-                  sessionId: admission.session_id,
-                };
-                yield* deliveries.accept(input.deliveryKey, receipt);
-                return { ...receipt, replayed: false };
               }),
-            ).pipe(
-              Effect.onExit((exit) =>
-                !promptAttempted && Exit.isFailure(exit)
-                  ? deliveries.abandonBeforePrompt(input.deliveryKey)
-                  : Effect.void,
-              ),
-              Effect.catchCause((cause) =>
-                promptAttempted
-                  ? Effect.failCause(cause)
-                  : Effect.fail(new ProviderPromptNotSubmittedError({ cause })),
-              ),
-            );
-          }),
+            ),
+          (pending) =>
+            Effect.sync(() => {
+              admissions.delete(pending);
+            }).pipe(Effect.andThen(Deferred.succeed(pending.completed, undefined)), Effect.asVoid),
         );
       }),
     replay: (input) =>
@@ -516,8 +545,29 @@ const make = Effect.gen(function* () {
         Effect.andThen(transport.watch(input.binding, input.sessionId)),
       ),
     settleDelivery: deliveries.settle,
-    historyOwnership: (scope) =>
-      check(scope.binding).pipe(Effect.andThen(deliveries.historyOwnership(scope))),
+    historyOwnership: (scope, options) =>
+      Effect.gen(function* () {
+        yield* check(scope.binding);
+        if (options?.awaitAdmissions) {
+          const pending = [...admissions].filter(
+            (entry) =>
+              entry.binding === scope.binding &&
+              entry.sessionId === scope.sessionId &&
+              entry.context?.threadId === scope.threadId &&
+              entry.context.providerInstanceId === scope.providerInstanceId,
+          );
+          yield* Effect.forEach(pending, (entry) => Deferred.await(entry.completed), {
+            discard: true,
+          });
+          yield* check(scope.binding);
+        }
+        return yield* deliveries.historyOwnership(scope, {
+          receiptsOnly: options?.receiptsOnly ?? false,
+          ...(options?.nativeMessageId === undefined
+            ? {}
+            : { nativeMessageId: options.nativeMessageId }),
+        });
+      }),
     recordManagedMessage: deliveries.recordManagedMessage,
     pendingDeliveries: (scope) =>
       check(scope.binding).pipe(Effect.andThen(deliveries.pendingDeliveries(scope))),
