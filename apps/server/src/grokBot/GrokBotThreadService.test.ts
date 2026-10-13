@@ -299,11 +299,41 @@ it.effect(
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const initial = yield* orchestrator.getThreadProjection(first.threadId!);
       const run = initial.runs[0]!;
-      const providerThread = initial.providerThreads[0]!;
+      const providerThread = initial.providerThreads.find(
+        (thread) => thread.id === run.providerThreadId,
+      )!;
       const now = yield* DateTime.now;
+      const providerSession = {
+        id: ProviderSessionId.make("agent-followup-session"),
+        driver: GROK_BOT_DRIVER_KIND,
+        providerInstanceId: instanceId,
+        status: "ready" as const,
+        cwd: "/tmp/scratch-project",
+        model: bot.id,
+        capabilities: GrokBotCapabilitiesV2,
+        createdAt: now,
+        updatedAt: now,
+        lastError: null,
+      };
       yield* (yield* EventSink.EventSinkV2).write({
         commandId: CommandId.make("agent-followup-seed"),
         events: [
+          {
+            id: EventId.make("agent-followup-session"),
+            type: "provider-session.attached",
+            threadId: first.threadId!,
+            runId: run.id,
+            occurredAt: now,
+            payload: providerSession,
+          },
+          {
+            id: EventId.make("agent-followup-thread"),
+            type: "provider-thread.updated",
+            threadId: first.threadId!,
+            runId: run.id,
+            occurredAt: now,
+            payload: { ...providerThread, providerSessionId: providerSession.id },
+          },
           {
             id: EventId.make("agent-followup-run"),
             type: "run.updated",
@@ -333,11 +363,6 @@ it.effect(
         ],
       });
       const sessions = yield* ProviderSessions.ProviderSessionManagerV2;
-      const providerSession = {
-        ...initial.providerSessions[0]!,
-        id: providerThread.providerSessionId!,
-        capabilities: GrokBotCapabilitiesV2,
-      };
       const sessionSpy = vi
         .spyOn(sessions, "get")
         .mockReturnValue(Effect.succeed(Option.some({ providerSession } as never)));

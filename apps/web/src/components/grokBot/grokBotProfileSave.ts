@@ -57,7 +57,7 @@ export interface ProfileSaveState {
 }
 
 /** True when the roster already shows every field the patch sets. */
-export function profilePatchShown(patch: ProfilePatch, bot: GrokBot): boolean {
+function profilePatchShown(patch: ProfilePatch, bot: GrokBot): boolean {
   return (Object.keys(patch) as (keyof ProfilePatch)[]).every(
     (field) => patch[field] === bot[field],
   );

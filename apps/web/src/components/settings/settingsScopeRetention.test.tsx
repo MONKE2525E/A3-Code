@@ -22,7 +22,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
     useNavigate: () => vi.fn(),
   }),
   useLocation: (options?: { select: (location: unknown) => unknown }) => {
-    const location = { pathname: state.pathname, hash: "", state: {} };
+    const location = { pathname: state.pathname, search: state.scope.search, hash: "", state: {} };
     return options ? options.select(location) : location;
   },
   Outlet: () => <StatefulContent />,
