@@ -482,7 +482,8 @@ export const makeGrokBotTranscriptProjection = (input: {
           ? yield* input.existingMessage(messageId)
           : undefined;
       if (
-        isNativeUserEntry(entry) &&
+        entry.kind === "message" &&
+        entry.role === "user" &&
         grokBotMessagePeer(input.native.botId, entry) === undefined &&
         entry.clientNonce !== undefined &&
         managedMessageIds.has(entry.clientNonce)
@@ -568,8 +569,7 @@ export const makeGrokBotTranscriptProjection = (input: {
         }
       }
       if (
-        entry.kind === "message" &&
-        entry.role === "user" &&
+        isNativeUserEntry(entry) &&
         grokBotMessagePeer(input.native.botId, entry) === undefined &&
         entry.clientNonce !== undefined &&
         managedMessageIds.has(entry.clientNonce) &&
