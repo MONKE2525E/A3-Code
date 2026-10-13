@@ -6045,10 +6045,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         }>`
         SELECT run.run_id, run.thread_id, run.status, json_extract(run.payload_json, '$.resourceWait') AS resource_wait
         FROM orchestration_v2_projection_runs AS run
-        JOIN orchestration_v2_projection_threads AS thread ON thread.thread_id = run.thread_id
         WHERE run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
           AND run.status IN ('starting', 'running', 'waiting')
-          AND thread.archived_at IS NULL AND thread.deleted_at IS NULL
       `;
         // The first status predicate matches the existing partial recovery index.
         return rows.map((row) => ({
@@ -6142,20 +6140,18 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
       getResourceAdmissionRuns: Effect.gen(function* () {
         const existing = (yield* Ref.get(replayState)).projections;
         return [...existing.values()].flatMap((projection) =>
-          projection.thread.archivedAt !== null || projection.thread.deletedAt !== null
-            ? []
-            : projection.runs.flatMap((run) =>
-                run.status === "starting" || run.status === "running" || run.status === "waiting"
-                  ? [
-                      {
-                        runId: run.id,
-                        threadId: run.threadId,
-                        status: run.status,
-                        resourceWait: run.resourceWait === true,
-                      },
-                    ]
-                  : [],
-              ),
+          projection.runs.flatMap((run) =>
+            run.status === "starting" || run.status === "running" || run.status === "waiting"
+              ? [
+                  {
+                    runId: run.id,
+                    threadId: run.threadId,
+                    status: run.status,
+                    resourceWait: run.resourceWait === true,
+                  },
+                ]
+              : [],
+          ),
         );
       }),
       getShellSnapshot: (options) =>

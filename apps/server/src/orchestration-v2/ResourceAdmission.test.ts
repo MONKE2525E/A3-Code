@@ -138,6 +138,13 @@ it.effect.each(["memory", "sqlite"] as const)(
         yield* admission.release(a.runId);
         expect(yield* admission.acquire(c)).toBe(true);
         yield* put("b", "running", false);
+        yield* store.apply({
+          id: EventId.make("archive:b"),
+          type: "thread.archived",
+          threadId: b.threadId,
+          occurredAt: now,
+          payload: { ...(yield* store.getThread(b.threadId))!, archivedAt: now },
+        });
         expect(yield* admission.acquire(a)).toBe(false);
         yield* put("b", "waiting", false);
         expect(yield* admission.acquire(a)).toBe(true);

@@ -4860,6 +4860,69 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  it.effect.each(["thread.stop", "run.interrupt"] as const)(
+    "stops resource-waiting work through %s and cancels its pending start",
+    (type) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const threadId = ThreadId.make(`resource-wait-stop:${type}`);
+        const commandId = CommandId.make(`resource-wait-message:${type}`);
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`resource-wait-create:${type}`),
+          threadId,
+          projectId: ProjectId.make("resource-wait-project"),
+          title: "Resource wait stop",
+          createdBy: "user",
+          creationSource: "web",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: `/tmp/resource-wait-stop-${type}`,
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId,
+          threadId,
+          messageId: MessageId.make(`resource-wait-message:${type}`),
+          text: "Wait before starting.",
+          createdBy: "user",
+          creationSource: "web",
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "start_immediately" },
+        });
+        const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+        yield* (yield* EventSink.EventSinkV2).write({
+          events: [
+            {
+              id: EventId.make(`resource-wait:${type}`),
+              type: "run.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: yield* DateTime.now,
+              payload: { ...run, status: "waiting", resourceWait: true },
+            },
+          ],
+        });
+        yield* orchestrator.dispatch({
+          commandId: CommandId.make(`resource-wait-stop:${type}`),
+          threadId,
+          ...(type === "run.interrupt" ? { type, runId: run.id } : { type }),
+        });
+        const stopped = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(stopped.runs[0]?.status, "interrupted");
+        assert.equal(stopped.attempts[0]?.status, "interrupted");
+        assert.equal(stopped.nodes[0]?.status, "interrupted");
+        const starts = (yield* (yield* EffectOutbox.EffectOutboxV2).listByCommandId(
+          commandId,
+        )).filter((effect) => effect.request.type === "provider-turn.start");
+        assert.lengthOf(starts, 1);
+        assert.equal(starts[0]?.status, "cancelled");
+      }),
+  );
+
   it.effect.each([false, true])(
     "cancels queued work and pending starts when a thread is archived (resource wait: %s)",
     (resourceWait) =>

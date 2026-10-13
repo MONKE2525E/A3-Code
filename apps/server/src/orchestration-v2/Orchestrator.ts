@@ -9337,7 +9337,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (
         providerThread.driver === "grok-bot" &&
         providerTurn === undefined &&
-        run.status !== "preparing"
+        run.status !== "preparing" &&
+        !(run.status === "waiting" && run.resourceWait === true)
       ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
@@ -9456,7 +9457,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
       if (
         providerTurn === undefined &&
-        (run.status === "preparing" || run.status === "starting" || run.status === "running")
+        (run.status === "preparing" ||
+          run.status === "starting" ||
+          run.status === "running" ||
+          (run.status === "waiting" && run.resourceWait === true))
       ) {
         const attempt = projection.attempts.find(
           (candidate) => candidate.id === run.activeAttemptId,
@@ -9567,7 +9571,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* stopRemainingWork();
         yield* Ref.update(effects, (existing) => [...existing, ...otherProviderInterrupts]);
         return {
-          effectTypes: ["provider-turn.start", "provider-turn.restart"],
+          effectTypes: [
+            "provider-turn.start",
+            "provider-turn.restart",
+            "provider-runtime.reconnect",
+          ],
           reason: `Run ${run.id} was interrupted before its provider turn started.`,
         } satisfies {
           readonly effectTypes: ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
@@ -9701,7 +9709,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const target =
         projection.runs.findLast(
           (run) =>
-            run.status === "preparing" || run.status === "starting" || run.status === "running",
+            run.status === "preparing" ||
+            run.status === "starting" ||
+            run.status === "running" ||
+            (run.status === "waiting" && run.resourceWait === true),
         ) ??
         (derivePendingBackgroundWork({
           latestRun,
