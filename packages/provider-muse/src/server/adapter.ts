@@ -304,6 +304,11 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
       const commands = yield* Semaphore.make(1);
       const eventPermit = yield* Semaphore.make(1);
       let host: MuseSdkHost;
+      const hostScopeCleanups = new WeakMap<MuseSdkHost, Effect.Effect<void>>();
+      const closeHost = (host: MuseSdkHost) =>
+        Effect.tryPromise(() => host.close()).pipe(
+          Effect.ensuring(hostScopeCleanups.get(host) ?? Effect.void),
+        );
       let hostEpoch = 0;
       let closed = false;
       let broken = false;
@@ -787,7 +792,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
         yield* Queue.fail(events, protocolError(detail, cause));
         // Report the failure first; a hung host can take a while to close.
         const failed = host;
-        yield* Effect.tryPromise(() => failed.close()).pipe(Effect.ignore, Effect.forkIn(scope));
+        yield* closeHost(failed).pipe(Effect.ignore, Effect.forkIn(scope));
       });
       const owns = (turn: ActiveTurn, turnId: string) =>
         turnId === turn.nativeId || turn.joined.has(turnId);
@@ -1382,6 +1387,9 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
           threadId: input.threadId,
           env: environment,
         });
+        if (launch.cleanup !== undefined) {
+          yield* Scope.addFinalizer(scope, launch.cleanup);
+        }
         const created = yield* Effect.acquireRelease(
           createMuseSdkHostEffect(
             {
@@ -1413,6 +1421,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
           { interruptible: true },
         ).pipe(Effect.provideService(Scope.Scope, scope));
         host = created;
+        if (launch.cleanup !== undefined) hostScopeCleanups.set(created, launch.cleanup);
         created.connection.onNotification((notification) => {
           Queue.offerUnsafe(inbox, {
             type: "notification",
@@ -1922,7 +1931,7 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
                 Effect.gen(function* () {
                   if (active !== turn) return;
                   hostEpoch++;
-                  yield* Effect.tryPromise(() => host.close()).pipe(
+                  yield* closeHost(host).pipe(
                     Effect.mapError((cause) => protocolError("Cannot stop Muse compaction", cause)),
                     Effect.onError(failHost),
                   );

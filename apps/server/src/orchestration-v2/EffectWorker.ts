@@ -27,6 +27,7 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ResourceAdmission from "./ResourceAdmission.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 
 export class OrchestrationEffectExecutionError extends Schema.TaggedError<OrchestrationEffectExecutionError>()(
@@ -593,6 +594,7 @@ export const layerWithOptions = (
     Effect.gen(function* () {
       const outbox = yield* EffectOutbox.EffectOutboxV2;
       const executor = yield* OrchestrationEffectExecutorV2;
+      const admission = yield* ResourceAdmission.ResourceAdmission;
       const workerId = options.workerId ?? `orchestration-v2:${process.pid}`;
       const leaseDurationMs = Math.max(1, options.leaseDurationMs ?? 30_000);
       const wasCancelled = (effectId: string) =>
@@ -738,6 +740,33 @@ export const layerWithOptions = (
           }).pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
           if (cancelledBeforeExecution) return true;
 
+          const startRunId =
+            effect.request.type === "provider-turn.start" ? effect.request.runId : undefined;
+          if (startRunId !== undefined) {
+            const admitted = yield* admission
+              .acquire({ runId: startRunId, threadId: effect.threadId })
+              .pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
+            if (!admitted) {
+              const deferred = yield* outbox
+                .retry({
+                  effectId: effect.id,
+                  workerId,
+                  error: "Waiting for host resources",
+                  delayMs: 5_000,
+                  consumeAttempt: false,
+                })
+                .pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
+              if (!deferred && !(yield* wasCancelled(effect.id))) {
+                return yield* new OrchestrationEffectWorkerError({
+                  operation: "reschedule",
+                  effectId: effect.id,
+                  cause: "The worker no longer owns the capacity-deferred effect lease.",
+                });
+              }
+              return true;
+            }
+          }
+
           const execution = executor
             .execute(effect, { willRetry: effect.attemptCount < maxAttempts })
             .pipe(Effect.as("executed" as const));
@@ -745,6 +774,7 @@ export const layerWithOptions = (
             Effect.ensuring(outbox.clearCancellation(effect.id)),
           );
           if (Exit.isSuccess(exit) && exit.value === "cancelled") {
+            if (startRunId !== undefined) yield* admission.release(startRunId);
             return true;
           }
           if (Exit.isSuccess(exit)) {
@@ -763,6 +793,7 @@ export const layerWithOptions = (
           }
 
           const error = Cause.pretty(exit.cause);
+          if (startRunId !== undefined) yield* admission.release(startRunId);
           const nonRetryable = isNonRetryableProviderTurnControlFailure(effect.request.type, error);
           yield* Effect.logWarning("Orchestration effect execution failed", {
             effectId: effect.id,

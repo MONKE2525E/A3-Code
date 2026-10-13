@@ -60,6 +60,7 @@ const withFakeSystemd = <A, E>(
   body: (input: {
     readonly scope: Effect.Success<typeof make>;
     readonly units: Map<string, { activeState: string; result: string }>;
+    readonly kills: Array<ReadonlyArray<string>>;
   }) => Effect.Effect<A, E>,
 ) =>
   Effect.gen(function* () {
@@ -68,6 +69,7 @@ const withFakeSystemd = <A, E>(
       NodeFS.writeFileSync(NodePath.join(bin, name), "", { mode: 0o755 });
     }
     const units = new Map<string, { activeState: string; result: string }>();
+    const kills: Array<ReadonlyArray<string>> = [];
     const output = (stdout: string): ProcessRunner.ProcessRunOutput => ({
       stdout,
       stderr: "",
@@ -82,6 +84,10 @@ const withFakeSystemd = <A, E>(
       run: ({ args }) =>
         Effect.sync(() => {
           const [, verb, unit = ""] = args;
+          if (verb === "kill") {
+            kills.push(args);
+            units.delete(args.at(-1)!);
+          }
           if (verb === "reset-failed") units.delete(unit);
           if (verb !== "show") return output("");
           const state = units.get(unit);
@@ -97,7 +103,7 @@ const withFakeSystemd = <A, E>(
       Effect.provideService(HostProcess.Platform, "linux"),
       Effect.provideService(HostProcess.Environment, { PATH: bin, XDG_RUNTIME_DIR: "/run/user/1" }),
     );
-    return yield* body({ scope, units }).pipe(
+    return yield* body({ scope, units, kills }).pipe(
       Effect.ensuring(Effect.sync(() => NodeFS.rmSync(bin, { recursive: true, force: true }))),
     );
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
@@ -106,6 +112,42 @@ const unitOf = (launch: { readonly args: ReadonlyArray<string> }) =>
   launch.args.find((arg) => arg.startsWith("--unit="))?.slice("--unit=".length) ?? "";
 
 describe("AgentScope service", () => {
+  it.effect("reaps only the released launch's scope, once, after its leader exits", () =>
+    withFakeSystemd(({ scope, units, kills }) =>
+      Effect.gen(function* () {
+        const first = yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "a" });
+        const replacement = yield* scope.wrap({
+          command: "agent",
+          args: [],
+          name: "t",
+          threadId: "a",
+        });
+        const terminal = yield* scope.wrap({ command: "agent", args: [], name: "terminal" });
+        for (const launch of [first, replacement, terminal]) {
+          units.set(unitOf(launch), { activeState: "active", result: "success" });
+        }
+        expect(first.cleanup).toBeDefined();
+        yield* first.cleanup!;
+        yield* first.cleanup!;
+        expect(kills).toEqual([
+          ["--user", "kill", "--signal=SIGKILL", "--kill-whom=all", unitOf(first)],
+        ]);
+        expect(units.has(unitOf(replacement))).toBe(true);
+        expect(units.has(unitOf(terminal))).toBe(true);
+      }),
+    ),
+  );
+
+  it.effect("does not signal a scope which already exited", () =>
+    withFakeSystemd(({ scope, kills }) =>
+      Effect.gen(function* () {
+        const launch = yield* scope.wrap({ command: "agent", args: [], name: "t" });
+        yield* launch.cleanup!;
+        expect(kills).toEqual([]);
+      }),
+    ),
+  );
+
   it.effect("labels a thread from its newest scope until its next session clears it", () =>
     withFakeSystemd(({ scope, units }) =>
       Effect.gen(function* () {

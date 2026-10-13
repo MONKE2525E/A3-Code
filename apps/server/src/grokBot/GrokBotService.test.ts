@@ -94,6 +94,7 @@ const fixtureFor = (platform: NodeJS.Platform) =>
       failPr: false,
       prCalls: 0,
       nativeAvailable: false,
+      versionCode: 0,
       npm: "ok" as "ok" | "missing" | "timeout" | number,
       nativePinned: [] as string[],
       nativeBinding: "selected-account-fixture",
@@ -149,7 +150,7 @@ const fixtureFor = (platform: NodeJS.Platform) =>
           if (remote.sendFailure) return yield* remote.sendFailure;
           return output(JSON.stringify(remote.receipt), remote.sendCode);
         }
-        return output("0.12.4");
+        return output("0.12.4", remote.versionCode);
       });
     const nativeList = Effect.suspend(
       (): GrokBotNativeService.GrokBotNativeService["Service"]["list"] => {
@@ -982,6 +983,21 @@ it.layer(NodeServices.layer)("Grok Bot bridge", (it) => {
       yield* service.read(bot.id);
       assert.strictEqual(calls.filter((call) => call.args.includes("thread")).length, 2);
       assert.strictEqual(calls.filter((call) => call.args.includes("list")).length, 1);
+    }),
+  );
+
+  it.effect("backs off an unavailable CLI and discovers recovery after five seconds", () =>
+    Effect.gen(function* () {
+      const { service, remote, calls } = yield* fixture;
+      remote.versionCode = 1;
+      for (let read = 0; read < 6; read++) {
+        assert.equal((yield* service.status).installed, false);
+      }
+      assert.equal(calls.filter((call) => call.args.includes("--version")).length, 1);
+      remote.versionCode = 0;
+      yield* TestClock.adjust("5 seconds");
+      assert.equal((yield* service.status).installed, true);
+      assert.equal(calls.filter((call) => call.args.includes("--version")).length, 2);
     }),
   );
   it.effect("refreshes cached roster and transcript after sends and updates", () =>

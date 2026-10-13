@@ -23,6 +23,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EffectWorker from "./EffectWorker.ts";
+import * as ResourceAdmission from "./ResourceAdmission.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
@@ -43,6 +44,99 @@ const providerThreadId = ProviderThreadId.make("provider-thread:effect-worker-re
 const providerTurnId = ProviderTurnId.make("provider-turn:effect-worker-restart");
 const attemptId = RunAttemptId.make("run-attempt:effect-worker-restart");
 const runId = RunId.make("run:effect-worker-restart");
+
+it.effect("capacity deferrals remain cancellable and never exhaust provider retries", () =>
+  Effect.gen(function* () {
+    const allowed = yield* Ref.make(false);
+    const executed = yield* Ref.make(0);
+    const executor = Layer.succeed(EffectWorker.OrchestrationEffectExecutorV2, {
+      execute: () => Ref.update(executed, (count) => count + 1),
+    });
+    const outboxLayer = EffectOutbox.layer.pipe(
+      Layer.provideMerge(
+        Layer.effectDiscard(runMigrations()).pipe(
+          Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
+        ),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const id = "effect:resource-deferred";
+      yield* outbox.enqueue([
+        {
+          id,
+          commandId: CommandId.make("command:resource-deferred"),
+          threadId,
+          request: { type: "provider-turn.start", runId },
+        },
+      ]);
+      for (let attempt = 0; attempt < 7; attempt++) {
+        assert.isTrue(yield* worker.runOnce);
+        const row = Option.getOrThrow(yield* outbox.get(id));
+        assert.equal(row.status, "pending");
+        assert.equal(row.attemptCount, 0);
+        assert.equal(yield* Ref.get(executed), 0);
+        yield* TestClock.adjust("5 seconds");
+      }
+      // Control work still runs while starts wait for capacity.
+      yield* outbox.enqueue([
+        {
+          id: "effect:cleanup",
+          commandId: CommandId.make("command:cleanup"),
+          threadId: ThreadId.make("other-thread"),
+          request: { type: "terminal.cleanup" },
+        },
+      ]);
+      assert.isTrue(yield* worker.runOnce);
+      assert.isTrue(yield* worker.runOnce);
+      assert.equal(yield* Ref.get(executed), 1);
+      yield* Ref.set(allowed, true);
+      yield* TestClock.adjust("5 seconds");
+      assert.isTrue(yield* worker.runOnce);
+      assert.equal(yield* Ref.get(executed), 2);
+      const row = Option.getOrThrow(yield* outbox.get(id));
+      assert.equal(row.status, "succeeded");
+      assert.equal(row.attemptCount, 1);
+      yield* Ref.set(allowed, false);
+      const cancelledId = "effect:resource-cancelled";
+      yield* outbox.enqueue([
+        {
+          id: cancelledId,
+          commandId: CommandId.make("command:resource-cancelled"),
+          threadId,
+          request: { type: "provider-turn.start", runId },
+        },
+      ]);
+      assert.isTrue(yield* worker.runOnce);
+      yield* outbox.cancelUnsettled({
+        threadId,
+        effectTypes: ["provider-turn.start"],
+        reason: "User stopped queued work",
+      });
+      yield* Ref.set(allowed, true);
+      yield* TestClock.adjust("5 seconds");
+      assert.isFalse(yield* worker.runOnce);
+      assert.equal(Option.getOrThrow(yield* outbox.get(cancelledId)).status, "cancelled");
+      assert.equal(yield* Ref.get(executed), 2);
+    }).pipe(
+      Effect.provide(
+        EffectWorker.layer.pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              outboxLayer,
+              executor,
+              Layer.succeed(ResourceAdmission.ResourceAdmission, {
+                acquire: () => Ref.get(allowed),
+                release: () => Effect.void,
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+  }).pipe(Effect.provide(TestClock.layer())),
+);
 
 function restartEffect(
   now: DateTime.Utc,

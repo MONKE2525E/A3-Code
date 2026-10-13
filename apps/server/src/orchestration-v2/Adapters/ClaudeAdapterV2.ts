@@ -769,7 +769,7 @@ export const layerQueryRunner: Layer.Layer<
               ),
             ),
           ),
-        );
+        ).pipe(Effect.onError(() => launch?.cleanup ?? Effect.void));
 
         return {
           messages: Stream.fromAsyncIterable(claudeQueryMessages(queryRuntime), (cause) =>
@@ -858,6 +858,7 @@ export const layerQueryRunner: Layer.Layer<
           ),
           close: Queue.shutdown(promptQueue).pipe(
             Effect.andThen(closeClaudeQuery(queryRuntime)),
+            Effect.ensuring(launch?.cleanup ?? Effect.void),
             Effect.tap(() =>
               logProtocolEvent({
                 direction: "outgoing",

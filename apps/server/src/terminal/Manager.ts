@@ -1611,6 +1611,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const legacyHistoryPath = (threadId: string) =>
     path.join(logsDir, `${legacySafeThreadId(threadId)}.log`);
 
+  const processCleanups = new WeakMap<PtyAdapter.PtyProcess, Effect.Effect<void>>();
+  const cleanupOwnedScope = (process: PtyAdapter.PtyProcess | null) =>
+    process === null ? Effect.void : (processCleanups.get(process) ?? Effect.void);
+
   const readManagerState = SynchronizedRef.get(managerStateRef);
 
   const modifyManagerState = <A>(
@@ -1711,6 +1715,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     terminalId: string,
   ) {
     const fiber = yield* runKillEscalation(process, threadId, terminalId).pipe(
+      Effect.ensuring(cleanupOwnedScope(process)),
       Effect.ensuring(
         modifyManagerState((state) => {
           if (!state.killFibers.has(process)) {
@@ -2116,6 +2121,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }
 
       yield* clearKillFiber(action.process);
+      yield* cleanupOwnedScope(action.process);
       yield* unregisterTerminal({
         threadId: action.threadId,
         terminalId: action.terminalId,
@@ -2209,12 +2215,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     );
 
     if (attempt._tag === "Success") {
+      if (launch.cleanup !== undefined) processCleanups.set(attempt.success, launch.cleanup);
       return {
         process: attempt.success,
         shellLabel: formatShellCandidate(candidate),
       };
     }
 
+    if (launch.cleanup !== undefined) yield* launch.cleanup;
     const spawnError = attempt.failure;
     if (!isRetryableShellSpawnError(spawnError)) {
       return yield* spawnError;

@@ -561,7 +561,7 @@ const make = Effect.gen(function* () {
       timeToLive: (exit) =>
         Exit.isSuccess(exit) && (exit.value.installed || exit.value.nativeAvailable)
           ? "30 seconds"
-          : 0,
+          : "5 seconds",
     },
   );
   const status = Cache.get(statusCache, undefined);

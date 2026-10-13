@@ -13,6 +13,7 @@ import {
   TerminalProviderInstanceNotFoundError,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as Data from "effect/Data";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
@@ -421,6 +422,29 @@ it.layer(
   Layer.merge(NodeServices.layer, ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer))),
   { excludeTestServices: true },
 )("TerminalManager", (it) => {
+  it.effect("cleans up detached scope children when the terminal shell exits", () =>
+    Effect.gen(function* () {
+      const reaped = yield* Deferred.make<void>();
+      const { manager, ptyAdapter } = yield* createManager().pipe(
+        Effect.provideService(AgentScope, {
+          ...AgentScope.defaultValue(),
+          wrap: ({ command, args }) =>
+            Effect.succeed({
+              command,
+              args,
+              cleanup: Deferred.succeed(reaped, undefined).pipe(Effect.asVoid),
+            }),
+        }),
+      );
+      yield* manager.open(openInput());
+      ptyAdapter.processes[0]!.emitExit({ exitCode: 0, signal: 0 });
+      yield* Deferred.await(reaped);
+      const terminal = yield* manager.open(openInput());
+      assert.equal(terminal.status, "running");
+      assert.equal(ptyAdapter.processes.length, 2);
+    }),
+  );
+
   it.effect("spawns lazily and reuses running terminal per thread", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();

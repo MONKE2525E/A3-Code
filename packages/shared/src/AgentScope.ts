@@ -43,6 +43,8 @@ export interface AgentScopeShape {
 export interface AgentScopeCommand {
   readonly command: string;
   readonly args: ReadonlyArray<string>;
+  /** Stop the exact owned scope, including detached descendants, on process release. */
+  readonly cleanup?: Effect.Effect<void>;
 }
 
 export const AgentScope = Context.Reference<AgentScopeShape>("@t3tools/shared/AgentScope", {
