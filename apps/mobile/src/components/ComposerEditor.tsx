@@ -23,7 +23,7 @@ import {
 } from "../state/use-composer-drafts";
 import { importComposerContextClipboard } from "../lib/composerContextClipboard";
 import { mobilePreferencesAtom } from "../state/preferences";
-import { ComposerContextSheet } from "./ComposerContextSheet";
+import { ComposerContextSheet } from "../features/threads/ComposerContextSheet";
 import { AppText as Text } from "./AppText";
 import {
   composerDocumentAttachment,

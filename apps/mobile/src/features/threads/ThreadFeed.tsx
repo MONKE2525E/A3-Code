@@ -1,4 +1,4 @@
-import { useRouteOpenPullRequest } from "../pull-requests/useRouteOpenPullRequest";
+import { useOpenPullRequest } from "../pull-requests/useOpenPullRequestFromRoute";
 import { ThreadContextDivider } from "./thread-context-divider";
 import { ThreadHandoffRow } from "./thread-handoff-row";
 import { SecretRequestCard } from "./SecretRequestCard";
@@ -34,7 +34,7 @@ import {
   collectComposerContextReferences,
   replaceComposerContextReferences,
 } from "@t3tools/shared/composerContextReferences";
-import { ComposerContextSheet } from "../../components/ComposerContextSheet";
+import { ComposerContextSheet } from "./ComposerContextSheet";
 import { writeComposerContextClipboard } from "../../lib/composerContextClipboard";
 import {
   codexArtifactTemplatePresentationLabel,
@@ -2051,7 +2051,7 @@ type UserMessageContentProps = {
 function UserMessageContent(props: UserMessageContentProps) {
   const [selected, setSelected] = useState<{ contextId: string; label: string } | null>(null);
   const navigation = useNavigation();
-  const openPullRequest = useRouteOpenPullRequest();
+  const openPullRequest = useOpenPullRequest();
   const { selectedThread } = useThreadSelection();
   const liveText = useLiveThreadLinkLabels(props.text, props.environmentId);
   const text = replaceComposerContextReferences(liveText, (ref) => {
@@ -2233,7 +2233,7 @@ function ThreadFeedPlaceholder(props: {
 }
 
 export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
-  const openPullRequest = useRouteOpenPullRequest();
+  const openPullRequest = useOpenPullRequest();
   const usesNativeWorkspaceColumns = useNativeWorkspaceColumnsSupported();
   const navigation = useNavigation();
   const { themeAppearance } = useAppearancePreferences();

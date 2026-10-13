@@ -45,6 +45,7 @@ import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import { grokBotSenderNote } from "./GrokBotSenderNote.ts";
+import { grokBotInlineHandoffBudget } from "./Adapters/GrokBotManagedBinding.ts";
 import {
   isRestartNoteContinuation,
   pendingRestartCancelledBackgroundWork,
@@ -257,12 +258,13 @@ export const layer: Layer.Layer<
                     source.status === "interrupted" ||
                     (source.status === "completed" &&
                       handoff.delivery === undefined &&
-                      projection.messages.some(
-                        (message) =>
-                          message.id === source.userMessageId &&
-                          message.attachments.length === 0 &&
-                          message.text.trim().toLowerCase() === "/compact",
-                      ))),
+                      (providerThread?.driver === "grok-bot" ||
+                        projection.messages.some(
+                          (message) =>
+                            message.id === source.userMessageId &&
+                            message.attachments.length === 0 &&
+                            message.text.trim().toLowerCase() === "/compact",
+                        )))),
               ))),
       );
       const nativeForkTransfer = projection.contextTransfers.find(
@@ -1143,11 +1145,16 @@ export const layer: Layer.Layer<
                     createdAt: yield* DateTime.now,
                   }),
                 ];
-          const delivery = yield* deliverContextHandoffs({
+          const deliveryEffect = deliverContextHandoffs({
             handoffs: [...effectiveHandoffs, ...retryHandoff],
             deferInline: compact,
             providerThread: runningProviderThread,
             budget: Effect.gen(function* () {
+              // Grok owns the persistent bot's context and compaction. Its mirrored
+              // transcript cannot measure current occupancy; bound imported history
+              // without charging that transcript or blocking the current request.
+              if (session.driver === "grok-bot")
+                return grokBotInlineHandoffBudget({ tokenCap, userText, restartNote });
               return handoffBudget({
                 tokenCap,
                 modelContextWindow,
@@ -1191,6 +1198,14 @@ export const layer: Layer.Layer<
                 });
               }),
           });
+          const delivery = yield* session.driver === "grok-bot"
+            ? deliveryEffect.pipe(
+                Effect.catchTags({
+                  ContextHandoffBudgetError: () =>
+                    Effect.succeed({ context: "", delivered: Effect.void, unsent: Effect.void }),
+                }),
+              )
+            : deliveryEffect;
           if (!(yield* isCurrentAttemptInStatus("running"))) return;
           const start = compact ? session.compactThread! : session.startTurn;
           const context = [delivery.context, restartNote]

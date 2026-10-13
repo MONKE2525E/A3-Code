@@ -2,6 +2,11 @@
 import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import {
+  DEFAULT_UNIFIED_SETTINGS,
+  type EnvironmentId,
+  type UnifiedSettings,
+} from "@t3tools/contracts";
 import type { SettingsScopeSearch } from "./settingsScope";
 
 interface ScopeState {
@@ -22,12 +27,7 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
     useNavigate: () => vi.fn(),
   }),
   useLocation: (options?: { select: (location: unknown) => unknown }) => {
-    const location = {
-      pathname: state.pathname,
-      hash: "",
-      search: state.scope.search,
-      state: {},
-    };
+    const location = { pathname: state.pathname, search: state.scope.search, hash: "", state: {} };
     return options ? options.select(location) : location;
   },
   Outlet: () => <StatefulContent />,
@@ -52,6 +52,12 @@ vi.mock("./SettingsScopeContext", async () => {
   };
 });
 vi.mock("../../state/environments", () => ({ useEnvironments: () => ({ environments: [] }) }));
+vi.mock("../../hooks/useSettings", () => ({
+  useEnvironmentSettings: <T,>(
+    _environmentId: EnvironmentId,
+    selector: (settings: UnifiedSettings) => T,
+  ) => selector(DEFAULT_UNIFIED_SETTINGS),
+}));
 vi.mock("../ui/sidebar", () => ({
   SidebarInset: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }));

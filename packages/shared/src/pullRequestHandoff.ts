@@ -5,7 +5,6 @@
  */
 import type {
   PullRequestAction,
-  PullRequestActor,
   PullRequestCheck,
   PullRequestChecksState as ContractPullRequestChecksState,
   PullRequestComment,
@@ -468,21 +467,4 @@ export function handoffPrompt(
           : existing.prompt;
   if (kept.trim().length === 0) return incoming;
   return incoming.length === 0 ? kept : `${kept}\n\n${incoming}`;
-}
-
-/** A review that says something about the change itself, rather than only carrying remarks. */
-export type PullRequestReviewOutcome = "approved" | "changes-requested" | "dismissed";
-
-export interface PullRequestReviewOutcomeEntry {
-  /**
-   * What made this entry its own reviewer. A login where the host reported one, and otherwise the
-   * review's own id — so a surface listing these has a key that separates the same two authorless
-   * verdicts this does, rather than collapsing them back into one row.
-   */
-  readonly key: string;
-  readonly actor: PullRequestActor | null;
-  readonly outcome: PullRequestReviewOutcome;
-  readonly at: string;
-  /** Commits landed after this verdict, so it speaks for code that is no longer on the branch. */
-  readonly stale: boolean;
 }
