@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import {
   makeMuseAgentProjection,
   museHistoryFrame,
-  stripMuseWidgetMarkers,
+  stripMuseInlineMarkers,
 } from "./MuseAgentAdapterV2Projection.ts";
 import { instanceId, binding, threadId, makeTurn, receipt } from "./MuseAgentAdapterV2.testkit.ts";
 
@@ -650,10 +650,16 @@ it.effect("rejects blank, foreign and delayed prior-delivery supersession notice
   }),
 );
 
-it("drops Muse widget markers and keeps the words around them", () => {
+it("drops Muse inline markers and keeps the words around them", () => {
   assert.strictEqual(
-    stripMuseWidgetMarkers("On it. Which model?\n[[hatch_widget:widget-5419bf8d]]"),
+    stripMuseInlineMarkers("On it. Which model?\n[[hatch_widget:widget-5419bf8d]]"),
     "On it. Which model?",
   );
-  assert.strictEqual(stripMuseWidgetMarkers("plain reply"), "plain reply");
+  assert.strictEqual(
+    stripMuseInlineMarkers(
+      "Now they're giving this guy tips.\n[image:image/jpeg workspace/user/files/screenshot.png]",
+    ),
+    "Now they're giving this guy tips.",
+  );
+  assert.strictEqual(stripMuseInlineMarkers("plain reply"), "plain reply");
 });

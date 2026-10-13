@@ -80,18 +80,20 @@ export function museTerminalStatus(status: string | undefined) {
 }
 
 /**
- * Muse's own UI widgets, such as `[[hatch_widget:…]]`, appear inline in its reply text. T3 cannot
- * render them, so the marker is dropped and the words around it stay.
+ * Muse writes inline markers into its transcript text: its own UI widgets (`[[hatch_widget:…]]`)
+ * and attached files (`[image:image/jpeg workspace/…]`). T3 renders neither as text, so the markers
+ * are dropped and the words around them stay.
  */
-const MUSE_WIDGET_MARKER = /\[\[hatch_widget:[^\]]*\]\]/g;
-export function stripMuseWidgetMarkers(text: string): string {
-  const stripped = text.replace(MUSE_WIDGET_MARKER, "");
+const MUSE_INLINE_MARKER =
+  /\[\[hatch_widget:[^\]]*\]\]|\[(?:image|file|audio|video|document):[^\]]*\]/g;
+export function stripMuseInlineMarkers(text: string): string {
+  const stripped = text.replace(MUSE_INLINE_MARKER, "");
   return stripped === text ? text : stripped.trimEnd();
 }
 
 function canonicalText(payload: typeof Payload.Type): string | undefined {
   const text = rawCanonicalText(payload);
-  return text === undefined ? undefined : stripMuseWidgetMarkers(text);
+  return text === undefined ? undefined : stripMuseInlineMarkers(text);
 }
 
 function rawCanonicalText(payload: typeof Payload.Type): string | undefined {
