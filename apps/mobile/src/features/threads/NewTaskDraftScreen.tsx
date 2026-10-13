@@ -119,7 +119,6 @@ import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/re
 import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
 import { useRemoteConnectionStatus } from "../../state/use-remote-environment-registry";
 import { useNewTaskFlow } from "./new-task-flow-provider";
-import { useRouteOpenPullRequest } from "../pull-requests/useRouteOpenPullRequest";
 import {
   nextEnvironmentId,
   useHardwareKeyboardCommand,
@@ -201,7 +200,6 @@ export function NewTaskDraftScreen(props: {
   const projects = useProjects();
   const flow = useNewTaskFlow();
   const navigation = useNavigation();
-  const openPullRequest = useRouteOpenPullRequest();
   const {
     consumeShare,
     getShare,
@@ -1452,7 +1450,6 @@ export function NewTaskDraftScreen(props: {
         draftKey={flow.draftKey}
         environmentId={selectedProject.environmentId}
         onOpenAttachment={openDraftDocument}
-        onOpenPullRequest={openPullRequest}
         onOpenMention={(path) => {
           if (!composerWorkspaceCwd) return;
           promptInputRef.current?.blur();

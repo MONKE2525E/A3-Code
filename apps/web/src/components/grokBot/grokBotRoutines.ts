@@ -70,9 +70,7 @@ function grokBotCronLooksRaw(value: string): boolean {
   const fields = body.split(" ");
   if (fields.length !== 5) return false;
   return (
-    CRON_TZ_PREFIX.test(text) ||
-    /[*\/,-]/.test(body) ||
-    fields.every((field) => /^\d+$/.test(field))
+    CRON_TZ_PREFIX.test(text) || /[*/,-]/.test(body) || fields.every((field) => /^\d+$/.test(field))
   );
 }
 

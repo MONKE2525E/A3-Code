@@ -54,12 +54,12 @@ const provider: ServerProvider = {
 const V2_RELEASE = "0.0.46";
 
 describe("provider compatibility", () => {
-  it("bundles a compatibility policy for every built-in versioned harness", () => {
+  it("bundles a compatibility policy for every versioned built-in harness", () => {
     for (const builtIn of BUILT_IN_DRIVERS) {
       // Registry entries are arbitrary external ACP agents, not one versioned harness.
       if (builtIn.driverKind === "acpRegistry") continue;
-      // Native Grok Bots have no CLI version or package to update; readiness is
-      // checked through the account-bound native protocol instead.
+      // Grok Bot connects to an account in the user's native client; there is no local binary
+      // or provider version for a bundled version-range policy to classify.
       if (builtIn.driverKind === "grok-bot") continue;
       assert.isDefined(
         resolveProviderCompatibility(
@@ -71,24 +71,6 @@ describe("provider compatibility", () => {
         `Missing bundled compatibility policy for ${builtIn.driverKind}`,
       );
     }
-  });
-
-  it("keeps the unversioned native Grok Bot provider free of CLI advice", () => {
-    const native = {
-      ...provider,
-      driver: ProviderDriverKind.make("grok-bot"),
-      version: null,
-      status: "ready" as const,
-      message: undefined,
-      auth: { status: "authenticated" as const },
-    };
-    const checked = applyProviderCompatibility(
-      native,
-      undefined,
-      ModelManifest.BUNDLED_MODEL_MANIFEST.compatibility,
-    );
-    assert.deepEqual(checked, native);
-    assert.isUndefined(checked.compatibilityAdvisory);
   });
 
   it("keeps releases before V2 on the OpenCode 1 policy they shipped with", () => {
