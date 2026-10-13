@@ -1,4 +1,4 @@
-import { useOpenPullRequest } from "../../../native/useOpenPullRequest";
+import { useRouteOpenPullRequest } from "../../pull-requests/useRouteOpenPullRequest";
 import {
   type GitActionRequestInput,
   buildMenuItems,
@@ -72,7 +72,7 @@ function GitOverviewSheetContent(props: GitOverviewSheetProps) {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const presentation = props.presentation ?? "sheet";
-  const openPullRequest = useOpenPullRequest({ replace: presentation === "sheet" });
+  const openPullRequest = useRouteOpenPullRequest({ replace: presentation === "sheet" });
   const isInspector = presentation === "inspector";
   const environmentId = EnvironmentId.make(props.route.params.environmentId);
   const threadId = ThreadId.make(props.route.params.threadId);
