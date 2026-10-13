@@ -216,9 +216,9 @@ export const makeGrokBotTranscriptProjection = (input: {
       readonly image: boolean;
     }[],
   ) => Effect.Effect<readonly ChatAttachment[], GrokBotBindingError>;
-  readonly existingMessage?: (
-    id: OrchestrationV2ConversationMessage["id"],
-  ) => Effect.Effect<OrchestrationV2ConversationMessage | undefined, GrokBotBindingError>;
+  readonly existingMessages?: (
+    ids: ReadonlyArray<OrchestrationV2ConversationMessage["id"]>,
+  ) => Effect.Effect<ReadonlyArray<OrchestrationV2ConversationMessage>, GrokBotBindingError>;
   /** Native answer rows attributed to a managed turn; replayed history carries its own write time. */
   readonly onOwnedOutput?: (turn: GrokBotTurnIdentity, streaming: boolean, atMs: number) => void;
 }) => {
@@ -341,6 +341,20 @@ export const makeGrokBotTranscriptProjection = (input: {
         if (previous === undefined) newlyOwnedRequests.add(entry.requestId);
       }
     }
+    const existingIds = decodedRows
+      .filter(({ row, entry }) => !messages.has(`${generation}/${row.seq}/${entry.id}`))
+      .map(({ row, entry }) =>
+        input.idAllocator.derive.messageFromProviderItem({
+          driver: GROK_BOT_DRIVER_KIND,
+          nativeItemId: `${grokBotNativeThreadId(input.native)}/${generation}/${row.seq}/${entry.id}`,
+        }),
+      );
+    const persistedById = new Map(
+      (input.existingMessages === undefined || existingIds.length === 0
+        ? []
+        : yield* input.existingMessages(existingIds)
+      ).map((message) => [message.id, message]),
+    );
     for (const { row, entry } of decodedRows) {
       const nativeItemId = `${grokBotNativeThreadId(input.native)}/${generation}/${row.seq}/${entry.id}`;
       const messageId = input.idAllocator.derive.messageFromProviderItem({
@@ -349,10 +363,7 @@ export const makeGrokBotTranscriptProjection = (input: {
       });
       // Native rows can omit their timestamp. Preserve the first import time
       // across reconnects so old replies cannot move into the newest run.
-      const persisted =
-        messages.has(`${generation}/${row.seq}/${entry.id}`) || input.existingMessage === undefined
-          ? undefined
-          : yield* input.existingMessage(messageId);
+      const persisted = persistedById.get(messageId);
       if (
         entry.kind === "message" &&
         entry.role === "user" &&
@@ -705,9 +716,9 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
                         }),
                     ),
                   ),
-          ...(bindings.existingMessage === undefined
+          ...(bindings.existingMessages === undefined
             ? {}
-            : { existingMessage: (id) => bindings.existingMessage!(owned, id) }),
+            : { existingMessages: (ids) => bindings.existingMessages!(owned, ids) }),
         });
         const settlements = makeGrokBotSettlementProjection(owned, bindings.lookupCompletion);
         const approvals = makeGrokBotApprovalProjection({

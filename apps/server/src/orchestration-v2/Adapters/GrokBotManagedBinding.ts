@@ -171,11 +171,11 @@ export class GrokBotManagedBinding extends Context.Service<
       native: GrokBotBoundSession,
       messageId: string,
     ) => Effect.Effect<GrokBotTurnIdentity | undefined, GrokBotBindingError>;
-    /** Bounded lookup used only to repair a previously imported native user echo. */
-    readonly existingMessage?: (
+    /** Reads persisted replay rows in one batch, including assistant messages without timestamps. */
+    readonly existingMessages?: (
       native: GrokBotBoundSession,
-      id: OrchestrationV2ConversationMessage["id"],
-    ) => Effect.Effect<OrchestrationV2ConversationMessage | undefined, GrokBotBindingError>;
+      ids: ReadonlyArray<OrchestrationV2ConversationMessage["id"]>,
+    ) => Effect.Effect<ReadonlyArray<OrchestrationV2ConversationMessage>, GrokBotBindingError>;
     readonly lookupCompletion: (
       identity: GrokBotTurnIdentity,
     ) => Effect.Effect<GrokBotManagedCompletion | undefined, GrokBotBindingError>;

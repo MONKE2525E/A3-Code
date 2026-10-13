@@ -167,7 +167,7 @@ const inFlight = (threadId: ThreadId, runId: RunId) =>
     Effect.flatMap((binding) => binding.inFlightWork!(identity(threadId, runId))),
   );
 
-it.effect("live message lookup preserves timestamp-free assistant replies after reconnect", () =>
+it.effect("one live batch preserves timestamp-free assistant replies after reconnect", () =>
   Effect.gen(function* () {
     const home = ThreadId.make("grok-bot:replay-lookup");
     yield* seedThread(home);
@@ -180,38 +180,52 @@ it.effect("live message lookup preserves timestamp-free assistant replies after 
       generation: 0,
       replay: true,
       deletes: [],
-      entries: [
-        {
-          seq: "1",
-          updatedSeq: "1",
-          value: {
-            id: "earlier-reply",
-            kind: "send-message",
-            message: { type: "text", content: "The child will report back automatically." },
-          },
+      entries: ["First reply.", "Second reply.", "Third reply."].map((content, index) => ({
+        seq: String(index + 1),
+        updatedSeq: "1",
+        value: {
+          id: `earlier-reply-${index}`,
+          kind: "send-message",
+          message: { type: "text", content },
         },
-      ],
+      })),
     } as const;
     yield* TestClock.setTime(DateTime.toEpochMillis(at));
     const first = yield* makeGrokBotTranscriptProjection({ native, idAllocator }).project(frame);
-    const original = first.find((event) => event.type === "message.updated")!.message;
-    yield* projections.apply({
-      id: eventId(),
-      type: "message.updated",
-      threadId: home,
-      occurredAt: at,
-      payload: original,
-    });
+    const originals = first
+      .filter((event) => event.type === "message.updated")
+      .map((event) => event.message);
+    for (const original of originals)
+      yield* projections.apply({
+        id: eventId(),
+        type: "message.updated",
+        threadId: home,
+        occurredAt: at,
+        payload: original,
+      });
     yield* TestClock.adjust("2 minutes");
-    const replay = yield* makeGrokBotTranscriptProjection({
+    let reads = 0;
+    const projector = makeGrokBotTranscriptProjection({
       native,
       idAllocator,
-      existingMessage: (id) => binding.existingMessage!(native, id),
-    }).project(frame);
+      existingMessages: (ids) => {
+        reads++;
+        assert.deepEqual(
+          ids,
+          originals.map((message) => message.id),
+        );
+        return binding.existingMessages!(native, ids);
+      },
+    });
+    const replay = yield* projector.project(frame);
     assert.deepEqual(
-      replay.find((event) => event.type === "message.updated")!.message.createdAt,
-      original.createdAt,
+      replay
+        .filter((event) => event.type === "message.updated")
+        .map((event) => ({ text: event.message.text, createdAt: event.message.createdAt })),
+      originals.map((message) => ({ text: message.text, createdAt: message.createdAt })),
     );
+    assert.deepEqual(yield* projector.project(frame), []);
+    assert.equal(reads, 1);
   }).pipe(Effect.provide(Layer.merge(bindingLayer, IdAllocator.layer))),
 );
 

@@ -2150,7 +2150,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             occurredAt: now,
             payload: {
               ...message,
-              text: delegatedCompletionWakeDetail(remainingTaskIds),
+              text: delegatedCompletionWakeDetail(remainingTaskIds, projection.subagents),
               delegatedCompletion: {
                 parentRunId: parentRun.id,
                 generation: delivery.generation,
@@ -3864,6 +3864,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly scheduledTaskId?: OrchestrationV2ConversationMessage["scheduledTaskId"];
     readonly senderThreadId?: OrchestrationV2ConversationMessage["senderThreadId"];
     readonly voiceRequest?: OrchestrationV2ConversationMessage["voiceRequest"];
+    readonly notification?: OrchestrationV2ConversationMessage["notification"];
     readonly delegatedCompletion?: OrchestrationV2ConversationMessage["delegatedCompletion"];
     readonly forceRestart: boolean;
   }) =>
@@ -4027,6 +4028,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               : { scheduledTaskId: input.scheduledTaskId }),
             ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
             ...(input.voiceRequest === undefined ? {} : { voiceRequest: input.voiceRequest }),
+            ...(input.notification === undefined ? {} : { notification: input.notification }),
             id: input.messageId,
             threadId: input.command.threadId,
             runId: messageInput.runId,
@@ -4779,13 +4781,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : command.deliveryIntent === "auto"
             ? projection.runs.findLast((run) => run.status === "running")
             : undefined;
-      if (
+      const restartGrokTurn =
         grokTarget?.status === "running" &&
         projection.providerThreads.some(
           (thread) => thread.id === grokTarget.providerThreadId && thread.driver === "grok-bot",
         ) &&
-        (dispatchMode.type === "steer_active" || command.deliveryIntent === "auto")
-      ) {
+        (dispatchMode.type === "steer_active" || command.deliveryIntent === "auto");
+      if (restartGrokTurn) {
         dispatchMode = { type: "restart_active", targetRunId: grokTarget.id };
       }
       if (dispatchMode.type === "steer_active") {
@@ -4807,13 +4809,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           dispatchMode = { type: "start_immediately" };
         }
       }
-      // A restart continuation resumes the interrupted turn, so it starts
-      // immediately rather than queueing like other wakes.
+      // Automatic child-attention delivery can release a native Grok wait.
+      // If that run settled before dispatch, the queued intent starts a new turn.
+      // Restart continuations also start immediately.
       if (
         command.notification !== undefined &&
         (command.createdBy !== "agent" ||
           (command.creationSource !== "server" && command.creationSource !== "provider") ||
           (dispatchMode.type !== "queue_after_active" &&
+            !(
+              command.dispatchMode.type === "queue_after_active" &&
+              command.deliveryIntent === "auto" &&
+              (dispatchMode.type === "start_immediately" || restartGrokTurn)
+            ) &&
             !(
               command.restartContinuationOfRunId !== undefined &&
               dispatchMode.type === "start_immediately"
@@ -4983,6 +4991,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ? {}
             : { senderThreadId: command.senderThreadId }),
           ...(command.voiceRequest === undefined ? {} : { voiceRequest: command.voiceRequest }),
+          ...(command.notification === undefined ? {} : { notification: command.notification }),
           forceRestart: dispatchMode.type === "restart_active",
         });
         return;
@@ -10106,7 +10115,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ? undefined
               : {
                   ...message,
-                  text: delegatedCompletionWakeDetail(taskIds),
+                  text: delegatedCompletionWakeDetail(
+                    taskIds,
+                    input.parentProjection.subagents.map((task) =>
+                      task.id === input.updatedTask.id ? input.updatedTask : task,
+                    ),
+                  ),
                   delegatedCompletion: {
                     parentRunId: input.parentRun.id,
                     generation: delivery.generation,
@@ -11659,7 +11673,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (owner == null || owner.archivedAt !== null || owner.deletedAt !== null) continue;
       const adapter = yield* providerAdapters.get(owner.providerInstanceId);
       if (adapter.driver !== "grok-bot") continue;
-      const parent = yield* projectionStore.getThreadRecords(ownerId, ["subagents"]);
+      const parent = yield* projectionStore.getThreadRecords(ownerId, ["subagents", "runs"]);
       const task = parent.subagents.find(
         (row) => row.origin === "app_owned" && row.childThreadId === event.threadId,
       );
@@ -11676,6 +11690,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const request = yield* projectionStore.getRuntimeRequest(event.threadId, event.payload.id);
         if (request?.status !== "pending") continue;
       }
+      const releaseBlockingWait =
+        attention &&
+        task !== undefined &&
+        (task.completionWake ?? "settled_only") === "settled_only" &&
+        parent.runs.some((run) => run.id === task.runId && run.status === "running");
       const key = `grok-bot-wake:${ownerId}:${attention ? "request" : "run"}:${sourceId}`;
       const detail = [
         summary,
@@ -11696,6 +11715,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         createdBy: "agent",
         creationSource: "server",
         dispatchMode: { type: "queue_after_active" },
+        // Native Grok turns cannot steer a blocking child wait. Auto delivery
+        // restarts that attempt while retaining the child and its pending request.
+        ...(releaseBlockingWait ? { deliveryIntent: "auto" as const } : {}),
         notification: {
           source: { kind: "system" },
           outcome: attention

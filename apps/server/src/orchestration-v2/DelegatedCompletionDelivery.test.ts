@@ -808,6 +808,135 @@ it.layer(layerAutoWake)("Grok Bot automatic wakes", (it) => {
 });
 
 it.layer(layerTest)("delegated completion delivery repairs", (it) => {
+  it.effect("keeps both task summaries when a queued delivery grows and one result is read", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("summary-mailbox");
+      const runId = RunId.make("summary-parent");
+      const taskId = NodeId.make("summary-first");
+      const secondId = NodeId.make("summary-second");
+      const messageId = MessageId.make(`message:delegated-delivery:${threadId}`);
+      yield* seedParentWithTerminalTask({
+        threadId,
+        runId,
+        projectId: ProjectId.make("summary-project"),
+        rootNodeId: NodeId.make("summary-root"),
+        taskId,
+        deliveryState: "claimed",
+        completionWake: "always",
+        deliveryTaskIds: [taskId],
+        now,
+      });
+      const initial = yield* orchestrator.getThreadProjection(threadId);
+      const first = {
+        ...initial.subagents[0]!,
+        childThreadId: ThreadId.make("summary-first-child"),
+        result: "First child succeeded.",
+      };
+      const second = {
+        ...first,
+        id: secondId,
+        childThreadId: ThreadId.make("summary-second-child"),
+        status: "failed" as const,
+        result: "Second child failed.",
+        completionWake: "settled_only" as const,
+        completionDelivery: { state: "pending" as const, observedByRunId: null },
+      };
+      const deliveryRun = {
+        ...initial.runs[0]!,
+        id: RunId.make("summary-delivery"),
+        ordinal: 2,
+        userMessageId: messageId,
+        status: "queued" as const,
+        startedAt: null,
+        delegatedCompletion: undefined,
+      };
+      yield* sink.write({
+        events: [
+          {
+            id: EventId.make("summary-first"),
+            type: "subagent.updated",
+            threadId,
+            occurredAt: now,
+            payload: first,
+          },
+          {
+            id: EventId.make("summary-second"),
+            type: "subagent.updated",
+            threadId,
+            occurredAt: now,
+            payload: second,
+          },
+          {
+            id: EventId.make("summary-delivery"),
+            type: "run.updated",
+            threadId,
+            occurredAt: now,
+            payload: deliveryRun,
+          },
+          {
+            id: EventId.make("summary-message"),
+            type: "message.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: messageId,
+              threadId,
+              runId: deliveryRun.id,
+              nodeId: null,
+              role: "user",
+              text: "First result",
+              attachments: [],
+              streaming: false,
+              createdBy: "agent",
+              creationSource: "server",
+              createdAt: now,
+              updatedAt: now,
+              delegatedCompletion: { parentRunId: runId, generation: 1, taskIds: [taskId] },
+            },
+          },
+        ],
+      });
+      yield* orchestrator.dispatch({
+        type: "delegated_task.wake-policy",
+        commandId: CommandId.make("summary-upgrade"),
+        parentThreadId: threadId,
+        taskId: secondId,
+        completionWake: "always",
+      });
+      const combined = (yield* orchestrator.getThreadProjection(threadId)).messages.find(
+        (message) => message.id === messageId,
+      )!;
+      assert.include(
+        combined.text,
+        "taskId: summary-first; threadId: summary-first-child; status: completed; summary: First child succeeded.",
+      );
+      assert.include(
+        combined.text,
+        "taskId: summary-second; threadId: summary-second-child; status: failed; summary: Second child failed.",
+      );
+      assert.deepEqual(combined.delegatedCompletion?.taskIds, [taskId, secondId]);
+      yield* orchestrator.dispatch({
+        type: "delegated_task.completion-delivery.acknowledge",
+        commandId: CommandId.make("summary-read-first"),
+        parentThreadId: threadId,
+        taskId,
+        observedByRunId: runId,
+      });
+      const remaining = (yield* orchestrator.getThreadProjection(threadId)).messages.find(
+        (message) => message.id === messageId,
+      )!;
+      assert.include(
+        remaining.text,
+        "taskId: summary-second; threadId: summary-second-child; status: failed; summary: Second child failed.",
+      );
+      assert.notInclude(remaining.text, "First child succeeded.");
+      assert.deepEqual(remaining.delegatedCompletion?.taskIds, [secondId]);
+    }),
+  );
+
   it.effect("acceptance batches pending siblings without acknowledging their results", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

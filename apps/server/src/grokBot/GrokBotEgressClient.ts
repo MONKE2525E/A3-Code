@@ -2,7 +2,6 @@
 import * as NodeDnsPromises from "node:dns/promises";
 import * as NodeNet from "node:net";
 import { NodeWS } from "@effect/platform-node/NodeSocket";
-import { isPublicFaviconHost } from "@t3tools/shared/hostClassification";
 
 export type EgressPolicy = {
   readonly restricted: boolean;
@@ -129,13 +128,11 @@ export function startEgressClient(input: {
     };
     streams.set(id, stream);
     try {
-      // Resolve once and connect to that exact public address, preventing DNS rebinding.
+      // Resolve once and connect to that exact policy-approved address, preventing DNS rebinding.
       const addresses = await NodeDnsPromises.lookup(host, { all: true });
       const address = addresses.find(
         (entry) =>
-          isPublicFaviconHost(entry.address) &&
-          (egressAllows(host, port, input.policy) ||
-            egressAllows(entry.address, port, input.policy)),
+          egressAllows(host, port, input.policy) || egressAllows(entry.address, port, input.policy),
       );
       if (
         !address ||

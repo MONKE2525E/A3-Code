@@ -134,7 +134,7 @@ export function grokBotSetupView(status: GrokBotSetupStatus): GrokBotSetupView {
   }
 }
 
-export const GROK_BOT_OAUTH_PATH = "/settings/marketplace?grokBotOAuth=1";
+const GROK_BOT_OAUTH_PATH = "/settings/marketplace?grokBotOAuth=1";
 
 /**
  * The OAuth return must be an http(s) page of the environment that owns the pending flow. The

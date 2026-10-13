@@ -260,7 +260,7 @@ it.effect("repairs a previously imported owned echo once without introducing ano
     const projection = makeGrokBotTranscriptProjection({
       native: nativeSession,
       idAllocator,
-      existingMessage: (id) => Effect.succeed(id === old.id ? old : undefined),
+      existingMessages: (ids) => Effect.succeed(ids.includes(old.id) ? [old] : []),
     });
     projection.registerManagedTurn(grokBotTurnIdentity(turn));
     const events = yield* projection.project(frame);
@@ -272,7 +272,7 @@ it.effect("repairs a previously imported owned echo once without introducing ano
     const fresh = makeGrokBotTranscriptProjection({
       native: nativeSession,
       idAllocator,
-      existingMessage: () => Effect.succeed(undefined),
+      existingMessages: () => Effect.succeed([]),
     });
     fresh.registerManagedTurn(grokBotTurnIdentity(turn));
     assert.deepEqual(yield* fresh.project(frame), []);
@@ -1326,7 +1326,7 @@ it.effect("keeps timestamp-free bot replies in their original position across re
       const reconnected = makeGrokBotTranscriptProjection({
         native: nativeSession,
         idAllocator,
-        existingMessage: (id) => Effect.succeed(id === oldMessage.id ? oldMessage : undefined),
+        existingMessages: (ids) => Effect.succeed(ids.includes(oldMessage.id) ? [oldMessage] : []),
       });
       const replayed = yield* reconnected.project(frame);
       const message = replayed.find((event) => event.type === "message.updated")!.message;
