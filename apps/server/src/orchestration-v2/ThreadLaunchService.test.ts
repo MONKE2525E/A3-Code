@@ -2537,7 +2537,11 @@ it.effect("a late branch name cannot restore a cancelled worktree", () =>
       Effect.provide(harness.layer),
       Effect.withLogger(
         Logger.make(({ message }) => {
-          if (message.includes("Thread worktree branch rename failed")) renameRefused.resolve();
+          if (
+            (typeof message === "string" || Array.isArray(message)) &&
+            message.includes("Thread worktree branch rename failed")
+          )
+            renameRefused.resolve();
         }),
       ),
     );
