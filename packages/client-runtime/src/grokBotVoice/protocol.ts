@@ -3,9 +3,9 @@
  * desktop app: ephemeral secret as a WebSocket subprotocol, 24 kHz mono PCM16 as base64 frames,
  * server VAD, `grok-transcribe` input transcription. Browser-safe: no Node APIs.
  */
-export const VOICE_REALTIME_ORIGIN = "wss://api.x.ai/";
+const VOICE_REALTIME_ORIGIN = "wss://api.x.ai/";
 export const VOICE_SAMPLE_RATE = 24_000;
-export const VOICE_TRANSCRIPTION_MODEL = "grok-transcribe";
+const VOICE_TRANSCRIPTION_MODEL = "grok-transcribe";
 
 export interface VoiceRealtimeCredential {
   readonly clientSecret: string;
@@ -79,7 +79,7 @@ export function sessionUpdateFrame(input: {
   });
 }
 
-export function floatToPcm16(samples: Float32Array): Uint8Array {
+function floatToPcm16(samples: Float32Array): Uint8Array {
   const out = new Int16Array(samples.length);
   for (let i = 0; i < samples.length; i += 1) {
     const s = Math.max(-1, Math.min(1, samples[i] ?? 0));
@@ -88,7 +88,7 @@ export function floatToPcm16(samples: Float32Array): Uint8Array {
   return new Uint8Array(out.buffer);
 }
 
-export function pcm16ToFloat(bytes: Uint8Array): Float32Array {
+function pcm16ToFloat(bytes: Uint8Array): Float32Array {
   const view = new DataView(
     bytes.buffer,
     bytes.byteOffset,
@@ -153,15 +153,6 @@ export function responseCreateFrame(instructions: string | null): string {
       ? { type: "response.create" }
       : { type: "response.create", response: { instructions } },
   );
-}
-
-export function truncateFrame(cut: { itemId: string; contentIndex: number; audioEndMs: number }) {
-  return JSON.stringify({
-    type: "conversation.item.truncate",
-    item_id: cut.itemId,
-    content_index: cut.contentIndex,
-    audio_end_ms: Math.round(cut.audioEndMs),
-  });
 }
 
 export type VoiceServerEvent =

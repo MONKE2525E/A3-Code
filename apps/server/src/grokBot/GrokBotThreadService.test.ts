@@ -1,4 +1,3 @@
-import { vi } from "vite-plus/test";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -20,6 +19,7 @@ import {
   type GrokBotOrchestratorConfig,
 } from "@t3tools/contracts";
 import type { ProviderAdapterV2 } from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Stream from "effect/Stream";
@@ -182,33 +182,6 @@ const runtime = (database: DatabaseLayer = Sqlite.layerMemory) =>
     ThreadSearch.layer.pipe(Layer.provide(database)),
   ).pipe(Layer.provideMerge(NodeServices.layer));
 
-const threadManagementLayer = (
-  orchestrator: Orchestrator.OrchestratorV2["Service"],
-  logSendFailures: boolean,
-) => {
-  const serviceLayer = Threads.layer.pipe(
-    Layer.provide(Layer.succeed(Orchestrator.OrchestratorV2, orchestrator)),
-  );
-  if (!logSendFailures) return serviceLayer;
-  return Layer.effect(
-    Threads.ThreadManagementService,
-    Effect.gen(function* () {
-      const service = yield* Threads.ThreadManagementService;
-      return {
-        ...service,
-        sendToThread: (input: Threads.ThreadManagementSendInput) =>
-          service
-            .sendToThread(input)
-            .pipe(
-              Effect.tapError((error) =>
-                Effect.logError("Grok pending-send diagnostic", { error }),
-              ),
-            ),
-      };
-    }),
-  ).pipe(Layer.provide(serviceLayer));
-};
-
 const seedProjects = Effect.gen(function* () {
   const projects = yield* Projects.ProjectStoreV2;
   for (const id of [projectId, otherProjectId, scratchProjectId]) {
@@ -244,7 +217,6 @@ const fixture = (
     readonly orchestrator?: Orchestrator.OrchestratorV2["Service"];
     readonly scratchUnavailable?: boolean;
     readonly providerSessions?: ProviderSessions.ProviderSessionManagerV2["Service"];
-    readonly logSendFailures?: boolean;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -255,7 +227,9 @@ const fixture = (
       options.providerSessions ?? (yield* ProviderSessions.ProviderSessionManagerV2);
     const layer = Service.layer.pipe(
       Layer.provide(Layer.succeed(ProviderSessions.ProviderSessionManagerV2, providerSessions)),
-      Layer.provide(threadManagementLayer(orchestrator, options.logSendFailures ?? false)),
+      Layer.provide(
+        Threads.layer.pipe(Layer.provide(Layer.succeed(Orchestrator.OrchestratorV2, orchestrator))),
+      ),
       Layer.provide(Layer.succeed(Orchestrator.OrchestratorV2, orchestrator)),
       Layer.provide(Layer.succeed(Projections.ProjectionStoreV2, projections)),
       Layer.provide(Layer.succeed(Projects.ProjectStoreV2, projects)),
@@ -315,8 +289,27 @@ it.effect(
   "agent messages restart an unsettled pending Grok attempt instead of queueing indefinitely",
   () =>
     Effect.gen(function* () {
-      yield* seedProjects;
-      const service = yield* fixture({ logSendFailures: true });
+      yield* observing;
+      nativeHistory.length = 0;
+      const sessions = yield* ProviderSessions.ProviderSessionManagerV2;
+      const controlledSessions = {
+        ...sessions,
+        open: (input: Parameters<typeof sessions.open>[0]) =>
+          sessions.get(input.providerSessionId).pipe(
+            Effect.flatMap((existing) =>
+              Option.isSome(existing)
+                ? sessions.open(input)
+                : Effect.fail(
+                    new ProviderSessions.ProviderSessionOpenError({
+                      instanceId: input.modelSelection.instanceId,
+                      providerSessionId: input.providerSessionId,
+                      cause: "This test keeps read-only observer sessions unopened.",
+                    }),
+                  ),
+            ),
+          ),
+      };
+      const service = yield* fixture({ providerSessions: controlledSessions });
       const caller = { requestNamespace: "agent-followup" };
       const first = yield* service.send(
         { botId: bot.id, message: "first", clientRequestId: "first" },
@@ -336,13 +329,35 @@ it.effect(
       const providerSessionId = providerThread.providerSessionId;
       if (providerSessionId === null)
         return yield* Effect.die("The pending Grok provider thread must retain its session.");
-      const providerSession = initial.providerSessions.find(
-        (candidate) =>
-          candidate.driver === providerThread.driver &&
-          candidate.providerInstanceId === providerThread.providerInstanceId,
+      const sessionCensus = {
+        runBoundThreads: initial.providerThreads.filter(
+          (candidate) =>
+            candidate.id === run.providerThreadId && candidate.providerSessionId !== null,
+        ).length,
+        observedSessions: initial.providerSessions.filter((candidate) =>
+          candidate.id.startsWith("provider-session:grok-bot-observe:"),
+        ).length,
+      };
+      assert.deepEqual(sessionCensus, { runBoundThreads: 1, observedSessions: 0 });
+      const projects = yield* Projects.ProjectStoreV2;
+      const project = yield* projects.getShell(initial.thread.projectId);
+      if (Option.isNone(project))
+        return yield* Effect.die("The pending run must retain its project workspace.");
+      const runSession = yield* sessions.open({
+        threadId: first.threadId!,
+        providerSessionId,
+        modelSelection: initial.thread.modelSelection,
+        runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: initial.thread.runtimeMode,
+          interactionMode: initial.thread.interactionMode,
+          cwd: initial.thread.worktreePath ?? project.value.workspaceRoot,
+        }),
+      });
+      assert.equal(runSession.providerSessionId, providerSessionId);
+      const withSession = yield* orchestrator.getThreadProjection(first.threadId!);
+      assert.isTrue(
+        withSession.providerSessions.some((session) => session.id === providerSessionId),
       );
-      if (providerSession === undefined)
-        return yield* Effect.die("The pending Grok provider thread must have a matching session.");
       const now = yield* DateTime.now;
       yield* (yield* EventSink.EventSinkV2).write({
         commandId: CommandId.make("agent-followup-seed"),
@@ -375,18 +390,6 @@ it.effect(
           },
         ],
       });
-      const sessions = yield* ProviderSessions.ProviderSessionManagerV2;
-      const selectedProviderSession = {
-        ...providerSession,
-        id: providerSessionId,
-        capabilities: GrokBotCapabilitiesV2,
-      };
-      const sessionSpy = vi
-        .spyOn(sessions, "get")
-        .mockReturnValue(
-          Effect.succeed(Option.some({ providerSession: selectedProviderSession } as never)),
-        );
-      yield* Effect.addFinalizer(() => Effect.sync(() => sessionSpy.mockRestore()));
       const next = yield* service.send(
         { botId: bot.id, message: "follow up", clientRequestId: "followup" },
         caller,
