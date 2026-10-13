@@ -54,10 +54,13 @@ const provider: ServerProvider = {
 const V2_RELEASE = "0.0.46";
 
 describe("provider compatibility", () => {
-  it("bundles a compatibility policy for every built-in harness", () => {
+  it("bundles a compatibility policy for every versioned built-in harness", () => {
     for (const builtIn of BUILT_IN_DRIVERS) {
-      // Registry entries and native cloud bots have no versioned CLI harness.
-      if (builtIn.driverKind === "acpRegistry" || builtIn.driverKind === "grok-bot") continue;
+      // Registry entries are arbitrary external ACP agents, not one versioned harness.
+      if (builtIn.driverKind === "acpRegistry") continue;
+      // Grok Bot connects to an account in the user's native client; there is no local binary
+      // or provider version for a bundled version-range policy to classify.
+      if (builtIn.driverKind === "grok-bot") continue;
       assert.isDefined(
         resolveProviderCompatibility(
           ModelManifest.BUNDLED_MODEL_MANIFEST.compatibility,

@@ -2,6 +2,11 @@
 import { act, useState, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import {
+  DEFAULT_UNIFIED_SETTINGS,
+  type EnvironmentId,
+  type UnifiedSettings,
+} from "@t3tools/contracts";
 import type { SettingsScopeSearch } from "./settingsScope";
 
 interface ScopeState {
@@ -47,6 +52,12 @@ vi.mock("./SettingsScopeContext", async () => {
   };
 });
 vi.mock("../../state/environments", () => ({ useEnvironments: () => ({ environments: [] }) }));
+vi.mock("../../hooks/useSettings", () => ({
+  useEnvironmentSettings: <T,>(
+    _environmentId: EnvironmentId,
+    selector: (settings: UnifiedSettings) => T,
+  ) => selector(DEFAULT_UNIFIED_SETTINGS),
+}));
 vi.mock("../ui/sidebar", () => ({
   SidebarInset: ({ children }: { children: ReactNode }) => <div>{children}</div>,
 }));

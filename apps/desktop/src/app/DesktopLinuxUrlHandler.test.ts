@@ -28,9 +28,9 @@ const makeEnvironment = (path: Path.Path, overrides: Record<string, unknown> = {
     platform: "linux",
     isPackaged: true,
     isDevelopment: false,
-    displayName: "T3 Code (Alpha)",
-    linuxDesktopEntryName: "com.t3tools.T3Code.desktop",
-    linuxWmClass: "t3code",
+    displayName: "T3 Code plus Grokbot (Alpha)",
+    linuxDesktopEntryName: "com.monke.t3code.grokbot.desktop",
+    linuxWmClass: "t3code-grokbot",
     linuxApplicationsDir: "/home/alice/.local/share/applications",
     appImagePath: Option.some("/home/alice/Applications/T3-Code.AppImage"),
     path,
@@ -157,17 +157,28 @@ const emptyRecording = (): RecordedRegistration => ({
   copies: [],
 });
 
+const currentDesktopEntry = `[Desktop Entry]
+Type=Application
+Name=T3 Code plus Grokbot (Alpha)
+Exec="/home/alice/Applications/T3-Code.AppImage" %U
+Icon=/home/alice/.local/share/icons/com.monke.t3code.grokbot.desktop.png
+Terminal=false
+NoDisplay=true
+StartupNotify=false
+MimeType=x-scheme-handler/t3code-grokbot;
+`;
+
 describe("DesktopLinuxUrlHandler", () => {
   it("renders a scheme-handler desktop entry with freedesktop Exec quoting", () => {
     const entry = DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
-      displayName: "T3 Code (Nightly)",
+      displayName: "T3 Code plus Grokbot (Nightly)",
       execTarget: '/home/al ice/Apps/T3 "100%" $HOME\\x.AppImage',
-      scheme: "t3code",
+      scheme: "t3code-grokbot",
       iconPath: "/home/al ice/icons/T3\\x.png",
     });
 
     assert.include(entry, "[Desktop Entry]");
-    assert.include(entry, "Name=T3 Code (Nightly)");
+    assert.include(entry, "Name=T3 Code plus Grokbot (Nightly)");
     // Exec composes both escaping layers: a literal backslash becomes four
     // backslashes in the file, a quote three characters, a dollar sign two
     // backslashes plus the sign.
@@ -177,34 +188,34 @@ describe("DesktopLinuxUrlHandler", () => {
     );
     assert.include(entry, "NoDisplay=true");
     assert.notInclude(entry, "StartupWMClass=");
-    assert.include(entry, "MimeType=x-scheme-handler/t3code;");
+    assert.include(entry, "MimeType=x-scheme-handler/t3code-grokbot;");
     assert.include(entry, "Icon=/home/al ice/icons/T3\\\\x.png");
   });
 
   it("carries structured context on registration errors", () => {
     const writeError = new DesktopLinuxUrlHandler.DesktopLinuxUrlHandlerRegistrationError({
       step: "write-desktop-entry",
-      scheme: "t3code",
-      desktopEntryPath: "/home/alice/.local/share/applications/com.t3tools.T3Code.desktop",
+      scheme: "t3code-grokbot",
+      desktopEntryPath: "/home/alice/.local/share/applications/com.monke.t3code.grokbot.desktop",
       cause: new Error("boom"),
     });
     assert.equal(
       writeError.message,
-      "Failed to register the t3code:// URL handler (step: write-desktop-entry).",
+      "Failed to register the t3code-grokbot:// URL handler (step: write-desktop-entry).",
     );
     assert.equal(
       writeError.desktopEntryPath,
-      "/home/alice/.local/share/applications/com.t3tools.T3Code.desktop",
+      "/home/alice/.local/share/applications/com.monke.t3code.grokbot.desktop",
     );
 
     const exitError = new DesktopLinuxUrlHandler.DesktopLinuxUrlHandlerRegistrationError({
       step: "set-default-handler",
-      scheme: "t3code",
+      scheme: "t3code-grokbot",
       exitCode: 4,
     });
     assert.equal(
       exitError.message,
-      "Failed to register the t3code:// URL handler (step: set-default-handler, xdg-mime exit code 4).",
+      "Failed to register the t3code-grokbot:// URL handler (step: set-default-handler, xdg-mime exit code 4).",
     );
   });
 
@@ -217,16 +228,12 @@ describe("DesktopLinuxUrlHandler", () => {
         yield* runRegister(recorded);
 
         assert.deepEqual(recorded.directories, ["/home/alice/.local/share/applications"]);
-        assert.equal(recorded.files.length, 1);
-        assert.equal(
-          recorded.files[0]?.path,
-          "/home/alice/.local/share/applications/com.t3tools.T3Code.desktop",
-        );
-        assert.include(
-          recorded.files[0]?.content,
-          'Exec="/home/alice/Applications/T3-Code.AppImage" %U',
-        );
-        assert.include(recorded.files[0]?.content, "MimeType=x-scheme-handler/t3code-grokbot;");
+        assert.deepEqual(recorded.files, [
+          {
+            path: "/home/alice/.local/share/applications/com.monke.t3code.grokbot.desktop",
+            content: currentDesktopEntry,
+          },
+        ]);
         assert.deepEqual(recorded.commands, [
           {
             command: "update-desktop-database",
@@ -234,7 +241,11 @@ describe("DesktopLinuxUrlHandler", () => {
           },
           {
             command: "xdg-mime",
-            args: ["default", "com.t3tools.T3Code.desktop", "x-scheme-handler/t3code-grokbot"],
+            args: [
+              "default",
+              "com.monke.t3code.grokbot.desktop",
+              "x-scheme-handler/t3code-grokbot",
+            ],
           },
         ]);
       });
@@ -244,14 +255,24 @@ describe("DesktopLinuxUrlHandler", () => {
   it.effect("falls back to the process executable outside an AppImage", () => {
     const recorded = emptyRecording();
 
-    return Effect.gen(function* () {
-      yield* runRegister(recorded, { environment: { appImagePath: Option.none() } });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            const execPath = process.execPath;
+            process.execPath = "/usr/bin/t3code-grokbot";
+            return execPath;
+          }),
+          (execPath) =>
+            Effect.sync(() => {
+              process.execPath = execPath;
+            }),
+        );
+        yield* runRegister(recorded, { environment: { appImagePath: Option.none() } });
 
-      assert.include(
-        recorded.files[0]?.content,
-        `Exec=${DesktopLinuxUrlHandler.escapeDesktopEntryExecArgument(process.execPath)} %U`,
-      );
-    });
+        assert.include(recorded.files[0]?.content, 'Exec="/usr/bin/t3code-grokbot" %U');
+      }),
+    );
   });
 
   it.effect("does not rewrite the pre-ready entry while the portal can be reading it", () => {
@@ -259,12 +280,7 @@ describe("DesktopLinuxUrlHandler", () => {
 
     return Effect.gen(function* () {
       yield* runRegister(recorded, {
-        existingEntry: DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
-          displayName: "T3 Code (Alpha)",
-          execTarget: "/home/alice/Applications/T3-Code.AppImage",
-          scheme: "t3code-grokbot",
-          iconPath: "/home/alice/.local/share/icons/com.t3tools.T3Code.desktop.png",
-        }),
+        existingEntry: currentDesktopEntry,
       });
 
       assert.deepEqual(recorded.files, []);
@@ -276,7 +292,39 @@ describe("DesktopLinuxUrlHandler", () => {
         },
         {
           command: "xdg-mime",
-          args: ["default", "com.t3tools.T3Code.desktop", "x-scheme-handler/t3code-grokbot"],
+          args: ["default", "com.monke.t3code.grokbot.desktop", "x-scheme-handler/t3code-grokbot"],
+        },
+      ]);
+    });
+  });
+
+  it.effect("upgrades an entry with the upstream display name and URL scheme", () => {
+    const recorded = emptyRecording();
+
+    return Effect.gen(function* () {
+      yield* runRegister(recorded, {
+        existingEntry: currentDesktopEntry
+          .replace("Name=T3 Code plus Grokbot (Alpha)", "Name=T3 Code (Alpha)")
+          .replace(
+            "MimeType=x-scheme-handler/t3code-grokbot;",
+            "MimeType=x-scheme-handler/t3code;",
+          ),
+      });
+
+      assert.deepEqual(recorded.files, [
+        {
+          path: "/home/alice/.local/share/applications/com.monke.t3code.grokbot.desktop",
+          content: currentDesktopEntry,
+        },
+      ]);
+      assert.deepEqual(recorded.commands, [
+        {
+          command: "update-desktop-database",
+          args: ["/home/alice/.local/share/applications"],
+        },
+        {
+          command: "xdg-mime",
+          args: ["default", "com.monke.t3code.grokbot.desktop", "x-scheme-handler/t3code-grokbot"],
         },
       ]);
     });
@@ -284,22 +332,20 @@ describe("DesktopLinuxUrlHandler", () => {
 
   it.effect("installs a persistent icon even when the desktop entry is already current", () => {
     const recorded = emptyRecording();
-    const iconPath = "/home/alice/.local/share/icons/com.t3tools.T3Code.desktop.png";
+    const iconPath = "/home/alice/.local/share/icons/com.monke.t3code.grokbot.desktop.png";
     return Effect.gen(function* () {
       yield* runRegister(recorded, {
         iconSource: "/tmp/.mount_T3/resources/icon.png",
-        existingEntry: DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
-          displayName: "T3 Code (Alpha)",
-          execTarget: "/home/alice/Applications/T3-Code.AppImage",
-          scheme: "t3code-grokbot",
-          iconPath,
-        }),
+        existingEntry: currentDesktopEntry,
       });
       assert.deepEqual(recorded.files, []);
       assert.deepEqual(recorded.copies, [
         { source: "/tmp/.mount_T3/resources/icon.png", destination: iconPath },
       ]);
-      assert.equal(recorded.commands.at(-1)?.command, "xdg-mime");
+      assert.deepEqual(recorded.commands.at(-1), {
+        command: "xdg-mime",
+        args: ["default", "com.monke.t3code.grokbot.desktop", "x-scheme-handler/t3code-grokbot"],
+      });
     });
   });
 
@@ -332,15 +378,27 @@ describe("DesktopLinuxUrlHandler", () => {
       yield* runRegister(unpackaged, {
         environment: {
           isPackaged: false,
-          linuxDesktopEntryName: "com.t3tools.T3Code.Development.desktop",
+          isDevelopment: true,
+          displayName: "T3 Code plus Grokbot (Dev)",
+          linuxDesktopEntryName: "com.monke.t3code.grokbot.Development.desktop",
         },
       });
 
       assert.deepEqual(nonLinux.files, []);
-      assert.equal(
-        unpackaged.files[0]?.path,
-        "/home/alice/.local/share/applications/com.t3tools.T3Code.Development.desktop",
-      );
+      assert.deepEqual(unpackaged.files, [
+        {
+          path: "/home/alice/.local/share/applications/com.monke.t3code.grokbot.Development.desktop",
+          content: `[Desktop Entry]
+Type=Application
+Name=T3 Code plus Grokbot (Dev)
+Exec="/home/alice/Applications/T3-Code.AppImage" %U
+Terminal=false
+NoDisplay=true
+StartupNotify=false
+MimeType=x-scheme-handler/t3code-grokbot-dev;
+`,
+        },
+      ]);
       assert.deepEqual(unpackaged.commands, []);
     });
   });
@@ -359,7 +417,8 @@ describe("DesktopLinuxUrlHandler", () => {
           module: "FileSystem",
           method: "writeFileString",
           description: "read-only filesystem",
-          pathOrDescriptor: "/home/alice/.local/share/applications/com.t3tools.T3Code.desktop",
+          pathOrDescriptor:
+            "/home/alice/.local/share/applications/com.monke.t3code.grokbot.desktop",
         }),
       });
 

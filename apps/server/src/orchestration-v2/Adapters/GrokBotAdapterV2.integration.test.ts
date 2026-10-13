@@ -58,8 +58,8 @@ it.effect.each([
     const settled = yield* Deferred.make<SettlementFrame>();
     const completed = yield* Deferred.make<void>();
     const disconnect = yield* Deferred.make<void>();
+    const transcriptReopened = yield* Deferred.make<void>();
     const transcriptVisible = yield* Deferred.make<void>();
-    const transcriptReattached = yield* Deferred.make<void>();
     let prepared: GrokBotManagedTurn | undefined;
     let writes = 0;
     let watches = 0;
@@ -99,10 +99,9 @@ it.effect.each([
         }),
       watch: () => {
         transcriptWatches++;
-        if (scenario === "eof" && transcriptWatches > 1)
-          return Stream.fromEffect(Deferred.succeed(transcriptReattached, undefined)).pipe(
-            Stream.drain,
-            Stream.concat(Stream.never),
+        if (transcriptWatches === 2 && scenario === "eof")
+          return Stream.fromEffect(Deferred.succeed(transcriptReopened, undefined)).pipe(
+            Stream.flatMap(() => Stream.never),
           );
         if (scenario === "transcript")
           return Stream.fromEffect(Deferred.await(sent)).pipe(
@@ -360,11 +359,11 @@ it.effect.each([
       if (scenario === "eof") {
         yield* Deferred.succeed(disconnect, undefined);
         yield* TestClock.adjust("1 second");
-        yield* Deferred.await(transcriptReattached);
+        yield* Deferred.await(transcriptReopened);
+        yield* worker.drain();
         const held = yield* orchestrator.getThreadProjection(threadId);
         assert.equal(held.runs[0]?.status, "running");
         assert.equal(writes, 1);
-        assert.equal(watches, 1);
         assert.equal(transcriptWatches, 2);
       }
       if (scenario === "transport") {

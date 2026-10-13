@@ -23,6 +23,7 @@ import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -317,6 +318,7 @@ const make = Effect.gen(function* () {
     let createdWorktreePath: string | null = null;
     let setupTerminalId: string | null = null;
     let workspaceRecorded = false;
+    let branchRenameFiber: Fiber.Fiber<void, never> | null = null;
     if (input.workspaceStrategy.type === "worktree") {
       yield* setupTracker.begin({
         threadId,
@@ -505,7 +507,7 @@ const make = Effect.gen(function* () {
       ) {
         const oldBranch = branch;
         const worktreeCwd = worktreePath;
-        yield* generateBranchNameFor(worktreeCwd, initialMessage).pipe(
+        branchRenameFiber = yield* generateBranchNameFor(worktreeCwd, initialMessage).pipe(
           Effect.flatMap(({ branch: newBranch, exactName }) =>
             git.renameBranch({
               cwd: worktreeCwd,
@@ -521,8 +523,6 @@ const make = Effect.gen(function* () {
               threadId,
               branch: renamed.branch,
               worktreePath: worktreeCwd,
-              // Late naming must not reattach a checkout that was cancelled or rebound.
-              expectedWorktreePath: worktreeCwd,
             }),
           ),
           Effect.catchCause((cause) =>
@@ -533,6 +533,7 @@ const make = Effect.gen(function* () {
               cause,
             }),
           ),
+          Effect.asVoid,
           Effect.forkIn(preparationScope),
         );
       }
@@ -634,6 +635,7 @@ const make = Effect.gen(function* () {
       Effect.onError((cause) =>
         Effect.gen(function* () {
           const cancelled = Cause.hasInterruptsOnly(cause);
+          if (cancelled && branchRenameFiber !== null) yield* Fiber.interrupt(branchRenameFiber);
           yield* setupTracker.finish(
             threadId,
             cancelled ? "cancelled" : "failed",

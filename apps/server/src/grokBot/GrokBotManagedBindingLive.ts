@@ -12,6 +12,7 @@ import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
   GROK_BOT_MANAGED_MCP_SERVER,
+  GROK_BOT_NATIVE_MESSAGE_LIMIT,
   GROK_BOT_MANAGED_SKILL_NAME,
   GROK_BOT_MANAGED_SKILL_BODY,
   GROK_BOT_MANAGED_WORKFLOW_PATH,
@@ -103,7 +104,7 @@ const make = Effect.gen(function* () {
   }) {
     const turn = input.turn;
     // Reject oversized user input before issuing any run credential.
-    if (grokBotManagedPrompt(turn.message.text).length > 1000000)
+    if (grokBotManagedPrompt(turn.message.text).length > GROK_BOT_NATIVE_MESSAGE_LIMIT)
       return yield* unavailable("The managed prompt exceeds the native message limit.");
     if (
       turn.threadId !== input.native.threadId ||
@@ -164,7 +165,7 @@ const make = Effect.gen(function* () {
           ? { ...saved.managedSkill, changed: saved.managedSkill.changed || skill.changed }
           : { ...saved.managedSkill, changed: true };
     const nativePrompt = grokBotManagedPrompt(turn.message.text, verifiedSkill);
-    if (nativePrompt.length > 1000000)
+    if (nativePrompt.length > GROK_BOT_NATIVE_MESSAGE_LIMIT)
       return yield* unavailable("The managed prompt exceeds the native message limit.");
     const access = yield* settings.getSettings.pipe(
       Effect.map((all) => resolveProjectSettings(all, turn.appThread.projectId).settings),
