@@ -346,7 +346,11 @@ it.effect(
       };
       const sessionSpy = vi
         .spyOn(sessions, "get")
-        .mockReturnValue(Effect.succeed(Option.some({ providerSession } as never)));
+        .mockReturnValue(
+          Effect.succeed(
+            Option.some({ providerSession, interruptTurn: () => Effect.void } as never),
+          ),
+        );
       yield* Effect.addFinalizer(() => Effect.sync(() => sessionSpy.mockRestore()));
       const next = yield* service.send(
         { botId: bot.id, message: "follow up", clientRequestId: "followup" },

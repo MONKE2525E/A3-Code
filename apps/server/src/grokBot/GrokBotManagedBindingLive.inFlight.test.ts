@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import {
   EventId,
   NodeId,
@@ -13,10 +14,13 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
 import * as Endpoint from "../cloud/ManagedEndpointAddress.ts";
 import * as Registry from "../mcp/McpSessionRegistry.ts";
 import type { GrokBotTurnIdentity } from "../orchestration-v2/Adapters/GrokBotSettlementProjection.ts";
 import { GrokBotManagedBinding } from "../orchestration-v2/Adapters/GrokBotManagedBinding.ts";
+import { makeGrokBotTranscriptProjection } from "../orchestration-v2/Adapters/GrokBotAdapterV2.ts";
+import { nativeSession } from "../orchestration-v2/Adapters/GrokBotProvider.testkit.ts";
 import * as Projection from "../orchestration-v2/ProjectionStore.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -29,7 +33,9 @@ const projectionLayer = Projection.layer.pipe(Layer.provideMerge(SqlitePersisten
 const bindingLayer = Live.layer.pipe(
   Layer.provide([
     Layer.mock(Store.GrokBotManagedStateStore)({}),
-    Layer.mock(Native.GrokBotNativeRuntimeService)({}),
+    Layer.mock(Native.GrokBotNativeRuntimeService)({
+      accountBinding: Effect.succeed(nativeSession.binding),
+    }),
     Layer.mock(Registry.McpSessionRegistry)({}),
     Layer.mock(Endpoint.ManagedEndpointAddress)({}),
     Layer.mock(ServerSettings.ServerSettingsService)({}),
@@ -160,6 +166,54 @@ const inFlight = (threadId: ThreadId, runId: RunId) =>
   GrokBotManagedBinding.pipe(
     Effect.flatMap((binding) => binding.inFlightWork!(identity(threadId, runId))),
   );
+
+it.effect("live message lookup preserves timestamp-free assistant replies after reconnect", () =>
+  Effect.gen(function* () {
+    const home = ThreadId.make("grok-bot:replay-lookup");
+    yield* seedThread(home);
+    const native = { ...nativeSession, threadId: home };
+    const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    const projections = yield* Projection.ProjectionStoreV2;
+    const binding = yield* GrokBotManagedBinding;
+    const frame = {
+      _tag: "Rows",
+      generation: 0,
+      replay: true,
+      deletes: [],
+      entries: [
+        {
+          seq: "1",
+          updatedSeq: "1",
+          value: {
+            id: "earlier-reply",
+            kind: "send-message",
+            message: { type: "text", content: "The child will report back automatically." },
+          },
+        },
+      ],
+    } as const;
+    yield* TestClock.setTime(DateTime.toEpochMillis(at));
+    const first = yield* makeGrokBotTranscriptProjection({ native, idAllocator }).project(frame);
+    const original = first.find((event) => event.type === "message.updated")!.message;
+    yield* projections.apply({
+      id: eventId(),
+      type: "message.updated",
+      threadId: home,
+      occurredAt: at,
+      payload: original,
+    });
+    yield* TestClock.adjust("2 minutes");
+    const replay = yield* makeGrokBotTranscriptProjection({
+      native,
+      idAllocator,
+      existingMessage: (id) => binding.existingMessage!(native, id),
+    }).project(frame);
+    assert.deepEqual(
+      replay.find((event) => event.type === "message.updated")!.message.createdAt,
+      original.createdAt,
+    );
+  }).pipe(Effect.provide(Layer.merge(bindingLayer, IdAllocator.layer))),
+);
 
 it.effect("inFlightWork holds live tools without holding the native turn for async children", () =>
   Effect.gen(function* () {

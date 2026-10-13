@@ -38,6 +38,7 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import { continueRestartedRun } from "./RestartContinuation.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
@@ -125,7 +126,11 @@ const layerTestProviderInstanceRegistry = Layer.succeed(
   },
 );
 
-const layerTest = Layer.mergeAll(RuntimeLayer.layer, RuntimeLayer.layerEventSink).pipe(
+const layerTest = Layer.mergeAll(
+  RuntimeLayer.layer,
+  RuntimeLayer.layerEventSink,
+  ProjectionStore.layer,
+).pipe(
   Layer.provideMerge(RuntimeLayer.layerProjectService),
   Layer.provide(
     Layer.mock(WorkspacePaths.WorkspacePaths)({
@@ -489,6 +494,148 @@ it.layer(layerAutoWake)("Grok Bot automatic wakes", (it) => {
         1,
       );
     }),
+  );
+
+  it.effect(
+    "recovers a finalized deferred result after its parent settled without a listener",
+    () =>
+      Effect.gen(function* () {
+        const bot = yield* seedBot("deferred-recovery");
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const parentRun = (yield* orchestrator.getThreadProjection(bot.threadId)).runs[0]!;
+        yield* store.apply({
+          id: EventId.make("deferred-recovery:running"),
+          type: "run.updated",
+          threadId: bot.threadId,
+          occurredAt: bot.now,
+          payload: { ...parentRun, status: "running", completedAt: null },
+        });
+        const child = yield* seedRestartCancelledChild({
+          parentThreadId: bot.threadId,
+          parentRunId: bot.runId,
+          projectId: bot.projectId,
+          rootNodeId: bot.rootNodeId,
+          name: "finalized-deferred-child",
+          completionWake: "settled_only",
+          continuationPending: false,
+          runStatus: "completed",
+          now: bot.now,
+        });
+        yield* orchestrator.recoverDelegatedTasks;
+        assert.isDefined(
+          (yield* orchestrator.getThreadProjection(bot.threadId)).subagents.find(
+            (task) => task.id === child.taskId,
+          )?.result,
+        );
+        assert.notInclude(
+          yield* store.getRecoveryThreadIds("subagent-results"),
+          child.childThreadId,
+        );
+        // Projection-only apply models a committed terminal run whose observer was lost.
+        yield* store.apply({
+          id: EventId.make("deferred-recovery:finished"),
+          type: "run.updated",
+          threadId: bot.threadId,
+          occurredAt: bot.now,
+          payload: parentRun,
+        });
+        const after = yield* sink.latestSequence();
+        yield* orchestrator.recoverDelegatedTasks;
+        yield* dispatchCompletionOffer(bot.threadId);
+        yield* waitForWake(bot.threadId, after);
+        yield* orchestrator.recoverDelegatedTasks;
+        assert.lengthOf(
+          (yield* orchestrator.getThreadProjection(bot.threadId)).messages.filter((message) =>
+            message.delegatedCompletion?.taskIds.includes(child.taskId),
+          ),
+          1,
+        );
+      }),
+  );
+
+  it.effect(
+    "recovers sent-thread completion and pending requests committed before observers, once",
+    () =>
+      Effect.gen(function* () {
+        const bot = yield* seedBot("owner-recovery");
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const sourceId = ThreadId.make("thread:owner-recovery-source");
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("create:owner-recovery-source"),
+          threadId: sourceId,
+          projectId: bot.projectId,
+          title: "Recover source",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "agent",
+          creationSource: "mcp",
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("send:owner-recovery-source"),
+          threadId: sourceId,
+          messageId: MessageId.make("message:owner-recovery-source"),
+          text: "Work on this",
+          senderThreadId: bot.threadId,
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "agent",
+          creationSource: "mcp",
+        });
+        const source = (yield* orchestrator.getThreadProjection(sourceId)).runs[0]!;
+        yield* store.apply({
+          id: EventId.make("owner-recovery:completed"),
+          type: "run.updated",
+          threadId: sourceId,
+          occurredAt: bot.now,
+          payload: { ...source, status: "completed", completedAt: bot.now },
+        });
+        const requestId = RuntimeRequestId.make("owner-recovery:request");
+        yield* store.apply({
+          id: EventId.make("owner-recovery:pending"),
+          type: "runtime-request.updated",
+          threadId: sourceId,
+          occurredAt: bot.now,
+          payload: {
+            id: requestId,
+            nodeId: source.rootNodeId!,
+            providerTurnId: null,
+            nativeRequestRef: null,
+            kind: "user_input",
+            status: "pending",
+            responseCapability: { type: "message" },
+            createdAt: bot.now,
+            resolvedAt: null,
+          },
+        });
+        for (let boot = 0; boot < 2; boot++) yield* orchestrator.recoverDelegatedTasks;
+        const wakes = (yield* orchestrator.getThreadProjection(bot.threadId)).messages.filter(
+          (message) => message.notification !== undefined,
+        );
+        assert.lengthOf(wakes, 2);
+        assert.lengthOf(
+          wakes.filter((message) => message.text.includes(source.id)),
+          1,
+        );
+        assert.lengthOf(
+          wakes.filter((message) => message.text.includes(requestId)),
+          1,
+        );
+        assert.deepEqual(
+          (yield* orchestrator.getThreadProjection(bot.threadId)).runs
+            .filter((run) => wakes.some((message) => message.runId === run.id))
+            .map((run) => run.status)
+            .toSorted(),
+          ["queued", "starting"],
+        );
+      }),
   );
 
   it.effect.each(["user_input", "command"] as const)(

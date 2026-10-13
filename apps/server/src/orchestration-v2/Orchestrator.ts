@@ -11629,16 +11629,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         : threadDispatch.withLock(parentThreadId, dispatch);
     });
 
-  const wakeGrokBotOwners = Effect.fnUntraced(function* (stored: OrchestrationV2StoredEvent) {
-    const event = stored.event;
-    if (event.type !== "run.updated" && event.type !== "runtime-request.updated") return;
+  const wakeGrokBotOwners = Effect.fnUntraced(function* (
+    event:
+      | {
+          readonly type: "run.updated";
+          readonly threadId: ThreadId;
+          readonly payload: OrchestrationV2Run;
+        }
+      | {
+          readonly type: "runtime-request.updated";
+          readonly threadId: ThreadId;
+          readonly payload: OrchestrationV2ThreadProjection["runtimeRequests"][number];
+        },
+  ) {
     const attention = event.type === "runtime-request.updated";
     if (attention && event.payload.status !== "pending") return;
     const source = yield* projectionStore.getThread(event.threadId);
     const parentThreadId =
       source.lineage.relationshipToParent === "subagent" ? source.lineage.parentThreadId : null;
     const lastSender = yield* projectionStore.getLastThreadSender(event.threadId);
-    const owners = new Set([lastSender, ...(attention ? [parentThreadId] : [])]);
+    const owners = new Set([lastSender?.threadId, ...(attention ? [parentThreadId] : [])]);
     const sourceId = event.payload.id;
     const summary = attention
       ? `Thread ${source.title.slice(0, 120)} needs attention (${event.payload.kind}).`
@@ -11747,7 +11757,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (parentThreadId !== undefined) {
         yield* threadDispatch.withLock(parentThreadId, finalizeAppOwnedSubagent(threadId));
       }
-      yield* wakeGrokBotOwners(stored);
+      if (stored.event.type === "run.updated") yield* wakeGrokBotOwners(stored.event);
     }).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("Failed to react to terminal V2 run", {
@@ -11771,7 +11781,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           stored.event.payload.status === "pending",
       ),
       Stream.runForEach((stored) =>
-        wakeGrokBotOwners(stored).pipe(
+        (stored.event.type === "runtime-request.updated"
+          ? wakeGrokBotOwners(stored.event)
+          : Effect.void
+        ).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("Failed to wake Grok Bot for pending request", {
               threadId: stored.event.threadId,
@@ -11848,6 +11861,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               .withLock(
                 threadId,
                 Effect.gen(function* () {
+                  yield* offerDeferredDelegatedCompletions(threadId);
                   const projection = yield* projectionStore.getThreadRecords(threadId, [
                     "runs",
                     "messages",
@@ -11894,6 +11908,50 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ),
       Effect.catchCause((cause) =>
         Effect.logWarning("Failed to inspect delegated completion delivery during recovery", {
+          cause,
+        }),
+      ),
+    );
+    // Reconciliation can commit terminal runs before these subscriptions start.
+    // Re-offer persisted sources; command receipts own deduplication across boots.
+    yield* projectionStore.getRecoveryThreadIds("owner-notifications").pipe(
+      Effect.flatMap((threadIds) =>
+        Effect.forEach(
+          threadIds,
+          (threadId) =>
+            Effect.gen(function* () {
+              const sender = yield* projectionStore.getLastThreadSender(threadId);
+              const projection = yield* projectionStore.getThreadRecords(threadId, [
+                "runs",
+                "runtimeRequests",
+              ]);
+              if (sender !== undefined)
+                for (const run of projection.runs)
+                  if (
+                    delegatedTaskTerminalStatus(run.status) !== null &&
+                    DateTime.Order(run.completedAt ?? run.requestedAt, sender.createdAt) >= 0
+                  )
+                    yield* wakeGrokBotOwners({ type: "run.updated", threadId, payload: run });
+              for (const request of projection.runtimeRequests)
+                if (request.status === "pending")
+                  yield* wakeGrokBotOwners({
+                    type: "runtime-request.updated",
+                    threadId,
+                    payload: request,
+                  });
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Failed to recover Grok Bot owner notification", {
+                  threadId,
+                  cause,
+                }),
+              ),
+            ),
+          { concurrency: 8, discard: true },
+        ),
+      ),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Failed to inspect Grok Bot owner notifications during recovery", {
           cause,
         }),
       ),

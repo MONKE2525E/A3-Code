@@ -182,7 +182,10 @@ const notificationMarkers = Effect.gen(function* () {
     createdAt,
     updatedAt: importedAt,
   });
-  assert.equal(yield* store.getLastThreadSender(nativeId), lastSender);
+  assert.deepEqual(yield* store.getLastThreadSender(nativeId), {
+    threadId: lastSender,
+    createdAt: completedAt,
+  });
 });
 
 it.effect("SQL shell publishes bounded completed native GrokBot notification markers", () =>

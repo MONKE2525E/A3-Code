@@ -302,7 +302,6 @@ const make = Effect.gen(function* () {
         yield* accountIsCurrent(owned.binding);
         const records = yield* projections.getThreadRecords(owned.threadId, ["messages"], {
           messageIds: [id],
-          messageRoles: ["user"],
         });
         return records.messages[0];
       }).pipe(Effect.mapError(() => unavailable("The existing native message could not be read."))),

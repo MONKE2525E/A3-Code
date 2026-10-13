@@ -13,7 +13,7 @@ layer("055_OrchestrationV2", (it) => {
     Effect.sync(() => {
       assert.deepStrictEqual(
         migrationEntries.map(([id]) => id),
-        Array.from({ length: 64 }, (_, index) => index + 1),
+        Array.from({ length: 65 }, (_, index) => index + 1),
       );
     }),
   );
@@ -36,6 +36,7 @@ layer("055_OrchestrationV2", (it) => {
         [62, "GrokBotManagedRuntime"],
         [63, "GrokBotManagedCompletion"],
         [64, "GrokBotMigrationCompatibility"],
+        [65, "ThreadSenderIndex"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
 
@@ -66,6 +67,7 @@ layer("055_OrchestrationV2", (it) => {
         { migration_id: 62, name: "GrokBotManagedRuntime" },
         { migration_id: 63, name: "GrokBotManagedCompletion" },
         { migration_id: 64, name: "GrokBotMigrationCompatibility" },
+        { migration_id: 65, name: "ThreadSenderIndex" },
       ]);
 
       const tables = yield* sql<{ readonly name: string }>`
