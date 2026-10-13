@@ -3,21 +3,21 @@ import { useCallback } from "react";
 import { type ExternalUrlTarget, tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import { useOpenPullRequest as useResolvedPullRequest } from "./useOpenPullRequest";
 
-/**
- * Resolve links in the environment and thread of the current route unless the caller names an
- * environment. Callers that know the link's environment pass it as the second argument.
- */
-export function useRouteOpenPullRequest(options?: { readonly replace?: boolean }) {
+/** Resolve links in their originating environment and carry the thread into the shared viewer. */
+export function useOpenPullRequest(options?: {
+  readonly replace?: boolean;
+  readonly context?: { readonly environmentId: string; readonly projectId: string };
+}) {
   const route = useRoute();
-  const routeParams = route.params as
+  const routeContext = route.params as
     | { environmentId?: string | string[]; threadId?: string | string[] }
     | undefined;
   const first = (value: string | string[] | undefined) => {
     const text = Array.isArray(value) ? value[0] : value;
     return text?.trim() ? text : undefined;
   };
-  const environmentId = first(routeParams?.environmentId);
-  const threadId = first(routeParams?.threadId);
+  const environmentId = options?.context?.environmentId ?? first(routeContext?.environmentId);
+  const threadId = first(routeContext?.threadId);
   const openResolved = useResolvedPullRequest(options);
   return useCallback(
     async (

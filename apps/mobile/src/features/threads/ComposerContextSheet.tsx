@@ -1,10 +1,11 @@
-import { tryOpenExternalUrl } from "../lib/openExternalUrl";
-import { SourceFileSurface } from "../features/files/SourceFileSurface";
+import { useOpenPullRequest } from "../pull-requests/useOpenPullRequestFromRoute";
+import { SourceFileSurface } from "../files/SourceFileSurface";
 import { filePreviewKind } from "@t3tools/shared/filePreview";
 import type {
   ComposerContextRecord,
   ElementContextSource,
   EnvironmentId,
+  ProjectId,
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
@@ -20,22 +21,22 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { REVIEW_MONO_FONT_FAMILY } from "../features/review/reviewDiffRendering";
-import { ReviewCommentCard, useReviewCommentColors } from "../features/review/ReviewCommentCard";
+import { REVIEW_MONO_FONT_FAMILY } from "../review/reviewDiffRendering";
+import { ReviewCommentCard, useReviewCommentColors } from "../review/ReviewCommentCard";
 import {
   composerAttachmentInlineUri,
   isFileBackedComposerAttachment,
   type DraftComposerAttachment,
-} from "../lib/composerImages";
-import { contextImageGallery } from "../lib/contextImageGallery";
-import { FilePreviewModal } from "./FilePreviewModal";
-import { VideoPreviewModal } from "./VideoPreviewModal";
-import { ComposerContextAttachment } from "./ComposerContextAttachment";
-import { AppText as Text } from "./AppText";
-import { SymbolView } from "./AppSymbol";
-import { ContextSheetSize } from "./ContextSheetSize";
-import { useAppearancePreferences } from "../features/settings/appearance/AppearancePreferencesProvider";
-import { getMobileTerminalTheme } from "../features/terminal/terminalTheme";
+} from "../../lib/composerImages";
+import { contextImageGallery } from "../../lib/contextImageGallery";
+import { FilePreviewModal } from "../../components/FilePreviewModal";
+import { VideoPreviewModal } from "../../components/VideoPreviewModal";
+import { ComposerContextAttachment } from "../../components/ComposerContextAttachment";
+import { AppText as Text } from "../../components/AppText";
+import { SymbolView } from "../../components/AppSymbol";
+import { ContextSheetSize } from "../../components/ContextSheetSize";
+import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
+import { getMobileTerminalTheme } from "../terminal/terminalTheme";
 
 function ContextField(props: { label: string; value: string | null | undefined; code?: boolean }) {
   if (!props.value) return null;
@@ -95,9 +96,16 @@ export function ComposerContextSheet(props: {
   readonly onOpenSkill?: () => void;
   readonly onOpenThread?: (thread: ScopedThreadRef) => void;
   readonly environmentId?: EnvironmentId;
+  readonly projectId?: ProjectId;
   readonly records?: ReadonlyArray<ComposerContextRecord>;
   readonly attachments?: ReadonlyArray<DraftComposerAttachment>;
 }) {
+  const openPullRequest = useOpenPullRequest({
+    context:
+      props.environmentId && props.projectId
+        ? { environmentId: props.environmentId, projectId: props.projectId }
+        : undefined,
+  });
   const reviewColors = useReviewCommentColors();
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
@@ -420,9 +428,7 @@ export function ComposerContextSheet(props: {
                 accessibilityRole="link"
                 onPress={() => {
                   props.onClose();
-                  const open =
-                    props.onOpenPullRequestUrl ??
-                    ((url: string) => tryOpenExternalUrl(url, "pull-request"));
+                  const open = props.onOpenPullRequestUrl ?? openPullRequest;
                   void open(pullRequestUrl)
                     .then((opened) => {
                       if (!opened)

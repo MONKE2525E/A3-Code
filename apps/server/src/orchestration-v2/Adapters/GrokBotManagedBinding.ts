@@ -23,6 +23,7 @@ export const GROK_BOT_PROTOCOL_BLOCKER =
 
 export const GROK_BOT_MANAGED_MCP_SERVER = "t3-code-managed";
 export const GROK_BOT_MANAGED_SKILL_NAME = "t3-code-managed-turn-v1";
+export const GROK_BOT_NATIVE_MESSAGE_LIMIT = 1_000_000;
 export const GROK_BOT_MANAGED_WORKFLOW_PATH = `/home/box/sand-data/workflows/${GROK_BOT_MANAGED_SKILL_NAME}/SKILL.md`;
 
 // Shared skill guidance for persistent bot discovery and coordination.
@@ -100,6 +101,22 @@ export function grokBotManagedPrompt(
 ): string {
   const skillName = skill?.skillId ?? GROK_BOT_MANAGED_SKILL_NAME;
   return [text, "", "[From T3 Code: Use skill " + skillName + ".]"].join("\n");
+}
+
+/** Reserve the exact native prompt suffix before offering room for inline history. */
+export function grokBotInlineHandoffBudget(input: {
+  readonly tokenCap: number;
+  readonly userText: string;
+  readonly restartNote: string;
+}): number {
+  const suffix =
+    input.restartNote === ""
+      ? `User message:\n${input.userText}`
+      : `${input.restartNote}\n\nUser message:\n${input.userText}`;
+  const remaining =
+    GROK_BOT_NATIVE_MESSAGE_LIMIT - grokBotManagedPrompt(suffix).length - "\n\n".length;
+  // History cost is measured in UTF-8 bytes, so the remaining JS characters are conservative.
+  return Math.max(0, Math.min(input.tokenCap, remaining));
 }
 
 /** Remove only a generated trailing instruction from a T3-format user echo. */

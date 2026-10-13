@@ -44,7 +44,7 @@ vi.mock("../../state/atom-registry", () => ({
   },
 }));
 
-import { useRouteOpenPullRequest } from "./useRouteOpenPullRequest";
+import { useOpenPullRequest } from "./useOpenPullRequestFromRoute";
 
 describe("opening a PR from a route", () => {
   beforeEach(() => {
@@ -54,7 +54,7 @@ describe("opening a PR from a route", () => {
 
   it("prefers an explicit draft environment over the route's environment", async () => {
     mocks.params = { environmentId: "env-route", threadId: "thread-a" };
-    const open = useRouteOpenPullRequest();
+    const open = useOpenPullRequest();
     expect(await open("https://github.com/example/app/pull/42", "env-a")).toBe(true);
     expect(mocks.dispatch).toHaveBeenCalledWith({
       type: "PUSH",
@@ -73,7 +73,7 @@ describe("opening a PR from a route", () => {
 
   it("uses the first route environment and thread when the link names neither", async () => {
     mocks.params = { environmentId: ["env-a", "env-x"], threadId: ["thread-a", "thread-b"] };
-    const open = useRouteOpenPullRequest();
+    const open = useOpenPullRequest();
     expect(await open("https://github.com/example/app/pull/42")).toBe(true);
     expect(mocks.dispatch).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -87,7 +87,7 @@ describe("opening a PR from a route", () => {
 
   it("opens the link externally when no environment is known", async () => {
     mocks.params = { threadId: "thread-a" };
-    const open = useRouteOpenPullRequest();
+    const open = useOpenPullRequest();
     expect(await open("https://github.com/example/app/pull/42")).toBe(true);
     expect(mocks.dispatch).not.toHaveBeenCalled();
     expect(mocks.external).toHaveBeenCalledWith(
