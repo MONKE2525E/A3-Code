@@ -1,4 +1,5 @@
 import {
+  ChevronDownIcon,
   EllipsisIcon,
   EyeOffIcon,
   HistoryIcon,
@@ -29,6 +30,8 @@ export function AgentRosterRow(props: {
   /** Live tool or progress text for screen readers; the visible row stays quiet. */
   readonly statusText?: string | null | undefined;
   readonly menu?: ReactNode;
+  /** A chevron that shows or hides the row's own children, such as a list of conversations. */
+  readonly disclosure?: { readonly expanded: boolean; readonly onToggle: () => void } | undefined;
   readonly disabled?: boolean;
   /** Opening is in flight; the row stays disabled so repeat clicks cannot queue. */
   readonly pending?: boolean;
@@ -49,7 +52,10 @@ export function AgentRosterRow(props: {
         aria-current={props.selected ? "page" : undefined}
         disabled={props.disabled || props.pending}
         aria-busy={props.pending || undefined}
-        className="relative z-10 flex h-[3.375rem] w-full min-w-0 cursor-pointer items-center gap-2 pl-(--sidebar-row-content-inset) pr-8.5 py-(--sidebar-content-inset) text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+        className={cn(
+          "relative z-10 flex h-[3.375rem] w-full min-w-0 cursor-pointer items-center gap-2 pl-(--sidebar-row-content-inset) py-(--sidebar-content-inset) text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
+          props.disclosure ? "pr-16" : "pr-8.5",
+        )}
         onClick={props.onOpen}
       >
         {props.avatar}
@@ -74,6 +80,20 @@ export function AgentRosterRow(props: {
         <span role="status" className="sr-only">
           {props.statusText}
         </span>
+      ) : null}
+      {props.disclosure ? (
+        <Button
+          size="icon-micro"
+          variant="ghost"
+          aria-label={props.disclosure.expanded ? "Hide conversations" : "Show conversations"}
+          aria-expanded={props.disclosure.expanded}
+          className="absolute top-1/2 right-8 z-20 -translate-y-1/2"
+          onClick={props.disclosure.onToggle}
+        >
+          <ChevronDownIcon
+            className={cn("transition-transform", props.disclosure.expanded && "rotate-180")}
+          />
+        </Button>
       ) : null}
       {props.menu}
       {props.footer}

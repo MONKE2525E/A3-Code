@@ -17,6 +17,7 @@ import {
   ArrowLeftIcon,
   ChevronRightIcon,
   FingerprintIcon,
+  ListChecksIcon,
   ListIcon,
   MessageSquareIcon,
   PencilIcon,
@@ -361,197 +362,44 @@ function SkillsSection({ environmentId, providerInstanceId }: Target) {
   );
 }
 
-function ConversationRow({
-  session,
-  canWrite,
-  onRename,
-  onArchive,
-  busy,
-}: {
-  readonly session: MuseAgentFeatureSession;
-  readonly canWrite: boolean;
-  readonly onRename: () => void;
-  readonly onArchive: () => void;
-  readonly busy: boolean;
-}) {
-  const actions = resolveMuseSessionActions(session);
-  const title = museSessionTitle(session);
-  return (
-    <Row icon={<MessageSquareIcon />}>
-      <div className="grid min-w-0 flex-1 gap-0.5">
-        <span className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-sm font-semibold text-foreground">{title}</span>
-          {actions.stateLabel ? <Badge variant="outline">{actions.stateLabel}</Badge> : null}
-        </span>
-        {session.snippet && session.title ? (
-          <span className="line-clamp-2 text-sm text-muted-foreground">{session.snippet}</span>
-        ) : null}
-        {session.canSendMessages === false ? (
-          <span className="text-xs text-muted-foreground">
-            Read-only{session.readOnlyReason ? `: ${session.readOnlyReason}` : ""}
-          </span>
-        ) : null}
-      </div>
-      <div className="flex shrink-0 gap-1">
-        {actions.canRename ? (
-          <Button size="sm" variant="ghost-muted" disabled={!canWrite || busy} onClick={onRename}>
-            Rename
-          </Button>
-        ) : null}
-        {actions.canArchive ? (
-          <Button size="sm" variant="ghost-muted" disabled={!canWrite || busy} onClick={onArchive}>
-            {actions.archiveAction === "archive" ? "Archive" : "Restore"}
-          </Button>
-        ) : null}
-      </div>
-    </Row>
-  );
-}
-
-function ConversationsSection({
-  environmentId,
-  providerInstanceId,
-  canWrite,
-}: Target & { canWrite: boolean }) {
-  const [view, setView] = useState<"active" | "archived">("active");
-  const read = useFeatureRead(environmentId, { operation: "sessions", providerInstanceId, view });
-  const update = useAtomCommand(museAgentFeatureUpdate, { reportFailure: false });
+/**
+ * Muse's record of what it has done. Conversations live under the Muse row in the sidebar; this tab
+ * holds the tasks and runs Muse recorded, which are the sessions that are not threads.
+ */
+function ActivitySection({ environmentId, providerInstanceId }: Target) {
+  const read = useFeatureRead(environmentId, {
+    operation: "sessions",
+    providerInstanceId,
+    view: "active",
+  });
   const sessions = read.data?.operation === "sessions" ? read.data.data : null;
-  const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const run = async (
-    sessionId: string,
-    input:
-      | { operation: "session_rename"; title: string }
-      | { operation: "session_archive"; archived: boolean },
-    success: string,
-  ) => {
-    setBusyId(sessionId);
-    setError(null);
-    const result = await update({
-      environmentId,
-      input: { ...input, providerInstanceId, sessionId },
-    });
-    setBusyId(null);
-    if (result._tag === "Failure") {
-      if (isAtomCommandInterrupted(result)) return false;
-      const failure = squashAtomCommandFailure(result);
-      setError(failure instanceof Error ? failure.message : "The conversation was not updated.");
-      return false;
-    }
-    toastManager.add({ type: "success", title: success });
-    return true;
-  };
-
+  const tasks = sessions === null ? null : sessions.filter((session) => !session.isThread);
   return (
-    <div className="grid gap-3">
-      <MuseAgentDeliveryRecovery
-        environmentId={environmentId}
-        providerInstanceId={providerInstanceId}
-        canWrite={canWrite}
-      />
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="text-base font-semibold text-foreground">Conversations</h3>
-        <div role="group" aria-label="Conversation list" className="flex gap-1">
-          {(["active", "archived"] as const).map((option) => (
-            <Button
-              key={option}
-              size="sm"
-              variant={view === option ? "secondary" : "ghost-muted"}
-              aria-pressed={view === option}
-              onClick={() => setView(option)}
-            >
-              {option === "active" ? "Active" : "Archived"}
-            </Button>
+    <FeatureState
+      view={{ ...read, data: tasks }}
+      label="activity"
+      isEmpty={(items) => items.length === 0}
+      emptyText="Muse hasn't recorded any activity yet."
+    >
+      {(items) => (
+        <ul className="grid gap-1">
+          {items.map((session) => (
+            <Row key={session.sessionId} icon={<ListChecksIcon />}>
+              <div className="grid min-w-0 flex-1 gap-0.5">
+                <span className="truncate text-sm font-semibold text-foreground">
+                  {session.title?.trim() || "Untitled task"}
+                </span>
+                {session.snippet ? (
+                  <span className="line-clamp-2 text-sm text-muted-foreground">
+                    {session.snippet}
+                  </span>
+                ) : null}
+              </div>
+            </Row>
           ))}
-        </div>
-      </div>
-      {error ? (
-        <p role="alert" className="text-xs text-destructive">
-          {error}
-        </p>
-      ) : null}
-      <FeatureState
-        view={{ ...read, data: sessions }}
-        label="conversations"
-        isEmpty={(items) => items.length === 0}
-        emptyText={
-          view === "active" ? "Muse has no active conversations." : "No archived conversations."
-        }
-      >
-        {(items) => (
-          <ul className="grid gap-1">
-            {items.map((session) => (
-              <ConversationRow
-                key={session.sessionId}
-                session={session}
-                canWrite={canWrite}
-                busy={busyId === session.sessionId}
-                onRename={() =>
-                  setRenaming({ id: session.sessionId, title: museSessionTitle(session) })
-                }
-                onArchive={() => {
-                  const archiving = resolveMuseSessionActions(session).archiveAction === "archive";
-                  void run(
-                    session.sessionId,
-                    { operation: "session_archive", archived: archiving },
-                    archiving ? "Conversation archived" : "Conversation restored",
-                  );
-                }}
-              />
-            ))}
-          </ul>
-        )}
-      </FeatureState>
-      <Dialog open={renaming !== null} onOpenChange={(open) => (open ? null : setRenaming(null))}>
-        <DialogPopup>
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              const title = renaming?.title.trim();
-              if (!renaming || !title) return;
-              void run(
-                renaming.id,
-                { operation: "session_rename", title },
-                "Conversation renamed",
-              ).then((ok) => {
-                if (ok) setRenaming(null);
-              });
-            }}
-          >
-            <DialogHeader>
-              <DialogTitle>Rename conversation</DialogTitle>
-              <DialogDescription>This renames the conversation in Muse.</DialogDescription>
-            </DialogHeader>
-            <DialogPanel>
-              <Input
-                autoFocus
-                aria-label="Conversation title"
-                value={renaming?.title ?? ""}
-                onChange={(event) =>
-                  setRenaming((current) =>
-                    current ? { ...current, title: event.target.value } : current,
-                  )
-                }
-              />
-            </DialogPanel>
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setRenaming(null)}>
-                Cancel
-              </Button>
-              <Button
-                type="submit"
-                disabled={busyId !== null || (renaming?.title.trim().length ?? 0) === 0}
-              >
-                {busyId !== null ? "Renaming…" : "Rename"}
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogPopup>
-      </Dialog>
-    </div>
+        </ul>
+      )}
+    </FeatureState>
   );
 }
 
@@ -708,7 +556,7 @@ function MuseAgentFeaturesBody({
         unavailable
       ) : (
         <div className="px-5 pb-6">
-          <ConversationsSection {...target} canWrite={canWrite} />
+          <ActivitySection {...target} />
         </div>
       );
   } else {

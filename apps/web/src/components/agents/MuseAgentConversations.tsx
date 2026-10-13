@@ -15,8 +15,6 @@ import { ArchiveIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { Button } from "~/components/ui/button";
-import { Collapsible, CollapsiblePanel } from "~/components/ui/collapsible";
-import { CollapsibleSectionHeader } from "~/components/ui/collapsible-section-header";
 import { Skeleton } from "~/components/ui/skeleton";
 import { useSidebar } from "~/components/ui/sidebar";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
@@ -35,8 +33,8 @@ import { AgentRosterNotice } from "./AgentRoster";
 import { isMuseSessionThread } from "./aiAgents";
 
 /**
- * Muse's conversations under its sidebar row: Main chat first, then side chats. Each opens as its
- * own thread, and archiving one removes it from Muse and from the sidebar.
+ * Muse's conversations, nested under its sidebar row: Main chat first, then side chats. Each opens as
+ * its own thread, and archiving one removes it from Muse and from the sidebar.
  */
 export function MuseAgentConversations({
   environmentId,
@@ -50,15 +48,12 @@ export function MuseAgentConversations({
   /** The open thread id, or null when the route is not a thread in this environment. */
   readonly routeThreadId: string | null;
 }) {
-  const [open, setOpen] = useState(false);
-  // Only read Muse's list while it is open, so a collapsed row costs nothing.
+  // Mounted only while the row is expanded, so a collapsed Muse costs no list read.
   const read = useEnvironmentQuery(
-    open
-      ? museAgentFeatureReadQuery({
-          environmentId,
-          input: { operation: "sessions", providerInstanceId, view: "active" },
-        })
-      : null,
+    museAgentFeatureReadQuery({
+      environmentId,
+      input: { operation: "sessions", providerInstanceId, view: "active" },
+    }),
   );
   const sessions = read.data?.operation === "sessions" ? read.data.data : null;
   const conversations = useMemo(
@@ -68,45 +63,39 @@ export function MuseAgentConversations({
         .toSorted((a, b) => Number(b.isPrimary) - Number(a.isPrimary)),
     [sessions],
   );
+  if (read.error !== null && sessions === null) {
+    return (
+      <AgentRosterNotice message={read.error} actionLabel="Retry" onAction={() => read.refresh()} />
+    );
+  }
+  if (sessions === null) {
+    return (
+      <div className="flex flex-col gap-2 px-6 py-1">
+        <Skeleton className="h-9 w-full" shape="card" />
+        <Skeleton className="h-9 w-full" shape="card" />
+      </div>
+    );
+  }
+  if (conversations.length === 0) {
+    return <p className="px-6 py-2 text-xs text-sidebar-muted-foreground">No conversations yet.</p>;
+  }
   return (
-    <Collapsible open={open} onOpenChange={setOpen}>
-      <CollapsibleSectionHeader expanded={open} tone="muted" onClick={() => setOpen(!open)}>
-        Conversations
-      </CollapsibleSectionHeader>
-      <CollapsiblePanel>
-        {read.error ? (
-          <AgentRosterNotice
-            message={read.error}
-            actionLabel="Retry"
-            onAction={() => read.refresh()}
+    <ul className="flex flex-col gap-px pr-1 pb-1 pl-6">
+      {conversations.map((session) => (
+        <li key={session.sessionId}>
+          <MuseConversationRow
+            environmentId={environmentId}
+            providerInstanceId={providerInstanceId}
+            session={session}
+            threads={threads}
+            selected={
+              routeThreadId !== null &&
+              isMuseSessionThread(routeThreadId, session.isPrimary ? null : session.sessionId)
+            }
           />
-        ) : sessions === null ? (
-          <div className="flex flex-col gap-2 px-1 py-1">
-            <Skeleton className="h-9 w-full" shape="card" />
-            <Skeleton className="h-9 w-full" shape="card" />
-          </div>
-        ) : conversations.length === 0 ? (
-          <p className="px-2 py-2 text-xs text-sidebar-muted-foreground">No conversations yet.</p>
-        ) : (
-          <ul className="flex flex-col gap-px pb-1">
-            {conversations.map((session) => (
-              <li key={session.sessionId}>
-                <MuseConversationRow
-                  environmentId={environmentId}
-                  providerInstanceId={providerInstanceId}
-                  session={session}
-                  threads={threads}
-                  selected={
-                    routeThreadId !== null &&
-                    isMuseSessionThread(routeThreadId, session.isPrimary ? null : session.sessionId)
-                  }
-                />
-              </li>
-            ))}
-          </ul>
-        )}
-      </CollapsiblePanel>
-    </Collapsible>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -135,15 +124,40 @@ function MuseConversationRow({
   const open = async () => {
     if (busy) return;
     if (isMobile) setOpenMobile(false);
-    setBusy(true);
-    // Main chat opens without a session, so it keeps its canonical thread.
-    const result = await openThread({
+    const cached = threads.find(
+      (entry) =>
+        entry.providerInstanceId === providerInstanceId &&
+        entry.archivedAt === null &&
+        isMuseSessionThread(entry.id, session.isPrimary ? null : session.sessionId),
+    );
+    const request = {
       environmentId,
       input: {
         providerInstanceId,
         ...(session.isPrimary ? {} : { sessionId: session.sessionId }),
       },
-    });
+    };
+    if (cached) {
+      // Open the cached conversation now. The guarded open still runs and reports a failure here.
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(scopeThreadRef(environmentId, cached.id)),
+      });
+      const validated = await openThread(request);
+      if (validated._tag !== "Success" && !isAtomCommandInterrupted(validated)) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not open conversation",
+            description: String(squashAtomCommandFailure(validated)),
+          }),
+        );
+      }
+      return;
+    }
+    setBusy(true);
+    // Main chat opens without a session, so it keeps its canonical thread.
+    const result = await openThread(request);
     setBusy(false);
     if (result._tag !== "Success") return;
     void navigate({

@@ -29,6 +29,7 @@ import { buildThreadRouteParams } from "~/threadRoutes";
 import { AgentPinnedTile, AgentRosterNotice, AgentRosterRow, AgentRowMenu } from "./AgentRoster";
 import {
   findCachedMuseAgentThread,
+  isMuseSessionThread,
   museAvatarStateForStatus,
   resolveMuseAgentSidebarState,
   resolveMuseAgentStatusDot,
@@ -163,12 +164,36 @@ function MuseAgentRoster({
 
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
+  const [conversationsOpen, setConversationsOpen] = useState(false);
 
   const open = useCallback(async () => {
     if (opening) return;
     if (isMobile) setOpenMobile(false);
-    // Always use the guarded open: the server validates the account, unarchives and reattaches
-    // history (idempotent), and the cached thread is never a bypass.
+    const cached = threads.find(
+      (entry) =>
+        entry.providerInstanceId === instanceId &&
+        entry.archivedAt === null &&
+        isMuseSessionThread(entry.id, null),
+    );
+    if (cached) {
+      // Show the cached chat at once. The guarded open still runs: it validates the account and
+      // reattaches history, and a failure surfaces on this row.
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(scopeThreadRef(environmentId, cached.id)),
+      });
+      const validated = await openThread({
+        environmentId,
+        input: { providerInstanceId: ProviderInstanceId.make(instanceId) },
+      });
+      if (validated._tag !== "Success" && !isAtomCommandInterrupted(validated)) {
+        setOpenError(
+          shortError(squashAtomCommandFailure(validated), "Could not open Muse. Try again."),
+        );
+      }
+      return;
+    }
+    // Without a cached chat, the guarded open is the only way in: it creates the thread.
     setOpening(true);
     setOpenError(null);
     const result = await openThread({
@@ -190,7 +215,7 @@ function MuseAgentRoster({
       to: "/$environmentId/$threadId",
       params: buildThreadRouteParams(scopeThreadRef(environmentId, threadId)),
     });
-  }, [environmentId, instanceId, isMobile, navigate, opening, openThread, setOpenMobile]);
+  }, [environmentId, instanceId, isMobile, navigate, opening, openThread, setOpenMobile, threads]);
 
   // Working comes from the canonical thread's run, never from the selected route.
   const avatarState = museAvatarStateForStatus(thread?.status);
@@ -237,31 +262,21 @@ function MuseAgentRoster({
     />
   );
 
-  const conversations = (
-    <MuseAgentConversations
-      environmentId={environmentId}
-      providerInstanceId={ProviderInstanceId.make(instanceId)}
-      threads={threads}
-      routeThreadId={routeEnvironmentId === environmentId ? routeThreadId : null}
-    />
-  );
+  // A pinned tile has no room for a disclosure, so its conversations wait until it is unpinned.
   if (pinned) {
     return (
-      <>
-        <ul className="grid grid-cols-[repeat(auto-fit,minmax(80px,1fr))] gap-x-1 gap-y-3 py-1.5">
-          <li>
-            <AgentPinnedTile
-              name={name}
-              avatar={avatarNode("xl")}
-              selected={selected}
-              statusDot={statusDot}
-              menu={menu("tile")}
-              onOpen={() => void open()}
-            />
-          </li>
-        </ul>
-        {conversations}
-      </>
+      <ul className="grid grid-cols-[repeat(auto-fit,minmax(80px,1fr))] gap-x-1 gap-y-3 py-1.5">
+        <li>
+          <AgentPinnedTile
+            name={name}
+            avatar={avatarNode("xl")}
+            selected={selected}
+            statusDot={statusDot}
+            menu={menu("tile")}
+            onOpen={() => void open()}
+          />
+        </li>
+      </ul>
     );
   }
   return (
@@ -274,10 +289,25 @@ function MuseAgentRoster({
         disabled={!canOpen}
         pending={opening}
         menu={menu("row")}
-        footer={errorFooter}
+        disclosure={{
+          expanded: conversationsOpen,
+          onToggle: () => setConversationsOpen((expanded) => !expanded),
+        }}
+        footer={
+          <>
+            {errorFooter}
+            {conversationsOpen ? (
+              <MuseAgentConversations
+                environmentId={environmentId}
+                providerInstanceId={ProviderInstanceId.make(instanceId)}
+                threads={threads}
+                routeThreadId={routeEnvironmentId === environmentId ? routeThreadId : null}
+              />
+            ) : null}
+          </>
+        }
         onOpen={() => void open()}
       />
-      {conversations}
     </div>
   );
 }
