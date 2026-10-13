@@ -33,18 +33,26 @@ export function grokBotUserMessageIds(
   );
 }
 
-/** Delivered once the polled transcript shows a user message with the same text that was not there before. */
-export function isGrokBotSendDelivered(
-  messages: readonly ConversationMessage[],
+/** The user messages a send produced: same text, and not in the transcript before the send. */
+function grokBotSendEchoes<Message extends ConversationMessage>(
+  messages: readonly Message[],
   sent: GrokBotSentMessage,
-): boolean {
+): readonly Message[] {
   const text = sent.text.trim();
-  return messages.some(
+  return messages.filter(
     (message) =>
       message.sender.kind === "user" &&
       !sent.baselineUserIds.has(message.id) &&
       message.text.trim() === text,
   );
+}
+
+/** Delivered once the polled transcript shows a user message with the same text that was not there before. */
+export function isGrokBotSendDelivered(
+  messages: readonly ConversationMessage[],
+  sent: GrokBotSentMessage,
+): boolean {
+  return grokBotSendEchoes(messages, sent).length > 0;
 }
 
 export function grokBotErrorReason(error: unknown): string | null {
@@ -138,18 +146,77 @@ export function groupGrokBotReactions(
   return [...counts].map(([emoji, count]) => ({ emoji, count }));
 }
 
-/**
- * A settled message settles the wait only when it arrived after the send began.
- * The last message from before the send is an old reply, however settled it is.
- */
-export function isGrokBotReplyAfterSend(input: {
-  readonly afterMessageId: string | undefined;
-  readonly lastMessageId: string | undefined;
-  readonly lastMessageSettled: boolean;
-}): boolean {
-  return (
-    input.lastMessageSettled &&
-    input.lastMessageId !== undefined &&
-    input.lastMessageId !== input.afterMessageId
+/** Who put this emoji on the message, for a reaction pill's tooltip and accessible description. */
+export function grokBotReactionTitle(reactions: ReactionList | undefined, emoji: string): string {
+  const senders = new Set(
+    (reactions ?? [])
+      .filter((reaction) => reaction.emoji === emoji)
+      .map((reaction) => reaction.from),
   );
+  const names = [senders.has("user") ? "you" : null, senders.has("bot") ? "Grok Bot" : null];
+  return `Reacted by ${names.filter((name) => name !== null).join(" and ")}`;
+}
+
+/**
+ * A bot reaction answers a send only when it sits on the user message the send produced. A
+ * standalone reaction (its target missing from the transcript) cannot prove which send it
+ * answers, so it shows as a pill but never settles a wait.
+ */
+export function isGrokBotReactionReplyToSend(input: {
+  readonly sent: GrokBotSentMessage;
+  readonly messages: readonly (typeof GrokBotMessage.Type)[];
+}): boolean {
+  return grokBotSendEchoes(input.messages, input.sent).some((message) =>
+    (message.reactions ?? []).some((reaction) => reaction.from === "bot"),
+  );
+}
+
+/**
+ * A finished bot text turn. A reaction-only turn does not count: its target is not in the
+ * transcript, so it cannot be tied to the send it would answer.
+ */
+export function isGrokBotSettledTextTurn(message: typeof GrokBotMessage.Type | undefined): boolean {
+  return (
+    message?.role === "assistant" && message.streaming !== true && message.reactionOnly !== true
+  );
+}
+
+/**
+ * This bot's own text to the user. A message it sent to a peer carries an `addressee`, and a
+ * peer's message is not this bot's, so neither answers the user's send.
+ */
+function isGrokBotOwnTextReply(
+  message: typeof GrokBotMessage.Type | undefined,
+  botId: string,
+): boolean {
+  return (
+    message !== undefined &&
+    isGrokBotSettledTextTurn(message) &&
+    message.sender.kind === "bot" &&
+    message.sender.id === botId &&
+    message.addressee === undefined
+  );
+}
+
+/**
+ * A settled text reply settles the wait only when it sits after the send's boundary, the last
+ * message from before the send. Reaction-only rows after it are skipped, so a standalone reaction
+ * does not hide the reply. A boundary missing from the transcript cannot tell old replies from
+ * new ones, so it settles nothing; the wait then ends at its timeout.
+ */
+export function isGrokBotTextReplyAfterSend(input: {
+  readonly afterMessageId: string | undefined;
+  readonly botId: string;
+  readonly messages: readonly (typeof GrokBotMessage.Type)[];
+}): boolean {
+  let start = 0;
+  if (input.afterMessageId !== undefined) {
+    const boundary = input.messages.findIndex((message) => message.id === input.afterMessageId);
+    if (boundary === -1) return false;
+    start = boundary + 1;
+  }
+  for (let index = start; index < input.messages.length; index += 1) {
+    if (isGrokBotOwnTextReply(input.messages[index], input.botId)) return true;
+  }
+  return false;
 }

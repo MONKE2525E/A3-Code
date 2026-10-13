@@ -5216,9 +5216,9 @@ it.effect(
     }),
 );
 
-it.effect(
-  "persists completed Grok Bot run attachments from an idle observer while buffering active run messages",
-  () =>
+it.effect.each(["attachments", "reaction_added", "reaction_removed"] as const)(
+  "persists completed Grok Bot run %s while buffering active run messages",
+  (scenario) =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
       const driver = ProviderDriverKind.make("grok-bot");
@@ -5305,7 +5305,7 @@ it.effect(
           createdAt: now,
           updatedAt: now,
         });
-        const history = makeMessage(
+        const fileHistory = makeMessage(
           yield* idAllocator.allocate.message({ threadId, ordinal: 2 }),
           completedRunId,
         );
@@ -5322,14 +5322,62 @@ it.effect(
           generation: 0,
           afterUpdatedSeq: "0",
         };
+        const reaction = { emoji: "👍", from: "bot" as const, messageId: userMessageId };
+        const history: OrchestrationV2ConversationMessage =
+          scenario === "attachments"
+            ? fileHistory
+            : {
+                ...fileHistory,
+                id: userMessageId,
+                role: "user",
+                createdBy: "user",
+                creationSource: "web",
+                text: "Original prompt",
+                attachments: [],
+                ...(scenario === "reaction_added" ? { grokBotReactions: [reaction] } : {}),
+              };
+        const historyItem = grokBotMessageTurnItem(history, { native }).turnItem;
+        if (scenario !== "attachments") {
+          const { grokBotReactions: _reactions, ...withoutReactions } = history;
+          const original = {
+            ...withoutReactions,
+            ...(scenario === "reaction_removed" ? { grokBotReactions: [reaction] } : {}),
+          };
+          yield* eventSink.write({
+            events: [
+              {
+                id: yield* idAllocator.allocate.event({ threadId }),
+                threadId,
+                occurredAt: now,
+                type: "message.updated",
+                payload: original,
+              },
+              {
+                id: yield* idAllocator.allocate.event({ threadId }),
+                threadId,
+                occurredAt: now,
+                type: "turn-item.updated",
+                payload: {
+                  ...grokBotMessageTurnItem(original, { native }).turnItem,
+                  id: idAllocator.derive.userTurnItem({ messageId: userMessageId }),
+                },
+              },
+            ],
+          });
+        }
+        const exactHistoryItem = {
+          ...historyItem,
+          id:
+            scenario === "attachments"
+              ? historyItem.id
+              : idAllocator.derive.userTurnItem({ messageId: userMessageId }),
+        };
         const afterSequence = yield* eventSink.latestSequence({ threadId });
         const persisted = yield* eventSink.stream({ threadId, afterSequence }).pipe(
           Stream.filter(
             ({ event }) =>
               (event.type === "message.updated" && event.payload.id === history.id) ||
-              (event.type === "turn-item.updated" &&
-                event.payload.type === "assistant_message" &&
-                event.payload.messageId === history.id),
+              (event.type === "turn-item.updated" && event.payload.id === exactHistoryItem.id),
           ),
           Stream.take(2),
           Stream.runCollect,
@@ -5340,14 +5388,19 @@ it.effect(
         yield* Queue.offerAll(queue!, [
           { type: "message.updated" as const, driver, message: active },
           { type: "message.updated" as const, driver, message: history },
-          grokBotMessageTurnItem(history, { native }),
+          { type: "turn_item.updated" as const, driver, turnItem: exactHistoryItem },
         ]);
         yield* Fiber.join(persisted);
         const projection = yield* projectionStore.getThreadProjection(threadId);
-        assert.equal(
-          projection.messages.find((message) => message.id === history.id)?.attachments[0]?.name,
-          "poteto.txt",
-        );
+        const persistedMessage = projection.messages.find((message) => message.id === history.id);
+        assert.deepEqual(persistedMessage, history);
+        const persistedItem = projection.turnItems.find((item) => item.id === exactHistoryItem.id);
+        if (persistedItem?.type !== "user_message" && persistedItem?.type !== "assistant_message")
+          return assert.fail("Historical message timeline was not persisted.");
+        assert.deepEqual(persistedItem.grokBotReactions, history.grokBotReactions);
+        assert.equal(persistedItem.runId, completedRunId);
+        assert.equal(persistedItem.text, history.text);
+        assert.equal(persistedItem.messageId, history.id);
         assert.isUndefined(projection.messages.find((message) => message.id === active.id));
         const buffered = yield* runtime.events.pipe(Stream.take(1), Stream.runCollect);
         assert.equal(buffered[0]?.type, "message.updated");

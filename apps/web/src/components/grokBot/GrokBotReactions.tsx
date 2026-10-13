@@ -1,8 +1,9 @@
 import type { GrokBotMessage } from "@t3tools/contracts";
 
+import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { cn } from "~/lib/utils";
 
-import { groupGrokBotReactions } from "./grokBotConversation";
+import { grokBotReactionTitle, groupGrokBotReactions } from "./grokBotConversation";
 
 export function GrokBotReactions({
   reactions,
@@ -15,17 +16,27 @@ export function GrokBotReactions({
   if (groups.length === 0) return null;
   return (
     <ul aria-label="Reactions" className={cn("flex flex-wrap gap-1", className)}>
-      {groups.map((group) => (
-        <li
-          key={group.emoji}
-          className="flex items-center gap-1 rounded-full bg-muted/50 px-1.5 py-0.5 text-xs leading-4"
-        >
-          <span>{group.emoji}</span>
-          {group.count > 1 ? (
-            <span className="text-muted-foreground tabular-nums">{group.count}</span>
-          ) : null}
-        </li>
-      ))}
+      {groups.map((group) => {
+        const title = grokBotReactionTitle(reactions, group.emoji);
+        return (
+          <li key={group.emoji}>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <span className="flex h-6 items-center gap-1 rounded-full border border-border bg-muted px-2 text-sm leading-5" />
+                }
+              >
+                <span>{group.emoji}</span>
+                {group.count > 1 ? (
+                  <span className="text-xs text-muted-foreground tabular-nums">{group.count}</span>
+                ) : null}
+                <span className="sr-only">{title}</span>
+              </TooltipTrigger>
+              <TooltipPopup>{title}</TooltipPopup>
+            </Tooltip>
+          </li>
+        );
+      })}
     </ul>
   );
 }

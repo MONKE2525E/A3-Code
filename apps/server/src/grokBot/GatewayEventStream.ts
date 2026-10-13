@@ -17,7 +17,7 @@ export function decodeEvents<E, R>(source: Stream.Stream<Uint8Array, E, R>) {
     let data: string[] = [];
     let size = 0;
     let skipLF = false;
-    return source.pipe(
+    const frames = source.pipe(
       Stream.mapAccumEffect(
         () => undefined,
         (_, chunk) =>
@@ -53,12 +53,23 @@ export function decodeEvents<E, R>(source: Stream.Stream<Uint8Array, E, R>) {
               } else if (line === "data" || line.startsWith("data:")) {
                 const value = line === "data" ? "" : line.slice(5).replace(/^ /, "");
                 data.push(value);
-                size += value.length;
+                // The joined newline also consumes space, including for empty data fields.
+                size += value.length + 1;
               }
             }
             pending = pending.slice(start);
             return [undefined, events] as const;
           }),
+      ),
+    );
+    return frames.pipe(
+      Stream.concat(
+        Stream.fromEffect(
+          Effect.try({
+            try: () => decoder.decode(),
+            catch: () => new GatewayFrameError({}),
+          }),
+        ).pipe(Stream.drain),
       ),
     );
   });

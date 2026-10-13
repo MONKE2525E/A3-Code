@@ -2,6 +2,7 @@ import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -9,6 +10,7 @@ import * as ManagedEndpointAddress from "../cloud/ManagedEndpointAddress.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { derive } from "@t3tools/provider-core/server/IdAllocator";
 import {
   GROK_BOT_MANAGED_MCP_SERVER,
   GROK_BOT_NATIVE_MESSAGE_LIMIT,
@@ -95,6 +97,20 @@ const make = Effect.gen(function* () {
       ["pending", "running"].includes(attempt.status)
     );
   });
+  const withUserMessage = Effect.fnUntraced(function* (identity: GrokBotTurnIdentity) {
+    if (identity.userMessageId !== undefined) return identity;
+    const records = yield* projections.getThreadRecords(identity.native.threadId, ["runs"], {
+      runIds: [identity.runId],
+    });
+    const run = records.runs.find(
+      (run) =>
+        run.id === identity.runId &&
+        run.providerInstanceId === identity.native.providerInstanceId &&
+        run.providerThreadId === identity.providerThreadId &&
+        run.rootNodeId === identity.rootNodeId,
+    );
+    return run === undefined ? identity : { ...identity, userMessageId: run.userMessageId };
+  });
   const prepareTurn = Effect.fnUntraced(function* (input: {
     readonly native: GrokBotBoundSession;
     readonly turn: GrokBotManagedTurn["input"];
@@ -131,6 +147,7 @@ const make = Effect.gen(function* () {
     const messageId = `t3-${Buffer.from(hash).toString("hex")}`;
     const identity: GrokBotTurnIdentity = {
       native: input.native,
+      userMessageId: turn.message.messageId,
       messageId,
       sentAtMs: yield* Clock.currentTimeMillis,
       runId: turn.runId,
@@ -155,13 +172,12 @@ const make = Effect.gen(function* () {
       return yield* unavailable("This provider no longer owns the active run attempt.");
     const saved = yield* store.prepareTurn({
       ...identity,
-      ...(skill === undefined ? {} : { managedSkill: skill }),
+      managedSkill: skill,
     });
     const verifiedSkill =
-      skill === undefined || saved.managedSkill === undefined
+      saved.managedSkill === undefined
         ? undefined
-        : ("workflowPath" in skill ? skill.workflowPath : undefined) ===
-            saved.managedSkill.workflowPath
+        : skill.workflowPath === saved.managedSkill.workflowPath
           ? { ...saved.managedSkill, changed: saved.managedSkill.changed || skill.changed }
           : { ...saved.managedSkill, changed: true };
     const nativePrompt = grokBotManagedPrompt(turn.message.text, verifiedSkill);
@@ -182,48 +198,61 @@ const make = Effect.gen(function* () {
     ]);
     if (access.browser) capabilities.add("preview");
     if (access.device) capabilities.add("device");
-    const credential = yield* registry.issue({
-      threadId: input.native.threadId,
-      providerInstanceId: input.native.providerInstanceId,
-      remoteRun: { runId: saved.runId, attemptId: saved.attemptId },
-      // The same thread preference limits both local and cloud agent browser access.
-      browserToolsAvailable: access.browser,
-      capabilities,
-    });
-    // Settings and credential issuance yield; the run may have been replaced in that time.
-    yield* Effect.gen(function* () {
-      if (!(yield* validateIdentity(saved)))
-        return yield* unavailable("This provider no longer owns the active run attempt.");
-    }).pipe(
-      Effect.tapError(() => registry.revokeProviderSession(credential.config.providerSessionId)),
+    // Own the grant from issuance through handoff; failed or interrupted validation revokes it.
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const credential = yield* registry.issue({
+          threadId: input.native.threadId,
+          providerInstanceId: input.native.providerInstanceId,
+          remoteRun: { runId: saved.runId, attemptId: saved.attemptId },
+          // The same thread preference limits both local and cloud agent browser access.
+          browserToolsAvailable: access.browser,
+          capabilities,
+        });
+        return yield* restore(
+          Effect.gen(function* () {
+            // Settings and credential issuance yield; the run may have been replaced in that time.
+            if (!(yield* validateIdentity(saved)))
+              return yield* unavailable("This provider no longer owns the active run attempt.");
+          }),
+        ).pipe(
+          Effect.map(() => {
+            const mcpEndpoint = new URL("/mcp", publicEndpoint.httpBaseUrl);
+            // Native cloud discovery caches by URL. Version the managed tool contract so an
+            // older catalog cannot hide the completion tool after an integration upgrade.
+            mcpEndpoint.searchParams.set("t3-managed-protocol", "2");
+            const handles = leases.get(input.providerSessionId) ?? new Set<string>();
+            handles.add(credential.config.providerSessionId);
+            leases.set(input.providerSessionId, handles);
+            return {
+              native: saved.native,
+              input: turn,
+              providerTurnId: saved.providerTurnId,
+              messageId: saved.messageId,
+              sentAtMs: saved.sentAtMs,
+              nativePrompt,
+              ...(saved.managedSkill === undefined ? {} : { managedSkill: saved.managedSkill }),
+              mcpConfig: {
+                mcpServers: {
+                  // A saved native connector can shadow a per-turn connector with the same name.
+                  [GROK_BOT_MANAGED_MCP_SERVER]: {
+                    type: "http" as const,
+                    url: mcpEndpoint.href,
+                    headers: { Authorization: credential.config.authorizationHeader },
+                    placement: "server" as const,
+                  },
+                },
+              },
+            };
+          }),
+          Effect.onExit((exit) =>
+            Exit.isFailure(exit)
+              ? registry.revokeProviderSession(credential.config.providerSessionId)
+              : Effect.void,
+          ),
+        );
+      }),
     );
-    const handles = leases.get(input.providerSessionId) ?? new Set<string>();
-    handles.add(credential.config.providerSessionId);
-    leases.set(input.providerSessionId, handles);
-    const mcpEndpoint = new URL("/mcp", publicEndpoint.httpBaseUrl);
-    // Native cloud discovery caches by URL. Version the managed tool contract so an
-    // older catalog cannot hide the completion tool after an integration upgrade.
-    mcpEndpoint.searchParams.set("t3-managed-protocol", "2");
-    return {
-      native: saved.native,
-      input: turn,
-      providerTurnId: saved.providerTurnId,
-      messageId: saved.messageId,
-      sentAtMs: saved.sentAtMs,
-      nativePrompt,
-      ...(saved.managedSkill === undefined ? {} : { managedSkill: saved.managedSkill }),
-      mcpConfig: {
-        mcpServers: {
-          // A saved native connector can shadow a per-turn connector with the same name.
-          [GROK_BOT_MANAGED_MCP_SERVER]: {
-            type: "http" as const,
-            url: mcpEndpoint.href,
-            headers: { Authorization: credential.config.authorizationHeader },
-            placement: "server" as const,
-          },
-        },
-      },
-    };
   });
   return GrokBotManagedBinding.of({
     availability: Effect.gen(function* () {
@@ -307,10 +336,21 @@ const make = Effect.gen(function* () {
         });
         return records.messages[0];
       }).pipe(Effect.mapError(() => unavailable("The existing native message could not be read."))),
+    existingUserTurnItem: (owned, messageId) =>
+      Effect.gen(function* () {
+        yield* accountIsCurrent(owned.binding);
+        return yield* projections.getTurnItem({
+          threadId: owned.threadId,
+          itemId: derive.userTurnItem({ messageId }),
+        });
+      }).pipe(
+        Effect.mapError(() => unavailable("The initiating message timeline could not be read.")),
+      ),
     lookupTranscriptTurn: (owned, messageId) =>
       Effect.gen(function* () {
         yield* accountIsCurrent(owned.binding);
-        return yield* store.lookupTranscriptTurn(owned, messageId);
+        const identity = yield* store.lookupTranscriptTurn(owned, messageId);
+        return identity === undefined ? undefined : yield* withUserMessage(identity);
       }).pipe(
         Effect.mapError(() => unavailable("The native message ownership could not be read.")),
       ),
@@ -326,7 +366,7 @@ const make = Effect.gen(function* () {
     restoreTranscriptTurns: (owned) =>
       Effect.gen(function* () {
         yield* accountIsCurrent(owned.binding);
-        return yield* store.restoreTranscriptTurns(owned);
+        return yield* Effect.forEach(yield* store.restoreTranscriptTurns(owned), withUserMessage);
       }).pipe(
         Effect.mapError(() =>
           unavailable("The durable native transcript ownership could not be restored."),
@@ -336,7 +376,8 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const turns = yield* store.restoreTurns(owned);
         const live: GrokBotTurnIdentity[] = [];
-        for (const turn of turns) if (yield* validateIdentity(turn)) live.push(turn);
+        for (const turn of turns)
+          if (yield* validateIdentity(turn)) live.push(yield* withUserMessage(turn));
         return live;
       }).pipe(
         Effect.mapError(() =>

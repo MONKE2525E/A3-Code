@@ -1,5 +1,6 @@
 import {
   GrokBotConnectorCard,
+  GrokBotReactions,
   GrokBotVoiceCallId,
   GrokBotVoiceCallMarker,
   GrokBotWorkflowReferences,
@@ -1249,6 +1250,7 @@ const GrokBotMessagePeer = Schema.Struct({
 });
 
 export const OrchestrationV2ConversationMessage = Schema.Struct({
+  grokBotReactions: Schema.optionalKey(GrokBotReactions),
   /** Native spoken input stays in chat history but is not a written-message voice update. */
   grokBotVoiceUtterance: Schema.optionalKey(Schema.Literal(true)),
   grokBotPeer: Schema.optional(GrokBotMessagePeer),
@@ -1528,6 +1530,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     ...OrchestrationV2TurnItemBaseFields,
     ...OrchestrationV2CreationFields,
     type: Schema.Literal("user_message"),
+    grokBotReactions: Schema.optionalKey(GrokBotReactions),
     grokBotPeer: Schema.optional(GrokBotMessagePeer),
     grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
     messageId: MessageId,
@@ -1542,6 +1545,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("assistant_message"),
+    grokBotReactions: Schema.optionalKey(GrokBotReactions),
     grokBotPeer: Schema.optional(GrokBotMessagePeer),
     grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
     grokBotVoiceCall: Schema.optionalKey(GrokBotVoiceCallMarker),
@@ -2316,6 +2320,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     ...OrchestrationV2TurnItemJsonBaseFields,
     ...OrchestrationV2CreationFields,
     type: Schema.Literal("user_message"),
+    grokBotReactions: Schema.optionalKey(GrokBotReactions),
     grokBotPeer: Schema.optional(GrokBotMessagePeer),
     grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
     messageId: MessageId,
@@ -2330,6 +2335,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("assistant_message"),
+    grokBotReactions: Schema.optionalKey(GrokBotReactions),
     grokBotPeer: Schema.optional(GrokBotMessagePeer),
     grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
     grokBotVoiceCall: Schema.optionalKey(GrokBotVoiceCallMarker),

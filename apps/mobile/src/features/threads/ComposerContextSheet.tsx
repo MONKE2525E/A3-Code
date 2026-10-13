@@ -1,10 +1,12 @@
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
+import { useOpenPullRequest } from "../pull-requests/useOpenPullRequestFromRoute";
 import { SourceFileSurface } from "../files/SourceFileSurface";
 import { filePreviewKind } from "@t3tools/shared/filePreview";
 import type {
   ComposerContextRecord,
   ElementContextSource,
   EnvironmentId,
+  ProjectId,
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
@@ -95,9 +97,16 @@ export function ComposerContextSheet(props: {
   readonly onOpenSkill?: () => void;
   readonly onOpenThread?: (thread: ScopedThreadRef) => void;
   readonly environmentId?: EnvironmentId;
+  readonly projectId?: ProjectId;
   readonly records?: ReadonlyArray<ComposerContextRecord>;
   readonly attachments?: ReadonlyArray<DraftComposerAttachment>;
 }) {
+  const openPullRequest = useOpenPullRequest({
+    context:
+      props.environmentId && props.projectId
+        ? { environmentId: props.environmentId, projectId: props.projectId }
+        : undefined,
+  });
   const reviewColors = useReviewCommentColors();
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
@@ -420,9 +429,7 @@ export function ComposerContextSheet(props: {
                 accessibilityRole="link"
                 onPress={() => {
                   props.onClose();
-                  const open =
-                    props.onOpenPullRequestUrl ??
-                    ((url: string) => tryOpenExternalUrl(url, "pull-request"));
+                  const open = props.onOpenPullRequestUrl ?? openPullRequest;
                   void open(pullRequestUrl)
                     .then((opened) => {
                       if (!opened)

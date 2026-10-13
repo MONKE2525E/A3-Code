@@ -10,6 +10,7 @@ import * as Context from "effect/Context";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -253,7 +254,6 @@ const make = Effect.gen(function* () {
           entry.scope = scope;
           activationFailures.delete(input.callId);
         }).pipe(
-          Effect.uninterruptible,
           Effect.onExit((exit) =>
             Effect.gen(function* () {
               if (exit._tag === "Failure") {
@@ -274,6 +274,9 @@ const make = Effect.gen(function* () {
       }).pipe(
         Effect.catchCause((cause) => {
           const error = Option.getOrUndefined(Cause.findErrorOption(cause));
+          // Defects and interruptions are not authority failures; they keep propagating.
+          // No typed failure means the cause carries none, so it is safe to re-raise as never.
+          if (error === undefined) return Effect.failCause(cause as Cause.Cause<never>);
           activationFailures.set(
             input.callId,
             isOrchestratorFailure(error)
