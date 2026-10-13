@@ -97,9 +97,14 @@ const fixture = Effect.gen(function* () {
   };
 });
 
-it.effect.each(["write", "rename"] as const)(
-  "a failed %s keeps routing state and the saved opt-in unchanged until disabling succeeds",
-  (operation) =>
+it.effect.each([
+  { operation: "write", trigger: "explicit" },
+  { operation: "rename", trigger: "explicit" },
+  { operation: "write", trigger: "account-change" },
+  { operation: "rename", trigger: "account-change" },
+] as const)(
+  "a failed $operation during $trigger keeps routing state and the saved opt-in unchanged",
+  ({ operation, trigger }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       let fail = false;
@@ -126,13 +131,19 @@ it.effect.each(["write", "rename"] as const)(
       const persisted = yield* fs.readFileString(savedFile);
       const stops = current.stops;
       fail = true;
-      const result = yield* Effect.result(service.set(false));
+      if (trigger === "account-change") current.binding = "second";
+      const result = yield* Effect.result(
+        trigger === "account-change" ? service.read() : service.set(false),
+      );
       assert.strictEqual(result._tag, "Failure");
+      current.binding = "first";
       assert.deepEqual(yield* service.read(), previous);
       assert.strictEqual(current.stops, stops);
       assert.strictEqual(yield* fs.readFileString(savedFile), persisted);
       fail = false;
-      assert.strictEqual((yield* service.set(false)).state, "off");
+      if (trigger === "account-change") current.binding = "second";
+      const disabled = yield* trigger === "account-change" ? service.read() : service.set(false);
+      assert.strictEqual(disabled.state, "off");
       assert.strictEqual((yield* service.read()).enabled, false);
       assert.strictEqual(JSON.parse(yield* fs.readFileString(savedFile)).enabled, false);
       assert.strictEqual(current.stops, stops + 1);

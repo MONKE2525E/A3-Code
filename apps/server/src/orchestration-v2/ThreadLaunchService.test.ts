@@ -2596,7 +2596,7 @@ it.effect("cancels tracked setup before provider work is released", () =>
         command: "launch:cancel-tracked",
         thread: "thread:cancel-tracked",
         message: "Start",
-        workspace: { type: "worktree", baseRef: "main", branch: "cancel-setup" },
+        workspace: { type: "worktree", baseRef: "main" },
       });
       const originalDispatch = threads.dispatch;
       const dispatchSpy = vi

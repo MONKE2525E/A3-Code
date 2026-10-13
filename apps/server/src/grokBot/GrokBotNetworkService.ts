@@ -155,11 +155,12 @@ const make = Effect.gen(function* () {
     lock.withPermits(1)(
       Effect.gen(function* () {
         if (saved.binding !== binding || !saved.enabled) return;
+        const value = { ...saved, enabled: false };
+        yield* persist(value);
         epoch++;
         resetContext();
-        saved = { ...saved, enabled: false };
+        saved = value;
         state = { enabled: false, state: "off", activeStreams: 0, relayedStreams: 0, error: null };
-        yield* persist(saved);
       }),
     );
   const reconcile = reconcileLock.withPermits(1)(

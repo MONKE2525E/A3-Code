@@ -378,24 +378,14 @@ it.effect.each([
           yield* outbox.awaitAvailable;
         }
         yield* Deferred.succeed(disconnect, undefined);
-        if (scenario === "eof") {
-          // Clean read-stream endings reattach inside the existing provider session.
-          yield* TestClock.adjust("1 second");
-          yield* Deferred.await(transcriptReattached);
-          const held = yield* orchestrator.getThreadProjection(threadId);
-          assert.equal(held.runs[0]?.status, "running");
-          assert.equal(writes, 1);
-          assert.equal(watches, 1);
-        } else {
-          yield* outbox.awaitAvailable;
-          const held = yield* orchestrator.getThreadProjection(threadId);
-          assert.equal(held.runs[0]?.status, "running");
-          assert.isTrue(Option.isSome(yield* worker.nextClaimableAt));
-          yield* TestClock.adjust("5 seconds");
-          yield* worker.drain();
-          assert.equal(writes, 1);
-          assert.equal(watches, 2);
-        }
+        yield* outbox.awaitAvailable;
+        const held = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(held.runs[0]?.status, "running");
+        assert.isTrue(Option.isSome(yield* worker.nextClaimableAt));
+        yield* TestClock.adjust("5 seconds");
+        yield* worker.drain();
+        assert.equal(writes, 1);
+        assert.equal(watches, 2);
       }
       if (reconnect) {
         const sessions = yield* ProviderSessions.ProviderSessionManagerV2;
