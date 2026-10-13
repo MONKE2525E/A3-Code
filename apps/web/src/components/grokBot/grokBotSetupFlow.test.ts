@@ -90,4 +90,47 @@ describe("resolveGrokBotOAuthRedirect", () => {
     );
     expect(resolveGrokBotOAuthRedirect("t3code://app", null)).toBeNull();
   });
+  it.each(["http://192.168.1.10:3773", "http://100.64.0.2:3773"])(
+    "uses the environment's published HTTPS endpoint when connected over %s",
+    (httpBaseUrl) => {
+      expect(
+        resolveGrokBotOAuthRedirect(
+          "https://app.t3.codes",
+          httpBaseUrl,
+          "https://this-environment.example.test/mcp",
+        ),
+      ).toBe("https://this-environment.example.test/settings/marketplace?grokBotOAuth=1");
+      expect(resolveGrokBotOAuthRedirect("https://app.t3.codes", httpBaseUrl)).toBeNull();
+    },
+  );
+  it.each(["localhost", "127.0.0.1", "[::1]"])(
+    "keeps the server's HTTP loopback exception for %s",
+    (host) => {
+      expect(
+        resolveGrokBotOAuthRedirect(
+          "t3code://app",
+          `http://${host}:3773`,
+          "https://this-environment.example.test/mcp",
+        ),
+      ).toBe(`http://${host}:3773/settings/marketplace?grokBotOAuth=1`);
+    },
+  );
+  it("uses a published environment address before falling back to the page", () => {
+    expect(
+      resolveGrokBotOAuthRedirect(
+        "https://app.t3.codes",
+        null,
+        "https://this-environment.example.test/mcp",
+      ),
+    ).toBe("https://this-environment.example.test/settings/marketplace?grokBotOAuth=1");
+  });
+  it("rejects insecure remote and credential-bearing addresses", () => {
+    expect(resolveGrokBotOAuthRedirect("http://100.64.0.2:3773", null)).toBeNull();
+    expect(
+      resolveGrokBotOAuthRedirect("t3code://app", "https://user:password@box.ts.net"),
+    ).toBeNull();
+    expect(
+      resolveGrokBotOAuthRedirect("t3code://app", "http://100.64.0.2:3773", "http://box.ts.net"),
+    ).toBeNull();
+  });
 });
