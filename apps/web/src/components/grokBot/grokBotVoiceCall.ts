@@ -29,6 +29,11 @@ type VoiceTurn = NonNullable<VoiceEndInput["turns"]>[number];
 
 const MAX_TURNS = 1_000;
 const MAX_TURN_CHARS = 16_000;
+const READ_RETRY_BASE_MS = 500;
+const MAX_READ_RETRY_EXPONENT = 4;
+const CHAT_RETRY_NOTICE =
+  "Written chat updates are temporarily unavailable. Retrying automatically.";
+const CHAT_INIT_NOTICE = "Written chat context is unavailable. Retrying automatically.";
 
 const VOICE_SETTINGS: VoiceSettings = { voiceId: null, voiceSpeed: 1, voiceLanguage: null };
 
@@ -67,10 +72,22 @@ interface ActiveCall {
   realtimeConversationId: string | null;
   turns: VoiceTurn[];
   assistantTurns: Map<string, VoiceTurn>;
+  userTurns: Map<string, VoiceTurn>;
+  completedUserTurns: Set<string>;
+  closedAssistantTurns: Set<string>;
+  responseTurnIds: Set<string>;
+  assistantFallbackId: string | null;
+  assistantResponseClosed: boolean;
   pendingWork: Set<string>;
   watchingWork: Set<string>;
-  chatAfterSequence: number | null;
+  seenApprovalIds: Set<string>;
+  workRetryTimers: Map<string, ReturnType<typeof setTimeout>>;
+  workRetryAttempts: Map<string, number>;
+  // Undefined initializes context; null disables the watch after a permanent failure or hang-up.
+  chatAfterSequence: number | null | undefined;
   watchingChat: boolean;
+  chatRetryTimer: ReturnType<typeof setTimeout> | null;
+  chatRetryAttempts: number;
   recoveryEpoch: number;
   stopRecovery: () => void;
 }
@@ -102,7 +119,11 @@ export function createGrokBotVoiceCall(options: {
   const release = (current: ActiveCall, ending: VoiceEndInput["ending"]) => {
     current.stopRecovery();
     current.pendingWork.clear();
+    for (const timer of current.workRetryTimers.values()) clearTimeout(timer);
+    current.workRetryTimers.clear();
     current.watchingWork.clear();
+    if (current.chatRetryTimer !== null) clearTimeout(current.chatRetryTimer);
+    current.chatRetryTimer = null;
     current.chatAfterSequence = null;
     current.audio?.clear();
     current.audio?.close();
@@ -174,8 +195,22 @@ export function createGrokBotVoiceCall(options: {
         line,
       });
     } catch (error) {
-      denyCall(current, error);
+      if (!denyCall(current, error) && call === current) {
+        const message = isRecoverableRpcError(error)
+          ? "The T3 connection interrupted this tool. Its outcome is unknown. Check its status before retrying a write."
+          : "T3 could not execute this tool. Try a smaller read, or check the call's permissions.";
+        emit({ ...state, notice: message });
+        return JSON.stringify({ error: "tool_failed", tool: tool.name, message });
+      }
       throw error;
+    }
+    if (result.kind !== "served" && call === current) {
+      emit({
+        ...state,
+        notice: `Call tool ${tool.name.slice(0, 100)} failed. ${toolFailureMessage(result)}`,
+      });
+    } else if (call === current && state.notice !== null) {
+      emit({ ...state, notice: null });
     }
     if (result.completion?.pending && call === current) {
       current.pendingWork.add(result.completion.requestToolCallId);
@@ -185,8 +220,15 @@ export function createGrokBotVoiceCall(options: {
   };
 
   const waitForWork = async (current: ActiveCall, requestToolCallId: string) => {
-    if (!current.pendingWork.has(requestToolCallId) || current.watchingWork.has(requestToolCallId))
+    if (
+      call !== current ||
+      !current.pendingWork.has(requestToolCallId) ||
+      current.watchingWork.has(requestToolCallId)
+    )
       return;
+    const retryTimer = current.workRetryTimers.get(requestToolCallId);
+    if (retryTimer !== undefined) clearTimeout(retryTimer);
+    current.workRetryTimers.delete(requestToolCallId);
     current.watchingWork.add(requestToolCallId);
     let epoch = current.recoveryEpoch;
     let recoverable = false;
@@ -200,7 +242,7 @@ export function createGrokBotVoiceCall(options: {
           callId: current.callId,
           toolCallId: `wait:${requestToolCallId}`.slice(0, 256),
           name: "t3_task_progress",
-          input: { requestToolCallId },
+          input: { requestToolCallId, seenApprovalIds: [...current.seenApprovalIds] },
           line: {
             theyJustTalked: current.theyJustTalked,
             newsOwed: false,
@@ -208,29 +250,145 @@ export function createGrokBotVoiceCall(options: {
             alreadySpokeThisTurn: current.alreadySpokeThisTurn,
           },
         });
+        if (call !== current) return;
         if (
-          call !== current ||
           result.kind !== "served" ||
           result.completion?.requestToolCallId !== requestToolCallId
-        )
+        ) {
+          if (
+            typeof result.output === "object" &&
+            result.output !== null &&
+            "retryable" in result.output &&
+            result.output.retryable === true
+          )
+            throw new GrokBotVoiceError({ reason: "unavailable" });
+          if (result.kind === "served") return;
+          const message =
+            "T3 could not retrieve this call's work result. Its status is unknown; ask for task_status before retrying.";
+          emit({ ...state, notice: message });
+          current.session?.deliverWork(
+            requestToolCallId,
+            JSON.stringify({ error: "task_watch_failed", message }),
+          );
           return;
-        if (result.completion.pending) continue;
+        }
+        current.workRetryAttempts.delete(requestToolCallId);
+        if (result.completion.pending) {
+          const output = result.output;
+          if (
+            typeof output === "object" &&
+            output !== null &&
+            "status" in output &&
+            output.status === "landed" &&
+            "runId" in output &&
+            typeof output.runId === "string"
+          ) {
+            const noticeId = `run:${output.runId}`;
+            current.seenApprovalIds.add(noticeId);
+            if (current.seenApprovalIds.size > 512)
+              current.seenApprovalIds.delete(current.seenApprovalIds.values().next().value!);
+            if (state.notice !== null) emit({ ...state, notice: null });
+            current.session?.deliverWork(noticeId, toolOutput(result));
+          }
+          if (
+            typeof output === "object" &&
+            output !== null &&
+            "status" in output &&
+            output.status === "input_required" &&
+            "questions" in output &&
+            Array.isArray(output.questions)
+          ) {
+            for (const question of output.questions) {
+              if (typeof question?.requestId !== "string") continue;
+              current.seenApprovalIds.add(question.requestId);
+              if (current.seenApprovalIds.size > 512)
+                current.seenApprovalIds.delete(current.seenApprovalIds.values().next().value!);
+              emit({ ...state, notice: "A thread needs your answer." });
+              current.session?.deliverWork(
+                `question:${question.requestId}`,
+                JSON.stringify({ ...output, questions: [question] }),
+              );
+            }
+          }
+          if (
+            typeof output === "object" &&
+            output !== null &&
+            "status" in output &&
+            output.status === "approval_required" &&
+            "approvals" in output &&
+            Array.isArray(output.approvals)
+          ) {
+            for (const approval of output.approvals) {
+              if (typeof approval?.requestId !== "string") continue;
+              current.seenApprovalIds.add(approval.requestId);
+              if (current.seenApprovalIds.size > 512)
+                current.seenApprovalIds.delete(current.seenApprovalIds.values().next().value!);
+              emit({ ...state, notice: "A delegated task needs your approval." });
+              current.session?.deliverWork(
+                `approval:${approval.requestId}`,
+                JSON.stringify({ ...output, approvals: [approval] }),
+              );
+            }
+          }
+          continue;
+        }
+        const output =
+          result.output !== null && typeof result.output === "object"
+            ? (result.output as Record<string, unknown>)
+            : {};
+        if (output.status === "watch_stopped") {
+          if (state.notice !== null) emit({ ...state, notice: null });
+          return;
+        }
+        if (typeof output.error === "string")
+          emit({ ...state, notice: output.error.slice(0, 500) });
+        else if (state.notice !== null) emit({ ...state, notice: null });
         current.session?.deliverWork(requestToolCallId, toolOutput(result));
         return;
       }
     } catch (error) {
-      if (!denyCall(current, error) && call === current) recoverable = isRecoverableRpcError(error);
+      if (!denyCall(current, error) && call === current) {
+        recoverable = isRecoverableRpcError(error);
+        const message = recoverable
+          ? "Work results are temporarily unavailable. Retrying the status read automatically; the original action will not be repeated."
+          : "T3 could not check this call's work. Ask for its status before retrying.";
+        emit({ ...state, notice: message });
+        current.session?.deliverWork(
+          `watch-error:${requestToolCallId}:${epoch}`,
+          JSON.stringify({ error: "task_watch_failed", message }),
+        );
+      }
     } finally {
       if (!recoverable) current.pendingWork.delete(requestToolCallId);
       current.watchingWork.delete(requestToolCallId);
       // A replacement session may arrive before the rejected wait settles. Use that edge once.
-      if (recoverable && call === current && current.recoveryEpoch !== epoch)
-        void waitForWork(current, requestToolCallId);
+      if (recoverable && call === current) {
+        if (current.recoveryEpoch !== epoch) void waitForWork(current, requestToolCallId);
+        else {
+          const attempts = current.workRetryAttempts.get(requestToolCallId) ?? 0;
+          if (!current.workRetryTimers.has(requestToolCallId)) {
+            current.workRetryAttempts.set(
+              requestToolCallId,
+              Math.min(attempts + 1, MAX_READ_RETRY_EXPONENT),
+            );
+            const timer = setTimeout(
+              () => {
+                current.workRetryTimers.delete(requestToolCallId);
+                if (call === current) void waitForWork(current, requestToolCallId);
+              },
+              READ_RETRY_BASE_MS * 2 ** attempts,
+            );
+            current.workRetryTimers.set(requestToolCallId, timer);
+          }
+        }
+      }
     }
   };
 
   const watchChat = async (current: ActiveCall) => {
     if (call !== current || current.chatAfterSequence === null || current.watchingChat) return;
+    if (current.chatRetryTimer !== null) clearTimeout(current.chatRetryTimer);
+    current.chatRetryTimer = null;
     current.watchingChat = true;
     let epoch = current.recoveryEpoch;
     let recoverable = false;
@@ -238,11 +396,15 @@ export function createGrokBotVoiceCall(options: {
       while (true) {
         if (call !== current || current.callId === null) return;
         epoch = current.recoveryEpoch;
+        const initializing = current.chatAfterSequence === undefined;
         const result = await ports.runTool({
           callId: current.callId,
           toolCallId: "chat-updates",
           name: "t3_chat_updates",
-          input: { afterSequence: current.chatAfterSequence },
+          input:
+            current.chatAfterSequence === undefined
+              ? {}
+              : { afterSequence: current.chatAfterSequence },
           line: {
             theyJustTalked: false,
             newsOwed: false,
@@ -250,19 +412,61 @@ export function createGrokBotVoiceCall(options: {
             alreadySpokeThisTurn: false,
           },
         });
-        if (call !== current || result.kind !== "served" || result.chatContext === undefined)
+        if (call !== current) return;
+        if (result.kind !== "served" || result.chatContext === undefined) {
+          if (
+            typeof result.output === "object" &&
+            result.output !== null &&
+            "retryable" in result.output &&
+            result.output.retryable === true
+          )
+            throw new GrokBotVoiceError({ reason: "unavailable" });
+          emit({
+            ...state,
+            notice: "T3 could not read written chat updates. Restart this call to resume them.",
+          });
           return;
+        }
+        current.chatRetryAttempts = 0;
+        if (state.notice === CHAT_RETRY_NOTICE || state.notice === CHAT_INIT_NOTICE)
+          emit({ ...state, notice: null });
         current.chatAfterSequence = result.chatContext.afterSequence;
+        // The initial read returns recent history to establish a cursor. Only events after
+        // that baseline are new caller instructions; replaying history can repeat old writes.
+        if (initializing) continue;
         for (const message of result.chatContext.messages)
-          current.session?.deliverChat({ ...message, atMs: Date.now() });
+          if (message.role === "user")
+            current.session?.deliverChat({ ...message, atMs: Date.now() });
       }
     } catch (error) {
-      if (!denyCall(current, error) && call === current) recoverable = isRecoverableRpcError(error);
+      if (!denyCall(current, error) && call === current) {
+        recoverable = isRecoverableRpcError(error);
+        emit({
+          ...state,
+          notice: recoverable
+            ? current.chatAfterSequence === undefined
+              ? CHAT_INIT_NOTICE
+              : CHAT_RETRY_NOTICE
+            : "T3 could not read written chat updates. Restart this call to resume them.",
+        });
+      }
     } finally {
       current.watchingChat = false;
       if (!recoverable) current.chatAfterSequence = null;
-      if (recoverable && call === current && current.recoveryEpoch !== epoch)
-        void watchChat(current);
+      if (recoverable && call === current) {
+        if (current.recoveryEpoch !== epoch) void watchChat(current);
+        else {
+          const attempts = current.chatRetryAttempts;
+          current.chatRetryAttempts = Math.min(attempts + 1, MAX_READ_RETRY_EXPONENT);
+          current.chatRetryTimer = setTimeout(
+            () => {
+              current.chatRetryTimer = null;
+              if (call === current) void watchChat(current);
+            },
+            READ_RETRY_BASE_MS * 2 ** attempts,
+          );
+        }
+      }
     }
   };
 
@@ -270,49 +474,103 @@ export function createGrokBotVoiceCall(options: {
     switch (event.type) {
       case "audio.delta":
         current.alreadySpokeThisTurn = true;
-        current.audio?.enqueue(event.samples);
+        current.audio?.enqueue(event.samples, event);
         return;
       case "speech.started":
         // Barge-in: the caller spoke over the bot, so queued speech stops.
         current.theyJustTalked = true;
-        current.audio?.clear();
+        closeAssistantResponse(current);
+        current.session?.truncateAudio(current.audio?.clear() ?? []);
         return;
       case "conversation.created":
         if (event.conversationId !== null) current.realtimeConversationId = event.conversationId;
         return;
-      case "transcript.user":
+      case "transcript.user": {
         current.theyJustTalked = true;
-        addTurn(current, {
-          id: event.itemId ?? `user-${current.turns.length}`,
-          speaker: "user",
-          text: event.text,
-          atMs: Date.now(),
-        });
-        return;
-      case "transcript.assistant.delta": {
-        const id = event.itemId ?? `assistant-${current.turns.length}`;
-        const open = current.assistantTurns.get(id);
-        if (open !== undefined) {
-          // Turns are append-only snapshots, so a growing reply replaces its own entry.
-          const grown = { ...open, text: (open.text + event.delta).slice(0, MAX_TURN_CHARS) };
-          current.assistantTurns.set(id, grown);
-          current.turns[current.turns.indexOf(open)] = grown;
-          return;
-        }
-        const turn = addTurn(current, {
-          id,
-          speaker: "assistant",
-          text: event.delta,
-          atMs: Date.now(),
-        });
-        if (turn !== null) current.assistantTurns.set(id, turn);
+        const id = event.itemId ?? `user-${current.turns.length}`;
+        if (!event.final && current.completedUserTurns.has(id)) return;
+        upsertTurn(current, id, "user", event.text);
+        if (event.final && current.userTurns.has(id)) current.completedUserTurns.add(id);
         return;
       }
+      case "transcript.item":
+        if (event.speaker === "user") {
+          const id = event.itemId ?? `user-${current.turns.length}`;
+          if (!current.completedUserTurns.has(id)) upsertTurn(current, id, "user", event.text);
+          return;
+        }
+        upsertAssistant(current, event.itemId, event.text, false, false);
+        return;
+      case "transcript.assistant.delta":
+        upsertAssistant(current, event.itemId, event.delta, true, false);
+        return;
+      case "transcript.assistant.final":
+        upsertAssistant(current, event.itemId, event.text, false, true);
+        return;
+      case "item.truncated":
+      case "item.ended":
+        if (event.itemId !== null) current.closedAssistantTurns.add(event.itemId);
+        return;
+      case "response.created":
+        current.assistantResponseClosed = false;
+        current.assistantFallbackId = null;
+        current.responseTurnIds.clear();
+        return;
       case "response.ended":
+        closeAssistantResponse(current);
         current.alreadySpokeThisTurn = false;
+        return;
+      case "error":
+        if (state.notice === null)
+          emit({
+            ...state,
+            notice:
+              "The voice response failed. Tool results are retained. Speak again or reconnect if the bot stays quiet.",
+          });
         return;
       default:
         return;
+    }
+  };
+
+  const closeAssistantResponse = (current: ActiveCall) => {
+    current.assistantResponseClosed = true;
+    for (const id of current.responseTurnIds) current.closedAssistantTurns.add(id);
+    current.responseTurnIds.clear();
+  };
+
+  const upsertAssistant = (
+    current: ActiveCall,
+    itemId: string | null,
+    text: string,
+    append: boolean,
+    final: boolean,
+  ) => {
+    const id = itemId ?? current.assistantFallbackId ?? `assistant-${current.turns.length}`;
+    if (current.assistantResponseClosed || current.closedAssistantTurns.has(id)) return;
+    const previous = current.assistantTurns.get(id);
+    upsertTurn(current, id, "assistant", append ? (previous?.text ?? "") + text : text);
+    if (!current.assistantTurns.has(id)) return;
+    if (itemId === null) current.assistantFallbackId = id;
+    current.responseTurnIds.add(id);
+    if (final) current.closedAssistantTurns.add(id);
+  };
+
+  const upsertTurn = (
+    current: ActiveCall,
+    id: string,
+    speaker: VoiceTurn["speaker"],
+    text: string,
+  ) => {
+    const turns = speaker === "assistant" ? current.assistantTurns : current.userTurns;
+    const previous = turns.get(id);
+    if (previous !== undefined) {
+      const replacement = { ...previous, text: text.slice(0, MAX_TURN_CHARS) };
+      turns.set(id, replacement);
+      current.turns[current.turns.indexOf(previous)] = replacement;
+    } else {
+      const turn = addTurn(current, { id, speaker, text, atMs: Date.now() });
+      if (turn !== null) turns.set(id, turn);
     }
   };
 
@@ -333,7 +591,14 @@ export function createGrokBotVoiceCall(options: {
           denyCall(current, error);
         });
     }
-    emit({ phase, muted: state.muted, notice: null });
+    emit({
+      phase,
+      muted: state.muted,
+      notice:
+        state.notice === CHAT_INIT_NOTICE || state.notice === CHAT_RETRY_NOTICE
+          ? state.notice
+          : null,
+    });
   };
 
   const start = async () => {
@@ -348,10 +613,21 @@ export function createGrokBotVoiceCall(options: {
       realtimeConversationId: null,
       turns: [],
       assistantTurns: new Map(),
+      userTurns: new Map(),
+      completedUserTurns: new Set(),
+      closedAssistantTurns: new Set(),
+      responseTurnIds: new Set(),
+      assistantFallbackId: null,
+      assistantResponseClosed: false,
       pendingWork: new Set(),
       watchingWork: new Set(),
+      seenApprovalIds: new Set(),
+      workRetryTimers: new Map(),
+      workRetryAttempts: new Map(),
       chatAfterSequence: null,
       watchingChat: false,
+      chatRetryTimer: null,
+      chatRetryAttempts: 0,
       recoveryEpoch: 0,
       stopRecovery: noop,
     };
@@ -388,6 +664,7 @@ export function createGrokBotVoiceCall(options: {
         tools: started.session.tools,
         voice: VOICE_SETTINGS,
         greeting: started.session.greeting.direction,
+        waitForPlayback: () => current.audio?.whenDrained() ?? null,
         ports: {
           openSocket: ports.openSocket,
           refreshCredential: async () => {
@@ -408,10 +685,9 @@ export function createGrokBotVoiceCall(options: {
       });
       // The session dials in its constructor and reports only later transitions, so this one is ours.
       emit({ phase: "connecting", muted: false, notice: null });
-      if (started.session.chatContext !== undefined) {
-        current.chatAfterSequence = started.session.chatContext.afterSequence;
-        void watchChat(current);
-      }
+      current.chatAfterSequence = started.session.chatContext?.afterSequence;
+      if (current.chatAfterSequence === undefined) emit({ ...state, notice: CHAT_INIT_NOTICE });
+      void watchChat(current);
     } catch (error) {
       if (call !== current) return;
       call = null;
@@ -455,8 +731,30 @@ function parseToolArguments(argumentsJson: string): unknown | null {
 
 /** A served tool returns its own JSON; anything else is a bounded error the model can speak about. */
 export function toolOutput(result: VoiceToolResult): string {
-  if (result.kind !== "served") return JSON.stringify({ error: result.kind });
+  if (result.kind !== "served") {
+    const output =
+      result.output !== null && typeof result.output === "object"
+        ? (result.output as Record<string, unknown>)
+        : {};
+    return JSON.stringify({
+      error: toolFailureMessage(result),
+      ...(typeof output.code === "string" ? { code: output.code.slice(0, 100) } : {}),
+      ...(typeof output.tool === "string" ? { tool: output.tool.slice(0, 100) } : {}),
+    });
+  }
   return JSON.stringify(result.output) ?? "{}";
+}
+
+function toolFailureMessage(result: VoiceToolResult): string {
+  const output =
+    result.output !== null && typeof result.output === "object"
+      ? (result.output as Record<string, unknown>)
+      : {};
+  return typeof output.error === "string"
+    ? output.error.slice(0, 500)
+    : typeof output.message === "string"
+      ? output.message.slice(0, 500)
+      : result.kind;
 }
 
 function endNotice(reason: VoiceCallEnd): string | null {
@@ -504,6 +802,8 @@ function isAuthorityDenial(error: unknown): boolean {
 function isRecoverableRpcError(error: unknown): boolean {
   if (typeof error !== "object" || error === null || !("_tag" in error)) return false;
   if (error._tag === "ConnectionTransientError" || error._tag === "EnvironmentRpcUnavailableError")
+    return true;
+  if (error._tag === "GrokBotVoiceError" && "reason" in error && error.reason === "unavailable")
     return true;
   return (
     error._tag === "RpcClientError" &&

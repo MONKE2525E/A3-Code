@@ -459,6 +459,7 @@ export function mergeProcesses(input: MergeProcessesInput): MergeProcessesResult
   const rootPids = [input.serverPid, ...electronRootPids];
   const roots = new Set(rootPids);
   const depths = processDepths(processes, roots);
+  const backendPids = processDepths(processes, new Set([input.serverPid]));
   const childrenByParent = new Map<number, number[]>();
   for (const process of processes) {
     const children = childrenByParent.get(process.ppid) ?? [];
@@ -502,13 +503,15 @@ export function mergeProcesses(input: MergeProcessesInput): MergeProcessesResult
         ? "server"
         : Option.contains(input.sidecarPid, process.pid)
           ? "resource-monitor"
-          : explicitElectronRootPids.has(process.pid)
-            ? "electron-main"
-            : electronMetric
-              ? electronCategory(electronMetric)
-              : isElectronDescendant(process.pid, processesByPid, electronPids)
-                ? inferredElectronCategory(process)
-                : "server-child";
+          : backendPids.has(process.pid)
+            ? "server-child"
+            : explicitElectronRootPids.has(process.pid)
+              ? "electron-main"
+              : electronMetric
+                ? electronCategory(electronMetric)
+                : isElectronDescendant(process.pid, processesByPid, electronPids)
+                  ? inferredElectronCategory(process)
+                  : "server-child";
     const firstSeenAt = previous?.process.firstSeenAt ?? DateTime.makeUnsafe(sampledAtMs);
     const preservePreviousRates = !input.updatePrevious && previous !== undefined;
     const cpuPercent = preservePreviousRates

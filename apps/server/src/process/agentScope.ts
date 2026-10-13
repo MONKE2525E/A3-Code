@@ -308,7 +308,38 @@ export const make = Effect.gen(function* () {
         // the unit even when it fails.
         options: threadId === undefined ? [...scope.scopeOptions, "--collect"] : scope.scopeOptions,
       };
-      return agentScopeCommand({ command: resolved.value, args, scope: systemdScope });
+      const cleanup = yield* Effect.cached(
+        Effect.gen(function* () {
+          // A provider can exit while detached tests/watchers keep its scope populated.
+          // Address only the unique unit created by this launch, never a shared slice.
+          const state = yield* readScope(scope.systemctl, unit);
+          if (state === undefined) {
+            yield* Effect.logWarning("Could not inspect agent scope during cleanup", { unit });
+            return;
+          }
+          if (threadId !== undefined && (state.result === "oom-kill" || state.oomKills > 0)) {
+            const tracked = scopeByThread.get(threadId);
+            if (tracked?.unit === unit) tracked.oomKilled = true;
+          }
+          if (classifyScope(state) === "running" || classifyScope(state) === "stopping") {
+            const killed = yield* run(scope.systemctl, [
+              "--user",
+              "kill",
+              "--signal=SIGKILL",
+              "--kill-whom=all",
+              unit,
+            ]);
+            if (killed._tag === "None" || killed.value.code !== 0) {
+              yield* Effect.logWarning("Could not clean up owned agent scope", { unit });
+            }
+          }
+          yield* forget(scope.systemctl, unit);
+        }).pipe(Effect.uninterruptible),
+      );
+      return {
+        ...agentScopeCommand({ command: resolved.value, args, scope: systemdScope }),
+        cleanup,
+      };
     }),
     oomKilled,
     clear,

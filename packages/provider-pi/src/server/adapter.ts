@@ -554,6 +554,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         threadId: input.threadId,
         env: launch.env,
       });
+      if (scopedLaunch.cleanup !== undefined) {
+        const cleanup = scopedLaunch.cleanup;
+        yield* Effect.addFinalizer(() => cleanup);
+      }
       const connection: PiRpcConnection = yield* makePiRpcConnection({
         command: scopedLaunch.command,
         args: scopedLaunch.args,

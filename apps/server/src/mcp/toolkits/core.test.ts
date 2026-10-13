@@ -13,6 +13,10 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   RunId,
+  RuntimeRequestId,
+  type ModelSelection,
+  type OrchestrationV2ServerCommand,
+  type ServerProvider,
   ThreadId,
   TurnItemId,
   type OrchestrationV2ProjectedTurnItem,
@@ -80,6 +84,9 @@ const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadR
 // Registration asks for every service the thread tools declare; these cases call none that use them.
 const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
   Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+  Layer.provide(
+    Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+  ),
   Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
 );
 
@@ -174,6 +181,164 @@ it.effect("checks capability through the production registration", () =>
     ),
   ),
 );
+
+it.effect("configure validates the live catalog before changing the thread selection", () => {
+  let shell = McpToolAccessTestkit.liveThreadShell(threadId);
+  const original = shell.modelSelection;
+  const commands: OrchestrationV2ServerCommand[] = [];
+  const provider: ServerProvider = {
+    instanceId: shell.providerInstanceId,
+    driver: ProviderDriverKind.make("codex"),
+    enabled: true,
+    installed: true,
+    version: "test",
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: "2026-10-12T00:00:00Z",
+    models: [
+      {
+        slug: "custom-configured-model",
+        name: "Custom model",
+        isCustom: true,
+        capabilities: {
+          optionDescriptors: [
+            {
+              id: "catalog-choice",
+              label: "Choice",
+              type: "select",
+              options: [
+                { id: "precise", label: "Precise" },
+                { id: "fast", label: "Fast" },
+              ],
+            },
+          ],
+        },
+      },
+    ],
+    slashCommands: [],
+    skills: [],
+  };
+  return Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const configure = (modelSelection: ModelSelection) =>
+      server
+        .callTool({
+          name: "t3_thread_configure",
+          arguments: { threadId, modelSelection },
+        })
+        .pipe(
+          Effect.provideService(
+            McpInvocationContext.McpInvocationContext,
+            clientScope("full-access"),
+          ),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    const valid = {
+      instanceId: shell.providerInstanceId,
+      model: "custom-configured-model",
+      options: [{ id: "catalog-choice", value: "precise" }],
+    };
+    for (const [selection, code] of [
+      [{ ...valid, model: "not-in-catalog" }, "model_unavailable"],
+      [{ ...valid, options: [...valid.options, ...valid.options] }, "invalid_request"],
+      [{ ...valid, options: [{ id: "catalog-choice", value: "unsupported" }] }, "invalid_request"],
+      [{ ...valid, options: [{ id: "unknown-option", value: true }] }, "invalid_request"],
+    ] as const) {
+      expect(declaredFailure(yield* configure(selection))).toMatchObject({ code });
+      expect(commands).toEqual([]);
+      expect(shell.modelSelection).toEqual(original);
+    }
+    expect((yield* configure(valid)).isError).not.toBe(true);
+    expect(shell.modelSelection).toEqual(valid);
+    expect(commands).toHaveLength(1);
+  }).pipe(
+    Effect.provide(
+      McpHttpServer.layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+        Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+        Layer.provide(
+          Layer.mock(ProviderRegistry.ProviderRegistry)({
+            getProviders: Effect.succeed([provider]),
+          }),
+        ),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: () => Effect.sync(() => shell),
+            getProjectThreadRecords: () =>
+              Effect.sync(() => McpToolAccessTestkit.idleThreadProjection(shell)),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                commands.push(command);
+                if (
+                  command.type === "thread.model-selection.set" ||
+                  command.type === "provider.switch"
+                )
+                  shell = { ...shell, modelSelection: command.modelSelection };
+                return { sequence: commands.length, storedEvents: [] };
+              }),
+          }),
+        ),
+      ),
+    ),
+  );
+});
+
+it.effect("permission responses require explicit consent and a pending permission request", () => {
+  const commands: unknown[] = [];
+  let kind = "command";
+  const requestId = RuntimeRequestId.make("permission-test");
+  const shell = McpToolAccessTestkit.liveThreadShell(threadId);
+  return Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const invoke = (userConfirmed: boolean) =>
+      server
+        .callTool({
+          name: "t3_pending_approval_respond",
+          arguments: { threadId, requestId, decision: "accept", userConfirmed },
+        })
+        .pipe(
+          Effect.provideService(
+            McpInvocationContext.McpInvocationContext,
+            clientScope("full-access"),
+          ),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    expect(declaredFailure(yield* invoke(false))).toMatchObject({ code: "capability_denied" });
+    expect(commands).toEqual([]);
+    kind = "user_input";
+    expect(declaredFailure(yield* invoke(true))).toMatchObject({ code: "invalid_request" });
+    expect(commands).toEqual([]);
+    kind = "command";
+    expect((yield* invoke(true)).isError).not.toBe(true);
+    expect(commands).toMatchObject([
+      { type: "runtime-request.respond", threadId, requestId, decision: "accept" },
+    ]);
+  }).pipe(
+    Effect.provide(
+      layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: () => Effect.succeed(shell),
+            getProjectThreadRecords: () =>
+              Effect.succeed({
+                ...McpToolAccessTestkit.idleThreadProjection(shell),
+                runtimeRequests: [{ id: requestId, kind, status: "pending" }],
+              } as never),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                commands.push(command);
+                return { sequence: 1, storedEvents: [] };
+              }),
+          }),
+        ),
+      ),
+    ),
+  );
+});
 
 it.effect("returns a bounded public failure without serializing storage causes", () =>
   Effect.gen(function* () {

@@ -174,6 +174,9 @@ export function grokBotMessageTurnItem(
     ...(message.grokBotVoiceCallId === undefined
       ? {}
       : { grokBotVoiceCallId: message.grokBotVoiceCallId }),
+    ...(message.grokBotConnectorCard === undefined
+      ? {}
+      : { grokBotConnectorCard: message.grokBotConnectorCard }),
   };
   const turnItem: OrchestrationV2TurnItem =
     message.role === "user"

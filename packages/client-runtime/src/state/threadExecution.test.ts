@@ -27,6 +27,7 @@ import {
   deriveRunlessWorkStartedAt,
   deriveThreadActivityRun,
   deriveThreadRuntime,
+  deriveLatestProviderSessionError,
   threadRuntimeHasInterruptibleRun,
 } from "./threadExecution.ts";
 import { threadRuntimeCanArchive, type ThreadRuntimeSummary } from "./models.ts";
@@ -54,6 +55,35 @@ function run(id: string, ordinal: number, status: OrchestrationV2RunStatus) {
 }
 
 describe("thread execution presentation", () => {
+  it("clears a stale session failure after an earlier row reconnects, and shows a newer failure", () => {
+    const instanceId = v2Projection.thread.providerInstanceId;
+    const session = (id: string, at: string, lastError: string | null) => ({
+      id: ProviderSessionId.make(id),
+      providerInstanceId: instanceId,
+      updatedAt: DateTime.makeUnsafe(at),
+      lastError,
+    });
+    const failedTurn = session("turn", "2026-07-28T10:00:00Z", "Stream failed");
+    const observer = session("observer", "2026-07-28T10:00:01Z", null);
+    for (const rows of [
+      [observer, failedTurn],
+      [failedTurn, observer],
+    ]) {
+      expect(deriveLatestProviderSessionError(rows, instanceId)).toBeNull();
+    }
+    expect(
+      deriveLatestProviderSessionError(
+        [observer, { ...failedTurn, updatedAt: DateTime.makeUnsafe("2026-07-28T10:00:02Z") }],
+        instanceId,
+      ),
+    ).toBe("Stream failed");
+    expect(
+      deriveLatestProviderSessionError(
+        [failedTurn, { ...observer, providerInstanceId: ProviderInstanceId.make("other") }],
+        instanceId,
+      ),
+    ).toBe("Stream failed");
+  });
   it("derives the current root failure without inheriting errors from children or previous runs", () => {
     const failed = { ...run("limited", 1, "failed"), rootNodeId: NodeId.make("root") };
     const item = {

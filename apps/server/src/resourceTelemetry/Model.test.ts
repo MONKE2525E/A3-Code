@@ -174,6 +174,43 @@ describe("resource telemetry process model", () => {
     expect(result.groups.electron.processCount).toBe(2);
   });
 
+  it("attributes backend descendants to backend when Electron owns the server", () => {
+    const result = merge({
+      native: nativeSnapshot(BASE_TIME_MS, [
+        processSample({ pid: 300, ppid: 1, startTimeMs: 10_000 }),
+        processSample({ pid: SERVER_PID, ppid: 300, startTimeMs: 11_000 }),
+        processSample({
+          pid: 101,
+          ppid: SERVER_PID,
+          startTimeMs: 12_000,
+          residentBytes: 4_096,
+          cpuPercent: 80,
+        }),
+        processSample({
+          pid: 102,
+          ppid: 101,
+          startTimeMs: 13_000,
+          residentBytes: 8_192,
+          cpuPercent: 120,
+        }),
+        processSample({ pid: 301, ppid: 300, startTimeMs: 14_000 }),
+      ]),
+      desktop: desktopSnapshot(BASE_TIME_MS, [
+        electronMetric({ pid: 300, creationTimeMs: 10_000, type: "Browser" }),
+      ]),
+    });
+    expect(
+      result.processes
+        .filter((entry) => entry.category === "server-child")
+        .map((entry) => entry.identity.pid),
+    ).toEqual([101, 102]);
+    expect(result.groups.backend.processCount).toBe(3);
+    expect(result.groups.backend.currentCpuPercent).toBe(200);
+    expect(result.groups.backend.currentRssBytes).toBe(13_312);
+    expect(result.groups.electron.processCount).toBe(2);
+    expect(result.groups.allT3.processCount).toBe(5);
+  });
+
   it("ignores stale Electron metrics after PID reuse", () => {
     const result = merge({
       native: nativeSnapshot(BASE_TIME_MS, [

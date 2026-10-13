@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 import { GrokBotId } from "./grokBot.ts";
+import { ChatAttachmentId, PROVIDER_SEND_TURN_MAX_ATTACHMENTS } from "./chatAttachment.ts";
 
 const CallId = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128));
 
@@ -31,6 +32,15 @@ export const GrokBotVoiceChatContext = Schema.Struct({
       id: Schema.String,
       role: Schema.Literals(["user", "assistant"]),
       text: Schema.String.check(Schema.isMaxLength(4_000)),
+      attachments: Schema.optionalKey(
+        Schema.Array(
+          Schema.Struct({
+            id: ChatAttachmentId,
+            name: Schema.String.check(Schema.isMaxLength(255)),
+            type: Schema.Literals(["image", "file"]),
+          }),
+        ).check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS)),
+      ),
     }),
   ).check(Schema.isMaxLength(40)),
 });

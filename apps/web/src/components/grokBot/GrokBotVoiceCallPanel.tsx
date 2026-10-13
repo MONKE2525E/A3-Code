@@ -14,6 +14,7 @@ const STATUS_LABEL: Record<GrokBotVoicePhase, string> = {
 };
 
 export function voiceCallStatusLabel(state: GrokBotVoiceCallState): string {
+  if (state.phase === "live" && state.notice !== null) return "Needs attention";
   return state.phase === "live" && state.muted ? "Muted" : STATUS_LABEL[state.phase];
 }
 

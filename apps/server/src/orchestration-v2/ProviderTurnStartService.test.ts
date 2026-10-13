@@ -37,6 +37,7 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import * as ResourceAdmission from "./ResourceAdmission.ts";
 
 const isDomainEvent = Schema.is(OrchestrationV2DomainEvent);
 
@@ -154,6 +155,8 @@ it("does not commit running state when inherited background routing cannot be re
 });
 
 function makeLocalCommandHarness(input: {
+  readonly acquire?: () => Effect.Effect<boolean>;
+  readonly remoteProvider?: boolean;
   readonly text: string;
   readonly previousNativeSession?: boolean;
   readonly previousMessages?: ReadonlyArray<string>;
@@ -203,7 +206,7 @@ function makeLocalCommandHarness(input: {
   };
   const providerThread: OrchestrationV2ThreadProjection["providerThreads"][number] = {
     id: providerThreadId,
-    driver: ProviderDriverKind.make("codex"),
+    driver: ProviderDriverKind.make(input.remoteProvider ? "grok-bot" : "codex"),
     providerInstanceId: newInstanceId,
     providerSessionId,
     appThreadId: threadId,
@@ -490,11 +493,18 @@ function makeLocalCommandHarness(input: {
           prepareProviderHandoff: () => Effect.die("history read must fail first"),
         }),
         Layer.mock(EventSink.EventSinkV2)({ writeIfRunCurrent }),
+        Layer.succeed(ResourceAdmission.ResourceAdmission, {
+          acquire: input.acquire ?? (() => Effect.succeed(true)),
+          release: () => Effect.void,
+        }),
         IdAllocator.layer,
         FileSystem.layerNoop({}),
         Layer.mock(GitWorkflow.GitWorkflowService)({}),
         Layer.mock(ProjectService.ProjectService)({}),
         Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getTurnItem: ({ itemId }) =>
+            Effect.sync(() => projection.turnItems.find((item) => item.id === itemId) ?? null),
+          getNextTurnItemOrdinal: () => Effect.succeed(1),
           getTurnStartContext: () =>
             Effect.succeed({
               ...projection,
@@ -541,7 +551,10 @@ function makeLocalCommandHarness(input: {
     attemptId,
     projection: () => projection,
     start: Effect.gen(function* () {
-      yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2).start({ threadId, runId });
+      return yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2).start({
+        threadId,
+        runId,
+      });
     }).pipe(Effect.provide(layer)),
     startWithRetry: Effect.gen(function* () {
       yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2).start({
@@ -552,6 +565,80 @@ function makeLocalCommandHarness(input: {
     }).pipe(Effect.provide(layer)),
   };
 }
+
+effectIt.effect(
+  "publishes one resource wait notice and resumes without consuming a provider attempt",
+  () =>
+    Effect.gen(function* () {
+      let allowed = false;
+      const harness = makeLocalCommandHarness({
+        text: "Continue",
+        failReadsAfterRunning: true,
+        acquire: () => Effect.sync(() => allowed),
+      });
+      expect(yield* harness.start).toBe("deferred");
+      expect(harness.projection().runs.at(-1)).toMatchObject({
+        status: "starting",
+        resourceWait: true,
+      });
+      expect(harness.projection().turnItems).toHaveLength(1);
+      expect(harness.projection().turnItems[0]).toMatchObject({
+        type: "system_notice",
+        status: "completed",
+        title: "Waiting for host resources",
+        message: "This turn is queued until other turns finish or CPU or memory pressure eases.",
+      });
+      expect(harness.open).not.toHaveBeenCalled();
+      expect(harness.tryHandlePromptCommand).not.toHaveBeenCalled();
+      expect(yield* harness.start).toBe("deferred");
+      expect(harness.writeIfRunCurrent).toHaveBeenCalledOnce();
+      allowed = true;
+      yield* harness.start;
+      expect(harness.projection().runs.at(-1)).toMatchObject({
+        status: "running",
+        resourceWait: false,
+      });
+      expect(harness.startRootRun).toHaveBeenCalledOnce();
+      expect(
+        harness.projection().turnItems.filter((item) => item.title === "Resources available"),
+      ).toHaveLength(1);
+      expect(
+        harness.projection().turnItems.some((item) => item.title === "Waiting for host resources"),
+      ).toBe(false);
+    }),
+);
+
+effectIt.effect("does not throttle remote provider observation with the host turn budget", () =>
+  Effect.gen(function* () {
+    const acquire = vi.fn(() => Effect.succeed(false));
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      acquire,
+      remoteProvider: true,
+      openFailure: new Error("remote observer unavailable"),
+    });
+    yield* harness.start;
+    expect(acquire).not.toHaveBeenCalled();
+    expect(harness.open).toHaveBeenCalledOnce();
+    expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+    expect(
+      harness.projection().turnItems.some((item) => item.title === "Waiting for host resources"),
+    ).toBe(false);
+  }),
+);
+
+effectIt.effect("handles local sign-out without waiting for provider capacity", () =>
+  Effect.gen(function* () {
+    const acquire = vi.fn(() => Effect.succeed(false));
+    const harness = makeLocalCommandHarness({ text: "/logout", acquire });
+    yield* harness.start;
+    expect(acquire).not.toHaveBeenCalled();
+    expect(harness.projection().runs.at(-1)?.status).toBe("completed");
+    expect(harness.tryHandlePromptCommand).toHaveBeenCalledOnce();
+    expect(harness.open).not.toHaveBeenCalled();
+    expect(harness.startRootRun).not.toHaveBeenCalled();
+  }),
+);
 
 effectIt.effect("terminalizes a starting run when its provider session cannot open", () =>
   Effect.gen(function* () {

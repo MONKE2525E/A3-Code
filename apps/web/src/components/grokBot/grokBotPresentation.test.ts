@@ -13,6 +13,8 @@ import {
   partitionGrokBotRoster,
   resolveGrokBotAvatarColor,
   resolveGrokBotAvatarKind,
+  isGrokBotEnvironmentConnecting,
+  isGrokBotRosterRecovering,
   resolveGrokBotSelectedEnvironment,
   resolveGrokBotSettingsEnvironment,
   retainGrokBotSettingsBotIdSearch,
@@ -21,6 +23,30 @@ import {
   validateGrokBotSettingsSearch,
 } from "./grokBotPresentation";
 import { GROK_BOT_PICKER_SHAPES, GROK_BOT_UNKNOWN_SHAPE_KINDS } from "./grokBotAvatarShapes";
+
+describe("roster refresh recovery", () => {
+  const recent = {
+    failure: { _tag: "GrokBotError", reason: "gateway_failed" },
+    hasData: true,
+    dataUpdatedAt: 10_000,
+    nowMs: 15_000,
+  };
+  it("preserves a recent roster during a brief failed background read", () => {
+    expect(isGrokBotRosterRecovering(recent)).toBe(true);
+    expect(isGrokBotRosterRecovering({ ...recent, nowMs: 39_999 })).toBe(true);
+    expect(isGrokBotRosterRecovering({ ...recent, nowMs: 40_000 })).toBe(false);
+  });
+  it("never hides first-load failures or sign-out and permission errors", () => {
+    expect(isGrokBotRosterRecovering({ ...recent, hasData: false })).toBe(false);
+    expect(isGrokBotRosterRecovering({ ...recent, dataUpdatedAt: 0 })).toBe(false);
+    for (const reason of ["signed_out", "permission_denied", "invalid_response"]) {
+      expect(
+        isGrokBotRosterRecovering({ ...recent, failure: { _tag: "GrokBotError", reason } }),
+      ).toBe(false);
+    }
+    expect(isGrokBotRosterRecovering({ ...recent, failure: new Error("other") })).toBe(false);
+  });
+});
 
 function bot(partial: {
   id: string;
@@ -410,5 +436,25 @@ describe("settingsSearchResultSearch", () => {
   it("leaves other results untouched", () => {
     const previous = { machine: "env-1", instanceId: "codex" };
     expect(settingsSearchResultSearch("providers", previous)).toBe(previous);
+  });
+});
+
+describe("isGrokBotEnvironmentConnecting", () => {
+  it("treats in-flight connection phases as loading", () => {
+    expect(isGrokBotEnvironmentConnecting({ catalogReady: true, phase: "connecting" })).toBe(true);
+    expect(isGrokBotEnvironmentConnecting({ catalogReady: true, phase: "reconnecting" })).toBe(
+      true,
+    );
+  });
+
+  it("waits for the catalog before declaring a missing environment unavailable", () => {
+    expect(isGrokBotEnvironmentConnecting({ catalogReady: false, phase: null })).toBe(true);
+    expect(isGrokBotEnvironmentConnecting({ catalogReady: true, phase: null })).toBe(false);
+  });
+
+  it("surfaces classified failures promptly", () => {
+    for (const phase of ["offline", "error", "unsupported", "available"]) {
+      expect(isGrokBotEnvironmentConnecting({ catalogReady: true, phase })).toBe(false);
+    }
   });
 });

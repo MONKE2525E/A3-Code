@@ -1,5 +1,10 @@
 import {
   GrokBotComputerInput,
+  GrokBotHostMachinesInput,
+  GrokBotHostMachines,
+  GrokBotHostMachineUpdateInput,
+  GrokBotNetworkInput,
+  GrokBotNetworkState,
   GrokBotComputerRecreateInput,
   GrokBotComputerRecreateResult,
   GrokBotComputerResetInput,
@@ -472,6 +477,10 @@ export const WS_METHODS = {
   grokBotsComputerRecreate: "grokBots.computerRecreate",
   grokBotsComputerReset: "grokBots.computerReset",
   grokBotsComputerUpgradeSchedule: "grokBots.computerUpgradeSchedule",
+  grokBotsHostMachines: "grokBots.hostMachines",
+  grokBotsHostMachineUpdate: "grokBots.hostMachineUpdate",
+  grokBotsNetworkRead: "grokBots.networkRead",
+  grokBotsNetworkSet: "grokBots.networkSet",
   grokBotsSecretPending: "grokBots.secretPending",
   grokBotsSecretSubmit: "grokBots.secretSubmit",
   grokBotsSecretDismiss: "grokBots.secretDismiss",
@@ -2049,6 +2058,26 @@ export const WsRpcGroup = RpcGroup.make(
   Rpc.make(WS_METHODS.grokBotsComputerUpgradeSchedule, {
     payload: GrokBotComputerUpgradeScheduleInput,
     success: GrokBotComputerUpgradeScheduleResult,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsHostMachines, {
+    payload: GrokBotHostMachinesInput,
+    success: GrokBotHostMachines,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsNetworkRead, {
+    payload: GrokBotHostMachinesInput,
+    success: GrokBotNetworkState,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsNetworkSet, {
+    payload: GrokBotNetworkInput,
+    success: GrokBotNetworkState,
+    error: GrokBotComputerError,
+  }),
+  Rpc.make(WS_METHODS.grokBotsHostMachineUpdate, {
+    payload: GrokBotHostMachineUpdateInput,
+    success: GrokBotHostMachines,
     error: GrokBotComputerError,
   }),
   Rpc.make(WS_METHODS.grokBotsSecretPending, {

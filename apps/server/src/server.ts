@@ -1,4 +1,5 @@
 import * as GrokBotComputerService from "./grokBot/GrokBotComputerService.ts";
+import * as GrokBotNetworkService from "./grokBot/GrokBotNetworkService.ts";
 import * as GrokBotSecretService from "./grokBot/GrokBotSecretService.ts";
 import * as GrokBotVoiceBackendLive from "./grokBot/voice/GrokBotVoiceBackendLive.ts";
 import * as GrokBotVoiceT3Bridge from "./grokBot/voiceRouting/GrokBotVoiceT3Bridge.ts";
@@ -91,6 +92,7 @@ import * as GrokBotManagedStateStore from "./grokBot/GrokBotManagedStateStore.ts
 import * as GrokBotMcpAuthority from "./grokBot/GrokBotMcpAuthority.ts";
 import * as McpRemoteCredentialStore from "./mcp/McpRemoteCredentialStore.ts";
 import * as GrokBotOrchestratorService from "./grokBot/GrokBotOrchestratorService.ts";
+import * as GrokBotSetupService from "./grokBot/GrokBotSetupService.ts";
 import * as GrokBotThreadService from "./grokBot/GrokBotThreadService.ts";
 import * as GrokBotRoutineService from "./grokBot/GrokBotRoutineService.ts";
 import * as GrokBotMarketplaceService from "./grokBot/GrokBotMarketplaceService.ts";
@@ -187,6 +189,7 @@ import * as CursorKeychain from "@t3tools/provider-cursor/server/CursorKeychain"
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as RuntimeLayer from "./orchestration-v2/runtimeLayer.ts";
+import * as ResourceAdmission from "./orchestration-v2/ResourceAdmission.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
 import * as ResourceCleanupService from "./orchestration-v2/ResourceCleanupService.ts";
@@ -509,6 +512,12 @@ const layerScheduledTaskWebhookOrigin = Layer.effect(
 );
 
 const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
+  Layer.provide(
+    ResourceAdmission.layer.pipe(
+      Layer.provide(ProjectionStoreV2.layer),
+      Layer.provide(HostResources.layer),
+    ),
+  ),
   Layer.provide(layerScheduledTaskWebhookOrigin),
   Layer.provide(ProviderEventIngestor.layerAnalytics),
   Layer.provide(layerCheckpointStore),
@@ -573,6 +582,12 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
 
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   GrokBotOrchestratorService.layer.pipe(
+    Layer.provideMerge(
+      GrokBotSetupService.layer.pipe(
+        Layer.provide(GrokBotNativeRuntimeService.layer),
+        Layer.provide(ManagedEndpointAddress.layer.pipe(Layer.provide(ServerSecretStore.layer))),
+      ),
+    ),
     Layer.provideMerge(GrokBotService.layer),
     Layer.provide(GrokBotNativeService.layer),
     Layer.provide(layerPullRequestService),
@@ -724,6 +739,7 @@ const layerRuntimeDependencies = GrokBotThreadService.layer.pipe(
   Layer.provide(ProjectionStoreV2.layer),
   Layer.provideMerge(layerRuntimeCoreDependencies),
   Layer.provideMerge(GrokBotComputerService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime))),
+  Layer.provideMerge(GrokBotNetworkService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime))),
   Layer.provideMerge(GrokBotSecretService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime))),
   Layer.provideMerge(GrokBotRoutineService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime))),
   Layer.provideMerge(

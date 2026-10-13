@@ -18,6 +18,7 @@ import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as HttpClientError from "effect/http/HttpClientError";
 import * as ProcessRunner from "../processRunner.ts";
 import * as Native from "./GrokBotNativeService.ts";
+import * as Network from "./GrokBotNetworkService.ts";
 import { createAttachmentId, resolveAttachmentPath } from "../attachmentStore.ts";
 import type { ChatFileAttachment } from "@t3tools/contracts";
 
@@ -32,6 +33,7 @@ const encodeSecret = (value: string) => {
   );
 };
 const fixture = Effect.gen(function* () {
+  const isolated = (yield* HostProcess.Environment).T3CODE_TEST_ISOLATED_PROFILE === "1";
   const fs = yield* FileSystem.FileSystem;
   const root = yield* fs.makeTempDirectoryScoped({ prefix: "grok-native-test-" });
   const appData = `${root}/.config/Grok Bot`;
@@ -200,11 +202,34 @@ const fixture = Effect.gen(function* () {
       }),
     ),
     Layer.provide(Layer.succeed(HostProcess.HomeDirectory, root)),
-    Layer.provide(Layer.succeed(HostProcess.Environment, {})),
+    Layer.provide(
+      Layer.succeed(
+        HostProcess.Environment,
+        isolated
+          ? {
+              XDG_CONFIG_HOME: `${root}/isolated-config`,
+              T3CODE_GROK_BOT_APP_DATA_DIR: appData,
+            }
+          : {},
+      ),
+    ),
     Layer.provide(Layer.succeed(HostProcess.Platform, "linux")),
   );
   const service = Context.get(yield* Layer.build(layer), Native.GrokBotNativeService);
   return { service, requests, remote, fs, secretFile, secrets, root };
+});
+
+it.layer(NodeServices.layer)("Independent desktop profile", (it) => {
+  it.effect("reads the existing Grok Bot account without sharing the T3 profile", () =>
+    Effect.gen(function* () {
+      const { service } = yield* fixture.pipe(
+        Effect.provideService(HostProcess.Environment, { T3CODE_TEST_ISOLATED_PROFILE: "1" }),
+      );
+      const binding = yield* service.accountBinding;
+      assert.isString(binding);
+      assert.equal((yield* service.listForBinding(binding))[0]?.id, "bot-1");
+    }).pipe(Effect.scoped),
+  );
 });
 
 const attachmentFixture = Effect.gen(function* () {
@@ -762,6 +787,82 @@ it.layer(NodeServices.layer)("Direct Grok Bot read transport", (it) => {
         );
         assert.strictEqual(requests.length, before);
       }),
+  );
+  it.effect(
+    "a send forks the bound routing claim without blocking or retrying the chat write",
+    () =>
+      Effect.gen(function* () {
+        const { service, remote, requests } = yield* fixture;
+        const binding = yield* service.accountBinding;
+        const claimed = yield* Deferred.make<string>();
+        remote.responses.SendGrokBotUserMessage = {
+          delivery: "GROK_BOT_USER_MESSAGE_DELIVERY_ACCEPTED_TEMPORAL",
+        };
+        const network = Layer.mock(Network.GrokBotNetworkService)({
+          claimIfEnabled: (requested) =>
+            Deferred.succeed(claimed, requested).pipe(Effect.andThen(Effect.never)),
+        });
+        yield* service
+          .runtimeRequest(binding, "SendGrokBotUserMessage", {
+            agentId: "bot-1",
+            sessionId: "s1",
+            messageId: "nonce",
+            text: "hello",
+            sentAtMs: "1",
+          })
+          .pipe(Effect.provide(network));
+        assert.strictEqual(yield* Deferred.await(claimed), binding);
+        assert.strictEqual(
+          requests.filter((request) => request.method === "SendGrokBotUserMessage").length,
+          1,
+        );
+        const failing = Layer.mock(Network.GrokBotNetworkService)({
+          claimIfEnabled: () => Effect.die("fixture claim failure"),
+        });
+        yield* service
+          .runtimeRequest(binding, "SendGrokBotUserMessage", {
+            agentId: "bot-1",
+            sessionId: "s1",
+            messageId: "next-nonce",
+            text: "hello",
+            sentAtMs: "2",
+          })
+          .pipe(Effect.provide(failing));
+        assert.strictEqual(
+          requests.filter((request) => request.method === "SendGrokBotUserMessage").length,
+          2,
+        );
+      }),
+  );
+  it.effect("egress uses the shipped machine hash for its optional client identity", () =>
+    Effect.gen(function* () {
+      const { service, remote, fs, secretFile, secrets } = yield* fixture;
+      yield* fs.writeFileString(
+        secretFile,
+        JSON.stringify({ ...secrets, "cursor-machine-id": encodeSecret("fixture-machine") }),
+      );
+      const binding = yield* service.accountBinding;
+      remote.responses.GetGrokBotEgressPolicy = {
+        restricted: true,
+        allowedDomains: ["example.com"],
+      };
+      remote.responses.EnsureSandBox = {
+        gatewayUrl: "https://fixture-8080.cursorvm.com",
+        gatewayToken: "fixture-gateway",
+        runState: "SAND_BOX_RUN_STATE_RUNNING",
+      };
+      const connection = yield* service.egressConnection(binding);
+      assert.strictEqual(
+        connection.clientId,
+        NodeCrypto.createHash("sha256")
+          .update("sand-egress-tunnel-client:fixture-machine")
+          .digest("hex")
+          .slice(0, 32),
+      );
+      assert.notInclude(JSON.stringify(connection), "fixture-machine");
+      assert.strictEqual(connection.url, "wss://fixture-8790.cursorvm.com/");
+      assert.deepStrictEqual(connection.policy.allowedDomains, ["example.com"]);
+    }),
   );
   it.effect(
     "uses Connect streaming framing and releases the response when its consumer cancels",

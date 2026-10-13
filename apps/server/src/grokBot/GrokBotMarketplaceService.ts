@@ -476,7 +476,11 @@ const make = (ports: readonly number[]) =>
     ) {
       const binding = yield* account;
       const result = yield* readServers(binding);
-      const servers = (result.servers ?? []).filter((s) => String(s.pluginId) === input.pluginId);
+      const servers = (result.servers ?? []).filter((s) =>
+        input.serverId === undefined
+          ? String(s.pluginId) === input.pluginId
+          : s.id === input.serverId,
+      );
       const identifiers = servers.flatMap((s) =>
         s.url && s.serverIdentifier ? [s.serverIdentifier] : [],
       );

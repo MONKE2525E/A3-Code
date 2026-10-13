@@ -41,6 +41,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import { validateModelSelection } from "../provider/modelSelectionValidation.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
@@ -128,6 +129,7 @@ export class ThreadLaunchError extends Schema.TaggedError<ThreadLaunchError>()(
     operation: Schema.Literals([
       "resolve-project",
       "read-receipt",
+      "validate-model",
       "generate-metadata",
       "provision-worktree",
       "run-setup-script",
@@ -782,6 +784,14 @@ const make = Effect.gen(function* () {
         commandId: input.commandId,
         instanceId: input.modelSelection.instanceId,
       });
+      if (Option.isNone(launchReceipt)) {
+        const provider = (yield* providerRegistry.getProviders).find(
+          (provider) => provider.instanceId === input.modelSelection.instanceId,
+        );
+        yield* validateModelSelection(provider, input.modelSelection).pipe(
+          Effect.mapError(mapError(input, "validate-model", input.threadId)),
+        );
+      }
       return yield* Effect.gen(function* () {
         // A retried launch has no client-supplied id to replay against, so
         // recover the thread id its accepted create was recorded under before

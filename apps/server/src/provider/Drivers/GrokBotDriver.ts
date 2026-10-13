@@ -18,9 +18,11 @@ import { makeUnavailableUsageLimits } from "@t3tools/provider-core/server/usageL
 import { createModelCapabilities } from "@t3tools/shared/model";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { GrokBotNativeRuntimeService } from "../../grokBot/GrokBotNativeRuntimeService.ts";
+import { isTransientEgressRefreshError } from "../../grokBot/GrokBotNativeService.ts";
 import {
   createGrokBotAdapterV2,
   GROK_BOT_DRIVER_KIND,
@@ -97,7 +99,15 @@ export const checkGrokBotProvider = Effect.fnUntraced(function* (
       return snapshot({
         message: "The selected Grok Bot account or team changed. Bind the provider again.",
       });
-    const bots = yield* native.roster(options.config.accountBinding);
+    // A roster health probe is independent of the active voice socket. Keep the last
+    // published status while a brief gateway outage recovers; never retry sign-out.
+    const bots = yield* native.roster(options.config.accountBinding).pipe(
+      Effect.retry({
+        while: isTransientEgressRefreshError,
+        schedule: Schedule.spaced("1 second"),
+        times: 5,
+      }),
+    );
     const usageLimits = yield* native.usageLimits(options.config.accountBinding, checkedAt).pipe(
       Effect.orElseSucceed(() =>
         makeUnavailableUsageLimits({
@@ -131,8 +141,23 @@ export const checkGrokBotProvider = Effect.fnUntraced(function* (
     });
     return availability.ready ? { ...result, status: "ready" as const } : result;
   }).pipe(
-    Effect.orElseSucceed(() =>
-      snapshot({ message: "The selected native Grok Bot account is unavailable." }),
+    Effect.catch((error) =>
+      Effect.logWarning("Grok Bot provider health probe failed", {
+        category: error._tag,
+        ...("stage" in error ? { stage: error.stage } : {}),
+        ...("status" in error ? { status: error.status } : {}),
+      }).pipe(
+        Effect.as(
+          snapshot({
+            message:
+              error._tag === "GrokBotNativeReadError" && isTransientEgressRefreshError(error)
+                ? error.status === 429
+                  ? "Grok Bot is rate limiting status checks. Try again shortly."
+                  : "Could not refresh Grok Bot status. Try again shortly."
+                : "The selected native Grok Bot account is unavailable.",
+          }),
+        ),
+      ),
     ),
   );
 });

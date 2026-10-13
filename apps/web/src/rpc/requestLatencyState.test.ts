@@ -80,6 +80,16 @@ describe("requestLatencyState", () => {
     expect(getSlowRpcAckRequests()).toEqual([]);
   });
 
+  it("does not warn for a normal voice long poll but still detects a stuck voice RPC", () => {
+    trackRpcRequestSent("voice-wait", WS_METHODS.grokBotsVoiceTool);
+    vi.advanceTimersByTime(20_000);
+    expect(getSlowRpcAckRequests()).toEqual([]);
+    vi.advanceTimersByTime(LONG_RUNNING_RPC_ACK_THRESHOLD_MS - 20_000);
+    expect(getSlowRpcAckRequests()).toMatchObject([
+      { requestId: "voice-wait", thresholdMs: LONG_RUNNING_RPC_ACK_THRESHOLD_MS },
+    ]);
+  });
+
   it("gives provider updates a longer threshold before warning", () => {
     trackRpcRequestSent("1", WS_METHODS.serverUpdateProvider, "server.updateProvider · env-1");
     vi.advanceTimersByTime(LONG_RUNNING_RPC_ACK_THRESHOLD_MS - 1);

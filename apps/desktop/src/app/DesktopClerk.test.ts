@@ -108,7 +108,7 @@ describe("DesktopClerk", () => {
           {
             storage: storageAdapter,
             passkeys: true,
-            renderer: { scheme: "t3code-grokbot-dev", host: "app" },
+            renderer: { scheme: "t3code", callbackScheme: "t3code-grokbot-dev", host: "app" },
           },
         ],
       ]);
@@ -301,9 +301,7 @@ it.effect(
         "t3code-grokbot-dev://app/settings/providers?instanceId=work&code=never-forward",
       ]);
       yield* Effect.promise(() => revealed.promise);
-      assert.deepEqual(loadURL.mock.calls, [
-        ["t3code-grokbot-dev://app/settings/providers?instanceId=work"],
-      ]);
+      assert.deepEqual(loadURL.mock.calls, [["t3code://app/settings/providers?instanceId=work"]]);
       listeners.get("open-url")!(event, "t3code-grokbot-dev://app/welcome#agents:machine-id");
       assert.equal(event.preventDefault.mock.calls.length, 1);
     }).pipe(

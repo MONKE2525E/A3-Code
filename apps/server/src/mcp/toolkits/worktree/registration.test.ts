@@ -1,3 +1,4 @@
+import * as GuidedSetup from "../../../grokBot/GrokBotSetupService.ts";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../../../orchestration-v2/ProjectionStore.ts";
 import * as DeviceService from "../../../device/DeviceService.ts";
@@ -40,6 +41,7 @@ import * as GrokBotThreadService from "../../../grokBot/GrokBotThreadService.ts"
 import * as GrokBotTurnCompletion from "../../../grokBot/GrokBotTurnCompletion.ts";
 
 const layerStubServices = Layer.mergeAll(
+  Layer.mock(GuidedSetup.GrokBotSetupService)({}),
   Layer.mock(GrokBotService.GrokBotService)({}),
   Layer.mock(GrokBotOrchestratorService.GrokBotOrchestratorService)({}),
   Layer.mock(GrokBotThreadService.GrokBotThreadService)({}),

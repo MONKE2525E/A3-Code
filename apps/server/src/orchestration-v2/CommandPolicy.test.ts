@@ -102,13 +102,20 @@ it("resolves automatic message delivery from authoritative provider capabilities
   );
 });
 
-it.each(["preparing", "starting"] as const)(
+it.each(["preparing", "starting", "resource-wait"] as const)(
   "queues an automatic message while the handoff run is %s",
   (status) => {
     const projection = dispatchProjection(baseCapabilities);
     assert.deepEqual(
       CommandPolicy.resolveMessageDispatchIntent(
-        { ...projection, runs: projection.runs.map((run) => ({ ...run, status })) },
+        {
+          ...projection,
+          runs: projection.runs.map((run) => ({
+            ...run,
+            status: status === "resource-wait" ? "starting" : status,
+            resourceWait: status === "resource-wait",
+          })),
+        },
         { type: "start_immediately" },
         "auto",
       ),

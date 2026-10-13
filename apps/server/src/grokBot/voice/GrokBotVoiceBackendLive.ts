@@ -55,14 +55,14 @@ const ToolResponse = Schema.Struct({
 const unavailable = new GrokBotVoiceError({ reason: "unavailable" });
 
 /**
- * Native errors can carry credentials, so only a bounded category leaves this adapter: a session
- * mismatch is the account changing, a 4xx is native declining, everything else is transient.
+ * Native errors can carry credentials, so only a bounded category leaves this adapter.
+ * Confirmed sign-out or unauthorized responses end the call; cache failures remain recoverable.
  */
 const toVoiceError = (cause: Native.NativeReadError | Native.NativeSignedOutError) => {
   if (cause._tag === "GrokBotNativeSignedOutError")
     return new GrokBotVoiceError({ reason: "account_unavailable" });
-  if (cause.stage === "session" || cause.status === 401)
-    return new GrokBotVoiceError({ reason: "account_unavailable" });
+  if (cause.status === 401) return new GrokBotVoiceError({ reason: "account_unavailable" });
+  if (cause.status === 408 || cause.status === 429) return unavailable;
   if (cause.status !== undefined && cause.status >= 400 && cause.status < 500)
     return new GrokBotVoiceError({ reason: "refused" });
   return unavailable;
@@ -90,11 +90,46 @@ const outcome = (kind: string | number | undefined) => {
 
 const make = Effect.gen(function* () {
   const native = yield* Native.GrokBotNativeService;
+  const failNative = Effect.fnUntraced(function* (
+    binding: string,
+    operation: Native.NativeRuntimeMethod | Native.NativeVoiceGatewayMethod,
+    cause: Native.NativeReadError | Native.NativeSignedOutError,
+  ) {
+    let error = toVoiceError(cause);
+    // Native uses the same session error for a binding mismatch and an unreadable cache.
+    if (cause._tag === "GrokBotNativeReadError" && cause.stage === "session") {
+      const selected = yield* Effect.result(
+        native.accountBinding.pipe(Effect.mapError(toVoiceError)),
+      );
+      if (selected._tag === "Failure") error = selected.failure;
+      else if (selected.success !== binding)
+        error = new GrokBotVoiceError({ reason: "account_unavailable" });
+    }
+    yield* Effect.logWarning("grok-bot.voice.native-operation-failed", {
+      operation,
+      stage: cause._tag === "GrokBotNativeSignedOutError" ? "session" : cause.stage,
+      category:
+        cause._tag === "GrokBotNativeReadError" && cause.status === 408
+          ? "timeout"
+          : cause._tag === "GrokBotNativeReadError" && cause.status === 429
+            ? "rate_limited"
+            : error.reason,
+    });
+    return yield* error;
+  });
   const request = (binding: string, method: Native.NativeRuntimeMethod, input: object) =>
-    native.runtimeRequest(binding, method, input).pipe(Effect.mapError(toVoiceError));
+    native
+      .runtimeRequest(binding, method, input)
+      .pipe(Effect.catch((cause) => failNative(binding, method, cause)));
 
   return GrokBotVoiceBackend.of({
-    accountBinding: native.accountBinding.pipe(Effect.mapError(toVoiceError)),
+    accountBinding: native.accountBinding.pipe(
+      Effect.mapError((error) =>
+        error._tag === "GrokBotNativeSignedOutError"
+          ? new GrokBotVoiceError({ reason: "account_unavailable" })
+          : unavailable,
+      ),
+    ),
 
     mintCredential: Effect.fn("GrokBotVoiceBackend.mintCredential")(function* (binding) {
       const minted = yield* request(binding, "MintSandVoiceCallSecret", {}).pipe(
@@ -177,13 +212,13 @@ const make = Effect.gen(function* () {
           method: "setVoiceCallPresence",
           args: { id: input.botId, callId: input.callId, isOnTheLine: input.onTheLine },
         })
-        .pipe(Effect.mapError(toVoiceError));
+        .pipe(Effect.catch((cause) => failNative(binding, "setVoiceCallPresence", cause)));
     }),
 
     recordCall: Effect.fn("GrokBotVoiceBackend.recordCall")(function* (binding, record) {
       yield* native
         .voiceGateway(binding, { method: "recordVoiceCall", args: { record } })
-        .pipe(Effect.mapError(toVoiceError));
+        .pipe(Effect.catch((cause) => failNative(binding, "recordVoiceCall", cause)));
     }),
   });
 });

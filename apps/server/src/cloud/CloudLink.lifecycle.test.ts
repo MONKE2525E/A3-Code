@@ -1,4 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- The relay validator requires an Ed25519 PEM fixture.
+import * as NodeCrypto from "node:crypto";
 import { describe, expect, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -48,6 +50,7 @@ import {
   retryManagedTunnelRegistration,
 } from "./managedTunnelStartup.ts";
 import * as ManagedEndpointRuntime from "./ManagedEndpointRuntime.ts";
+import * as ManagedEndpointAddress from "./ManagedEndpointAddress.ts";
 
 const storeFailure = (tag: "AlreadyExists" | "PermissionDenied") =>
   new ServerSecretStore.SecretStorePersistError({
@@ -688,6 +691,45 @@ describe("releaseManagedTunnelOnShutdown", () => {
         store,
         applyConfigCalls,
         requests,
+        respond: () => Response.json({ status: "ready" }),
+      }),
+    );
+  });
+
+  it.effect("persists the web link address after confirming its tunnel", () => {
+    const { store, values } = makeMemorySecretStore();
+    const config = {
+      providerKind: "cloudflare_tunnel" as const,
+      connectorToken: "existing-token",
+      tunnelId: "existing-tunnel",
+    };
+    const endpoint = {
+      providerKind: "cloudflare_tunnel" as const,
+      httpBaseUrl: "https://dev.example.test/",
+      wsBaseUrl: "wss://dev.example.test/",
+    };
+    const key = NodeCrypto.generateKeyPairSync("ed25519")
+      .publicKey.export({ type: "spki", format: "pem" })
+      .toString();
+    return Effect.gen(function* () {
+      const link = yield* CloudLink.CloudLink;
+      yield* link.applyRelayConfig({
+        relayUrl: "https://relay.example.test",
+        cloudUserId: "user-123",
+        environmentCredential: "environment-credential",
+        cloudMintPublicKey: key,
+        endpointRuntime: config,
+        endpoint,
+      });
+      expect(values.has(ManagedEndpointAddress.CLOUD_MANAGED_ENDPOINT_ADDRESS)).toBe(true);
+      const address = yield* ManagedEndpointAddress.ManagedEndpointAddress;
+      expect((yield* address.read)?.httpBaseUrl).toBe(endpoint.httpBaseUrl);
+    }).pipe(
+      Effect.provide(ManagedEndpointAddress.layer),
+      provideReleaseHarness({
+        store,
+        applyConfigCalls: [],
+        requests: [],
         respond: () => Response.json({ status: "ready" }),
       }),
     );

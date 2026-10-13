@@ -31,8 +31,9 @@ import {
   grokBotsUpdate,
   refreshGrokBotRoster,
 } from "~/state/grokBots";
+import { useEnvironmentPresentation } from "~/state/presentation";
 import { useEnvironmentQuery } from "~/state/query";
-import { serverEnvironment } from "~/state/server";
+import { environmentServerConfigsAtom, serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "~/state/use-atom-command";
 
 import { GrokBotAvatar } from "./GrokBotAvatar";
@@ -40,6 +41,8 @@ import { type GrokBotActivity, useGrokBotActivity } from "./grokBotActivity";
 import { grokBotNativeReady } from "./grokBotConnection";
 import {
   grokBotSettingsDestinationSearch,
+  isGrokBotEnvironmentConnecting,
+  isGrokBotRosterRecovering,
   grokBotSurfaceKey,
   partitionGrokBotRoster,
   resolveGrokBotSelectedEnvironment,
@@ -59,12 +62,29 @@ import { useGrokBotToolActivities, useGrokBotUnreadBotIds } from "./useGrokBotTh
 const GROK_BOTS_OPEN_STORAGE_KEY = "t3code:grok-bots-sidebar-open";
 
 export function GrokBotSidebarDropdown() {
+  const environmentId = useSelectedGrokBotEnvironmentId();
+  const configs = useAtomValue(environmentServerConfigsAtom);
+  const config = environmentId === null ? undefined : configs.get(environmentId);
+  const configured = Object.values(config?.settings.providerInstances ?? {}).some(
+    (instance) => instance.driver === "grok-bot",
+  );
+  return configured ? <ConfiguredGrokBotSidebarDropdown /> : null;
+}
+
+function ConfiguredGrokBotSidebarDropdown() {
   const selectedEnvironmentId = useSelectedGrokBotEnvironmentId();
   const connectedEnvironmentIds = useConnectedEnvironmentIds();
   const resolved = resolveGrokBotSelectedEnvironment({
     selectedEnvironmentId,
     connectedEnvironmentIds,
   });
+  const { isReady: catalogReady, presentation } = useEnvironmentPresentation(selectedEnvironmentId);
+  const connecting =
+    resolved.kind === "disconnected" &&
+    isGrokBotEnvironmentConnecting({
+      catalogReady,
+      phase: presentation?.connection.phase ?? null,
+    });
   const environmentId = resolved.kind === "environment" ? resolved.environmentId : null;
   const [open, setOpen] = useLocalStorage(GROK_BOTS_OPEN_STORAGE_KEY, true, Schema.Boolean);
   const navigate = useNavigate();
@@ -103,6 +123,21 @@ export function GrokBotSidebarDropdown() {
     () => partitionGrokBotRoster(roster.data ?? []),
     [roster.data],
   );
+  const [expiredRosterAt, setExpiredRosterAt] = useState(0);
+  useEffect(() => {
+    if (roster.failure === null) return;
+    const timer = window.setTimeout(
+      () => setExpiredRosterAt(roster.dataUpdatedAt),
+      Math.max(0, roster.dataUpdatedAt + 30_000 - Date.now()),
+    );
+    return () => window.clearTimeout(timer);
+  }, [roster.failure, roster.dataUpdatedAt]);
+  const recoveringRoster = isGrokBotRosterRecovering({
+    failure: roster.failure,
+    hasData: roster.data !== null,
+    dataUpdatedAt: roster.dataUpdatedAt,
+    nowMs: roster.dataUpdatedAt + (expiredRosterAt === roster.dataUpdatedAt ? 30_000 : 0),
+  });
   const location = useLocation();
   const selectedBotId = location.pathname.startsWith("/grok-bots/")
     ? decodeURIComponent(location.pathname.slice("/grok-bots/".length).split("/")[0] ?? "")
@@ -163,6 +198,8 @@ export function GrokBotSidebarDropdown() {
               <p className="px-2 py-2 text-xs text-sidebar-muted-foreground">
                 Connect an environment to use Grok Bots.
               </p>
+            ) : connecting ? (
+              <GrokBotSidebarLoading />
             ) : resolved.kind === "disconnected" ? (
               <GrokBotSidebarNotice
                 message="This environment is unavailable. Reconnect it or choose a connected one."
@@ -170,10 +207,7 @@ export function GrokBotSidebarDropdown() {
                 onAction={() => openSettings()}
               />
             ) : status.isPending && status.data === null ? (
-              <div className="flex flex-col gap-2 px-1 py-1">
-                <Skeleton className="h-16 w-full" shape="card" />
-                <Skeleton className="h-10 w-full" shape="card" />
-              </div>
+              <GrokBotSidebarLoading />
             ) : status.error ? (
               <GrokBotSidebarNotice
                 message={status.error}
@@ -198,11 +232,8 @@ export function GrokBotSidebarDropdown() {
                 onSecondary={() => openSettings()}
               />
             ) : roster.isPending && roster.data === null ? (
-              <div className="flex flex-col gap-2 px-1 py-1">
-                <Skeleton className="h-16 w-full" shape="card" />
-                <Skeleton className="h-10 w-full" shape="card" />
-              </div>
-            ) : roster.error ? (
+              <GrokBotSidebarLoading />
+            ) : roster.error && !recoveringRoster ? (
               <GrokBotSidebarNotice
                 message={roster.error}
                 actionLabel="Retry"
@@ -215,22 +246,39 @@ export function GrokBotSidebarDropdown() {
                 onAction={() => openSettings()}
               />
             ) : (
-              <GrokBotRosterList
-                environmentId={resolved.environmentId}
-                pinned={pinned}
-                rows={rows}
-                hidden={hidden}
-                selectedBotId={selectedBotId}
-                onOpen={openBot}
-                onEdit={(botId) => openSettings(botId)}
-                onHistory={openHistory}
-                onOpenSettings={() => openSettings()}
-              />
+              <>
+                {recoveringRoster ? (
+                  <p role="status" className="px-2 py-2 text-xs text-sidebar-muted-foreground">
+                    Refreshing Grok Bots…
+                  </p>
+                ) : null}
+                <GrokBotRosterList
+                  environmentId={resolved.environmentId}
+                  pinned={pinned}
+                  rows={rows}
+                  hidden={hidden}
+                  selectedBotId={selectedBotId}
+                  onOpen={openBot}
+                  onEdit={(botId) => openSettings(botId)}
+                  onHistory={openHistory}
+                  onOpenSettings={() => openSettings()}
+                />
+              </>
             )}
           </div>
         </CollapsiblePanel>
       </Collapsible>
     </SidebarGroup>
+  );
+}
+
+function GrokBotSidebarLoading() {
+  return (
+    <div className="flex flex-col gap-2 px-1 py-1" role="status" aria-busy="true">
+      <p className="px-1 text-xs text-sidebar-muted-foreground">Loading Grok Bots…</p>
+      <Skeleton className="h-16 w-full" shape="card" />
+      <Skeleton className="h-10 w-full" shape="card" />
+    </div>
   );
 }
 

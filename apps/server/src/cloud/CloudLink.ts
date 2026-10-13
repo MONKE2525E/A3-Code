@@ -1222,6 +1222,14 @@ const make = Effect.gen(function* () {
             endpointRuntimeStatus: { status: "disabled" },
           });
         }
+        if (payload.endpoint !== undefined) {
+          yield* endpointAddress
+            .remember({
+              endpoint: payload.endpoint,
+              config: payload.endpointRuntime,
+            })
+            .pipe(Effect.catch(internalError("persist-relay-config")));
+        }
         return {
           ok: true,
           endpointRuntimeStatus: registration.endpointRuntimeStatus,

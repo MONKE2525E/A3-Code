@@ -1481,6 +1481,28 @@ function savedBackendStatus(environment: EnvironmentPresentation): {
   }
 }
 
+function useCopyMcpUrl() {
+  return useCopyToClipboard<{ url: string }>({
+    target: "MCP URL",
+    onCopy: ({ url }) => {
+      toastManager.add({
+        type: "success",
+        title: "MCP URL copied",
+        description: `Add it to an agent, e.g. claude mcp add --transport http t3 ${url}`,
+      });
+    },
+    onError: (error) => {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not copy MCP URL",
+          description: error.message,
+        }),
+      );
+    },
+  });
+}
+
 /**
  * One added machine in the Environments list. The switch is the main action;
  * the update icon appears only when that machine can take an update; the
@@ -1526,25 +1548,7 @@ function SavedBackendListRow({
     },
     [copyTraceIdToClipboard],
   );
-  const { copyToClipboard: copyMcpUrl } = useCopyToClipboard<{ url: string }>({
-    target: "MCP URL",
-    onCopy: ({ url }) => {
-      toastManager.add({
-        type: "success",
-        title: "MCP URL copied",
-        description: `Add it to an agent, e.g. claude mcp add --transport http t3 ${url}`,
-      });
-    },
-    onError: (error) => {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Could not copy MCP URL",
-          description: error.message,
-        }),
-      );
-    },
-  });
+  const { copyToClipboard: copyMcpUrl } = useCopyMcpUrl();
   const versionMismatch = resolveServerConfigVersionMismatch(environment.serverConfig);
   const serverUpdateState = useAtomValue(serverEnvironment.updateStateAtom(environmentId));
   const resumingServerUpdate =
@@ -2049,6 +2053,15 @@ export function ConnectionsSettings() {
     reportFailure: false,
   });
   const primaryEnvironmentId = primaryEnvironment?.environmentId ?? null;
+  const { copyToClipboard: copyPrimaryMcpUrl } = useCopyMcpUrl();
+  const primaryMcpUrl = primaryEnvironment
+    ? environmentMcpUrl({
+        entry: primaryEnvironment.entry,
+        relayHttpBaseUrl: relayDiscoveryState.environments.get(primaryEnvironment.environmentId)
+          ?.environment.endpoint.httpBaseUrl,
+        preferRelay: true,
+      })
+    : null;
   const primarySessionState = usePrimarySessionState();
   const currentSessionScopes = primarySessionState.data?.authenticated
     ? (primarySessionState.data.permissions ?? primarySessionState.data.scopes ?? null)
@@ -3646,6 +3659,13 @@ export function ConnectionsSettings() {
                       environmentId={primaryEnvironmentId}
                       serverConfig={primaryServerConfig}
                     />
+                    {primaryMcpUrl ? (
+                      <MenuItem
+                        onClick={() => copyPrimaryMcpUrl(primaryMcpUrl, { url: primaryMcpUrl })}
+                      >
+                        Copy MCP URL
+                      </MenuItem>
+                    ) : null}
                   </MenuPopup>
                 </Menu>
               ) : null

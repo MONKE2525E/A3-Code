@@ -92,7 +92,10 @@ export const GrokBotMarketplacePluginUninstallInput = Schema.Struct({
 /** Installation and connector authentication are separate operations. */
 export const GrokBotMarketplacePluginChangeResult = Schema.Struct({ pluginId: Schema.String });
 
-export const GrokBotPluginConnectionsInput = Schema.Struct({ pluginId: Schema.String });
+export const GrokBotPluginConnectionsInput = Schema.Struct({
+  pluginId: Schema.String,
+  serverId: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))),
+});
 export const GrokBotPluginConnectionsResult = Schema.Struct({
   servers: Schema.Array(
     Schema.Struct({
