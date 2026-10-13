@@ -64,6 +64,8 @@ interface ChatHeaderProps {
   grokBotId: GrokBot["id"] | null;
   computerOpen: boolean;
   onToggleComputer: () => void;
+  museFeaturesOpen?: boolean;
+  onToggleMuseFeatures?: () => void;
 }
 
 /**
@@ -101,6 +103,8 @@ export const ChatHeader = memo(function ChatHeader({
   grokBotId,
   computerOpen,
   onToggleComputer,
+  museFeaturesOpen = false,
+  onToggleMuseFeatures,
 }: ChatHeaderProps) {
   const isMuseAgentThread = nativeAgentSourceForThread({ id: activeThreadId }) === "muse-agent";
   const activeProjectName = activeProject?.title;
@@ -481,7 +485,13 @@ export const ChatHeader = memo(function ChatHeader({
         />
       ) : null}
       {isMuseAgentThread ? (
-        <MuseAgentHeaderFeatures environmentId={activeThreadEnvironmentId} />
+        onToggleMuseFeatures ? (
+          <MuseAgentHeaderFeatures
+            environmentId={activeThreadEnvironmentId}
+            pressed={museFeaturesOpen}
+            onToggle={onToggleMuseFeatures}
+          />
+        ) : null
       ) : null}
       {grokBotId !== null ? (
         <>

@@ -2,7 +2,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId, MuseAgentThemes, ProviderInstanceId } from "@t3tools/contracts";
+import type { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import { useEffect, useState } from "react";
 
 import {
@@ -14,7 +14,6 @@ import {
   AlertDialogPopup,
   AlertDialogTitle,
 } from "~/components/ui/alert-dialog";
-import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { Spinner } from "~/components/ui/spinner";
@@ -30,8 +29,6 @@ import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
 
 type DocumentKind = "identity" | "soul" | "memory";
-type Theme = MuseAgentThemes["options"][string];
-type ThemeColors = Theme["light"];
 
 const DOCUMENTS: ReadonlyArray<{ readonly id: DocumentKind; readonly label: string }> = [
   { id: "identity", label: "Identity" },
@@ -301,143 +298,7 @@ function ProfileDocuments({
   );
 }
 
-/** Untrusted colors are used only when the browser parses them as a plain CSS color. */
-function safeColor(value: string, fallback: string): string {
-  return typeof CSS !== "undefined" && CSS.supports("color", value) ? value : fallback;
-}
-
-function ThemePreview({ label, colors }: { label: string; colors: ThemeColors }) {
-  const background = safeColor(colors.background, "transparent");
-  return (
-    <div
-      className="grid gap-1 rounded-md border p-2 text-xs"
-      style={{ backgroundColor: background }}
-      aria-hidden
-    >
-      <span className="sr-only">{label}</span>
-      <span
-        className="w-fit justify-self-end rounded-md px-2 py-0.5"
-        style={{
-          backgroundColor: safeColor(colors.userBubble, "transparent"),
-          color: safeColor(colors.userText, "inherit"),
-        }}
-      >
-        You
-      </span>
-      <span
-        className="w-fit rounded-md px-2 py-0.5"
-        style={{
-          backgroundColor: safeColor(colors.agentBubble, "transparent"),
-          color: safeColor(colors.agentText, "inherit"),
-        }}
-      >
-        Muse
-      </span>
-    </div>
-  );
-}
-
-function ProfileThemes({
-  environmentId,
-  providerInstanceId,
-  access,
-}: Target & { readonly access: Access }) {
-  const input = { operation: "profile_themes", providerInstanceId } as const;
-  const view = useEnvironmentQuery(museAgentFeatureReadQuery({ environmentId, input }));
-  const update = useAtomCommand(museAgentFeatureUpdate, { reportFailure: false });
-  const themes = view.data?.operation === "profile_themes" ? view.data.data : null;
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const canRead = access.operations === null || access.operations.includes("themes");
-  const canSet =
-    access.canWrite && access.operations !== null && access.operations.includes("set_theme");
-
-  const choose = async (themeId: string) => {
-    if (busyId !== null) return;
-    setBusyId(themeId);
-    setError(null);
-    const result = await update({
-      environmentId,
-      input: { operation: "profile_set_theme", providerInstanceId, themeId },
-    });
-    setBusyId(null);
-    if (result._tag !== "Success") {
-      if (!isAtomCommandInterrupted(result)) {
-        setError(failureMessage(result, "The theme could not be changed."));
-      }
-      return;
-    }
-    toastManager.add({ type: "success", title: "Muse theme updated" });
-    appAtomRegistry.refresh(museAgentFeatureReadQuery({ environmentId, input }));
-    refreshMuseAgent(appAtomRegistry, environmentId);
-  };
-
-  if (!canRead) return null;
-  const ids =
-    themes === null
-      ? []
-      : [
-          ...themes.order.filter((id) => id in themes.options),
-          ...Object.keys(themes.options).filter((id) => !themes.order.includes(id)),
-        ];
-  return (
-    <section className="grid gap-3">
-      <h3 className="text-sm font-medium text-foreground">Muse theme</h3>
-      <p className="text-xs text-muted-foreground">
-        Changes how Muse looks in its own app. T3 Code's theme is not affected.
-      </p>
-      {themes === null ? (
-        view.error === null ? (
-          <Loading label="themes" />
-        ) : (
-          <Notice
-            title="Muse themes could not be loaded."
-            error={view.error}
-            onRetry={view.refresh}
-          />
-        )
-      ) : ids.length === 0 ? (
-        <p className="text-sm text-muted-foreground">Muse reports no themes.</p>
-      ) : (
-        <ul className="grid gap-2 sm:grid-cols-2">
-          {ids.map((id) => {
-            const theme = themes.options[id]!;
-            const current = themes.selectedThemeId === id;
-            return (
-              <li key={id} className="grid gap-2 rounded-lg border p-2.5">
-                <div className="flex min-w-0 items-center justify-between gap-2">
-                  <span className="truncate text-sm font-medium text-foreground">{id}</span>
-                  {current ? <Badge variant="success">Current</Badge> : null}
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <ThemePreview label="Light" colors={theme.light} />
-                  <ThemePreview label="Dark" colors={theme.dark} />
-                </div>
-                <Button
-                  size="sm"
-                  variant={current ? "secondary" : "outline"}
-                  aria-pressed={current}
-                  aria-label={`Use Muse theme ${id}`}
-                  disabled={current || !canSet || busyId !== null}
-                  onClick={() => void choose(id)}
-                >
-                  {busyId === id ? "Applying…" : current ? "In use" : "Use theme"}
-                </Button>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-      {error ? (
-        <p role="alert" className="text-xs text-destructive">
-          {error}
-        </p>
-      ) : null}
-    </section>
-  );
-}
-
-/** Muse's plain-text identity, personality and memory files, and its theme. Native writes only. */
+/** Muse's plain-text identity, personality and memory files. Native writes only. */
 export function MuseAgentProfileSection({
   environmentId,
   providerInstanceId,
@@ -457,11 +318,6 @@ export function MuseAgentProfileSection({
         providerInstanceId={providerInstanceId}
         access={access}
         onDirtyChange={onDirtyChange}
-      />
-      <ProfileThemes
-        environmentId={environmentId}
-        providerInstanceId={providerInstanceId}
-        access={access}
       />
     </div>
   );

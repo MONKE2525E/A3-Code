@@ -637,6 +637,8 @@ function surfaceTitle(
       return "Pull requests";
     case "grok-computer":
       return "Computer";
+    case "muse-features":
+      return "Muse";
     case "device":
       return surface.title ?? surface.target?.name ?? "Device";
     case "preview": {
@@ -722,6 +724,10 @@ function SurfaceIcon({
       return <PullRequestGlyph.link className="size-3 shrink-0" />;
     case "grok-computer":
       return <Monitor className="size-3 shrink-0" />;
+    case "muse-features":
+      return (
+        <img src="/muse-logo.png" alt="" className="size-3 shrink-0 object-contain" aria-hidden />
+      );
     case "device":
       return surface.target?.platform === "ios" ? (
         <AppleIcon className="size-3 shrink-0" />

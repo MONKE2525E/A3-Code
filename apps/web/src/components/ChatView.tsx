@@ -1,3 +1,4 @@
+import { MuseAgentFeaturesPanel } from "./agents/MuseAgentFeaturesDialog";
 import { GrokBotComputerPanel } from "./grokBot/GrokBotComputerPanel";
 import { GrokBotSecureInputPanel } from "./grokBot/GrokBotSecureInputPanel";
 import { GROK_BOT_MAIN_SESSION_ID, grokBotSecretChatTarget } from "./grokBot/grokBotSecretRequest";
@@ -3292,10 +3293,9 @@ export default function ChatView(props: ChatViewProps) {
   const selectedProvider = selectedProviderEntry?.driverKind ?? requestedDriverKind;
   const isGrokBotThread = activeThreadId !== null && isGrokBotBackingThread({ id: activeThreadId });
   // Native Muse threads use the same compact composer as Grok Bot, so they also skip the strip below.
-  const isNativeAgentComposerThread =
-    isGrokBotThread ||
-    (activeThreadId !== null &&
-      nativeAgentSourceForThread({ id: activeThreadId }) === "muse-agent");
+  const isMuseAgentThread =
+    activeThreadId !== null && nativeAgentSourceForThread({ id: activeThreadId }) === "muse-agent";
+  const isNativeAgentComposerThread = isGrokBotThread || isMuseAgentThread;
   const activeProviderInstanceId = selectedProviderEntry?.instanceId ?? null;
   const activeProviderStatus = selectedProviderEntry?.snapshot ?? null;
   const { enabled: interactionModeEnabled, interactionMode } = resolveComposerInteractionMode({
@@ -11224,6 +11224,15 @@ export default function ChatView(props: ChatViewProps) {
       />
     ) : renderedRightPanelSurface?.kind === "pull-requests" && activeThreadRef ? (
       <ThreadPullRequestsPanel threadRef={activeThreadRef} />
+    ) : renderedRightPanelSurface?.kind === "muse-features" && isMuseAgentThread && activeThread ? (
+      <MuseAgentFeaturesPanel
+        key={activeThread.environmentId}
+        environmentId={activeThread.environmentId}
+        onClose={() => {
+          if (activeThreadRef === null) return;
+          useRightPanelStore.getState().toggle(activeThreadRef, "muse-features");
+        }}
+      />
     ) : renderedRightPanelSurface?.kind === "grok-computer" && isGrokBotThread ? (
       <GrokBotComputerPanel
         key={`${activeThread.environmentId}:${activeThread.modelSelection.model}`}
@@ -11488,6 +11497,11 @@ export default function ChatView(props: ChatViewProps) {
             rightPanelOpen={inlineRightPanelOwnsTitleBar}
             grokBotId={isGrokBotThread ? activeThread.modelSelection.model : null}
             computerOpen={activeRightPanelKind === "grok-computer"}
+            museFeaturesOpen={activeRightPanelKind === "muse-features"}
+            onToggleMuseFeatures={() => {
+              if (activeThreadRef === null) return;
+              useRightPanelStore.getState().toggle(activeThreadRef, "muse-features");
+            }}
             onToggleComputer={() => {
               if (activeThreadRef === null) return;
               useRightPanelStore.getState().toggle(activeThreadRef, "grok-computer");
