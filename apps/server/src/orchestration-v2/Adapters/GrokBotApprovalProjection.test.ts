@@ -1,6 +1,8 @@
 import { assert, expect, it } from "@effect/vitest";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import { ProviderSessionId, ProviderThreadId, ThreadId } from "@t3tools/contracts";
 import {
   NativeRuntimeError,
@@ -29,7 +31,7 @@ const card = (id: string, requestId: string, approval: object = {}) => ({
   requestId,
   timestampMs: 1,
   message: {
-    type: "approval",
+    type: "auto-review-approval",
     approval: { status: "pending", requestId, summary: "Run ls", ...approval },
   },
 });
@@ -53,19 +55,27 @@ const makeHarness = (
   appThreadId = nativeSession.threadId,
   nativeSessionId = nativeSession.sessionId,
   turnForRequest?: Parameters<typeof makeGrokBotApprovalProjection>[0]["turnForRequest"],
+  nativeOwner: Partial<Pick<typeof nativeSession, "binding" | "botId">> = {},
+  beforeResolve?: Effect.Effect<void>,
 ) =>
   Effect.gen(function* () {
     const ids = yield* IdAllocator.IdAllocatorV2;
     const calls: { method: string; input: object }[] = [];
     let failure: "refused" | "uncertain" | undefined;
-    const call = (method: string) => (input: object) => {
-      calls.push({ method, input });
-      return failure === undefined
-        ? Effect.succeed({})
-        : Effect.fail(new NativeRuntimeError({ kind: failure }));
-    };
+    const call = (method: string) => (input: object) =>
+      Effect.gen(function* () {
+        calls.push({ method, input });
+        if (beforeResolve !== undefined) yield* beforeResolve;
+        if (failure !== undefined) return yield* new NativeRuntimeError({ kind: failure });
+        return {};
+      });
     const projection = makeGrokBotApprovalProjection({
-      native: { ...nativeSession, threadId: appThreadId, sessionId: nativeSessionId },
+      native: {
+        ...nativeSession,
+        ...nativeOwner,
+        threadId: appThreadId,
+        sessionId: nativeSessionId,
+      },
       providerThreadId:
         threadId ??
         ids.derive.providerThread({
@@ -77,6 +87,8 @@ const makeHarness = (
       ...(turnForRequest === undefined ? {} : { turnForRequest }),
       runtime: {
         resolveAutoReviewApproval: call("auto"),
+        resolveLocalToolPermission: call("local"),
+        resolveConnectorGrant: call("connector"),
         respondToWidget: call("widget"),
         dismissWidget: call("dismiss"),
       },
@@ -269,7 +281,7 @@ it.effect("projects a waiting widget as an async question that keeps native dism
   }).pipe(Effect.provide(IdAllocator.layer)),
 );
 
-it.effect("offers a custom answer even when the native widget does not allow one", () =>
+it.effect("honors the native custom-answer flag", () =>
   Effect.gen(function* () {
     const { projection } = yield* harness;
     const events = yield* projection.project(
@@ -277,7 +289,7 @@ it.effect("offers a custom answer even when the native widget does not allow one
     );
     const [, , item] = events as unknown as { turnItem: object }[];
     expect(item?.turnItem).toMatchObject({
-      questions: [{ id: "q1", allowCustomAnswer: true }],
+      questions: [{ id: "q1", allowCustomAnswer: false }],
     });
   }).pipe(Effect.provide(IdAllocator.layer)),
 );
@@ -515,7 +527,7 @@ it.effect("keeps refused custom native answers pending and resolves only after a
     const { projection, calls, fail } = yield* harness;
     const [request] = pendingRequest(
       yield* projection.project(
-        rowsFrame([{ seq: "1", updatedSeq: "1", value: widgetCard("q1") }]),
+        rowsFrame([{ seq: "1", updatedSeq: "1", value: widgetCard("q1", { allowCustom: true }) }]),
       ),
     );
     fail("uncertain");
@@ -539,43 +551,6 @@ it.effect("keeps refused custom native answers pending and resolves only after a
   }).pipe(Effect.provide(IdAllocator.layer)),
 );
 
-it.effect("clears a chat-answered question silently and never overwrites its record", () =>
-  Effect.gen(function* () {
-    const { projection, calls, fail } = yield* harness;
-    const [chatted] = pendingRequest(
-      yield* projection.project(
-        rowsFrame([{ seq: "1", updatedSeq: "1", value: widgetCard("q1", { multiSelect: true }) }]),
-      ),
-    );
-    // Unsupported multi-select text was already recorded in chat. Its native clear is refused.
-    fail("uncertain");
-    assert.strictEqual(
-      (yield* projection.answer(chatted!.id, { q1: ["Gamma"] }).pipe(Effect.flip))._tag,
-      "GrokBotNativeRuntimeError",
-    );
-    fail(undefined);
-    // A newer question and a native removal of the old card must not emit over the recorded answer.
-    const superseding = yield* projection.project(
-      rowsFrame([{ seq: "2", updatedSeq: "1", value: widgetCard("q2") }]),
-    );
-    // Only the new question is emitted; the older one is not cancelled over its answer.
-    assert.deepStrictEqual(
-      pendingRequest(superseding).map((r) => r.status),
-      ["pending"],
-    );
-    assert.deepStrictEqual(
-      yield* projection.project(rowsFrame([], [{ seq: "1", updatedSeq: "3", entryId: "q1" }])),
-      [],
-    );
-    // The retry clears the card without emitting: the transcript already holds the answer.
-    assert.deepStrictEqual(yield* projection.answer(chatted!.id, { q1: ["Gamma"] }), []);
-    expect(calls.at(-1)).toEqual({
-      method: "dismiss",
-      input: expect.objectContaining({ entryId: "q1" }),
-    });
-  }).pipe(Effect.provide(IdAllocator.layer)),
-);
-
 it("rejects malformed or non-approval entries", () => {
   assert.isDefined(decodeGrokBotApproval(card("e", "r")));
   const approval = decodeGrokBotApproval(card("e", "r"));
@@ -586,7 +561,518 @@ it("rejects malformed or non-approval entries", () => {
     decodeGrokBotApproval({ id: "e", kind: "auto_review_approval", requestId: "r" }),
   );
   assert.isUndefined(decodeGrokBotApproval("text"));
+  assert.isUndefined(decodeGrokBotApproval({ ...card("e", "r"), kind: "message" }));
+  assert.isUndefined(
+    decodeGrokBotApproval({
+      ...card("e", "r"),
+      message: { type: "approval", approval: { requestId: "r", status: "pending" } },
+    }),
+  );
+  assert.isUndefined(decodeGrokBotApproval(card("e", "r", { requestId: undefined })));
+  assert.isUndefined(decodeGrokBotApproval(card("e", "r", { status: undefined })));
 });
+
+const localCard = (id: string, requestId: string, ask: object = {}) => ({
+  kind: "send-message",
+  id,
+  message: {
+    type: "local-tool-permission",
+    ask: {
+      requestId,
+      status: "pending",
+      action: "read-file",
+      target: "/workspace/config.json",
+      description: "Read the config",
+      ...ask,
+    },
+  },
+});
+const connectorCard = (id: string, requestId: string, ask: object = {}) => ({
+  kind: "send-message",
+  id,
+  message: {
+    type: "connector-grant",
+    ask: { requestId, status: "pending", serverName: "Calendar", ...ask },
+  },
+});
+
+const permissionCases = [
+  {
+    makeCard: localCard,
+    method: "local",
+    allow: "ALLOW_ONCE",
+    deny: "DENY",
+    labels: ["Allow once", "Deny"],
+    prompt: "Read the config\nread-file: /workspace/config.json",
+  },
+  {
+    makeCard: connectorCard,
+    method: "connector",
+    allow: "ALLOWED",
+    deny: "SKIPPED",
+    labels: ["Allow", "Skip"],
+    prompt: "Allow access to Calendar?",
+  },
+];
+it.effect.each(permissionCases)(
+  "projects $method permission with once-only native choices and confirmed callbacks",
+  ({ makeCard, method, allow, deny, labels, prompt }) =>
+    Effect.gen(function* () {
+      const { projection, calls, fail } = yield* harness;
+      const frame = rowsFrame([
+        { seq: "1", updatedSeq: "1", value: makeCard("e1", "r1") },
+        { seq: "2", updatedSeq: "1", value: makeCard("e2", "r2") },
+      ]);
+      const events = yield* projection.project(frame);
+      const [first, second] = pendingRequest(events);
+      const item = events.find((e) => e.type === "turn_item.updated");
+      assert.equal(
+        item?.type === "turn_item.updated" && item.turnItem.type === "approval_request"
+          ? item.turnItem.prompt
+          : undefined,
+        prompt,
+      );
+      assert.deepStrictEqual(
+        item?.type === "turn_item.updated" && item.turnItem.type === "approval_request"
+          ? item.turnItem.options?.map((o) => o.label)
+          : undefined,
+        labels,
+      );
+      assert.deepStrictEqual(yield* projection.project({ ...frame, replay: true }), []);
+      for (const failure of ["refused", "uncertain"] as const) {
+        fail(failure);
+        const error = yield* projection.respond(first!.id, "accept").pipe(Effect.flip);
+        assert.equal(error._tag === "GrokBotNativeRuntimeError" ? error.kind : undefined, failure);
+        assert.deepStrictEqual(
+          pendingRequest(yield* projection.replayPending()).map((r) => r.status),
+          ["pending", "pending"],
+        );
+      }
+      fail(undefined);
+      const before = calls.length;
+      for (const decision of ["acceptAlways", "acceptForSession"] as const)
+        assert.equal(
+          (yield* projection.respond(first!.id, decision).pipe(Effect.flip))._tag,
+          "GrokBotBindingError",
+        );
+      assert.equal(calls.length, before);
+      assert.deepStrictEqual(
+        pendingRequest(yield* projection.respond(first!.id, "accept")).map((r) => r.status),
+        ["resolved"],
+      );
+      assert.deepStrictEqual(yield* projection.respond(first!.id, "accept"), []);
+      yield* projection.respond(second!.id, "decline");
+      assert.deepStrictEqual(calls.slice(-2), [
+        {
+          method,
+          input: {
+            binding: nativeSession.binding,
+            botId: nativeSession.botId,
+            sessionId: nativeSession.sessionId,
+            entryId: "e1",
+            requestId: "r1",
+            resolution: allow,
+          },
+        },
+        {
+          method,
+          input: {
+            binding: nativeSession.binding,
+            botId: nativeSession.botId,
+            sessionId: nativeSession.sessionId,
+            entryId: "e2",
+            requestId: "r2",
+            resolution: deny,
+          },
+        },
+      ]);
+    }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect.each(permissionCases)(
+  "handles native settlement, stale versions, deletion and reordered $method rows",
+  ({ makeCard }) =>
+    Effect.gen(function* () {
+      const { projection, calls } = yield* harness;
+      const frame = rowsFrame([{ seq: "1", updatedSeq: "2", value: makeCard("e1", "r1") }]);
+      const [request] = pendingRequest(yield* projection.project(frame));
+      assert.deepStrictEqual(
+        yield* projection.project(rowsFrame([], [{ seq: "1", updatedSeq: "1", entryId: "e1" }])),
+        [],
+      );
+      assert.deepStrictEqual(
+        pendingRequest(
+          yield* projection.project(
+            rowsFrame([
+              { seq: "1", updatedSeq: "3", value: makeCard("e1", "r1", { status: "allowed" }) },
+            ]),
+          ),
+        ).map((r) => r.status),
+        ["resolved"],
+      );
+      assert.deepStrictEqual(yield* projection.project(frame), []);
+      assert.deepStrictEqual(yield* projection.respond(request!.id, "accept"), []);
+      const deleted = pendingRequest(
+        yield* projection.project(
+          rowsFrame([{ seq: "2", updatedSeq: "4", value: makeCard("e2", "r2") }]),
+        ),
+      )[0]!;
+      assert.deepStrictEqual(
+        pendingRequest(
+          yield* projection.project(rowsFrame([], [{ seq: "2", updatedSeq: "5", entryId: "e2" }])),
+        ).map((r) => r.status),
+        ["cancelled"],
+      );
+      assert.deepStrictEqual(yield* projection.respond(deleted.id, "accept"), []);
+      assert.equal(calls.length, 0);
+      const restarted = yield* harness;
+      assert.deepStrictEqual(
+        yield* restarted.projection.project(
+          rowsFrame([
+            {
+              seq: "1",
+              updatedSeq: "8",
+              value: makeCard("settled", "settled", { status: "expired" }),
+            },
+            { seq: "1", updatedSeq: "7", value: makeCard("settled", "settled") },
+          ]),
+        ),
+        [],
+      );
+    }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect("keeps approval, local-tool and connector request namespaces separate", () =>
+  Effect.gen(function* () {
+    const { projection, calls } = yield* harness;
+    const requests = pendingRequest(
+      yield* projection.project(
+        rowsFrame([
+          { seq: "1", updatedSeq: "1", value: card("command", "shared") },
+          { seq: "2", updatedSeq: "1", value: localCard("local", "shared") },
+          { seq: "3", updatedSeq: "1", value: connectorCard("connector", "shared") },
+        ]),
+      ),
+    );
+    assert.equal(new Set(requests.map((r) => r.id)).size, 3);
+    for (const request of requests) yield* projection.respond(request.id, "accept");
+    assert.deepStrictEqual(
+      calls.map((c) => c.method),
+      ["auto", "local", "connector"],
+    );
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect("binds reused native requests to their exact account, bot and session", () =>
+  Effect.gen(function* () {
+    const first = yield* harness;
+    const frame = rowsFrame([{ seq: "1", updatedSeq: "1", value: localCard("entry", "request") }]);
+    const [owned] = pendingRequest(yield* first.projection.project(frame));
+    for (const { sessionId, owner } of [
+      { sessionId: nativeSession.sessionId, owner: { binding: "b".repeat(64) } },
+      { sessionId: nativeSession.sessionId, owner: { botId: "another-bot" } },
+      { sessionId: "another-session", owner: {} },
+    ]) {
+      const foreign = yield* makeHarness(
+        providerSessionId,
+        undefined,
+        nativeSession.threadId,
+        sessionId,
+        undefined,
+        owner,
+      );
+      const [request] = pendingRequest(yield* foreign.projection.project(frame));
+      assert.notEqual(request!.id, owned!.id);
+      assert.equal(
+        (yield* foreign.projection.respond(owned!.id, "accept").pipe(Effect.flip))._tag,
+        "GrokBotBindingError",
+      );
+      assert.equal(foreign.calls.length, 0);
+    }
+    yield* first.projection.respond(owned!.id, "accept");
+    assert.deepStrictEqual(first.calls[0]?.input, {
+      binding: nativeSession.binding,
+      botId: nativeSession.botId,
+      sessionId: nativeSession.sessionId,
+      entryId: "entry",
+      requestId: "request",
+      resolution: "ALLOW_ONCE",
+    });
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+const multiselectCases = [
+  {
+    name: "two values in option order",
+    widget: {},
+    answer: ["Beta", "a", "a"],
+    expected: "a\nBeta",
+  },
+  {
+    name: "value rather than label",
+    widget: { allowCustom: true },
+    answer: ["Alpha", "a"],
+    expected: "a\nAlpha",
+  },
+  {
+    name: "label fallback and newline normalization",
+    widget: { options: [{ label: "One", value: " one\n\nvalue " }, { label: " two\nlabel " }] },
+    answer: [" two\nlabel ", " one\n\nvalue "],
+    expected: "one value\ntwo label",
+  },
+  {
+    name: "custom text after selected values",
+    widget: { allowCustom: true },
+    answer: [" custom\n\nanswer ", "Beta", "a"],
+    expected: "a\nBeta\ncustom answer",
+  },
+  {
+    name: "custom multiline string",
+    widget: { allowCustom: true },
+    answer: " custom\n \nanswer ",
+    expected: "custom answer",
+  },
+];
+it.effect.each(multiselectCases)(
+  "serializes native multiselect $name without dismissal",
+  ({ widget, answer, expected }) =>
+    Effect.gen(function* () {
+      const { projection, calls, fail } = yield* harness;
+      const [request] = pendingRequest(
+        yield* projection.project(
+          rowsFrame([
+            {
+              seq: "1",
+              updatedSeq: "1",
+              value: widgetCard("q1", { multiSelect: true, ...widget }),
+            },
+          ]),
+        ),
+      );
+      fail("refused");
+      yield* projection.answer(request!.id, { q1: answer }).pipe(Effect.flip);
+      assert.equal(projection.hasPending(), true);
+      fail("uncertain");
+      yield* projection.answer(request!.id, { q1: answer }).pipe(Effect.flip);
+      assert.equal(projection.hasPending(), true);
+      fail(undefined);
+      assert.deepStrictEqual(
+        pendingRequest(yield* projection.answer(request!.id, { q1: answer })).map((r) => r.status),
+        ["resolved"],
+      );
+      const count = calls.length;
+      assert.deepStrictEqual(yield* projection.answer(request!.id, { q1: answer }), []);
+      assert.equal(calls.length, count);
+      assert.deepStrictEqual(calls.at(-1), {
+        method: "widget",
+        input: {
+          binding: nativeSession.binding,
+          botId: nativeSession.botId,
+          sessionId: nativeSession.sessionId,
+          entryId: "q1",
+          value: expected,
+        },
+      });
+      assert.isFalse(calls.some((c) => c.method === "dismiss"));
+    }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect("keeps invalid, empty, disallowed custom and cross-question answers pending", () =>
+  Effect.gen(function* () {
+    const { projection, calls } = yield* harness;
+    const [request] = pendingRequest(
+      yield* projection.project(
+        rowsFrame([{ seq: "1", updatedSeq: "1", value: widgetCard("q1", { multiSelect: true }) }]),
+      ),
+    );
+    for (const answers of [
+      { q1: [] },
+      { q1: " " },
+      { q1: ["\n"] },
+      { q1: [42] },
+      { q1: ["custom"] },
+      { q2: ["a"] },
+      { q1: ["a"], q2: "Beta" },
+    ])
+      assert.equal(
+        (yield* projection.answer(request!.id, answers).pipe(Effect.flip))._tag,
+        "GrokBotBindingError",
+      );
+    assert.equal(projection.hasPending(), true);
+    assert.equal(calls.length, 0);
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect("does not turn empty native option values into their visible labels", () =>
+  Effect.gen(function* () {
+    const { projection, calls } = yield* harness;
+    const events = yield* projection.project(
+      rowsFrame([
+        {
+          seq: "1",
+          updatedSeq: "1",
+          value: widgetCard("q1", {
+            multiSelect: true,
+            options: [
+              { label: "Empty value", value: "" },
+              { label: "Whitespace value", value: " \n " },
+            ],
+          }),
+        },
+      ]),
+    );
+    const [request] = pendingRequest(events);
+    for (const answer of [[""], [" \n "], ["Empty value"], ["Whitespace value"]])
+      assert.equal(
+        (yield* projection.answer(request!.id, { q1: answer }).pipe(Effect.flip))._tag,
+        "GrokBotBindingError",
+      );
+    assert.equal(calls.length, 0);
+    assert.equal(projection.hasPending(), true);
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect("rejects malformed native permission envelopes without an inferred request id", () =>
+  Effect.gen(function* () {
+    const { projection, calls } = yield* harness;
+    const malformed = [
+      { ...localCard("local", "request"), kind: "message" },
+      { ...localCard("local", "request", { requestId: undefined }), requestId: "managed-request" },
+      localCard("local", "request", { action: 42 }),
+      localCard("local", "request", { status: undefined }),
+      connectorCard("connector", "request", { serverName: undefined }),
+      {
+        ...connectorCard("connector", "request", { requestId: undefined }),
+        requestId: "managed-request",
+      },
+    ];
+    assert.deepStrictEqual(
+      yield* projection.project(
+        rowsFrame(
+          malformed.map((value, index) => ({
+            seq: String(index + 1),
+            updatedSeq: String(index + 1),
+            value,
+          })),
+        ),
+      ),
+      [],
+    );
+    assert.equal(calls.length, 0);
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect("does not conflate the managed turn nonce with the native approval request", () =>
+  Effect.gen(function* () {
+    const turn = grokBotTurnIdentity(yield* makeTurn);
+    const { projection, calls } = yield* makeHarness(
+      providerSessionId,
+      undefined,
+      nativeSession.threadId,
+      nativeSession.sessionId,
+      (requestId) => (requestId === "managed-turn" ? turn : undefined),
+    );
+    const events = yield* projection.project(
+      rowsFrame([
+        {
+          seq: "1",
+          updatedSeq: "1",
+          value: { ...card("entry", "native-approval"), requestId: "managed-turn" },
+        },
+      ]),
+    );
+    const node = events.find((e) => e.type === "node.updated");
+    assert.equal(node?.type === "node.updated" ? node.node.runId : null, turn.runId);
+    yield* projection.respond(pendingRequest(events)[0]!.id, "accept");
+    expect(calls[0]?.input).toMatchObject({
+      requestId: "native-approval",
+      binding: nativeSession.binding,
+      botId: nativeSession.botId,
+      sessionId: nativeSession.sessionId,
+    });
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect("rejects a mismatched native row before mutating the projection", () =>
+  Effect.gen(function* () {
+    const { projection, calls } = yield* harness;
+    const existing = rowsFrame([{ seq: "1", updatedSeq: "1", value: widgetCard("existing") }]);
+    yield* projection.project(existing);
+    const error = yield* projection
+      .project(
+        rowsFrame([
+          { seq: "2", updatedSeq: "2", value: localCard("valid", "valid-request") },
+          { seq: "3", updatedSeq: "3", entryId: "another-entry", value: widgetCard("mismatched") },
+        ]),
+      )
+      .pipe(Effect.flip);
+    assert.equal(error._tag, "GrokBotBindingError");
+    assert.deepStrictEqual(
+      pendingRequest(yield* projection.replayPending()).map((r) => r.status),
+      ["pending"],
+    );
+    assert.deepStrictEqual(yield* projection.project(existing), []);
+    assert.equal(calls.length, 0);
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect("does not resurrect a deleted card from a later stale or duplicate frame", () =>
+  Effect.gen(function* () {
+    const { projection } = yield* harness;
+    yield* projection.project(rowsFrame([], [{ seq: "1", updatedSeq: "9", entryId: "deleted" }]));
+    for (const updatedSeq of ["7", "9"])
+      assert.deepStrictEqual(
+        yield* projection.project(
+          rowsFrame([{ seq: "1", updatedSeq, value: localCard("deleted", "request") }]),
+        ),
+        [],
+      );
+    assert.equal(projection.hasPending(), false);
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect("dispatches a pending permission once and preserves a deletion during the callback", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const confirmed = yield* Deferred.make<void>();
+      const { projection, calls } = yield* makeHarness(
+        providerSessionId,
+        undefined,
+        nativeSession.threadId,
+        nativeSession.sessionId,
+        undefined,
+        {},
+        Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(confirmed))),
+      );
+      const [request] = pendingRequest(
+        yield* projection.project(
+          rowsFrame([{ seq: "1", updatedSeq: "1", value: localCard("entry", "request") }]),
+        ),
+      );
+      const fiber = yield* projection.respond(request!.id, "accept").pipe(Effect.forkChild);
+      yield* Deferred.await(started);
+      assert.equal(
+        (yield* projection.respond(request!.id, "accept").pipe(Effect.flip))._tag,
+        "GrokBotBindingError",
+      );
+      assert.equal(calls.length, 1);
+      assert.deepStrictEqual(
+        pendingRequest(
+          yield* projection.project(
+            rowsFrame([], [{ seq: "1", updatedSeq: "2", entryId: "entry" }]),
+          ),
+        ).map((r) => r.status),
+        ["cancelled"],
+      );
+      yield* Deferred.succeed(confirmed, undefined);
+      assert.deepStrictEqual(yield* Fiber.join(fiber), []);
+      assert.equal(projection.hasPending(), false);
+      assert.deepStrictEqual(yield* projection.respond(request!.id, "accept"), []);
+      assert.equal(calls.length, 1);
+    }),
+  ).pipe(Effect.provide(IdAllocator.layer)),
+);
 
 it.effect(
   "associates a pending native question with its exact managed request and retains ownership on answer",

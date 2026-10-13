@@ -380,9 +380,9 @@ export class OrchestratorV2 extends Context.Service<OrchestratorV2, Orchestrator
 ) {}
 
 /**
- * Grok native cards accept single string answers, including custom text. Other providers retain
- * their option-only routing; unsupported multi-select answers use the existing chat path.
- * Must stay in step with the adapter's widget choice check.
+ * Grok widget answers are validated and serialized by their native adapter. Keep them on that
+ * callback path, including invalid answers, so they cannot become chat turns or dismissals.
+ * Other providers retain their single-choice routing.
  */
 function nativeChoiceAnswers(
   item: OrchestrationV2TurnItem | undefined,
@@ -391,14 +391,14 @@ function nativeChoiceAnswers(
   if (item?.type !== "user_input_request" || answers === undefined) return undefined;
   const question = item.questions.length === 1 ? item.questions[0] : undefined;
   const picked = question === undefined ? undefined : answers[question.id];
-  if (question === undefined || question.multiSelect === true || typeof picked !== "string") {
-    return undefined;
-  }
   if (
     item.nativeItemRef?.driver === "grok-bot" &&
     item.nativeItemRef.nativeId?.startsWith("widget/")
   ) {
-    return picked.trim().length > 0 ? answers : undefined;
+    return answers;
+  }
+  if (question === undefined || question.multiSelect === true || typeof picked !== "string") {
+    return undefined;
   }
   return question.options.some((option) => (option.value ?? option.label) === picked)
     ? answers
@@ -7471,7 +7471,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const nativeSessionId =
         runtimeRequest.responseCapability.type === "message"
           ? runtimeRequest.responseCapability.providerSessionId
-          : undefined;
+          : runtimeRequest.nativeRequestRef?.driver === "grok-bot" &&
+              runtimeRequest.nativeRequestRef.strength === "strong" &&
+              ["auto_review_approval/", "local_tool_permission/", "connector_grant/"].some(
+                (prefix) => runtimeRequest.nativeRequestRef?.nativeId?.startsWith(prefix),
+              )
+            ? (providerSessionId ?? undefined)
+            : undefined;
       // Only the native runtime can clear or answer its own card. A native call leaves the
       // request pending: the adapter emits the settled events after native confirms, so a
       // refused call leaves the question available and nothing is resolved locally.
@@ -7499,11 +7505,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const nativeAnswers = cancelled
           ? undefined
           : nativeChoiceAnswers(context.item, command.answers);
-        const nativeCall = cancelled
-          ? { decision: "cancel" as const }
-          : nativeAnswers === undefined
-            ? undefined
-            : { answers: nativeAnswers };
+        const nativeCall =
+          runtimeRequest.kind !== "user_input"
+            ? {
+                ...(command.decision === undefined ? {} : { decision: command.decision }),
+                ...(command.answers === undefined ? {} : { answers: command.answers }),
+              }
+            : cancelled
+              ? { decision: "cancel" as const }
+              : nativeAnswers === undefined
+                ? undefined
+                : { answers: nativeAnswers };
         if (nativeCall !== undefined) {
           // The request stays pending, so this event records no state change. A command must
           // record an event to commit its effect, and the queued native call is the real work.
@@ -10838,7 +10850,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           (task) =>
             task.id === command.taskId &&
             task.parentNodeId === command.parentNodeId &&
-            task.childThreadId === command.threadId,
+            task.origin === "app_owned" &&
+            task.threadId === command.parentThreadId &&
+            task.childThreadId !== null,
         );
         if (
           parentProjection.thread.deletedAt !== null ||
@@ -10852,7 +10866,111 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
             commandType: command.type,
-            cause: "This live call no longer owns that approval.",
+            cause: "This live call no longer owns that request.",
+          });
+        const remaining = [task];
+        const visited = new Set<ThreadId>([command.parentThreadId]);
+        const callerLimit = yield* DispatchModeLimit;
+        let ownsRequest = false;
+        while (remaining.length > 0) {
+          const currentTask = remaining.pop()!;
+          const threadId = currentTask.childThreadId;
+          if (
+            threadId === null ||
+            visited.has(threadId) ||
+            ["completed", "failed", "cancelled", "interrupted"].includes(currentTask.status)
+          )
+            continue;
+          visited.add(threadId);
+          const child = yield* projectionStore
+            .getThreadRecords(threadId, [
+              "runs",
+              "nodes",
+              "subagents",
+              "runtimeRequests",
+              "contextTransfers",
+            ])
+            .pipe(mapDispatchError(command));
+          if (
+            child.thread.deletedAt !== null ||
+            child.thread.archivedAt !== null ||
+            child.thread.lineage.relationshipToParent !== "subagent" ||
+            child.thread.lineage.parentThreadId !== currentTask.threadId ||
+            child.thread.forkedFrom?.type !== "node"
+          )
+            continue;
+          if (
+            threadId !== command.threadId &&
+            (exceededDispatchModeLimit(command.authority, child.thread) !== undefined ||
+              exceededDispatchModeLimit(parentProjection.thread, child.thread) !== undefined ||
+              (callerLimit !== undefined &&
+                exceededDispatchModeLimit(callerLimit, child.thread) !== undefined))
+          )
+            continue;
+          yield* refuseAboveDispatchModeLimit(command, threadId, child.thread);
+          yield* refuseAboveDispatchModeLimit(command, threadId, child.thread).pipe(
+            Effect.provideService(DispatchModeLimit, command.authority),
+          );
+          yield* refuseAboveDispatchModeLimit(command, threadId, child.thread).pipe(
+            Effect.provideService(DispatchModeLimit, parentProjection.thread),
+          );
+          const spawnRunId = child.contextTransfers.find(
+            (transfer) =>
+              transfer.type === "subagent_spawn" &&
+              transfer.sourceThreadId === currentTask.threadId &&
+              transfer.targetThreadId === threadId,
+          )?.targetRunId;
+          const taskRuns = child.runs.filter((run) => run.delegatedTaskId === currentTask.id);
+          const runIds = new Set(
+            (taskRuns.length > 0 ? taskRuns : child.runs.filter((run) => run.id === spawnRunId))
+              .filter(isBlockingRun)
+              .map((run) => run.id),
+          );
+          if (threadId === command.threadId) {
+            const request = child.runtimeRequests.find(
+              (request) => request.id === command.requestId && request.status === "pending",
+            );
+            const node = child.nodes.find((node) => node.id === request?.nodeId);
+            ownsRequest =
+              node?.runId !== null && node?.runId !== undefined && runIds.has(node.runId);
+            if (ownsRequest && request !== undefined) {
+              const question = request.kind === "user_input";
+              if (
+                question
+                  ? command.answers === undefined || command.decision !== undefined
+                  : command.decision === undefined ||
+                    command.answers !== undefined ||
+                    ![
+                      "command",
+                      "file-read",
+                      "file-change",
+                      "permission",
+                      "mcp-elicitation",
+                    ].includes(request.kind)
+              )
+                return yield* new OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause: "The response does not match this call's pending request.",
+                });
+            }
+            break;
+          }
+          remaining.push(
+            ...child.subagents.filter(
+              (nested) =>
+                nested.origin === "app_owned" &&
+                nested.threadId === threadId &&
+                nested.runId !== null &&
+                runIds.has(nested.runId),
+            ),
+          );
+        }
+        if (!ownsRequest)
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "That pending request is outside this live call's delegated task lineage.",
           });
         yield* dispatchRuntimeRequestRespond(
           {
@@ -10860,7 +10978,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             commandId: command.commandId,
             threadId: command.threadId,
             requestId: command.requestId,
-            decision: command.decision,
+            ...(command.decision === undefined ? {} : { decision: command.decision }),
+            ...(command.answers === undefined ? {} : { answers: command.answers }),
           },
           events,
           effects,
@@ -11386,7 +11505,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     // A limited sender checked these modes before dispatching; the thread's
     // user may have raised them since, and only here can they not change.
     const limit = yield* DispatchModeLimit;
-    if (limit !== undefined) {
+    // Call responses lock the parent; dispatchOnce checks the descendant's modes.
+    if (limit !== undefined && command.type !== "call.runtime-request.respond") {
       // A fork or merge-back source is not under this lock: its dispatch
       // checks the copy it reads instead.
       const threadId = commandThreadId(command);

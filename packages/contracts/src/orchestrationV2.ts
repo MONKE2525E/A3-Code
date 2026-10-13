@@ -3288,7 +3288,8 @@ const OrchestrationV2InternalCommand = Schema.Union([
     taskId: NodeId,
     threadId: ThreadId,
     requestId: RuntimeRequestId,
-    decision: Schema.Literals(["accept", "decline"]),
+    decision: Schema.optional(Schema.Literals(["accept", "decline"])),
+    answers: Schema.optional(ProviderUserInputAnswers),
   }),
   /** Moves an idle canonical bot conversation to its environment's No project storage. */
   Schema.Struct({

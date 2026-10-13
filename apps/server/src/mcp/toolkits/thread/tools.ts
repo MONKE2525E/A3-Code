@@ -175,6 +175,19 @@ const PendingRequestRespondTool = Tool.make("t3_pending_request_respond", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const PendingApprovalRespondTool = Tool.make("t3_pending_approval_respond", {
+  ...commandTool,
+  description:
+    "Approve or decline one pending permission request in a thread only after the user explicitly asks you to. This resolves that request through the provider's normal approval callback, not all future requests. userConfirmed must reflect the user's actual instruction.",
+  parameters: Schema.Struct({
+    ...requestTarget,
+    decision: Schema.Literals(["accept", "decline"]),
+    userConfirmed: Schema.Boolean,
+  }),
+})
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
+
 const ThreadConfigurationTool = Tool.make("t3_thread_configuration", {
   ...commandTool,
   description:
@@ -282,6 +295,7 @@ export const ThreadToolkit = Toolkit.make(
   PendingRequestListTool,
   PendingRequestReadTool,
   PendingRequestRespondTool,
+  PendingApprovalRespondTool,
   ThreadOrganizeTool,
   QueueListTool,
   QueueReadTool,

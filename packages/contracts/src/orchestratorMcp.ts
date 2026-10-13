@@ -32,6 +32,7 @@ import {
   OrchestrationV2CreationSource,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
+  OrchestrationV2UserInputQuestion,
 } from "./orchestrationV2.ts";
 import {
   ProviderOptionDescriptor,
@@ -227,11 +228,22 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
       "True only on that mode=wait call when timeoutMs elapsed. The timeout does not cancel the child. Later task_status reads return false and use status for liveness.",
   }),
   title: Schema.optionalKey(Schema.String),
+  pendingQuestions: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        threadId: Schema.optionalKey(ThreadId),
+        requestId: RuntimeRequestId,
+        questions: Schema.Array(OrchestrationV2UserInputQuestion),
+      }),
+    ),
+  ),
   pendingApprovals: Schema.optionalKey(
     Schema.Array(
       Schema.Struct({
+        threadId: Schema.optionalKey(ThreadId),
         requestId: RuntimeRequestId,
         title: Schema.String.check(Schema.isMaxLength(500)),
+        prompt: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(2000))),
       }),
     ),
   ),

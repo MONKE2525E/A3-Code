@@ -32,7 +32,8 @@ function decodeOption(value: unknown): GrokBotWidgetOption | undefined {
   return {
     label,
     description: text(value.description, 4096),
-    value: text(value.value, 4096),
+    // Native uses value ?? label; an empty value must not become the label.
+    value: typeof value.value === "string" && value.value.length <= 4096 ? value.value : undefined,
   };
 }
 

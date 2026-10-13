@@ -30,6 +30,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as GatewayEventStream from "./GatewayEventStream.ts";
+import * as Network from "./GrokBotNetworkService.ts";
 import * as ConnectJsonStream from "./ConnectJsonStream.ts";
 import * as ByteSize from "effect/ByteSize";
 import * as Duration from "effect/Duration";
@@ -367,6 +368,7 @@ export class GrokBotNativeService extends Context.Service<
       {
         readonly url: string;
         readonly headers: Record<string, string>;
+        readonly clientId?: string;
         readonly allowed: boolean;
         readonly policy: {
           readonly restricted: boolean;
@@ -523,6 +525,7 @@ function runtimeActivity(
 }
 
 const make = Effect.gen(function* () {
+  const scope = yield* Effect.scope;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const runner = yield* ProcessRunner.ProcessRunner;
@@ -881,8 +884,14 @@ const make = Effect.gen(function* () {
     method: NativeRuntimeMethod,
     input: object,
   ) {
+    const auth = yield* boundSession(binding);
+    if (method === "SendGrokBotUserMessage") {
+      const network = yield* Effect.serviceOption(Network.GrokBotNetworkService);
+      if (network._tag === "Some")
+        yield* network.value.claimIfEnabled(binding).pipe(Effect.ignoreCause, Effect.forkIn(scope));
+    }
     const result = yield* request(
-      yield* boundSession(binding),
+      auth,
       method,
       input,
       [
@@ -916,17 +925,28 @@ const make = Effect.gen(function* () {
     for (const media of input.attachments) {
       const filePath = yield* Effect.try({
         try: () => {
-          const url = new URL(media.url);
-          const decoded = decodeURIComponent(url.pathname);
-          const root = "/home/box/agent-data/agents/" + input.botId + "/attachments/";
+          // Inspect the original path before URL parsing can erase dot segments. Native uploads
+          // use absolute POSIX paths; message images also use hostless file URLs.
+          const urlPath = /^file:\/\/(\/[^?#]*)$/.exec(media.url)?.[1];
+          const decoded = media.url.startsWith("/")
+            ? media.url
+            : urlPath === undefined || /%(?:2f|5c)/i.test(urlPath)
+              ? ""
+              : decodeURIComponent(urlPath);
+          const segments = decoded.split("/");
           if (
-            url.protocol !== "file:" ||
-            url.hostname ||
-            url.search ||
-            url.hash ||
-            !decoded.startsWith(root) ||
+            /[\\\p{Cc}]/u.test(decoded) ||
+            /%(?:2e|2f|5c|00)/i.test(decoded) ||
             NodePath.posix.normalize(decoded) !== decoded ||
-            decoded.slice(root.length).includes("/")
+            segments[0] !== "" ||
+            segments[1] !== "home" ||
+            segments[2] !== "box" ||
+            (segments[3] !== "agent-data" && segments[3] !== "sand-data") ||
+            segments[4] !== "agents" ||
+            segments[5] !== input.botId ||
+            (segments[6] !== "attachments" && segments[6] !== "assets") ||
+            segments.length < 8 ||
+            segments.at(-1) === ""
           )
             throw new Error("invalid attachment path");
           return decoded;
@@ -945,6 +965,11 @@ const make = Effect.gen(function* () {
             ".webp": "image/webp",
             ".gif": "image/gif",
             ".svg": "image/svg+xml",
+            ".avif": "image/avif",
+            ".bmp": "image/bmp",
+            ".ico": "image/x-icon",
+            ".heic": "image/heic",
+            ".heif": "image/heif",
             ".txt": "text/plain",
             ".pdf": "application/pdf",
             ".mp4": "video/mp4",
@@ -1389,6 +1414,14 @@ const make = Effect.gen(function* () {
     return {
       url: url.href,
       headers: gatewayHeaders(connection),
+      ...(auth.machineId === undefined
+        ? {}
+        : {
+            clientId: NodeCrypto.createHash("sha256")
+              .update(`sand-egress-tunnel-client:${auth.machineId}`)
+              .digest("hex")
+              .slice(0, 32),
+          }),
       allowed: member.sandLocalEgressControls?.allowed !== false,
       policy: {
         restricted: decoded.restricted ?? false,

@@ -150,6 +150,12 @@ export const GrokBotCapabilitiesV2 = {
   runtimePolicy: { enforcement: "client-boundary" },
 } satisfies OrchestrationV2ProviderCapabilities;
 
+const NativeImages = Schema.Array(
+  Schema.Struct({
+    url: Schema.String,
+    alt: Schema.optionalKey(Schema.String),
+  }),
+);
 const NativeTextEntry = Schema.Struct({
   fromAgent: Schema.optionalKey(Schema.Unknown),
   toAgent: Schema.optionalKey(Schema.Unknown),
@@ -163,6 +169,9 @@ const NativeTextEntry = Schema.Struct({
   clientNonce: Schema.optionalKey(Schema.String),
   requestId: Schema.optionalKey(Schema.String),
   content: Schema.optionalKey(Schema.String),
+  images: Schema.optionalKey(NativeImages),
+  file_path: Schema.optionalKey(Schema.String),
+  file_name: Schema.optionalKey(Schema.String),
   richText: Schema.optionalKey(Schema.Unknown),
   message: Schema.optionalKey(
     Schema.Struct({
@@ -176,14 +185,7 @@ const NativeTextEntry = Schema.Struct({
       content: Schema.optionalKey(Schema.String),
       url: Schema.optionalKey(Schema.String),
       file_name: Schema.optionalKey(Schema.String),
-      images: Schema.optionalKey(
-        Schema.Array(
-          Schema.Struct({
-            url: Schema.String,
-            alt: Schema.optionalKey(Schema.String),
-          }),
-        ),
-      ),
+      images: Schema.optionalKey(NativeImages),
     }),
   ),
   isStreaming: Schema.optionalKey(Schema.Boolean),
@@ -196,6 +198,51 @@ const NativeTextEntry = Schema.Struct({
   ),
 });
 const decodeTextEntry = Schema.decodeUnknownOption(NativeTextEntry);
+
+const isNativeUserEntry = (entry: typeof NativeTextEntry.Type) =>
+  entry.kind === "user-attachment" || (entry.kind === "message" && entry.role === "user");
+
+/** Native uploads have no role field and carry a POSIX path rather than message.url. */
+const nativeEntryMedia = (entry: typeof NativeTextEntry.Type) => {
+  const media: { url: string; name?: string; image: boolean }[] = [];
+  const images =
+    entry.kind === "message"
+      ? entry.images
+      : entry.kind === "send-message"
+        ? entry.message?.images
+        : undefined;
+  for (const image of images ?? []) media.push({ url: image.url, image: true });
+  if (entry.kind === "user-attachment" && entry.file_path !== undefined) {
+    let imagePath = entry.file_path;
+    try {
+      imagePath = decodeURIComponent(imagePath);
+    } catch {
+      // Invalid file URLs remain subject to the media reader's path checks.
+    }
+    media.push({
+      url: entry.file_path,
+      image: /\.(?:avif|bmp|gif|heic|heif|ico|jpe?g|png|svg|webp)$/i.test(imagePath),
+      ...(entry.file_name === undefined ? {} : { name: entry.file_name }),
+    });
+  } else if (
+    entry.kind === "send-message" &&
+    entry.message?.type === "attachment" &&
+    entry.message.url !== undefined
+  ) {
+    media.push({
+      url: entry.message.url,
+      image: false,
+      ...(entry.message.file_name === undefined ? {} : { name: entry.message.file_name }),
+    });
+  }
+  const seen = new Set<string>();
+  return media.flatMap((attachment) => {
+    const url = attachment.url.trim();
+    if (url === "" || seen.has(url)) return [];
+    seen.add(url);
+    return [{ ...attachment, url }];
+  });
+};
 
 /** Stable identities are scoped to account, bot, native session, and transcript generation. */
 export function grokBotNativeThreadId(native: GrokBotBoundSession): string {
@@ -312,8 +359,7 @@ export const makeGrokBotTranscriptProjection = (input: {
         });
       if (isGrokBotVoiceCallInstruction(entry)) continue;
       if (
-        entry.kind === "message" &&
-        entry.role === "user" &&
+        isNativeUserEntry(entry) &&
         entry.clientNonce !== undefined &&
         grokBotMessagePeer(input.native.botId, entry) === undefined &&
         !managedMessageIds.has(entry.clientNonce) &&
@@ -326,8 +372,7 @@ export const makeGrokBotTranscriptProjection = (input: {
       // The owned user echo proves request ownership, even when replies precede it in a frame.
       const turn = entry.clientNonce === undefined ? undefined : turns.get(entry.clientNonce);
       if (
-        entry.kind === "message" &&
-        entry.role === "user" &&
+        isNativeUserEntry(entry) &&
         grokBotMessagePeer(input.native.botId, entry) === undefined &&
         turn !== undefined &&
         entry.requestId
@@ -356,8 +401,7 @@ export const makeGrokBotTranscriptProjection = (input: {
           ? yield* input.existingMessage(messageId)
           : undefined;
       if (
-        entry.kind === "message" &&
-        entry.role === "user" &&
+        isNativeUserEntry(entry) &&
         grokBotMessagePeer(input.native.botId, entry) === undefined &&
         entry.clientNonce !== undefined &&
         managedMessageIds.has(entry.clientNonce) &&
@@ -392,28 +436,14 @@ export const makeGrokBotTranscriptProjection = (input: {
                     : grokBotUserEchoText(entry.content, entry.clientNonce)
                   : entry.content
                 : undefined;
-      const media =
-        entry.kind !== "send-message"
-          ? []
-          : [
-              ...(entry.message?.images ?? []).map((image) => ({ url: image.url, image: true })),
-              ...(entry.message?.type === "attachment" && entry.message.url !== undefined
-                ? [
-                    {
-                      url: entry.message.url,
-                      image: false,
-                      ...(entry.message.file_name === undefined
-                        ? {}
-                        : { name: entry.message.file_name }),
-                    },
-                  ]
-                : []),
-            ];
+      const media = nativeEntryMedia(entry);
       if (text === undefined && media.length === 0) continue;
       const workflowReferences = grokBotWorkflowReferences(entry.richText);
       const peer = grokBotMessagePeer(input.native.botId, entry);
       const assistant =
-        peer !== undefined || entry.kind === "send-message" || entry.role !== "user";
+        peer !== undefined ||
+        entry.kind === "send-message" ||
+        (entry.kind !== "user-attachment" && entry.role !== "user");
       // Native's post-call summary has no channel; it shares a requestId with the call's voice user
       // rows and follows its marker. In-call speech precedes the marker, and requests owned by a
       // managed turn or unrelated to the call are never claimed.

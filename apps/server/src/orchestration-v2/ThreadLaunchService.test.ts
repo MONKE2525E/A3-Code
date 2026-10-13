@@ -68,6 +68,19 @@ const modelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
   model: "gpt-5.1-codex",
 } as const;
+const launchProvider: ServerProvider = {
+  instanceId: modelSelection.instanceId,
+  driver: ProviderDriverKind.make("codex"),
+  enabled: true,
+  installed: true,
+  version: null,
+  status: "ready",
+  auth: { status: "authenticated" },
+  checkedAt: "2026-10-12T00:00:00.000Z",
+  models: [{ slug: modelSelection.model, name: "Codex", isCustom: false, capabilities: null }],
+  slashCommands: [],
+  skills: [],
+};
 const project = {
   id: projectId,
   title: "Project",
@@ -191,7 +204,7 @@ function makeHarness(options: HarnessOptions = {}) {
       generateBranchName,
     }),
     layerServerSettings,
-    ProviderRegistryMock.layer(options.providers),
+    ProviderRegistryMock.layer(options.providers ?? [launchProvider]),
     options.managedFolders ??
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
         namedProjectsRoot: "/projects",
@@ -295,6 +308,115 @@ function waitUntil<E, R>(predicate: () => Effect.Effect<boolean, E, R>): Effect.
     assert.fail("Condition was not reached before timeout.");
   });
 }
+
+const customLaunchProvider: ServerProvider = {
+  ...launchProvider,
+  models: [
+    {
+      slug: "custom-launch-model",
+      name: "Custom launch model",
+      isCustom: true,
+      capabilities: {
+        optionDescriptors: [
+          {
+            id: "effort",
+            label: "Effort",
+            type: "select",
+            options: [{ id: "high", label: "High" }],
+          },
+          { id: "search", label: "Search", type: "boolean" },
+        ],
+      },
+    },
+  ],
+};
+
+it.effect.each([
+  { name: "missing provider", providers: [], model: "custom-launch-model", options: [] },
+  { name: "unknown model", providers: [customLaunchProvider], model: "invented", options: [] },
+  {
+    name: "unknown option",
+    providers: [customLaunchProvider],
+    model: "custom-launch-model",
+    options: [{ id: "unknown", value: true }],
+  },
+  {
+    name: "invalid choice",
+    providers: [customLaunchProvider],
+    model: "custom-launch-model",
+    options: [{ id: "effort", value: "low" }],
+  },
+  {
+    name: "invalid boolean",
+    providers: [customLaunchProvider],
+    model: "custom-launch-model",
+    options: [{ id: "search", value: "yes" }],
+  },
+  {
+    name: "duplicate option",
+    providers: [customLaunchProvider],
+    model: "custom-launch-model",
+    options: [
+      { id: "search", value: true },
+      { id: "search", value: false },
+    ],
+  },
+])("rejects $name at the direct launch boundary before creating a thread", (testCase) => {
+  const harness = makeHarness({ providers: testCase.providers });
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const input = {
+      ...launchInput({
+        command: "invalid-selection",
+        thread: "invalid-selection",
+        message: "Hello",
+      }),
+      modelSelection: {
+        instanceId: modelSelection.instanceId,
+        model: testCase.model,
+        options: testCase.options,
+      },
+    };
+    const failed = yield* launches.launch(input).pipe(Effect.flip);
+    assert.equal(failed._tag, "ThreadLaunchError");
+    if (failed._tag !== "ThreadLaunchError")
+      return assert.fail("Expected launch validation failure");
+    assert.equal(failed.operation, "validate-model");
+    assert.isNull(yield* threads.getThreadShell(input.threadId));
+    assert.isFalse(yield* threads.hasReceipt(input.commandId));
+    assert.equal(harness.runSetup.mock.calls.length, 0);
+    assert.equal(harness.createWorktree.mock.calls.length, 0);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect(
+  "launches a configured custom model with valid options and replays after catalog removal",
+  () => {
+    const providers = [customLaunchProvider];
+    const harness = makeHarness({ providers });
+    return Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const input = {
+        ...launchInput({ command: "custom-selection", thread: "custom-selection" }),
+        modelSelection: {
+          instanceId: modelSelection.instanceId,
+          model: "custom-launch-model",
+          options: [
+            { id: "effort", value: "high" },
+            { id: "search", value: true },
+          ],
+        },
+      };
+      const first = yield* launches.launch(input);
+      assert.deepEqual(first.projection.thread.modelSelection, input.modelSelection);
+      providers.length = 0;
+      const replay = yield* launches.launch(input);
+      assert.isTrue(replay.resumed);
+      assert.equal(replay.threadId, first.threadId);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
 
 it.effect.each(
   (["new", "existing"] as const).flatMap((target) =>
@@ -903,7 +1025,7 @@ it.effect("arms durable title generation after accepting the first message", () 
   }),
 );
 
-it.effect("does not update a reused thread title when the initial message is rejected", () =>
+it.effect("rejects an unavailable model before updating a reused thread title", () =>
   Effect.gen(function* () {
     const harness = makeHarness();
     yield* Effect.gen(function* () {
@@ -1017,6 +1139,7 @@ it.effect("uses the available source control writer for generated worktree branc
         sourceControlWriterModelSelection: writerModelSelection,
       },
       providers: [
+        launchProvider,
         {
           instanceId: writerInstanceId,
           driver: ProviderDriverKind.make("codex"),
@@ -1069,7 +1192,7 @@ it.effect("falls back when the source control writer is unavailable", () =>
           model: "missing-branch-writer-model",
         },
       },
-      providers: [],
+      providers: [launchProvider],
     });
 
     yield* Effect.gen(function* () {
@@ -2473,7 +2596,7 @@ it.effect("cancels tracked setup before provider work is released", () =>
         command: "launch:cancel-tracked",
         thread: "thread:cancel-tracked",
         message: "Start",
-        workspace: { type: "worktree", baseRef: "main" },
+        workspace: { type: "worktree", baseRef: "main", branch: "cancel-setup" },
       });
       const originalDispatch = threads.dispatch;
       const dispatchSpy = vi
