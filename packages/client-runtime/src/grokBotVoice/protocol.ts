@@ -187,15 +187,6 @@ export function spokenMessageFrame(message: string): string {
   });
 }
 
-export function truncateFrame(cut: { itemId: string; contentIndex: number; audioEndMs: number }) {
-  return JSON.stringify({
-    type: "conversation.item.truncate",
-    item_id: cut.itemId,
-    content_index: cut.contentIndex,
-    audio_end_ms: Math.round(cut.audioEndMs),
-  });
-}
-
 export type VoiceServerEvent =
   | { readonly type: "session.ready" }
   | { readonly type: "session.configured" }
