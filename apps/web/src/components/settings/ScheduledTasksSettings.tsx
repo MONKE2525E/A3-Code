@@ -267,6 +267,15 @@ export function ScheduledTasksSettings(target: {
     scope.environmentIds.includes(grokBotEnvironment.environmentId)
       ? grokBotEnvironment.environmentId
       : null;
+  // Muse readiness is per environment, so every in-scope connected environment is checked. Each
+  // section renders nothing where Muse is not set up, which the Grok Bot selection must not gate.
+  const museRoutineEnvironmentIds = connectedEnvironments
+    .map((entry) => entry.environmentId)
+    .filter(
+      (environmentId) =>
+        scope.kind === "all" ||
+        (scope.kind === "environment" && scope.environmentIds.includes(environmentId)),
+    );
   return (
     <SettingsPageContainer>
       <SettingsSection
@@ -320,9 +329,9 @@ export function ScheduledTasksSettings(target: {
             {nativeRoutinesEnvironmentId ? (
               <GrokBotNativeRoutines environmentId={nativeRoutinesEnvironmentId} />
             ) : null}
-            {nativeRoutinesEnvironmentId ? (
-              <MuseNativeRoutines environmentId={nativeRoutinesEnvironmentId} />
-            ) : null}
+            {museRoutineEnvironmentIds.map((environmentId) => (
+              <MuseNativeRoutines key={environmentId} environmentId={environmentId} />
+            ))}
           </div>
         )}
       </SettingsSection>
