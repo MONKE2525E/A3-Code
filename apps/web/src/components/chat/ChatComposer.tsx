@@ -49,6 +49,7 @@ import {
   PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS,
   isGrokBotBackingThread,
   isNativeAgentBackingThread,
+  nativeAgentSourceForThread,
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import {
@@ -2233,8 +2234,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     supportedRuntimeModes && supportedRuntimeModes.length > 0
       ? runtimeModeOptions.filter((option) => supportedRuntimeModes.includes(option.mode))
       : runtimeModeOptions;
+  // Muse threads are native: their approvals live in the Muse features panel, not this access picker.
+  const isMuseComposer =
+    activeThreadId !== null && nativeAgentSourceForThread({ id: activeThreadId }) === "muse-agent";
   const hideRuntimeMode =
-    selectedProvider === GROK_BOT_DRIVER_KIND && compatibleRuntimeModeOptions.length <= 1;
+    isMuseComposer ||
+    (selectedProvider === GROK_BOT_DRIVER_KIND && compatibleRuntimeModeOptions.length <= 1);
   // Older threads can contain a mode their current provider no longer offers.
   // Display the provider's first supported mode, which is also its safe legacy
   // fallback, without mutating persisted state until the user makes a choice.
@@ -2260,6 +2265,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isGrokBotBackingThread({ id: activeThreadId });
   // The thread is bound to its bot by modelSelection; the picker's selection can fall back to
   // another bot or an empty slug when the bot is missing from the provider's model list.
+  // Muse and Grok Bot threads share the compact native composer; Grok-only menus stay on isGrokBotComposer.
+  const isCompactNativeComposer = isGrokBotComposer || isMuseComposer;
   const grokBotId = isGrokBotComposer
     ? (activeThreadModelSelection?.model ?? selectedModel)
     : selectedModel;
@@ -2541,7 +2548,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // The GrokBot compact row keeps its actions' width reserved even when expanded, so wrapping is judged
   // against that same budget. Otherwise a prompt between the two widths would flip between layouts.
   const grokBotReservedWidth =
-    isGrokBotComposer && !isMobileViewport && restingActionsWidth !== null
+    isCompactNativeComposer && !isMobileViewport && restingActionsWidth !== null
       ? restingActionsWidth + COMPOSER_RESTING_ACTIONS_INSET_PX
       : 0;
   const hasWrappedPrompt = useComposerMultilinePrompt(composerMenuAnchor, grokBotReservedWidth);
@@ -5398,7 +5405,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // (full width, normal leading, controls below), minus the model chip. Bot questions keep the pill
   // too, so an answer box does not grow past the normal composer.
   const grokBotComposerCompact =
-    isGrokBotComposer && !isMobileViewport && !isComposerApprovalState && !hasMultilinePrompt;
+    isCompactNativeComposer && !isMobileViewport && !isComposerApprovalState && !hasMultilinePrompt;
   const composerActionsOverlay = isComposerResting || grokBotComposerCompact;
   const expandedComposerImages = composerActionsOverlay
     ? standaloneComposerImages.filter((image) => pendingSnapShotIdSet.has(image.id))
@@ -5702,7 +5709,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           data-resting-controls-separator="true"
         />
       ) : null}
-      {isGrokBotComposer ? null : (
+      {isCompactNativeComposer ? null : (
         <ProviderModelPicker
           environmentId={environmentId}
           compact={false}
@@ -7761,9 +7768,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                                 ? "Enable a provider in Settings to send a message"
                                 : phase === "disconnected"
                                   ? DISCONNECTED_COMPOSER_PLACEHOLDER
-                                  : isGrokBotComposer
-                                    ? "Ask anything, @mention bots/connectors, $use skills, or / for commands"
-                                    : "Ask anything, @tag files/folders, $use skills, or / for commands"
+                                  : isMuseComposer
+                                    ? "Ask Muse anything"
+                                    : isGrokBotComposer
+                                      ? "Ask anything, @mention bots/connectors, $use skills, or / for commands"
+                                      : "Ask anything, @tag files/folders, $use skills, or / for commands"
                     }
                     disabled={
                       isConnecting ||
@@ -7898,7 +7907,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     pendingAction={pendingPrimaryAction}
                     isRunning={phase === "running"}
                     canInterrupt={canInterrupt}
-                    followUpBehavior={isGrokBotComposer ? null : settings.followUpBehavior}
+                    followUpBehavior={isCompactNativeComposer ? null : settings.followUpBehavior}
                     alternateShortcutLabel={shortcutLabelForCommand(
                       keybindings,
                       "composer.sendAlternate",
