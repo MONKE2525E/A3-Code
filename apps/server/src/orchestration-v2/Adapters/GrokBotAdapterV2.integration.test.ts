@@ -59,6 +59,7 @@ it.effect.each([
     const completed = yield* Deferred.make<void>();
     const disconnect = yield* Deferred.make<void>();
     const transcriptVisible = yield* Deferred.make<void>();
+    const transcriptReattached = yield* Deferred.make<void>();
     let prepared: GrokBotManagedTurn | undefined;
     let writes = 0;
     let watches = 0;
@@ -98,6 +99,11 @@ it.effect.each([
         }),
       watch: () => {
         transcriptWatches++;
+        if (scenario === "eof" && transcriptWatches > 1)
+          return Stream.fromEffect(Deferred.succeed(transcriptReattached, undefined)).pipe(
+            Stream.drain,
+            Stream.concat(Stream.never),
+          );
         if (scenario === "transcript")
           return Stream.fromEffect(Deferred.await(sent)).pipe(
             Stream.flatMap((turn) =>
@@ -351,7 +357,17 @@ it.effect.each([
         );
         return;
       }
-      if (scenario === "eof" || scenario === "transport") {
+      if (scenario === "eof") {
+        yield* Deferred.succeed(disconnect, undefined);
+        yield* TestClock.adjust("1 second");
+        yield* Deferred.await(transcriptReattached);
+        const held = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(held.runs[0]?.status, "running");
+        assert.equal(writes, 1);
+        assert.equal(watches, 1);
+        assert.equal(transcriptWatches, 2);
+      }
+      if (scenario === "transport") {
         const originalEffects = yield* outbox.listByCommandId(CommandId.make("grok-bot:dispatch"));
         for (const _effect of originalEffects) {
           yield* outbox.awaitAvailable;
