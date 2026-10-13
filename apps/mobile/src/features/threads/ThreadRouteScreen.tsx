@@ -1,4 +1,4 @@
-import { useOpenPullRequest } from "../../native/useOpenPullRequest";
+import { useOpenPullRequest } from "../pull-requests/useOpenPullRequestFromRoute";
 import { makeTurnCommandMetadata } from "../../lib/commandMetadata";
 import { buildProjectThreadStartTurnInput } from "../../lib/projectThreadStartTurn";
 import { useWorktreeSetup } from "./use-worktree-setup";

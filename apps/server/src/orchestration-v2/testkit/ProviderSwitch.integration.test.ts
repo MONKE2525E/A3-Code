@@ -44,12 +44,20 @@ import {
 } from "../Adapters/CodexAdapterV2.ts";
 import { AcpProviderCapabilitiesV2 } from "@t3tools/provider-acp/server/adapter";
 import { CursorProviderCapabilitiesV2 } from "@t3tools/provider-cursor/testing";
+import { GrokBotCapabilitiesV2 } from "../Adapters/GrokBotAdapterV2.ts";
+import {
+  GROK_BOT_NATIVE_MESSAGE_LIMIT,
+  grokBotInlineHandoffBudget,
+  grokBotManagedPrompt,
+} from "../Adapters/GrokBotManagedBinding.ts";
+import * as ContextHandoffService from "../ContextHandoffService.ts";
 import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
 import * as LegacyV1ThreadImporter from "../legacy/LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "../Orchestrator.ts";
 import * as EffectWorker from "../EffectWorker.ts";
 import * as EffectOutbox from "../EffectOutbox.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionMaintenance from "../ProjectionMaintenance.ts";
 import * as ProjectionStore from "../ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
@@ -392,6 +400,263 @@ const waitForIdle = Effect.fn("ProviderSwitchTest.waitForIdle")(function* (
 });
 
 describe("orchestration v2 provider switching", () => {
+  it.live.each(["grok-bot", "codex"] as const)(
+    "recovers missed messages with large persistent history for %s",
+    (driver) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace(`persistent-context-${driver}`);
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const failStartOnce = yield* Ref.make(false);
+          const selection =
+            driver === "grok-bot"
+              ? { instanceId: ProviderInstanceId.make("grok-bot-test"), model: "persistent-bot" }
+              : CODEX_MODEL_SELECTION;
+          const registry = ProviderAdapterRegistry.layerFromAdapters([
+            makeTestAdapter({
+              instanceId: selection.instanceId,
+              driver: ProviderDriverKind.make(driver),
+              capabilities:
+                driver === "grok-bot" ? GrokBotCapabilitiesV2 : CodexProviderCapabilitiesV2,
+              modelSelection: selection,
+              responseByRunOrdinal: {},
+              capturedTurns,
+              failStartOnce,
+            }),
+          ]);
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const dispatch = (
+              ordinal: number,
+              text: string,
+              attachments: ReadonlyArray<ChatAttachment> = [],
+            ) =>
+              orchestrator.dispatch({
+                type: "message.dispatch",
+                commandId: CommandId.make(`persistent-context:${ordinal}`),
+                threadId,
+                messageId: MessageId.make(`persistent-context:${ordinal}`),
+                text,
+                attachments,
+                modelSelection: selection,
+                createdBy: "user",
+                creationSource: "web",
+                dispatchMode: { type: "start_immediately" },
+              });
+            const wait = (ordinal: number, status: "failed" | "completed") =>
+              orchestrator.streamStoredEvents.pipe(
+                Stream.filter(
+                  ({ event }) =>
+                    event.type === "run.updated" &&
+                    event.payload.ordinal === ordinal &&
+                    (event.payload.status === "completed" || event.payload.status === "failed"),
+                ),
+                Stream.runHead,
+                Effect.andThen(worker.drain()),
+                Effect.andThen(
+                  Effect.gen(function* () {
+                    const projection = yield* orchestrator.getThreadProjection(threadId);
+                    assert.equal(projection.runs.at(-1)?.status, status);
+                    return projection;
+                  }),
+                ),
+              );
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              commandId: CommandId.make("persistent-context:create"),
+              threadId,
+              projectId,
+              title: "Persistent bot context",
+              modelSelection: selection,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+              createdBy: "user",
+              creationSource: "web",
+            });
+            const screenshots: ChatAttachment[] = Array.from({ length: 24 }, (_, index) => ({
+              type: "image",
+              id: `screenshot-${index}`,
+              name: `screenshot-${index}.png`,
+              mimeType: "image/png",
+              sizeBytes: 100_000,
+            }));
+            yield* dispatch(1, "Existing native history ".repeat(5_000), screenshots);
+            yield* wait(1, "completed");
+            yield* Ref.set(failStartOnce, true);
+            yield* dispatch(2, "Recover this missed request");
+            yield* wait(2, "failed");
+            yield* dispatch(3, "uhh?");
+            const recovered = yield* wait(3, driver === "grok-bot" ? "completed" : "failed");
+            if (driver === "codex") {
+              assert.isTrue(
+                recovered.turnItems.some(
+                  (item) =>
+                    item.type === "error" &&
+                    item.runId === recovered.runs.at(-1)?.id &&
+                    item.failure.message.includes("Insufficient context allowance"),
+                ),
+              );
+              assert.equal((yield* Ref.get(capturedTurns)).length, 1);
+              return;
+            }
+            const contextHandoffService = yield* ContextHandoffService.ContextHandoffServiceV2;
+            const eventSink = yield* EventSink.EventSinkV2;
+            const restartNote = "A background run was cancelled while restarting this turn.";
+            const restartBudget = grokBotInlineHandoffBudget({
+              tokenCap: GROK_BOT_NATIVE_MESSAGE_LIMIT,
+              userText: "Current request",
+              restartNote,
+            });
+            const restartPrompt = `${"h".repeat(restartBudget)}\n\n${restartNote}\n\nUser message:\nCurrent request`;
+            assert.equal(grokBotManagedPrompt(restartPrompt).length, GROK_BOT_NATIVE_MESSAGE_LIMIT);
+            const turns = yield* Ref.get(capturedTurns);
+            assert.equal(turns.length, 2);
+            assert.equal(turns[1]?.nativeThreadId, turns[0]?.nativeThreadId);
+            assert.include(turns[1]!.text, "Recover this missed request");
+            assert.isTrue(turns[1]!.text.endsWith("User message:\nuhh?"));
+            assert.notInclude(turns[1]!.text, "Existing native history");
+            assert.isBelow(Buffer.byteLength(turns[1]!.text), 16_000);
+            assert.equal(recovered.contextHandoffs.at(-1)?.delivery?.status, "inline");
+            yield* dispatch(4, "Fresh follow-up");
+            const followup = yield* wait(4, "completed");
+            assert.equal((yield* Ref.get(capturedTurns)).at(-1)?.text, "Fresh follow-up");
+            assert.equal(followup.contextHandoffs.length, recovered.contextHandoffs.length);
+            yield* Ref.set(failStartOnce, true);
+            const oversizedMissedRequest = "Oversized missed request ".repeat(2_000);
+            yield* dispatch(5, oversizedMissedRequest);
+            yield* wait(5, "failed");
+            const currentRequest = "Preserve the entire current request ".repeat(1_000);
+            yield* dispatch(6, currentRequest, screenshots);
+            const bounded = yield* wait(6, "completed");
+            const lastTurn = (yield* Ref.get(capturedTurns)).at(-1)!;
+            assert.isTrue(lastTurn.text.endsWith(`User message:\n${currentRequest}`));
+            assert.deepEqual(lastTurn.attachments, screenshots);
+            assert.isBelow(
+              Buffer.byteLength(lastTurn.text) - Buffer.byteLength(currentRequest),
+              16_000,
+            );
+            assert.notInclude(lastTurn.text, oversizedMissedRequest);
+            const missedItem = bounded.turnItems.find(
+              (item) => item.type === "user_message" && item.text === oversizedMissedRequest,
+            )!;
+            assert.include(
+              bounded.contextHandoffs.at(-1)!.delivery!.omittedItemIds ?? [],
+              missedItem.id,
+            );
+            yield* Ref.set(failStartOnce, true);
+            const nearLimitMissedRequest = "Near-limit recovery source";
+            yield* dispatch(7, nearLimitMissedRequest);
+            yield* wait(7, "failed");
+            const nearLimitCurrentRequest = "x".repeat(
+              GROK_BOT_NATIVE_MESSAGE_LIMIT - grokBotManagedPrompt("").length,
+            );
+            yield* dispatch(8, nearLimitCurrentRequest, screenshots);
+            const nearLimitRun = yield* wait(8, "completed");
+            const nearLimitTurn = (yield* Ref.get(capturedTurns)).at(-1)!;
+            assert.equal(nearLimitTurn.nativeThreadId, turns.at(-1)?.nativeThreadId);
+            assert.equal(nearLimitTurn.text, nearLimitCurrentRequest);
+            assert.deepEqual(nearLimitTurn.attachments, screenshots);
+            assert.equal(
+              grokBotManagedPrompt(nearLimitTurn.text).length,
+              GROK_BOT_NATIVE_MESSAGE_LIMIT,
+            );
+            assert.isFalse(nearLimitTurn.text.includes(nearLimitMissedRequest));
+            assert.equal(nearLimitRun.contextHandoffs.length, bounded.contextHandoffs.length);
+            yield* dispatch(9, "Small follow-up after near-limit request");
+            const retryable = yield* wait(9, "completed");
+            const retriedTurn = (yield* Ref.get(capturedTurns)).at(-1)!;
+            assert.equal(retriedTurn.nativeThreadId, nearLimitTurn.nativeThreadId);
+            assert.include(retriedTurn.text, nearLimitMissedRequest);
+            assert.isTrue(
+              retriedTurn.text.endsWith("User message:\nSmall follow-up after near-limit request"),
+            );
+            const nearLimitMissedItem = retryable.turnItems.find(
+              (item) => item.type === "user_message" && item.text === nearLimitMissedRequest,
+            )!;
+            assert.include(
+              retryable.contextHandoffs.at(-1)!.delivery!.itemIds ?? [],
+              nearLimitMissedItem.id,
+            );
+
+            const durableContextMarker = "Manual context handoff.";
+            const durableCurrentRequest = "y".repeat(
+              GROK_BOT_NATIVE_MESSAGE_LIMIT - grokBotManagedPrompt("").length,
+            );
+            const completedSourceRun = retryable.runs.at(-1)!;
+            const sourceProviderThread = retryable.providerThreads.find(
+              (candidate) => candidate.id === completedSourceRun.providerThreadId,
+            )!;
+            const durableHandoff = yield* contextHandoffService.prepare({
+              threadId,
+              targetRunId: completedSourceRun.id,
+              fromProviderThreadIds: [sourceProviderThread.id],
+              toProviderThreadId: sourceProviderThread.id,
+            });
+            yield* eventSink.write({
+              events: [
+                {
+                  id: EventId.make("persistent-context:durable-manual-handoff"),
+                  type: "context-handoff.updated",
+                  threadId,
+                  runId: completedSourceRun.id,
+                  providerInstanceId: completedSourceRun.providerInstanceId,
+                  occurredAt: durableHandoff.createdAt,
+                  payload: durableHandoff,
+                },
+              ],
+            });
+            yield* dispatch(10, durableCurrentRequest, screenshots);
+            const durableSkipped = yield* wait(10, "completed");
+            const durableSkippedTurn = (yield* Ref.get(capturedTurns)).at(-1)!;
+            assert.equal(durableSkippedTurn.nativeThreadId, nearLimitTurn.nativeThreadId);
+            assert.equal(durableSkippedTurn.text, durableCurrentRequest);
+            assert.deepEqual(durableSkippedTurn.attachments, screenshots);
+            assert.equal(
+              grokBotManagedPrompt(durableSkippedTurn.text).length,
+              GROK_BOT_NATIVE_MESSAGE_LIMIT,
+            );
+            assert.isFalse(durableSkippedTurn.text.includes(durableContextMarker));
+            const durableSkippedHandoff = durableSkipped.contextHandoffs.at(-1)!;
+            assert.equal(durableSkippedHandoff.strategy, "manual_context");
+            assert.equal(durableSkippedHandoff.status, "ready");
+            assert.isUndefined(durableSkippedHandoff.delivery);
+
+            yield* dispatch(11, "Short follow-up for completed manual context");
+            const durableRecovered = yield* wait(11, "completed");
+            const durableRecoveredTurn = (yield* Ref.get(capturedTurns)).at(-1)!;
+            assert.equal(durableRecoveredTurn.nativeThreadId, nearLimitTurn.nativeThreadId);
+            assert.equal(durableRecoveredTurn.text.split(durableContextMarker).length - 1, 1);
+            assert.isTrue(
+              durableRecoveredTurn.text.endsWith(
+                "User message:\nShort follow-up for completed manual context",
+              ),
+            );
+            assert.equal(durableRecovered.contextHandoffs.at(-1)?.delivery?.status, "inline");
+
+            yield* dispatch(12, "Follow-up after manual context delivery");
+            const durableFollowup = yield* wait(12, "completed");
+            const durableFollowupTurn = (yield* Ref.get(capturedTurns)).at(-1)!;
+            assert.equal(durableFollowupTurn.nativeThreadId, nearLimitTurn.nativeThreadId);
+            assert.isFalse(durableFollowupTurn.text.includes(durableContextMarker));
+            assert.equal(durableFollowup.contextHandoffs.at(-1)?.delivery?.status, "inline");
+          }).pipe(
+            Effect.provide(
+              Layer.merge(
+                ProviderReplayHarness.layerWithRegistry(
+                  { name: `persistent-context-${driver}`, runtimePolicyOverride: { cwd } },
+                  registry,
+                ),
+                ContextHandoffService.layer.pipe(Layer.provide(IdAllocator.layer)),
+              ),
+            ),
+          );
+        }),
+      ),
+  );
+
   it.live.each([
     "compact-native",
     "compact-fallback",

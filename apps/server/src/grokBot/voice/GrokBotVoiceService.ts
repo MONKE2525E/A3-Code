@@ -106,7 +106,7 @@ export class GrokBotVoiceBackend extends Context.Service<
 >()("t3/grokBot/voice/GrokBotVoiceService/GrokBotVoiceBackend") {}
 
 /** Mirrors the desktop `isDialableURL`, but parses instead of prefix-matching so `wss://api.x.ai@evil` fails. */
-export function isDialableVoiceUrl(value: string): boolean {
+function isDialableVoiceUrl(value: string): boolean {
   if (!value.startsWith(GROK_BOT_VOICE_REALTIME_ORIGIN)) return false;
   try {
     const url = new URL(value);

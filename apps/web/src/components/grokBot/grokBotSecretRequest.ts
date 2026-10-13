@@ -107,7 +107,7 @@ function isStorageWritable(storage: Storage | undefined): boolean {
 
 const hiddenSecretRequestsStorage = localStorageForHiddenSecretRequests();
 /** False when hidden requests only last until the page reloads. */
-export const grokBotHiddenSecretRequestsPersist = isStorageWritable(hiddenSecretRequestsStorage);
+const grokBotHiddenSecretRequestsPersist = isStorageWritable(hiddenSecretRequestsStorage);
 
 interface HiddenGrokBotSecretRequestsState {
   /** Oldest first. */
