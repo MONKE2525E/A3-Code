@@ -31,3 +31,21 @@ export function resolveGrokBotVoiceCallActivity({
       return activity;
   }
 }
+
+/** A call badge shows only while its own bot's call is not idle. */
+export function isGrokBotVoiceCallLive({
+  call,
+  environmentId,
+  botId,
+}: {
+  readonly call: PinnedGrokBotVoiceCall | null;
+  readonly environmentId: EnvironmentId | null;
+  readonly botId: string;
+}): boolean {
+  return (
+    call !== null &&
+    call.environmentId === environmentId &&
+    call.botId === botId &&
+    call.state.phase !== "idle"
+  );
+}

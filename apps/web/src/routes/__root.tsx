@@ -17,7 +17,6 @@ import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { APP_BASE_NAME, APP_DISPLAY_NAME, APP_STAGE_LABEL, APP_VERSION } from "../branding";
 import { resolveServerBackedAppDisplayName } from "../branding.logic";
 import { AppSidebarLayout } from "../components/AppSidebarLayout";
-import { GrokBotVoiceCallDock } from "../components/grokBot/GrokBotVoiceCallDock";
 import { GrokBotVoiceCallProvider } from "../components/grokBot/GrokBotVoiceCallProvider";
 import { CommandPalette } from "../components/CommandPalette";
 import { CustomSnoozeDialogHost } from "../components/CustomSnoozeDialog";
@@ -210,11 +209,9 @@ function RootRouteView() {
       <CommandPalette>
         <AppSidebarLayout>
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            {/* Route insets fill the space above the call footer instead of the viewport. */}
             <div className="flex min-h-0 min-w-0 flex-1 [&>[data-slot=sidebar-inset]]:h-full!">
               <Outlet />
             </div>
-            <GrokBotVoiceCallDock />
           </div>
         </AppSidebarLayout>
       </CommandPalette>
