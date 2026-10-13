@@ -6043,8 +6043,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         }>`
         SELECT run.run_id, run.thread_id, run.status
         FROM orchestration_v2_projection_runs AS run
+        LEFT JOIN orchestration_v2_projection_provider_threads AS provider_thread
+          ON provider_thread.provider_thread_id = run.provider_thread_id
         WHERE run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
           AND run.status IN ('starting', 'running', 'waiting')
+          AND (provider_thread.driver IS NULL OR provider_thread.driver != 'grok-bot')
       `;
         // The first status predicate matches the existing partial recovery index.
         return rows.map((row) => ({
@@ -6138,7 +6141,9 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
         const existing = (yield* Ref.get(replayState)).projections;
         return [...existing.values()].flatMap((projection) =>
           projection.runs.flatMap((run) =>
-            run.status === "starting" || run.status === "running" || run.status === "waiting"
+            (run.status === "starting" || run.status === "running" || run.status === "waiting") &&
+            projection.providerThreads.find((thread) => thread.id === run.providerThreadId)
+              ?.driver !== "grok-bot"
               ? [
                   {
                     runId: run.id,

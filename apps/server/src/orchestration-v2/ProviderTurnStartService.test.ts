@@ -156,6 +156,7 @@ it("does not commit running state when inherited background routing cannot be re
 
 function makeLocalCommandHarness(input: {
   readonly acquire?: () => Effect.Effect<boolean>;
+  readonly remoteProvider?: boolean;
   readonly text: string;
   readonly previousNativeSession?: boolean;
   readonly previousMessages?: ReadonlyArray<string>;
@@ -205,7 +206,7 @@ function makeLocalCommandHarness(input: {
   };
   const providerThread: OrchestrationV2ThreadProjection["providerThreads"][number] = {
     id: providerThreadId,
-    driver: ProviderDriverKind.make("codex"),
+    driver: ProviderDriverKind.make(input.remoteProvider ? "grok-bot" : "codex"),
     providerInstanceId: newInstanceId,
     providerSessionId,
     appThreadId: threadId,
@@ -605,6 +606,25 @@ effectIt.effect(
         harness.projection().turnItems.some((item) => item.title === "Waiting for host resources"),
       ).toBe(false);
     }),
+);
+
+effectIt.effect("does not throttle remote provider observation with the host turn budget", () =>
+  Effect.gen(function* () {
+    const acquire = vi.fn(() => Effect.succeed(false));
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      acquire,
+      remoteProvider: true,
+      openFailure: new Error("remote observer unavailable"),
+    });
+    yield* harness.start;
+    expect(acquire).not.toHaveBeenCalled();
+    expect(harness.open).toHaveBeenCalledOnce();
+    expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+    expect(
+      harness.projection().turnItems.some((item) => item.title === "Waiting for host resources"),
+    ).toBe(false);
+  }),
 );
 
 effectIt.effect("handles local sign-out without waiting for provider capacity", () =>

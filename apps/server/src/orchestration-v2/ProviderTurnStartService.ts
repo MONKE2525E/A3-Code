@@ -466,7 +466,9 @@ export const layer: Layer.Layer<
           return;
         }
       }
-      const admitted = yield* admission.acquire({ threadId: input.threadId, runId });
+      const admitted =
+        providerThread.driver === "grok-bot" ||
+        (yield* admission.acquire({ threadId: input.threadId, runId }));
       // Capacity waits precede the provider turn. Keep "starting" so steering,
       // fork, and merge rules cannot mistake them for post-provider waiting.
       const resourceWait = run.resourceWait === true;

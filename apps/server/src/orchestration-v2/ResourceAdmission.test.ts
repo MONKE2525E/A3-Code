@@ -4,6 +4,8 @@ import {
   MessageId,
   ProjectId,
   ProviderInstanceId,
+  ProviderThreadId,
+  ProviderDriverKind,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -116,7 +118,8 @@ it.effect.each(["memory", "sqlite"] as const)(
                 ordinal: 1,
                 providerInstanceId: instanceId,
                 modelSelection: { instanceId, model: "test" },
-                providerThreadId: null,
+                providerThreadId:
+                  id === "remote" ? ProviderThreadId.make("remote-provider-thread") : null,
                 userMessageId: MessageId.make(`message:${id}`),
                 rootNodeId: null,
                 activeAttemptId: null,
@@ -174,6 +177,37 @@ it.effect.each(["memory", "sqlite"] as const)(
         expect(yield* admission.acquire(e)).toBe(false);
         yield* Ref.set(resources, { ...host, sampledAt: 4, availableMemoryBytes: 4 * GiB });
         expect(yield* admission.acquire(e)).toBe(true);
+        yield* put("e", "completed", false);
+        const remote = yield* put("remote", "running");
+        yield* store.apply({
+          id: EventId.make("remote-provider-thread"),
+          type: "provider-thread.updated",
+          threadId: remote.threadId,
+          occurredAt: now,
+          payload: {
+            id: ProviderThreadId.make("remote-provider-thread"),
+            driver: ProviderDriverKind.make("grok-bot"),
+            providerInstanceId: instanceId,
+            providerSessionId: null,
+            appThreadId: remote.threadId,
+            ownerNodeId: null,
+            nativeThreadRef: null,
+            nativeConversationHeadRef: null,
+            status: "active",
+            firstRunOrdinal: 1,
+            lastRunOrdinal: 1,
+            handoffIds: [],
+            forkedFrom: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        const local = yield* put("local", "starting");
+        yield* Ref.set(resources, { ...host, sampledAt: 5, cpuCount: 2 });
+        expect(yield* admission.acquire(local)).toBe(true);
+        expect(
+          (yield* store.getResourceAdmissionRuns).some((run) => run.runId === remote.runId),
+        ).toBe(false);
       }).pipe(
         Effect.provide(
           ResourceAdmission.layer.pipe(
