@@ -39,11 +39,6 @@ export class OrchestrationEffectExecutionError extends Schema.TaggedError<Orches
   },
 ) {}
 
-export class OrchestrationEffectCapacityDeferred extends Schema.TaggedError<OrchestrationEffectCapacityDeferred>()(
-  "OrchestrationEffectCapacityDeferred",
-  { effectId: Schema.String },
-) {}
-
 /**
  * Pure interrupt races with hard process teardown or a dead session produce
  * "not active" protocol errors. Retrying those only delays recovery.
@@ -76,7 +71,7 @@ export interface OrchestrationEffectExecutorV2Shape {
   readonly execute: (
     effect: EffectOutbox.OrchestrationEffectV2,
     options?: { readonly willRetry: boolean },
-  ) => Effect.Effect<void, OrchestrationEffectExecutionError | OrchestrationEffectCapacityDeferred>;
+  ) => Effect.Effect<void | "deferred", OrchestrationEffectExecutionError>;
 }
 
 export class OrchestrationEffectExecutorV2 extends Context.Service<
@@ -110,7 +105,6 @@ export const layerExecutor: Layer.Layer<
       yield* ThreadTitleRegenerationService.ThreadTitleRegenerationService;
     const threads = yield* ThreadManagementService.ThreadManagementService;
     const settings = yield* ServerSettings.ServerSettingsService;
-    const admission = yield* ResourceAdmission.ResourceAdmission;
     return OrchestrationEffectExecutorV2.of({
       execute: (effect, options) => {
         const willRetry = options?.willRetry ?? false;
@@ -351,8 +345,7 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
-          case "provider-turn.restart": {
-            const request = effect.request;
+          case "provider-turn.restart":
             return providerTurnControl
               .interruptAndAwaitTerminal({
                 threadId: effect.threadId,
@@ -384,36 +377,21 @@ export const layerExecutor: Layer.Layer<
                       : Effect.void,
                 ),
                 Effect.andThen(
-                  Effect.gen(function* () {
-                    // Teardown always runs before admission, so a restart can free scarce resources.
-                    if (
-                      !(yield* admission.acquire({
-                        threadId: effect.threadId,
-                        runId: request.runId,
-                      }))
-                    ) {
-                      return yield* new OrchestrationEffectCapacityDeferred({
-                        effectId: effect.id,
-                      });
-                    }
-                    yield* providerTurnStart.start({
-                      threadId: effect.threadId,
-                      runId: request.runId,
-                      willRetry,
-                    });
+                  providerTurnStart.start({
+                    threadId: effect.threadId,
+                    runId: effect.request.runId,
+                    willRetry,
                   }),
                 ),
-                Effect.mapError((cause) =>
-                  cause._tag === "OrchestrationEffectCapacityDeferred"
-                    ? cause
-                    : new OrchestrationEffectExecutionError({
-                        effectId: effect.id,
-                        effectType: effect.request.type,
-                        cause,
-                      }),
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
                 ),
               );
-          }
           case "runtime-request.respond":
             return runtimeRequests
               .respond({
@@ -785,25 +763,16 @@ export const layerWithOptions = (
 
           const startRunId =
             effect.request.type === "provider-turn.start" ||
-            effect.request.type === "provider-turn.restart"
+            effect.request.type === "provider-turn.restart" ||
+            effect.request.type === "provider-runtime.reconnect"
               ? effect.request.runId
               : undefined;
-          if (startRunId !== undefined && effect.request.type === "provider-turn.start") {
-            const admitted = yield* admission
-              .acquire({ runId: startRunId, threadId: effect.threadId })
-              .pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
-            if (!admitted) {
-              return yield* deferForCapacity(effect);
-            }
-          }
-
           const execution = executor
             .execute(effect, { willRetry: effect.attemptCount < maxAttempts })
             .pipe(
-              Effect.as("executed" as const),
-              Effect.catchTags({
-                OrchestrationEffectCapacityDeferred: () => Effect.succeed("deferred" as const),
-              }),
+              Effect.map((outcome) =>
+                outcome === "deferred" ? ("deferred" as const) : ("executed" as const),
+              ),
             );
           const exit = yield* Effect.exit(Effect.raceFirst(execution, cancellation)).pipe(
             Effect.ensuring(outbox.clearCancellation(effect.id)),

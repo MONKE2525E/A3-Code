@@ -3349,7 +3349,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const emitEvent = emit(events, command);
       const activeRunIds = new Set(
         projection.runs
-          .filter((run) => run.status === "queued" || run.status === "starting")
+          .filter(
+            (run) =>
+              run.status === "queued" ||
+              run.status === "starting" ||
+              (run.status === "waiting" && run.resourceWait === true),
+          )
           .map((run) => run.id),
       );
       for (const run of projection.runs.filter((candidate) => activeRunIds.has(candidate.id))) {

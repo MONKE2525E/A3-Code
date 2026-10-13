@@ -11,6 +11,7 @@ import {
   type OrchestrationV2TurnItem,
   RunId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Cause from "effect/Cause";
@@ -44,6 +45,7 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
+import * as ResourceAdmission from "./ResourceAdmission.ts";
 import { grokBotSenderNote } from "./GrokBotSenderNote.ts";
 import {
   isRestartNoteContinuation,
@@ -76,12 +78,12 @@ export interface ProviderTurnStartServiceV2Shape {
     readonly threadId: ThreadId;
     readonly runId: RunId;
     readonly willRetry?: boolean;
-  }) => Effect.Effect<void, ProviderTurnStartError>;
+  }) => Effect.Effect<void | "deferred", ProviderTurnStartError>;
   readonly reconnect: (input: {
     readonly threadId: ThreadId;
     readonly runId: RunId;
     readonly reconcileAttempt?: number;
-  }) => Effect.Effect<void, ProviderTurnStartError>;
+  }) => Effect.Effect<void | "deferred", ProviderTurnStartError>;
 }
 
 export class ProviderTurnStartServiceV2 extends Context.Service<
@@ -117,6 +119,7 @@ export const layer: Layer.Layer<
     const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
     const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
     const runtimePolicy = yield* RuntimePolicy.RuntimePolicyV2;
+    const admission = yield* ResourceAdmission.ResourceAdmission;
 
     // These callbacks outlive startup while a run drains background work. Build
     // them outside start's scope so they cannot retain its full thread history.
@@ -227,12 +230,13 @@ export const layer: Layer.Layer<
       readonly willRetry?: boolean;
     }) {
       const { runId } = input;
-      const projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
-      const run = projection.runs.find((candidate) => candidate.id === runId);
-      if (run === undefined) {
+      let projection = yield* projectionStore.getTurnStartContext(input.threadId, runId);
+      const selectedRun = projection.runs.find((candidate) => candidate.id === runId);
+      if (selectedRun === undefined) {
         return yield* new ProviderTurnStartError({ runId, cause: `Run ${runId} was not found.` });
       }
-      if (run.status !== "starting") {
+      let run = selectedRun;
+      if (run.status !== "starting" && !(run.status === "waiting" && run.resourceWait === true)) {
         // The effect is idempotent once the run has advanced or terminalized.
         return;
       }
@@ -285,6 +289,75 @@ export const layer: Layer.Layer<
           runId,
           cause: `Run ${runId} is missing its execution projection state.`,
         });
+      }
+      const admitted = yield* admission.acquire({ threadId: input.threadId, runId });
+      const resourceWait = run.status === "waiting" && run.resourceWait === true;
+      if (!admitted && resourceWait) return "deferred" as const;
+      if (!admitted || resourceWait) {
+        const now = yield* DateTime.now;
+        const noticeId = TurnItemId.make(`resource-wait:${runId}`);
+        const previous = yield* projectionStore.getTurnItem({
+          threadId: input.threadId,
+          itemId: noticeId,
+        });
+        const notice: OrchestrationV2TurnItem = {
+          id: noticeId,
+          threadId: input.threadId,
+          runId,
+          nodeId: rootNode.id,
+          providerThreadId: providerThread.id,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal:
+            previous?.ordinal ?? (yield* projectionStore.getNextTurnItemOrdinal(input.threadId)),
+          type: "system_notice",
+          status: "completed",
+          title: admitted ? "Resources available" : "Waiting for host resources",
+          message: admitted
+            ? "This turn can now start."
+            : "This turn is queued until other turns finish or CPU or memory pressure eases.",
+          startedAt: previous?.startedAt ?? now,
+          completedAt: now,
+          updatedAt: now,
+        };
+        const nextRun = {
+          ...run,
+          status: admitted ? ("starting" as const) : ("waiting" as const),
+          resourceWait: !admitted,
+        };
+        const payloads = [
+          { type: "run.updated", payload: nextRun },
+          { type: "turn-item.updated", payload: notice },
+        ] as const;
+        const events = yield* Effect.forEach(payloads, (event) =>
+          Effect.gen(function* () {
+            return {
+              ...event,
+              id: yield* idAllocator.allocate.event({ threadId: input.threadId }),
+              threadId: input.threadId,
+              runId,
+              nodeId: rootNode.id,
+              providerInstanceId: run.providerInstanceId,
+              occurredAt: now,
+            } satisfies OrchestrationV2DomainEvent;
+          }),
+        );
+        const written = yield* eventSink.writeIfRunCurrent({
+          threadId: input.threadId,
+          runId,
+          activeAttemptId: attempt.id,
+          expectedStatus: run.status,
+          events,
+        });
+        if (!written.committed) return;
+        if (!admitted) return "deferred" as const;
+        run = nextRun;
+        projection = {
+          ...projection,
+          runs: projection.runs.map((entry) => (entry.id === runId ? nextRun : entry)),
+          turnItems: [...projection.turnItems.filter((entry) => entry.id !== noticeId), notice],
+        };
       }
       // Settles a run that never reached the provider: one signal turn item plus
       // terminal run, attempt and root node, written only while the run is still
@@ -1310,7 +1383,13 @@ export const layer: Layer.Layer<
     }) {
       const projection = yield* projectionStore.getTurnStartContext(input.threadId, input.runId);
       const run = projection.runs.find((candidate) => candidate.id === input.runId);
-      if (run === undefined || (run.status !== "running" && run.status !== "starting")) return;
+      if (
+        run === undefined ||
+        (run.status !== "running" &&
+          run.status !== "starting" &&
+          !(run.status === "waiting" && run.resourceWait === true))
+      )
+        return;
       const attempt = projection.attempts.find((candidate) => candidate.id === run.activeAttemptId);
       const rootNode = projection.nodes.find((candidate) => candidate.id === run.rootNodeId);
       const providerThread = projection.providerThreads.find(
@@ -1336,9 +1415,8 @@ export const layer: Layer.Layer<
       // A prior observer may have consumed a settlement whose ingestion failed.
       // Reopen its snapshot rather than trusting an in-memory delivered nonce.
       if (Option.isSome(live)) yield* providerSessions.close(providerThread.providerSessionId);
-      if (run.status === "starting") {
-        yield* start({ ...input, willRetry: true });
-        return;
+      if (run.status === "starting" || (run.status === "waiting" && run.resourceWait === true)) {
+        return yield* start({ ...input, willRetry: true });
       }
       const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
       if (message === undefined)

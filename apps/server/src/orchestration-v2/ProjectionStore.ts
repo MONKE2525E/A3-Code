@@ -354,6 +354,7 @@ export interface ProjectionStoreV2Shape {
       readonly runId: RunId;
       readonly threadId: ThreadId;
       readonly status: "starting" | "running" | "waiting";
+      readonly resourceWait: boolean;
     }>,
     ProjectionStoreV2Error
   >;
@@ -6040,8 +6041,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           readonly run_id: string;
           readonly thread_id: string;
           readonly status: "starting" | "running" | "waiting";
+          readonly resource_wait: number | null;
         }>`
-        SELECT run.run_id, run.thread_id, run.status
+        SELECT run.run_id, run.thread_id, run.status, json_extract(run.payload_json, '$.resourceWait') AS resource_wait
         FROM orchestration_v2_projection_runs AS run
         JOIN orchestration_v2_projection_threads AS thread ON thread.thread_id = run.thread_id
         WHERE run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
@@ -6053,6 +6055,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           runId: RunId.make(row.run_id),
           threadId: ThreadId.make(row.thread_id),
           status: row.status,
+          resourceWait: row.resource_wait === 1,
         }));
       },
     ).pipe(
@@ -6143,7 +6146,14 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             ? []
             : projection.runs.flatMap((run) =>
                 run.status === "starting" || run.status === "running" || run.status === "waiting"
-                  ? [{ runId: run.id, threadId: run.threadId, status: run.status }]
+                  ? [
+                      {
+                        runId: run.id,
+                        threadId: run.threadId,
+                        status: run.status,
+                        resourceWait: run.resourceWait === true,
+                      },
+                    ]
                   : [],
               ),
         );

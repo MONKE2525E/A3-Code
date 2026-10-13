@@ -50,7 +50,12 @@ it.effect("capacity deferrals remain cancellable and never exhaust provider retr
     const allowed = yield* Ref.make(false);
     const executed = yield* Ref.make(0);
     const executor = Layer.succeed(EffectWorker.OrchestrationEffectExecutorV2, {
-      execute: () => Ref.update(executed, (count) => count + 1),
+      execute: (effect) =>
+        Effect.gen(function* () {
+          if (effect.request.type === "provider-turn.start" && !(yield* Ref.get(allowed)))
+            return "deferred" as const;
+          yield* Ref.update(executed, (count) => count + 1);
+        }),
     });
     const outboxLayer = EffectOutbox.layer.pipe(
       Layer.provideMerge(
@@ -180,6 +185,7 @@ function layerExecutorFor(input: {
   readonly continueAfterRestart?: boolean;
   readonly interrupt?: ProviderTurnControlService.ProviderTurnControlServiceV2Shape["interrupt"];
   readonly reconnect?: ProviderTurnStartService.ProviderTurnStartServiceV2["Service"]["reconnect"];
+  readonly start?: ProviderTurnStartService.ProviderTurnStartServiceV2["Service"]["start"];
 }) {
   const record = (event: string) => Ref.update(input.events, (events) => [...events, event]);
   const layerDependencies = Layer.mergeAll(
@@ -212,19 +218,21 @@ function layerExecutorFor(input: {
       ProviderTurnStartService.ProviderTurnStartServiceV2,
       ProviderTurnStartService.ProviderTurnStartServiceV2.of({
         reconnect: input.reconnect ?? (() => record("reconnect")),
-        start: () =>
-          Effect.gen(function* () {
-            yield* record("start");
-            if (
-              input.failFirstStart !== undefined &&
-              (yield* Ref.getAndSet(input.failFirstStart, false))
-            ) {
-              return yield* new ProviderTurnStartService.ProviderTurnStartError({
-                runId,
-                cause: "simulated first start failure",
-              });
-            }
-          }),
+        start:
+          input.start ??
+          (() =>
+            Effect.gen(function* () {
+              yield* record("start");
+              if (
+                input.failFirstStart !== undefined &&
+                (yield* Ref.getAndSet(input.failFirstStart, false))
+              ) {
+                return yield* new ProviderTurnStartService.ProviderTurnStartError({
+                  runId,
+                  cause: "simulated first start failure",
+                });
+              }
+            })),
       }),
     ),
     Layer.succeed(
@@ -958,7 +966,14 @@ it.effect(
         acquire: () => Ref.get(allowed),
         release: () => Effect.void,
       });
-      const executor = layerExecutorFor({ events }).pipe(Layer.provide(gate));
+      const executor = layerExecutorFor({
+        events,
+        start: () =>
+          Effect.gen(function* () {
+            if (!(yield* Ref.get(allowed))) return "deferred" as const;
+            yield* Ref.update(events, (values) => [...values, "start"]);
+          }),
+      });
       const outboxLayer = EffectOutbox.layer.pipe(
         Layer.provideMerge(
           Layer.effectDiscard(runMigrations()).pipe(

@@ -53,7 +53,12 @@ it.effect.each(["memory", "sqlite"] as const)(
         const store = yield* ProjectionStore.ProjectionStoreV2;
         const now = yield* DateTime.now;
         const instanceId = ProviderInstanceId.make("codex");
-        const put = (id: string, status: OrchestrationV2Run["status"], create = true) =>
+        const put = (
+          id: string,
+          status: OrchestrationV2Run["status"],
+          create = true,
+          resourceWait = false,
+        ) =>
           Effect.gen(function* () {
             const threadId = ThreadId.make(id);
             const runId = RunId.make(`run:${id}`);
@@ -108,6 +113,7 @@ it.effect.each(["memory", "sqlite"] as const)(
                 rootNodeId: null,
                 activeAttemptId: null,
                 status,
+                resourceWait,
                 requestedAt: now,
                 startedAt: status === "starting" ? null : now,
                 completedAt: null,
@@ -125,6 +131,10 @@ it.effect.each(["memory", "sqlite"] as const)(
           { concurrency: "unbounded" },
         );
         expect(results).toEqual([true, true, false]);
+        yield* put("b", "waiting", false, true);
+        // Keep the reservation while an admitted resource-waiting run commits starting.
+        expect(yield* admission.acquire(c)).toBe(false);
+        yield* put("b", "starting", false);
         yield* admission.release(a.runId);
         expect(yield* admission.acquire(c)).toBe(true);
         yield* put("b", "running", false);
