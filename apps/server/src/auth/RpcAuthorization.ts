@@ -44,6 +44,9 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
  */
 export const RPC_REQUIRED_SCOPES = {
   ...CLIENT_GUARDED_RPC_SCOPES,
+  [WS_METHODS.museAgentsStatus]: AuthOrchestrationReadScope,
+  [WS_METHODS.museAgentsFeatureRead]: AuthOrchestrationReadScope,
+  [WS_METHODS.museAgentsProfile]: AuthOrchestrationReadScope,
   [WS_METHODS.grokBotsOrchestratorConfig]: AuthOrchestrationReadScope,
   [WS_METHODS.grokBotsStatus]: AuthOrchestrationReadScope,
   [WS_METHODS.grokBotsList]: AuthOrchestrationReadScope,

@@ -1,3 +1,4 @@
+import * as NativeAgentService from "./nativeAgents/NativeAgentService.ts";
 import * as GrokBotComputerService from "./grokBot/GrokBotComputerService.ts";
 import * as GrokBotSecretService from "./grokBot/GrokBotSecretService.ts";
 import * as GrokBotVoiceService from "./grokBot/voice/GrokBotVoiceService.ts";
@@ -552,6 +553,13 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
 const MainWsRpcGroup = ServerWsRpcGroup.omit(
+  WS_METHODS.museAgentsFeatureRead,
+  WS_METHODS.museAgentsFeatureUpdate,
+  WS_METHODS.museAgentsStatus,
+  WS_METHODS.museAgentsSetup,
+  WS_METHODS.museAgentsProfile,
+  WS_METHODS.museAgentsOpenThread,
+  WS_METHODS.nativeAgentsOpenThread,
   WS_METHODS.grokBotsStatus,
   WS_METHODS.grokBotsSetup,
   WS_METHODS.grokBotsList,
@@ -595,6 +603,51 @@ const MainWsRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.grokBotsImportMarketplaceTemplate,
 );
 const layerGrokExtensionsRpc = Layer.mergeAll(
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.museAgentsFeatureRead,
+    Effect.map(
+      NativeAgentService.NativeAgentService,
+      (service) => (input) => service.featureRead(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.museAgentsFeatureUpdate,
+    Effect.map(
+      NativeAgentService.NativeAgentService,
+      (service) => (input) => service.featureUpdate(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.museAgentsStatus,
+    Effect.map(NativeAgentService.NativeAgentService, (service) => () => service.status),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.museAgentsSetup,
+    Effect.map(NativeAgentService.NativeAgentService, (service) => () => service.setup),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.museAgentsProfile,
+    Effect.map(
+      NativeAgentService.NativeAgentService,
+      (service) => (input) => service.profile(input.providerInstanceId),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.museAgentsOpenThread,
+    Effect.map(
+      NativeAgentService.NativeAgentService,
+      (service) => (input) =>
+        service.open({
+          source: "muse-agent",
+          providerInstanceId: input.providerInstanceId,
+          agentId: "muse",
+        }),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.nativeAgentsOpenThread,
+    Effect.map(NativeAgentService.NativeAgentService, (service) => (input) => service.open(input)),
+  ),
   ServerWsRpcGroup.toLayerHandler(
     WS_METHODS.grokBotsStatus,
     Effect.map(GrokBotService.GrokBotService, (service) => () => service.status),

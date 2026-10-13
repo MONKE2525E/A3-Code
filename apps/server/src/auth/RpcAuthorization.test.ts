@@ -33,6 +33,19 @@ import {
 import * as RpcAuthorization from "./RpcAuthorization.ts";
 
 describe("RPC authorization scopes", () => {
+  it("allows native agent inspection separately from setup and opening a chat", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.museAgentsStatus)).toBe(AuthOrchestrationReadScope);
+    expect(requiredScopeForRpcMethod(WS_METHODS.museAgentsProfile)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.museAgentsSetup)).toBe(AuthSettingsWriteScope);
+    expect(requiredScopeForRpcMethod(WS_METHODS.museAgentsOpenThread)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.nativeAgentsOpenThread)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
   it("separates bot reads, messaging, and environment settings", () => {
     for (const method of [
       WS_METHODS.grokBotsStatus,
