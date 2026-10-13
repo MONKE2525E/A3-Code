@@ -112,6 +112,25 @@ const unitOf = (launch: { readonly args: ReadonlyArray<string> }) =>
   launch.args.find((arg) => arg.startsWith("--unit="))?.slice("--unit=".length) ?? "";
 
 describe("AgentScope service", () => {
+  it.effect("preserves OOM attribution after cleanup resets the failed unit", () =>
+    withFakeSystemd(({ scope, units }) =>
+      Effect.gen(function* () {
+        const launch = yield* scope.wrap({
+          command: "agent",
+          args: [],
+          name: "t",
+          threadId: "oom",
+        });
+        units.set(unitOf(launch), { activeState: "failed", result: "oom-kill" });
+        yield* launch.cleanup!;
+        units.delete(unitOf(launch));
+        expect(yield* scope.oomKilled("oom")).toBe(true);
+        yield* scope.clear("oom");
+        expect(yield* scope.oomKilled("oom")).toBe(false);
+      }),
+    ),
+  );
+
   it.effect("reaps only the released launch's scope, once, after its leader exits", () =>
     withFakeSystemd(({ scope, units, kills }) =>
       Effect.gen(function* () {

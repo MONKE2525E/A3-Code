@@ -2966,9 +2966,17 @@ it.layer(
   it.effect("scoped runtime shutdown stops active terminals cleanly", () =>
     Effect.gen(function* () {
       const scope = yield* Scope.make("sequential");
+      const reaped = yield* Ref.make(0);
       const { manager, ptyAdapter } = yield* createManager(5, {
         processKillGraceMs: 10,
-      }).pipe(Effect.provideService(Scope.Scope, scope));
+      }).pipe(
+        Effect.provideService(Scope.Scope, scope),
+        Effect.provideService(AgentScope, {
+          ...AgentScope.defaultValue(),
+          wrap: ({ command, args }) =>
+            Effect.succeed({ command, args, cleanup: Ref.update(reaped, (count) => count + 1) }),
+        }),
+      );
       yield* manager.open(openInput());
       const process = ptyAdapter.processes[0];
       expect(process).toBeDefined();
@@ -2981,6 +2989,7 @@ it.layer(
 
       assert.equal(process.killSignals[0], "SIGTERM");
       expect(process.killSignals).toContain("SIGKILL");
+      assert.equal(yield* Ref.get(reaped), 1);
     }).pipe(Effect.provide(TestClock.layer())),
   );
 });

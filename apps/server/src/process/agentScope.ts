@@ -317,6 +317,10 @@ export const make = Effect.gen(function* () {
             yield* Effect.logWarning("Could not inspect agent scope during cleanup", { unit });
             return;
           }
+          if (threadId !== undefined && (state.result === "oom-kill" || state.oomKills > 0)) {
+            const tracked = scopeByThread.get(threadId);
+            if (tracked?.unit === unit) tracked.oomKilled = true;
+          }
           if (classifyScope(state) === "running" || classifyScope(state) === "stopping") {
             const killed = yield* run(scope.systemctl, [
               "--user",
