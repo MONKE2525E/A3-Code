@@ -1,5 +1,4 @@
 import { EnvironmentId, type GrokBot } from "@t3tools/contracts";
-import type { SearchMiddleware } from "@tanstack/react-router";
 
 import {
   GROK_BOT_AVATAR_KINDS,
@@ -82,11 +81,6 @@ export function retainGrokBotSettingsBotIdSearch<T extends GrokBotSettingsSearch
     ? { ...next, botId: previous.botId }
     : next;
 }
-
-export const retainGrokBotSettingsBotId: SearchMiddleware<GrokBotSettingsSearch> = ({
-  search,
-  next,
-}) => retainGrokBotSettingsBotIdSearch(search, next(search));
 
 /**
  * Old `/settings/grok-bots` links land on Providers. A stale `instanceId` is dropped and the
@@ -285,7 +279,7 @@ export function environmentChangeSearch(
 }
 
 /** Settings-search ids that live in the Grok Bot area of Providers. */
-export function isGrokBotSettingsSearchItem(id: string): boolean {
+function isGrokBotSettingsSearchItem(id: string): boolean {
   return (
     id === "grok-bots" ||
     id === "grok-bots-bridge" ||

@@ -6,7 +6,6 @@
 import type {
   PullRequestAction,
   PullRequestActor,
-  PullRequestCommit,
   PullRequestCheck,
   PullRequestChecksState as ContractPullRequestChecksState,
   PullRequestComment,
@@ -32,7 +31,7 @@ export interface PullRequestHandoffComment {
   readonly pullRequest?: PullRequestContextMetadata | undefined;
 }
 
-export function inferReviewCommentFenceLanguage(filePath: string): string {
+function inferReviewCommentFenceLanguage(filePath: string): string {
   const normalizedPath = filePath.replaceAll("\\", "/");
   const fileName = normalizedPath.slice(normalizedPath.lastIndexOf("/") + 1).toLowerCase();
   const extensionIndex = fileName.lastIndexOf(".");
@@ -50,31 +49,6 @@ export const PULL_REQUEST_MERGE_METHOD_LABELS: Record<PullRequestMergeMethod, st
   squash: "Squash and merge",
   rebase: "Rebase and merge",
 };
-
-/** Old environments keep their existing actions; new ones must finish stack discovery first. */
-export function allowsSinglePullRequestMerge(input: {
-  supportsStackActions: boolean;
-  hasStack: boolean;
-  stackPending: boolean;
-  stackError: string | null;
-}): boolean {
-  return (
-    !input.supportsStackActions ||
-    (!input.hasStack && !input.stackPending && input.stackError === null)
-  );
-}
-
-export function resolvePullRequestMergeMethod(
-  allowed: ReadonlyArray<PullRequestMergeMethod>,
-  current: PullRequestMergeMethod | null,
-  projectDefault: PullRequestMergeMethod | undefined,
-  lastSelected: PullRequestMergeMethod,
-): PullRequestMergeMethod {
-  for (const method of [current, projectDefault, lastSelected]) {
-    if (method && allowed.includes(method)) return method;
-  }
-  return allowed[0] ?? "merge";
-}
 
 export type PullRequestPrimaryControl =
   | "resolve"
@@ -136,14 +110,14 @@ export function pullRequestHandoffLabels(inThisThread: boolean) {
  * at all. The stripped text decides that and nothing else: the body itself is passed on whole,
  * because a comment demonstrating an HTML comment inside a code fence still has to show it.
  */
-export function visibleBody(body: string): string | null {
+function visibleBody(body: string): string | null {
   return body.replace(/<!--[\s\S]*?-->/gu, "").trim().length === 0 ? null : body.trim();
 }
 
 const FINDING_LIMIT = 20;
 const FINDING_BODY_MAX_LENGTH = 1_000;
 
-export function bounded(value: string): string {
+function bounded(value: string): string {
   const trimmed = value.trim();
   return trimmed.length <= FINDING_BODY_MAX_LENGTH
     ? trimmed
@@ -151,7 +125,7 @@ export function bounded(value: string): string {
 }
 
 /** Single-line form, for the parts that are read inside a sentence of the prompt. */
-export function boundedField(value: string): string {
+function boundedField(value: string): string {
   return bounded(value.replace(/\s+/gu, " "));
 }
 
@@ -161,7 +135,7 @@ export function boundedField(value: string): string {
  * travels with it: the thread names a line of the pull request's diff, which the fresh checkout
  * has not fetched and the reader can open for themselves.
  */
-export function reviewThreadContext(
+function reviewThreadContext(
   thread: PullRequestReviewThread,
   pullRequestNumber: number,
 ): PullRequestHandoffComment {
@@ -308,7 +282,7 @@ export function buildFixFindingsHandoff(input: {
  * writes. A page of preamble sitting in the field is something to scroll past and delete before
  * they can type their own sentence; in a chip it is one line they can read, keep, or throw away.
  */
-export function pullRequestContextComment(
+function pullRequestContextComment(
   input: {
     readonly number: number;
     readonly title: string;
@@ -499,73 +473,6 @@ export function handoffPrompt(
 /** A review that says something about the change itself, rather than only carrying remarks. */
 export type PullRequestReviewOutcome = "approved" | "changes-requested" | "dismissed";
 
-/**
- * Which review states are a verdict. Hosts spell the same three differently — GitHub reports
- * `CHANGES_REQUESTED`, Bitbucket `changes_requested` — so case and separator are ignored, and
- * anything else (GitHub's `COMMENTED`, a state no host here reports yet) is not a verdict.
- */
-export function pullRequestReviewOutcome(
-  reviewState: string | null,
-): PullRequestReviewOutcome | null {
-  switch (reviewState?.trim().toLowerCase().replaceAll("_", "-")) {
-    case "approved":
-      return "approved";
-    case "changes-requested":
-      return "changes-requested";
-    case "dismissed":
-      return "dismissed";
-    default:
-      return null;
-  }
-}
-
-/**
- * An instant as a number, because the text is not the order. Every host returns ISO-8601 but not
- * all of them in UTC, and `2026-07-05T01:00:00+02:00` sorts after `2026-07-05T00:30:00Z` as text
- * while falling an hour and a half before it in time. NaN for anything unparseable, which every
- * caller treats as "cannot say" rather than as a position.
- */
-function instant(iso: string): number {
-  return Date.parse(iso);
-}
-
-/**
- * The newest commit on the branch, which is what a verdict is current against. Null where the
- * host reported no commits — or none with a timestamp that parses — since nothing can then be
- * said to predate them.
- */
-export function newestPullRequestCommitAt(
-  commits: ReadonlyArray<PullRequestCommit>,
-): string | null {
-  let newest: string | null = null;
-  let newestAt = Number.NEGATIVE_INFINITY;
-  for (const commit of commits) {
-    const at = instant(commit.committedDate);
-    if (Number.isNaN(at) || at <= newestAt) continue;
-    newest = commit.committedDate;
-    newestAt = at;
-  }
-  return newest;
-}
-
-/**
- * Whether a verdict was given before the code it was given on.
- *
- * Measured against commit dates, which is the only thing the detail carries. That is a proxy and
- * not the question: a commit date says when the work was written, not when it reached this change
- * request, so pushing a branch of older commits after an approval leaves the approval reading as
- * current, and a rebase re-dates commits a verdict already covered. Answering it exactly needs
- * the host's own review-to-commit link — GitHub hangs a commit off every review — which no
- * adapter reads yet. Until one does, this errs towards leaving a verdict alone: it dims only
- * where the branch plainly moved on.
- */
-export function isPullRequestVerdictStale(at: string, newestCommitAt: string | null): boolean {
-  if (newestCommitAt === null) return false;
-  const verdictAt = instant(at);
-  const commitAt = instant(newestCommitAt);
-  return !Number.isNaN(verdictAt) && !Number.isNaN(commitAt) && verdictAt < commitAt;
-}
-
 export interface PullRequestReviewOutcomeEntry {
   /**
    * What made this entry its own reviewer. A login where the host reported one, and otherwise the
@@ -578,77 +485,4 @@ export interface PullRequestReviewOutcomeEntry {
   readonly at: string;
   /** Commits landed after this verdict, so it speaks for code that is no longer on the branch. */
   readonly stale: boolean;
-}
-
-/**
- * Where each reviewer landed, which is what "is this approved?" actually asks. One entry per
- * person and only their last word: a host keeps every review somebody ever submitted, and an
- * approval later followed by a request for changes is not an approval any more. A dismissal is a
- * verdict taken back, so it leaves nothing to show rather than showing itself.
- */
-export function latestPullRequestReviewOutcomes(
-  comments: ReadonlyArray<PullRequestComment>,
-  /** Left empty by a caller with no commits to hand, which makes no verdict stale. */
-  commits: ReadonlyArray<PullRequestCommit> = [],
-): ReadonlyArray<PullRequestReviewOutcomeEntry> {
-  const newestCommitAt = newestPullRequestCommitAt(commits);
-  const latest = new Map<string, PullRequestReviewOutcomeEntry>();
-  for (const comment of comments) {
-    const outcome = pullRequestReviewOutcome(comment.reviewState);
-    if (outcome === null) continue;
-    // Two deleted accounts are two reviewers. Keying both as "ghost" would let one overwrite the
-    // other and undercount the verdicts, so a review with no author identity stands alone.
-    const login = comment.author?.login ?? `ghost:${comment.id}`;
-    const current = latest.get(login);
-    // Not every host returns its reviews in order, so the newest wins rather than the last read.
-    if (current !== undefined && instant(current.at) > instant(comment.createdAt)) continue;
-    latest.set(login, {
-      key: login,
-      actor: comment.author,
-      outcome,
-      at: comment.createdAt,
-      stale: isPullRequestVerdictStale(comment.createdAt, newestCommitAt),
-    });
-  }
-  return [...latest.values()].filter((entry) => entry.outcome !== "dismissed");
-}
-
-/** One reviewer, however a host happens to have cased their login this time. */
-function reviewerKey(login: string): string {
-  return login.toLowerCase();
-}
-
-/**
- * Everyone whose face belongs on the Reviewers row: the people a review was asked of, then anyone
- * who ruled without being asked. A host drops a reviewer from the requested set once they have
- * reviewed, and their verdict is what the row exists to show.
- */
-export function pullRequestReviewerEntries(
-  reviewers: ReadonlyArray<PullRequestActor>,
-  comments: ReadonlyArray<PullRequestComment>,
-  commits: ReadonlyArray<PullRequestCommit>,
-) {
-  const outcomes = latestPullRequestReviewOutcomes(comments, commits);
-  const byLogin = new Map(
-    outcomes.flatMap((entry) =>
-      entry.actor ? [[reviewerKey(entry.actor.login), entry] as const] : [],
-    ),
-  );
-  const requested = new Set(reviewers.map((actor) => reviewerKey(actor.login)));
-  return [
-    ...reviewers.map((actor) => ({
-      key: actor.login,
-      actor: actor as PullRequestActor | null,
-      outcome: byLogin.get(reviewerKey(actor.login))?.outcome ?? null,
-      stale: byLogin.get(reviewerKey(actor.login))?.stale ?? false,
-    })),
-    ...outcomes
-      .filter((entry) => entry.actor === null || !requested.has(reviewerKey(entry.actor.login)))
-      .map((entry) => ({
-        key: entry.key,
-        actor: entry.actor,
-        outcome: entry.outcome as PullRequestReviewOutcome | null,
-        stale: entry.stale,
-      })),
-  ];
 }

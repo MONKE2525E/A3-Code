@@ -182,7 +182,7 @@ function describeTime(minuteField: string, hourField: string): string | null {
 }
 
 /** Human label for a native cron string. Unrecognized expressions stay null. */
-export function grokBotCronLabel(schedule: string): string | null {
+function grokBotCronLabel(schedule: string): string | null {
   const fields = cronBody(schedule).split(" ");
   if (fields.length !== 5) return null;
   const [minute, hour, dayOfMonth, month, dayOfWeek] = fields;

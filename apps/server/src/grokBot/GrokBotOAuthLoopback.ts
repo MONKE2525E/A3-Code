@@ -7,7 +7,7 @@ import * as NodeHttp from "node:http";
  * knows; the first free one is used. A busy port is never taken over.
  */
 export const LOOPBACK_PORTS: readonly number[] = [8787, 18787, 28787, 31787];
-export const RELAY_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback";
+const RELAY_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback";
 const RELAY_LOOPBACK_SUFFIX = ".tgd";
 const DEFAULT_PORT = LOOPBACK_PORTS[0];
 

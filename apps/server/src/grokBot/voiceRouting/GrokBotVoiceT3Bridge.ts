@@ -24,11 +24,10 @@ import * as Direct from "./GrokBotVoiceOrchestration.ts";
  * on the desktop, which is the execution path voice calls must not use; the rest only steer
  * the conversation and stay native.
  */
-export const NATIVE_EXECUTION_TOOLS: ReadonlySet<string> = new Set(["send_task"]);
-export const NATIVE_CONTROL_TOOLS: ReadonlySet<string> = new Set(["end_the_call", "stay_silent"]);
+const NATIVE_EXECUTION_TOOLS: ReadonlySet<string> = new Set(["send_task"]);
+const NATIVE_CONTROL_TOOLS: ReadonlySet<string> = new Set(["end_the_call", "stay_silent"]);
 
-export const T3_RUN_TASK = "t3_run_task";
-export const T3_PROJECT_LIST = "t3_project_list";
+const T3_RUN_TASK = "t3_run_task";
 export const T3_TASK_PROGRESS = "t3_task_progress";
 export const T3_CHAT_UPDATES = "t3_chat_updates";
 
