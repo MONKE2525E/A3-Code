@@ -187,7 +187,13 @@ export function spokenMessageFrame(message: string): string {
   });
 }
 
-export function truncateFrame(cut: { itemId: string; contentIndex: number; audioEndMs: number }) {
+export interface VoiceAudioCut {
+  readonly itemId: string;
+  readonly contentIndex: number;
+  readonly audioEndMs: number;
+}
+
+export function truncateFrame(cut: VoiceAudioCut) {
   return JSON.stringify({
     type: "conversation.item.truncate",
     item_id: cut.itemId,
@@ -210,20 +216,45 @@ export type VoiceServerEvent =
   | {
       readonly type: "audio.delta";
       readonly itemId: string | null;
-      readonly contentIndex: number;
+      readonly responseId: string | null;
+      readonly contentIndex: number | null;
       readonly samples: Float32Array;
     }
+  | { readonly type: "item.ended"; readonly itemId: string | null }
+  | { readonly type: "item.truncated"; readonly itemId: string | null }
   | { readonly type: "speech.started" }
   | { readonly type: "speech.stopped" }
-  | { readonly type: "transcript.user"; readonly itemId: string | null; readonly text: string }
+  | {
+      readonly type: "transcript.user";
+      readonly itemId: string | null;
+      readonly text: string;
+      readonly final: boolean;
+    }
+  | {
+      readonly type: "transcript.item";
+      readonly itemId: string | null;
+      readonly responseId: string | null;
+      readonly speaker: "user" | "assistant";
+      readonly text: string;
+      /** Explicit caller text input; generic conversation text can be startup context. */
+      readonly inputText: string | null;
+    }
   | {
       readonly type: "transcript.assistant.delta";
       readonly itemId: string | null;
+      readonly responseId: string | null;
       readonly delta: string;
+    }
+  | {
+      readonly type: "transcript.assistant.final";
+      readonly itemId: string | null;
+      readonly responseId: string | null;
+      readonly text: string;
     }
   | {
       readonly type: "tool.call";
       readonly callId: string;
+      readonly responseId: string | null;
       readonly name: string;
       readonly argumentsJson: string;
     }
@@ -254,6 +285,7 @@ export function parseServerEvent(raw: string): VoiceServerEvent | null {
   }
   if (!isRecord(value) || typeof value.type !== "string") return null;
   const itemId = str(value.item_id) ?? (isRecord(value.item) ? str(value.item.id) : null);
+  const responseId = str(value.response_id);
   switch (value.type) {
     case "session.created":
       return { type: "session.ready" };
@@ -284,10 +316,13 @@ export function parseServerEvent(raw: string): VoiceServerEvent | null {
       return {
         type: "audio.delta",
         itemId,
+        responseId,
         contentIndex:
-          typeof value.content_index === "number" && Number.isInteger(value.content_index)
+          typeof value.content_index === "number" &&
+          Number.isInteger(value.content_index) &&
+          value.content_index >= 0
             ? value.content_index
-            : 0,
+            : null,
         samples: pcm16ToFloat(fromBase64(delta)),
       };
     }
@@ -295,23 +330,86 @@ export function parseServerEvent(raw: string): VoiceServerEvent | null {
       return { type: "speech.started" };
     case "input_audio_buffer.speech_stopped":
       return { type: "speech.stopped" };
+    case "conversation.item.input_audio_transcription.updated":
     case "conversation.item.input_audio_transcription.completed": {
-      const t = text(value.transcript) ?? text(value.text);
+      const t = str(value.transcript) ?? str(value.text);
       return t === null
         ? { type: "unsupported", wireType: value.type }
-        : { type: "transcript.user", itemId, text: t };
+        : {
+            type: "transcript.user",
+            itemId,
+            text: t,
+            final: value.type === "conversation.item.input_audio_transcription.completed",
+          };
     }
     case "response.audio_transcript.delta":
     case "response.output_audio_transcript.delta": {
       const delta = str(value.delta);
-      return delta === null ? null : { type: "transcript.assistant.delta", itemId, delta };
+      return delta === null
+        ? null
+        : { type: "transcript.assistant.delta", itemId, responseId, delta };
     }
+    case "response.audio_transcript.done":
+    case "response.output_audio_transcript.done": {
+      const transcript = str(value.transcript);
+      return transcript === null
+        ? null
+        : { type: "transcript.assistant.final", itemId, responseId, text: transcript };
+    }
+    case "conversation.item.added": {
+      const item = value.item;
+      if (
+        !isRecord(item) ||
+        item.type !== "message" ||
+        (item.role !== "user" && item.role !== "assistant") ||
+        !Array.isArray(item.content)
+      )
+        return { type: "unsupported", wireType: value.type };
+      const transcript = item.content
+        .flatMap((part: unknown) => {
+          if (!isRecord(part)) return [];
+          if (part.type === "text" || part.type === "input_text" || part.type === "output_text")
+            return str(part.text) ?? [];
+          if (part.type === "audio" || part.type === "input_audio" || part.type === "output_audio")
+            return str(part.transcript) ?? [];
+          return [];
+        })
+        .join("");
+      const inputText =
+        item.role === "user" && responseId === null
+          ? item.content
+              .flatMap((part: unknown) =>
+                isRecord(part) && part.type === "input_text" ? (str(part.text) ?? []) : [],
+              )
+              .join("")
+          : "";
+      return transcript.length === 0
+        ? { type: "unsupported", wireType: value.type }
+        : {
+            type: "transcript.item",
+            itemId,
+            responseId,
+            speaker: item.role,
+            text: transcript,
+            inputText: inputText.trim() ? inputText : null,
+          };
+    }
+    case "response.output_item.done":
+      return { type: "item.ended", itemId };
+    case "conversation.item.truncated":
+      return { type: "item.truncated", itemId };
     case "response.function_call_arguments.done": {
       const callId = str(value.call_id);
       const name = str(value.name);
       return callId === null || name === null
         ? null
-        : { type: "tool.call", callId, name, argumentsJson: str(value.arguments) ?? "{}" };
+        : {
+            type: "tool.call",
+            callId,
+            responseId,
+            name,
+            argumentsJson: str(value.arguments) ?? "{}",
+          };
     }
     case "error": {
       const error = isRecord(value.error) ? value.error : value;

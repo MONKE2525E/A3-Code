@@ -30,6 +30,7 @@ interface FakeSource {
   buffer: { duration: number } | null;
   startedAt: number | null;
   stopped: boolean;
+  ended(): void;
   connect(): void;
   addEventListener(type: string, listener: () => void, options?: unknown): void;
   start(at: number): void;
@@ -51,8 +52,11 @@ function fakeContext(sampleRate = 24_000) {
         buffer: null,
         startedAt: null,
         stopped: false,
+        ended() {},
         connect() {},
-        addEventListener() {},
+        addEventListener(_type, listener) {
+          this.ended = listener;
+        },
         start(at) {
           this.startedAt = at;
         },
@@ -163,6 +167,45 @@ describe("voice playback", () => {
 });
 
 describe("voice audio lifecycle", () => {
+  it("cuts at cumulative heard PCM time, retaining ended chunks and excluding queued chunks", () => {
+    const context = fakeContext();
+    const player = createVoicePlayer(context as unknown as AudioContext);
+    const part = { itemId: "assistant-a", contentIndex: 2 };
+    player.enqueue(new Float32Array(12_000), part);
+    context.currentTime = 1.5;
+    context.sources[0]!.ended();
+    player.enqueue(new Float32Array(12_000), part);
+    player.enqueue(new Float32Array(12_000), part);
+    player.enqueue(new Float32Array(12_000), { itemId: "assistant-b", contentIndex: 1 });
+    context.currentTime = 1.625;
+    expect(player.clear()).toEqual([
+      { itemId: "assistant-a", contentIndex: 2, audioEndMs: 625 },
+      { itemId: "assistant-b", contentIndex: 1, audioEndMs: 0 },
+    ]);
+    expect(context.sources.slice(1).every((source) => source.stopped)).toBe(true);
+    context.sources[1]!.ended();
+    expect(player.clear()).toEqual([]);
+  });
+
+  it("does not invent truncation metadata for an unidentified audio frame", () => {
+    const context = fakeContext();
+    const player = createVoicePlayer(context as unknown as AudioContext);
+    player.enqueue(new Float32Array(12_000));
+    player.enqueue(new Float32Array(12_000), { itemId: "a", contentIndex: null });
+    context.currentTime = 1.25;
+    expect(player.clear()).toEqual([]);
+  });
+
+  it("forgets fully played previous items while retaining the current generating item's progress", () => {
+    const context = fakeContext();
+    const player = createVoicePlayer(context as unknown as AudioContext);
+    player.enqueue(new Float32Array(12_000), { itemId: "old", contentIndex: 0 });
+    context.currentTime = 1.5;
+    context.sources[0]!.ended();
+    player.enqueue(new Float32Array(12_000), { itemId: "current", contentIndex: 0 });
+    context.currentTime = 1.75;
+    expect(player.clear()).toEqual([{ itemId: "current", contentIndex: 0, audioEndMs: 250 }]);
+  });
   it("requests a mono mic with echo cancellation and noise suppression", async () => {
     const context = fakeContext();
     const requested: unknown[] = [];
