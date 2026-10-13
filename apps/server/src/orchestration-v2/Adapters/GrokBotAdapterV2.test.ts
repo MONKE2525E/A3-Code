@@ -475,6 +475,104 @@ it.effect("projects owned echo reactions onto the original T3 user message", () 
   }).pipe(Effect.provide(IdAllocator.layer)),
 );
 
+it.effect.each(["missing", "empty"] as const)(
+  "clears persisted reaction pills when native returns a %s collection",
+  (collection) =>
+    Effect.gen(function* () {
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const turn = yield* makeTurn;
+      const identity = grokBotTurnIdentity(turn);
+      const original = appUserMessage(turn, [
+        { emoji: "👍", from: "bot", messageId: turn.input.message.messageId },
+      ]);
+      const originalItem = {
+        ...grokBotMessageTurnItem(original, { native: nativeSession, turn: identity }).turnItem,
+        id: idAllocator.derive.userTurnItem({ messageId: original.id }),
+        ordinal: 100,
+      };
+      let ownedOutputs = 0;
+      const projection = makeGrokBotTranscriptProjection({
+        native: nativeSession,
+        idAllocator,
+        existingMessage: (id) => Effect.succeed(id === original.id ? original : undefined),
+        existingUserTurnItem: (id) => Effect.succeed(id === original.id ? originalItem : null),
+        onOwnedOutput: () => ownedOutputs++,
+      });
+      projection.registerManagedTurn(identity);
+      const nativeEcho = echo(identity.messageId);
+      const row = {
+        ...nativeEcho,
+        value: {
+          ...nativeEcho.value,
+          ...(collection === "empty" ? { reactions: [] } : {}),
+        },
+      };
+      const events = yield* projection.project(transcript([row]));
+      const { grokBotReactions: _messageReactions, ...messageWithoutReactions } = original;
+      const { grokBotReactions: _itemReactions, ...itemWithoutReactions } = originalItem;
+      assert.deepEqual(
+        events.filter((event) => event.type === "message.updated").map((event) => event.message),
+        [messageWithoutReactions],
+      );
+      assert.deepEqual(
+        events.filter((event) => event.type === "turn_item.updated").map((event) => event.turnItem),
+        [itemWithoutReactions],
+      );
+      assert.deepEqual(yield* projection.project(transcript([{ ...row, updatedSeq: "2" }])), []);
+      assert.equal(ownedOutputs, 0);
+    }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect("bounds native reaction projection to the first 32 entries", () =>
+  Effect.gen(function* () {
+    const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    const turn = yield* makeTurn;
+    const identity = grokBotTurnIdentity(turn);
+    const original = appUserMessage(turn);
+    const originalItem = {
+      ...grokBotMessageTurnItem(original, { native: nativeSession, turn: identity }).turnItem,
+      id: idAllocator.derive.userTurnItem({ messageId: original.id }),
+      ordinal: 100,
+    };
+    let ownedOutputs = 0;
+    const projection = makeGrokBotTranscriptProjection({
+      native: nativeSession,
+      idAllocator,
+      existingMessage: (id) => Effect.succeed(id === original.id ? original : undefined),
+      existingUserTurnItem: (id) => Effect.succeed(id === original.id ? originalItem : null),
+      onOwnedOutput: () => ownedOutputs++,
+    });
+    projection.registerManagedTurn(identity);
+    const nativeEcho = echo(identity.messageId);
+    const nativeReactions = Array.from({ length: 80 }, (_, index) => ({
+      emoji: String.fromCodePoint(0x1f600 + index),
+      by: index < 32 ? "me" : nativeSession.botId,
+    }));
+    const events = yield* projection.project(
+      transcript([
+        {
+          ...nativeEcho,
+          value: { ...nativeEcho.value, reactions: nativeReactions },
+        },
+      ]),
+    );
+    const expectedReactions = nativeReactions.slice(0, 32).map((reaction) => ({
+      emoji: reaction.emoji,
+      from: "user" as const,
+      messageId: original.id,
+    }));
+    assert.deepEqual(
+      events.filter((event) => event.type === "message.updated").map((event) => event.message),
+      [{ ...original, grokBotReactions: expectedReactions }],
+    );
+    assert.deepEqual(
+      events.filter((event) => event.type === "turn_item.updated").map((event) => event.turnItem),
+      [{ ...originalItem, grokBotReactions: expectedReactions }],
+    );
+    assert.equal(ownedOutputs, 0);
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
 it.effect.each([false, true])(
   "restores a reaction-only reply on replay with persisted pill = %s",
   (persisted) =>

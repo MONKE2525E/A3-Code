@@ -212,7 +212,7 @@ function grokBotNativeReactions(
   const reactions: ProjectedGrokBotReaction[] = [];
   const seen = new Set<string>();
   const ownedBotReactionKeys = new Set<string>();
-  for (const candidate of value) {
+  for (const candidate of value.slice(0, 32)) {
     if (!isRecord(candidate)) continue;
     const emoji = candidate.emoji;
     const by = candidate.by;
@@ -434,8 +434,7 @@ export const makeGrokBotTranscriptProjection = (input: {
         entry.role === "user" &&
         grokBotMessagePeer(input.native.botId, entry) === undefined &&
         entry.clientNonce !== undefined &&
-        managedMessageIds.has(entry.clientNonce) &&
-        Array.isArray(entry.reactions)
+        managedMessageIds.has(entry.clientNonce)
       ) {
         const turn = turns.get(entry.clientNonce);
         const appMessageId = turn?.userMessageId;
@@ -453,7 +452,7 @@ export const makeGrokBotTranscriptProjection = (input: {
             stored.role === "user"
           ) {
             const projected = grokBotNativeReactions(
-              entry.reactions,
+              entry.reactions ?? [],
               input.native.botId,
               appMessageId,
             );
