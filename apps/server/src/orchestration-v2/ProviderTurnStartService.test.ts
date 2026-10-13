@@ -571,7 +571,8 @@ effectIt.effect(
     Effect.gen(function* () {
       let allowed = false;
       const harness = makeLocalCommandHarness({
-        text: "/logout",
+        text: "Continue",
+        failReadsAfterRunning: true,
         acquire: () => Effect.sync(() => allowed),
       });
       expect(yield* harness.start).toBe("deferred");
@@ -593,10 +594,10 @@ effectIt.effect(
       allowed = true;
       yield* harness.start;
       expect(harness.projection().runs.at(-1)).toMatchObject({
-        status: "completed",
+        status: "running",
         resourceWait: false,
       });
-      expect(harness.tryHandlePromptCommand).toHaveBeenCalledOnce();
+      expect(harness.startRootRun).toHaveBeenCalledOnce();
       expect(
         harness.projection().turnItems.filter((item) => item.title === "Resources available"),
       ).toHaveLength(1);
@@ -604,6 +605,19 @@ effectIt.effect(
         harness.projection().turnItems.some((item) => item.title === "Waiting for host resources"),
       ).toBe(false);
     }),
+);
+
+effectIt.effect("handles local sign-out without waiting for provider capacity", () =>
+  Effect.gen(function* () {
+    const acquire = vi.fn(() => Effect.succeed(false));
+    const harness = makeLocalCommandHarness({ text: "/logout", acquire });
+    yield* harness.start;
+    expect(acquire).not.toHaveBeenCalled();
+    expect(harness.projection().runs.at(-1)?.status).toBe("completed");
+    expect(harness.tryHandlePromptCommand).toHaveBeenCalledOnce();
+    expect(harness.open).not.toHaveBeenCalled();
+    expect(harness.startRootRun).not.toHaveBeenCalled();
+  }),
 );
 
 effectIt.effect("terminalizes a starting run when its provider session cannot open", () =>

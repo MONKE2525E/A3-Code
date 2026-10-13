@@ -290,77 +290,6 @@ export const layer: Layer.Layer<
           cause: `Run ${runId} is missing its execution projection state.`,
         });
       }
-      const admitted = yield* admission.acquire({ threadId: input.threadId, runId });
-      // Capacity waits precede the provider turn. Keep "starting" so steering,
-      // fork, and merge rules cannot mistake them for post-provider waiting.
-      const resourceWait = run.resourceWait === true;
-      if (!admitted && resourceWait) return "deferred" as const;
-      if (!admitted || resourceWait) {
-        const now = yield* DateTime.now;
-        const noticeId = TurnItemId.make(`resource-wait:${runId}`);
-        const previous = yield* projectionStore.getTurnItem({
-          threadId: input.threadId,
-          itemId: noticeId,
-        });
-        const notice: OrchestrationV2TurnItem = {
-          id: noticeId,
-          threadId: input.threadId,
-          runId,
-          nodeId: rootNode.id,
-          providerThreadId: providerThread.id,
-          providerTurnId: null,
-          nativeItemRef: null,
-          parentItemId: null,
-          ordinal:
-            previous?.ordinal ?? (yield* projectionStore.getNextTurnItemOrdinal(input.threadId)),
-          type: "system_notice",
-          status: "completed",
-          title: admitted ? "Resources available" : "Waiting for host resources",
-          message: admitted
-            ? "This turn can now start."
-            : "This turn is queued until other turns finish or CPU or memory pressure eases.",
-          startedAt: previous?.startedAt ?? now,
-          completedAt: now,
-          updatedAt: now,
-        };
-        const nextRun = {
-          ...run,
-          status: "starting" as const,
-          resourceWait: !admitted,
-        };
-        const payloads = [
-          { type: "run.updated", payload: nextRun },
-          { type: "turn-item.updated", payload: notice },
-        ] as const;
-        const events = yield* Effect.forEach(payloads, (event) =>
-          Effect.gen(function* () {
-            return {
-              ...event,
-              id: yield* idAllocator.allocate.event({ threadId: input.threadId }),
-              threadId: input.threadId,
-              runId,
-              nodeId: rootNode.id,
-              providerInstanceId: run.providerInstanceId,
-              occurredAt: now,
-            } satisfies OrchestrationV2DomainEvent;
-          }),
-        );
-        const written = yield* eventSink.writeIfRunCurrent({
-          threadId: input.threadId,
-          runId,
-          activeAttemptId: attempt.id,
-          expectedStatus: run.status,
-          events,
-        });
-        if (!written.committed) return;
-        if (!admitted) return "deferred" as const;
-        run = nextRun;
-        projection = {
-          ...projection,
-          runs: projection.runs.map((entry) => (entry.id === runId ? nextRun : entry)),
-          turnItems: [...projection.turnItems.filter((entry) => entry.id !== noticeId), notice],
-        };
-      }
       // Settles a run that never reached the provider: one signal turn item plus
       // terminal run, attempt and root node, written only while the run is still
       // the current starting attempt.
@@ -536,6 +465,77 @@ export const layer: Layer.Layer<
           });
           return;
         }
+      }
+      const admitted = yield* admission.acquire({ threadId: input.threadId, runId });
+      // Capacity waits precede the provider turn. Keep "starting" so steering,
+      // fork, and merge rules cannot mistake them for post-provider waiting.
+      const resourceWait = run.resourceWait === true;
+      if (!admitted && resourceWait) return "deferred" as const;
+      if (!admitted || resourceWait) {
+        const now = yield* DateTime.now;
+        const noticeId = TurnItemId.make(`resource-wait:${runId}`);
+        const previous = yield* projectionStore.getTurnItem({
+          threadId: input.threadId,
+          itemId: noticeId,
+        });
+        const notice: OrchestrationV2TurnItem = {
+          id: noticeId,
+          threadId: input.threadId,
+          runId,
+          nodeId: rootNode.id,
+          providerThreadId: providerThread.id,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal:
+            previous?.ordinal ?? (yield* projectionStore.getNextTurnItemOrdinal(input.threadId)),
+          type: "system_notice",
+          status: "completed",
+          title: admitted ? "Resources available" : "Waiting for host resources",
+          message: admitted
+            ? "This turn can now start."
+            : "This turn is queued until other turns finish or CPU or memory pressure eases.",
+          startedAt: previous?.startedAt ?? now,
+          completedAt: now,
+          updatedAt: now,
+        };
+        const nextRun = {
+          ...run,
+          status: "starting" as const,
+          resourceWait: !admitted,
+        };
+        const payloads = [
+          { type: "run.updated", payload: nextRun },
+          { type: "turn-item.updated", payload: notice },
+        ] as const;
+        const events = yield* Effect.forEach(payloads, (event) =>
+          Effect.gen(function* () {
+            return {
+              ...event,
+              id: yield* idAllocator.allocate.event({ threadId: input.threadId }),
+              threadId: input.threadId,
+              runId,
+              nodeId: rootNode.id,
+              providerInstanceId: run.providerInstanceId,
+              occurredAt: now,
+            } satisfies OrchestrationV2DomainEvent;
+          }),
+        );
+        const written = yield* eventSink.writeIfRunCurrent({
+          threadId: input.threadId,
+          runId,
+          activeAttemptId: attempt.id,
+          expectedStatus: run.status,
+          events,
+        });
+        if (!written.committed) return;
+        if (!admitted) return "deferred" as const;
+        run = nextRun;
+        projection = {
+          ...projection,
+          runs: projection.runs.map((entry) => (entry.id === runId ? nextRun : entry)),
+          turnItems: [...projection.turnItems.filter((entry) => entry.id !== noticeId), notice],
+        };
       }
       const { worktreePath, branch } = projection.thread;
       if (worktreePath !== null && branch !== null) {

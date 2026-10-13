@@ -450,7 +450,6 @@ export const make = Effect.gen(function* () {
           payload: {
             ...run,
             status: "queued",
-            resourceWait: false,
             queueHeld: true,
             queuePosition: index + 1,
           },

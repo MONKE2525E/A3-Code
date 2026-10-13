@@ -4912,6 +4912,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           const held = yield* orchestrator.getThreadProjection(threadId);
           assert.equal(held.runs[0]?.status, "queued");
           assert.isTrue(held.runs[0]?.queueHeld);
+          assert.isTrue(held.runs[0]?.resourceWait);
           assert.equal(held.attempts[0]?.status, "pending");
           assert.equal(held.nodes[0]?.status, "pending");
           yield* recovery.reconcile(type);
@@ -4932,6 +4933,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           yield* orchestrator.resumeQueuedRuns;
           const resumed = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
           assert.equal(resumed.status, "starting");
+          assert.isTrue(resumed.resourceWait);
           assert.equal(resumed.id, run.id);
           assert.equal(resumed.activeAttemptId, run.activeAttemptId);
           return;
