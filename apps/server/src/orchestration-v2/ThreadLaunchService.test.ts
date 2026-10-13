@@ -33,6 +33,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
@@ -2481,6 +2482,65 @@ it.effect("cancels tracked setup before provider work is released", () =>
       assert.isNull(projection.thread.worktreePath);
       assert.isEmpty(yield* outbox.listByCommandId(CommandId.make(`${input.commandId}:release`)));
     }).pipe(Effect.provide(harness.layer));
+  }),
+);
+
+it.effect("a late branch name cannot restore a cancelled worktree", () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const namingStarted = yield* Deferred.make<void>();
+    const releaseNaming = yield* Deferred.make<void>();
+    const renameRefused = Promise.withResolvers<void>();
+    const harness = makeHarness({
+      runSetup: () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+      generateBranchName: () =>
+        Deferred.succeed(namingStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseNaming)),
+          Effect.as({ branch: "late-branch" }),
+        ),
+    });
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      const tracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
+      const threads = yield* ThreadManagement.ThreadManagementService;
+      const input = launchInput({
+        command: "launch:late-rename",
+        thread: "thread:late-rename",
+        message: "Start",
+        workspace: { type: "worktree", baseRef: "main" },
+      });
+      const launched = yield* launches.launch(input);
+      yield* Deferred.await(entered);
+      yield* Deferred.await(namingStarted);
+      assert.isTrue(yield* tracker.cancel(launched.threadId));
+      assert.isNull((yield* threads.getThreadProjection(launched.threadId)).thread.worktreePath);
+      const afterSequence = yield* threads.getThreadEventSequence(launched.threadId);
+      yield* Deferred.succeed(releaseNaming, undefined);
+      // Wait for the rejected update's warning, or the stored update if the old race returns.
+      yield* Effect.raceFirst(
+        Effect.promise(() => renameRefused.promise),
+        threads
+          .streamStoredEventsFrom({
+            threadId: launched.threadId,
+            afterSequence,
+            eventType: "thread.metadata-updated",
+          })
+          .pipe(Stream.runHead, Effect.asVoid),
+      );
+      const projection = yield* threads.getThreadProjection(launched.threadId);
+      assert.isNull(projection.thread.worktreePath);
+      assert.isNull(projection.thread.branch);
+      assert.equal(projection.runs[0]?.status, "failed");
+      assert.equal(harness.removeWorktree.mock.calls.length, 1);
+      assert.equal(harness.renameBranch.mock.calls.length, 1);
+    }).pipe(
+      Effect.provide(harness.layer),
+      Effect.withLogger(
+        Logger.make(({ message }) => {
+          if (message.includes("Thread worktree branch rename failed")) renameRefused.resolve();
+        }),
+      ),
+    );
   }),
 );
 

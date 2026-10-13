@@ -521,6 +521,8 @@ const make = Effect.gen(function* () {
               threadId,
               branch: renamed.branch,
               worktreePath: worktreeCwd,
+              // Late naming must not reattach a checkout that was cancelled or rebound.
+              expectedWorktreePath: worktreeCwd,
             }),
           ),
           Effect.catchCause((cause) =>
