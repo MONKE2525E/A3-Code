@@ -14,6 +14,7 @@ import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as HostResources from "../resourceTelemetry/HostResources.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ResourceAdmission from "./ResourceAdmission.ts";
 
 const GiB = 1024 ** 3;
@@ -48,9 +49,9 @@ describe("agent work capacity", () => {
   });
 });
 
-it.effect(
-  "reserves concurrent starts, releases failed starts, and counts persisted running work",
-  () =>
+it.effect.each(["memory", "sqlite"] as const)(
+  "reserves concurrent starts, releases failed starts, and counts persisted running work in %s",
+  (storage) =>
     Effect.gen(function* () {
       const resources = yield* Ref.make(host);
       yield* Effect.gen(function* () {
@@ -146,7 +147,9 @@ it.effect(
           ResourceAdmission.layer.pipe(
             Layer.provideMerge(
               Layer.merge(
-                ProjectionStore.layerMemory,
+                storage === "memory"
+                  ? ProjectionStore.layerMemory
+                  : ProjectionStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
                 Layer.succeed(HostResources.HostResources, { read: Ref.get(resources) }),
               ),
             ),

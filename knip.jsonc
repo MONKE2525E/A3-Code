@@ -23,7 +23,9 @@
         "build-custom-mobile.ts",
         "knip-schemas.ts",
         "mobile-native-client.ts",
+        "perf-diagnostics.mjs",
         "setup-worktree.ts",
+        "verify-agent-scope.mjs",
       ],
     },
     "apps/server": {

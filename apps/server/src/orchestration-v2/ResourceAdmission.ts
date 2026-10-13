@@ -42,19 +42,17 @@ const make = Effect.gen(function* () {
     acquire: (input: { readonly runId: RunId; readonly threadId: ThreadId }) =>
       mutex.withPermits(1)(
         Effect.gen(function* () {
-          const snapshot = yield* projections.getShellSnapshot();
-          const threads = new Map(snapshot.threads.map((thread) => [thread.id, thread]));
+          const runs = yield* projections.getResourceAdmissionRuns;
+          const byRun = new Map(runs.map((run) => [run.runId, run]));
           for (const [runId, threadId] of reservations) {
-            const thread = threads.get(threadId);
-            if (thread?.activeRunId !== runId || thread.activityRunStatus !== "starting") {
+            const run = byRun.get(runId);
+            if (run?.threadId !== threadId || run.status !== "starting") {
               reservations.delete(runId);
             }
           }
           if (reservations.has(input.runId)) return true;
-          const running = snapshot.threads.filter(
-            (thread) => thread.activityRunStatus === "running",
-          );
-          if (running.some((thread) => thread.activeRunId === input.runId)) return true;
+          const running = runs.filter((run) => run.status === "running");
+          if (running.some((run) => run.runId === input.runId)) return true;
           // Waiting parents/approvals consume no admission slot, so delegated children can run.
           const capacity = agentWorkCapacity(yield* host.read, running.length);
           if (running.length + reservations.size >= capacity) return false;

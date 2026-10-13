@@ -3348,7 +3348,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
       const emitEvent = emit(events, command);
       const activeRunIds = new Set(
-        projection.runs.filter((run) => run.status === "queued").map((run) => run.id),
+        projection.runs
+          .filter((run) => run.status === "queued" || run.status === "starting")
+          .map((run) => run.id),
       );
       for (const run of projection.runs.filter((candidate) => activeRunIds.has(candidate.id))) {
         yield* emitEvent({
@@ -11253,6 +11255,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.model-selection.set":
       case "provider.switch":
         yield* dispatchThreadMutation(command, events, effects);
+        if (command.type === "thread.archive") {
+          cancelUnsettledEffects = {
+            effectTypes: ["provider-turn.start", "provider-turn.restart"],
+            reason: "Thread was archived before the provider turn started.",
+          };
+        }
         break;
       case "thread.pull-request-watch.sync":
         yield* dispatchPullRequestWatchSync(command, events, effects);

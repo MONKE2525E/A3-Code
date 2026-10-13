@@ -22,8 +22,6 @@ import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EffectWorker from "./EffectWorker.ts";
-import * as ResourceAdmission from "./ResourceAdmission.ts";
-import * as HostResources from "../resourceTelemetry/HostResources.ts";
 import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -317,9 +315,6 @@ const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
   ),
 );
 const layerEffectWorkerProvided = EffectWorker.layer.pipe(
-  Layer.provide(
-    ResourceAdmission.layer.pipe(Layer.provide(Layer.merge(layerStores, HostResources.layer))),
-  ),
   Layer.provide(Layer.merge(layerStores, layerEffectExecutorProvided)),
 );
 const layerProviderRuntimeRecoveryProvided = ProviderRuntimeRecoveryService.layer.pipe(

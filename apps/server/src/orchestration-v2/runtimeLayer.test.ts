@@ -4860,7 +4860,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
-  it.effect("cancels queued work when a thread is archived", () =>
+  it.effect("cancels queued work and pending starts when a thread is archived", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const threadId = ThreadId.make("runtime-layer-archive-queued-thread");
@@ -4918,6 +4918,18 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
 
       const archived = yield* orchestrator.getThreadProjection(threadId);
       assert.isNotNull(archived.thread.archivedAt);
+      assert.equal(archived.runs.find((run) => run.id === activeRun.id)?.status, "cancelled");
+      assert.equal(
+        archived.attempts.find((attempt) => attempt.runId === activeRun.id)?.status,
+        "cancelled",
+      );
+      assert.equal(archived.nodes.find((node) => node.runId === activeRun.id)?.status, "cancelled");
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const starts = (yield* outbox.listByCommandId(
+        CommandId.make("runtime-layer-archive-queued-active-message"),
+      )).filter((effect) => effect.request.type === "provider-turn.start");
+      assert.lengthOf(starts, 1);
+      assert.equal(starts[0]?.status, "cancelled");
       assert.equal(archived.runs.find((run) => run.id === queuedRun.id)?.status, "cancelled");
       assert.equal(
         archived.attempts.find((attempt) => attempt.runId === queuedRun.id)?.status,
