@@ -42,7 +42,7 @@ vi.mock("../../state/atom-registry", () => ({
   },
 }));
 
-import { useOpenPullRequest } from "./useOpenPullRequest";
+import { useOpenPullRequest } from "../../native/useResolvedPullRequest";
 
 describe("opening a PR from chat", () => {
   beforeEach(() => vi.clearAllMocks());

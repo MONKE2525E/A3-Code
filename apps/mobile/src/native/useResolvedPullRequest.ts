@@ -2,11 +2,11 @@ import { EnvironmentId } from "@t3tools/contracts";
 import { StackActions, useNavigation } from "@react-navigation/native";
 import { useCallback } from "react";
 
-import { type ExternalUrlTarget, tryOpenExternalUrl } from "../../lib/openExternalUrl";
-import { appAtomRegistry } from "../../state/atom-registry";
-import { environmentProjects } from "../../state/projects";
-import { serverEnvironment } from "../../state/server";
-import { resolveNativePullRequestLink } from "./pull-request-link";
+import { type ExternalUrlTarget, tryOpenExternalUrl } from "../lib/openExternalUrl";
+import { appAtomRegistry } from "../state/atom-registry";
+import { environmentProjects } from "../state/projects";
+import { serverEnvironment } from "../state/server";
+import { resolveNativePullRequestLink } from "../lib/pullRequestLink";
 
 /**
  * Opens a link in the native pull request viewer when it names a repository the environment can

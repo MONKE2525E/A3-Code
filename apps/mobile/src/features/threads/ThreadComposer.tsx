@@ -58,7 +58,7 @@ import {
   COMPOSER_TRANSITION_DURATION_MS,
 } from "./composerLayoutTransition";
 import { SymbolView } from "../../components/AppSymbol";
-import { useOpenPullRequest } from "../pull-requests/useOpenPullRequest";
+import { useOpenPullRequest } from "../../native/useResolvedPullRequest";
 import { themeColorWithAlpha } from "../../lib/mobileTheme";
 import { armAgentAwarenessLiveActivityForLocalWork } from "../agent-awareness/remoteRegistration";
 import { scopedThreadKey } from "../../lib/scopedEntities";

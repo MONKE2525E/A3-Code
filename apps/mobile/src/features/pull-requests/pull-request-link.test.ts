@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import type { RepositoryIdentity } from "@t3tools/contracts";
 
-import { resolveNativePullRequestLink } from "./pull-request-link";
+import { resolveNativePullRequestLink } from "../../lib/pullRequestLink";
 
 function identity(
   provider: string,
