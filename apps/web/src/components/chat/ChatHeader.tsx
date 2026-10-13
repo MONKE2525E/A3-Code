@@ -2,6 +2,7 @@ import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
   type GrokBot,
+  nativeAgentSourceForThread,
   type ThreadId,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -24,6 +25,9 @@ import {
 import { isTrailingDoubleClick } from "../Sidebar.logic";
 import { GrokBotThreadHeading } from "../grokBot/GrokBotThreadHeading";
 import { GrokBotVoiceControl } from "../grokBot/GrokBotVoiceControl";
+import { MuseAgentThreadHeading } from "../agents/MuseAgentThreadHeading";
+import { MuseAgentHeaderFeatures } from "../agents/MuseAgentFeaturesDialog";
+import { MuseAgentHistoryPagination } from "../agents/MuseAgentHistoryPagination";
 import { Toggle } from "../ui/toggle";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
@@ -98,6 +102,7 @@ export const ChatHeader = memo(function ChatHeader({
   computerOpen,
   onToggleComputer,
 }: ChatHeaderProps) {
+  const isMuseAgentThread = nativeAgentSourceForThread({ id: activeThreadId }) === "muse-agent";
   const activeProjectName = activeProject?.title;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const interfaceFont = useClientSettings((settings) => settings.fontFamilySans);
@@ -422,6 +427,13 @@ export const ChatHeader = memo(function ChatHeader({
                 fallbackTitle={activeThreadTitle}
               />
             </h2>
+          ) : isMuseAgentThread ? (
+            <h2 className="min-w-0 flex-1">
+              <MuseAgentThreadHeading
+                environmentId={activeThreadEnvironmentId}
+                fallbackTitle={activeThreadTitle}
+              />
+            </h2>
           ) : isServerThread ? (
             <Tooltip>
               <TooltipTrigger
@@ -461,6 +473,15 @@ export const ChatHeader = memo(function ChatHeader({
           )}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
+      {isMuseAgentThread && isServerThread ? (
+        <MuseAgentHistoryPagination
+          environmentId={activeThreadEnvironmentId}
+          threadId={activeThreadId}
+        />
+      ) : null}
+      {isMuseAgentThread ? (
+        <MuseAgentHeaderFeatures environmentId={activeThreadEnvironmentId} />
+      ) : null}
       {grokBotId !== null ? (
         <>
           <Tooltip>

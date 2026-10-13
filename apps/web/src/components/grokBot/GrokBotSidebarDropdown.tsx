@@ -11,7 +11,10 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import * as Schema from "effect/Schema";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+
+import { AI_AGENTS_SECTION_LABEL } from "~/components/agents/aiAgents";
+import { MuseAgentSidebarSection } from "~/components/agents/MuseAgentSidebarSection";
 
 import { requestConfirmDialog } from "~/confirmDialog";
 import { Collapsible, CollapsiblePanel } from "~/components/ui/collapsible";
@@ -58,7 +61,13 @@ import { useGrokBotToolActivities, useGrokBotUnreadBotIds } from "./useGrokBotTh
 
 const GROK_BOTS_OPEN_STORAGE_KEY = "t3code:grok-bots-sidebar-open";
 
-export function GrokBotSidebarDropdown() {
+/**
+ * The shared AI Agents section. Grok Bots are its built-in roster; other native agents, such as
+ * Muse, pass their rows as `nativeAgents` and appear above the bots.
+ */
+export function GrokBotSidebarDropdown({
+  nativeAgents,
+}: { readonly nativeAgents?: ReactNode } = {}) {
   const selectedEnvironmentId = useSelectedGrokBotEnvironmentId();
   const connectedEnvironmentIds = useConnectedEnvironmentIds();
   const resolved = resolveGrokBotSelectedEnvironment({
@@ -155,13 +164,17 @@ export function GrokBotSidebarDropdown() {
           tone="muted"
           onClick={() => setOpenAndRefresh(!open)}
         >
-          Grok Bots
+          {AI_AGENTS_SECTION_LABEL}
         </CollapsibleSectionHeader>
         <CollapsiblePanel>
           <div className="mt-0.5">
+            {nativeAgents}
+            {environmentId !== null ? (
+              <MuseAgentSidebarSection environmentId={environmentId} />
+            ) : null}
             {resolved.kind === "no-environment" ? (
               <p className="px-2 py-2 text-xs text-sidebar-muted-foreground">
-                Connect an environment to use Grok Bots.
+                Connect an environment to use AI Agents.
               </p>
             ) : resolved.kind === "disconnected" ? (
               <GrokBotSidebarNotice
@@ -181,11 +194,14 @@ export function GrokBotSidebarDropdown() {
                 onAction={() => openSettings()}
               />
             ) : !ready && status.data?.installed !== true ? (
-              <GrokBotSidebarNotice
-                message="Set up the Grok Bot connection to chat with your bots here."
-                actionLabel="Set up"
-                onAction={() => openSettings()}
-              />
+              <div className="flex items-center justify-between gap-2 px-2 py-1">
+                <span className="min-w-0 truncate text-xs text-sidebar-muted-foreground">
+                  Grok Bots not connected
+                </span>
+                <Button size="xs" variant="ghost" onClick={() => openSettings()}>
+                  Set up
+                </Button>
+              </div>
             ) : !ready ? (
               <GrokBotSidebarNotice
                 message="Open Grok Bot and sign in, then refresh the connection."

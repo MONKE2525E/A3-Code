@@ -48,6 +48,7 @@ import {
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS,
   isGrokBotBackingThread,
+  isNativeAgentBackingThread,
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import {
@@ -2171,7 +2172,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         activeProjectId,
       ),
     );
-    return activeThreadId !== null && isGrokBotBackingThread({ id: activeThreadId })
+    return activeThreadId !== null && isNativeAgentBackingThread({ id: activeThreadId })
       ? entries
       : omitGrokBotProviderEntries(entries);
   }, [activeThreadId, providerStatuses, settings, activeProjectId]);

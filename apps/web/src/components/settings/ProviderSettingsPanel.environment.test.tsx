@@ -67,6 +67,8 @@ vi.mock("./settingsLayout", async (importOriginal) => {
 });
 
 vi.mock("./SettingsScopeSentence", () => ({ SettingsScopeSentence: () => null }));
+// The native Muse feature dialog pulls in asset/session state this routing test does not exercise.
+vi.mock("../agents/MuseAgentFeaturesDialog", () => ({ MuseAgentFeaturesButton: () => null }));
 vi.mock("react/compiler-runtime", async () => {
   const { reactHookHarness } = await import("../../test/reactHookHarness");
   return { c: reactHookHarness.useMemoCache };

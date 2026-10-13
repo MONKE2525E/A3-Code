@@ -78,6 +78,42 @@ export function buildGrokBotSearchItems(input: {
   return items;
 }
 
+/** A global search hit on the native Muse chat, which is a canonical thread with no Grok bot behind it. */
+export interface MuseAgentSearchHit {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: string;
+  readonly source: "user" | "assistant";
+  readonly snippet: string;
+}
+
+/** Muse's single conversation appears once per environment and opens as its ordinary thread. */
+export function buildMuseAgentSearchItems(input: {
+  readonly hits: ReadonlyArray<MuseAgentSearchHit>;
+  readonly query: string;
+  readonly name: string;
+  readonly icon: (hit: MuseAgentSearchHit) => ReactNode;
+  readonly run: (hit: MuseAgentSearchHit) => Promise<void>;
+}): CommandPaletteActionItem[] {
+  const seen = new Set<string>();
+  const items: CommandPaletteActionItem[] = [];
+  for (const hit of input.hits) {
+    const key = `${hit.environmentId}:${hit.threadId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push({
+      kind: "action",
+      value: `muse-agent:${key}`,
+      title: input.name,
+      description: "Muse conversation",
+      searchTerms: [input.query, input.name, hit.snippet],
+      threadContentMatch: { source: hit.source, snippet: hit.snippet, query: input.query },
+      icon: input.icon(hit),
+      run: () => input.run(hit),
+    });
+  }
+  return items;
+}
+
 export function browseInputEndPaddingClass(input: {
   readonly willCreateProjectPath: boolean;
   readonly hasHighlightedBrowseItem: boolean;

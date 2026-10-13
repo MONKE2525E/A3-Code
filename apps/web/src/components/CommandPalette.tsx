@@ -2,7 +2,6 @@
 
 import { threadPullRequestLinkMode } from "@t3tools/client-runtime/thread-pull-request-compatibility";
 import { settingsSearchResultSearch } from "./grokBot/grokBotPresentation";
-import { isGrokBotBackingThread } from "@t3tools/client-runtime/state/grok-bot-threads";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -49,7 +48,9 @@ import {
   type EnvironmentId,
   type EnvironmentMachineKind,
   type FilesystemBrowseResult,
+  isNativeAgentBackingThread,
   type ProjectId,
+  type ThreadId,
   type SourceControlDiscoveryResult,
   SourceControlProviderKind,
   type SourceControlRepositoryInfo,
@@ -136,6 +137,9 @@ import {
 } from "../state/entities";
 import { useThreadSearch } from "../state/queries";
 import { grokBotsListQuery } from "../state/grokBots";
+import { museAgentProfileQuery } from "../state/museAgent";
+import { MuseAgentAvatar } from "./agents/MuseAgentAvatar";
+import { useMuseAgentAvatar } from "./agents/useMuseAgentAvatar";
 import { GrokBotAvatar } from "./grokBot/GrokBotAvatar";
 import { grokBotSearchHitsFromMatches } from "./grokBot/grokBotSearchHits";
 import { useSelectedGrokBotEnvironmentId } from "./grokBot/useGrokBotEnvironment";
@@ -186,6 +190,7 @@ import {
   buildThreadActionItems,
   buildLinkedThreadActionItems,
   buildGrokBotSearchItems,
+  buildMuseAgentSearchItems,
   buildCommandPaletteRows,
   enumerateCommandPaletteItems,
   findHighlightedCommandPaletteItem,
@@ -255,6 +260,13 @@ import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { readPullRequestListPreferences } from "~/components/pullRequest/pullRequestListPreferences";
 
 const EMPTY_BROWSE_ENTRIES: FilesystemBrowseResult["entries"] = [];
+
+type GrokBotSearchHit = ReturnType<typeof grokBotSearchHitsFromMatches>[number];
+
+/** Module-level so the palette's item icons keep a stable identity across renders. */
+const renderGrokBotSearchIcon = (hit: GrokBotSearchHit) => (
+  <GrokBotAvatar bot={hit.bot} size="xs" environmentId={hit.environmentId} />
+);
 
 function getEnvironmentBrowsePlatform(os: string | null | undefined): string {
   if (os === "windows") {
@@ -703,9 +715,9 @@ function OpenCommandPaletteDialog(props: {
   }, [activeThreadReferenceCopyTarget]);
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const shellThreads = useThreadShells();
-  // Grok Bot work threads stay out of palette lists; the bot dropdown reaches them.
+  // Native agent chats (Grok Bots, Muse) stay out of palette lists; the AI Agents section reaches them.
   const threads = useMemo(
-    () => shellThreads.filter((thread) => !isGrokBotBackingThread(thread)),
+    () => shellThreads.filter((thread) => !isNativeAgentBackingThread(thread)),
     [shellThreads],
   );
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -789,6 +801,12 @@ function OpenCommandPaletteDialog(props: {
       ? null
       : grokBotsListQuery({ environmentId: rosterEnvironmentId, input: {} }),
   );
+  const museProfile = useEnvironmentQuery(
+    rosterEnvironmentId === null
+      ? null
+      : museAgentProfileQuery({ environmentId: rosterEnvironmentId, input: {} }),
+  );
+  const museAvatar = useMuseAgentAvatar(rosterEnvironmentId, museProfile.data);
   const grokBotSearchItems = useMemo(() => {
     const hits = grokBotSearchHitsFromMatches({
       matches: threadSearch.matches,
@@ -796,10 +814,10 @@ function OpenCommandPaletteDialog(props: {
       rosterEnvironmentId,
       roster: grokBotRoster.data ?? [],
     });
-    return buildGrokBotSearchItems({
+    const grokItems = buildGrokBotSearchItems({
       hits,
       query: threadSearch.query,
-      icon: (hit) => <GrokBotAvatar bot={hit.bot} size="xs" environmentId={hit.environmentId} />,
+      icon: renderGrokBotSearchIcon,
       run: async (hit) => {
         await navigate({
           to: "/grok-bots/$botId",
@@ -808,8 +826,39 @@ function OpenCommandPaletteDialog(props: {
         });
       },
     });
+    const museName = museProfile.data?.name?.trim() || "Muse";
+    const museIcon = <MuseAgentAvatar name={museName} imageUrl={museAvatar.imageUrl} size="sm" />;
+    const museItems = buildMuseAgentSearchItems({
+      hits: threadSearch.matches.flatMap((match) =>
+        (match.source === "user" || match.source === "assistant") &&
+        match.threadId.startsWith("muse-agent:")
+          ? [
+              {
+                environmentId: match.environmentId,
+                threadId: match.threadId,
+                source: match.source,
+                snippet: match.snippet,
+              },
+            ]
+          : [],
+      ),
+      query: threadSearch.query,
+      name: museName,
+      icon: () => museIcon,
+      run: async (hit) => {
+        await navigate({
+          to: "/$environmentId/$threadId",
+          params: buildThreadRouteParams(
+            scopeThreadRef(hit.environmentId, hit.threadId as ThreadId),
+          ),
+        });
+      },
+    });
+    return [...museItems, ...grokItems];
   }, [
     grokBotRoster.data,
+    museProfile.data,
+    museAvatar.imageUrl,
     navigate,
     rosterEnvironmentId,
     shellThreads,

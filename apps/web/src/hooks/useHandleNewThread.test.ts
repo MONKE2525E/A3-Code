@@ -96,6 +96,8 @@ vi.mock("@t3tools/client-runtime/environment", () => ({
 vi.mock("@t3tools/contracts", () => ({
   DEFAULT_RUNTIME_MODE: "default",
   DEFAULT_SERVER_SETTINGS: {},
+  // providerInstances.ts brands a placeholder id at import time.
+  ProviderInstanceId: { make: (value: string) => value },
 }));
 vi.mock("@t3tools/shared/projectSettings", () => ({
   // Environment settings pass through; the tests set project fields on the

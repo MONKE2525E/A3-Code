@@ -69,7 +69,7 @@ import {
   settlePromise,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { isGrokBotBackingThread } from "@t3tools/client-runtime/state/grok-bot-threads";
+import { isNativeAgentBackingThread } from "@t3tools/contracts";
 import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
 import { useNavigate, useParams, useRouter } from "@tanstack/react-router";
 import {
@@ -1378,7 +1378,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     };
     const visibleProjectThreads = sortThreads(
       projectThreads.filter(
-        (thread) => thread.archivedAt === null && !isGrokBotBackingThread(thread),
+        (thread) => thread.archivedAt === null && !isNativeAgentBackingThread(thread),
       ),
       threadSortOrder,
     );
@@ -3517,7 +3517,7 @@ export default function LegacySidebar() {
   const visibleThreads = useMemo(
     () =>
       sidebarThreads.filter(
-        (thread) => thread.archivedAt === null && !isGrokBotBackingThread(thread),
+        (thread) => thread.archivedAt === null && !isNativeAgentBackingThread(thread),
       ),
     [sidebarThreads],
   );
@@ -3558,7 +3558,7 @@ export default function LegacySidebar() {
       sortedProjects.flatMap((project) => {
         const projectThreads = sortThreads(
           (threadsByProjectKey.get(project.projectKey) ?? []).filter(
-            (thread) => thread.archivedAt === null && !isGrokBotBackingThread(thread),
+            (thread) => thread.archivedAt === null && !isNativeAgentBackingThread(thread),
           ),
           sidebarThreadSortOrder,
         );
