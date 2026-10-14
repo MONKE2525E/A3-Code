@@ -370,3 +370,23 @@ it.effect("sends presence and the call record to the gateway under the call's bi
     assert.strictEqual(error.reason, "account_unavailable");
   }),
 );
+
+it.effect("refuses native group agents before opening an unsupported multi-speaker session", () =>
+  Effect.gen(function* () {
+    const native = makeNative({
+      ListGrokBotAgents: {
+        agents: [{ agentId: "group", name: "Team", memberAgentIds: ["bot-a", "bot-b"] }],
+      },
+    });
+    const error = yield* Effect.flip(
+      Effect.gen(function* () {
+        return yield* (yield* GrokBotVoiceBackend).openSession("binding-1", { botId: "group" });
+      }).pipe(Effect.provide(native.layer)),
+    );
+    assert.strictEqual(error.reason, "refused");
+    assert.deepStrictEqual(
+      native.sent.map((request) => request.method),
+      ["ListGrokBotAgents"],
+    );
+  }),
+);

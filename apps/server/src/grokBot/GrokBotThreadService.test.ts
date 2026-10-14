@@ -184,9 +184,7 @@ const runtime = (database: DatabaseLayer = Sqlite.layerMemory) =>
 
 const seedProjects = Effect.gen(function* () {
   const projects = yield* Projects.ProjectStoreV2;
-  const fs = yield* FileSystem.FileSystem;
   for (const id of [projectId, otherProjectId, scratchProjectId]) {
-    const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: `t3-${id}-` });
     yield* projects.apply({
       sequence: 1,
       eventId: EventId.make(`project:${id}`),
@@ -201,7 +199,7 @@ const seedProjects = Effect.gen(function* () {
       payload: {
         projectId: id,
         title: id,
-        workspaceRoot,
+        workspaceRoot: `/tmp/${id}`,
         defaultModelSelection: null,
         scripts: [],
         createdAt: "2026-10-10T00:00:00.000Z",
@@ -1099,6 +1097,9 @@ it.effect(
 const observing = Effect.gen(function* () {
   observedSessions.length = 0;
   yield* seedProjects;
+  const fileSystem = yield* FileSystem.FileSystem;
+  for (const id of [projectId, scratchProjectId])
+    yield* fileSystem.makeDirectory(`/tmp/${id}`, { recursive: true });
 });
 
 it.effect(
@@ -1324,8 +1325,7 @@ it.effect("observation switches to a live bound session instead of doubling the 
       runtimePolicy: {
         runtimeMode: "full-access",
         interactionMode: "default",
-        cwd: Option.getOrThrow(yield* (yield* Projects.ProjectStoreV2).get(scratchProjectId))
-          .workspaceRoot,
+        cwd: `/tmp/${scratchProjectId}`,
       },
     });
     yield* projections.apply({

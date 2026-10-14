@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
-import { GrokBotRuntimeActivity, grokBotAgentStamp, splitGrokBotAgentStamp } from "./grokBot.ts";
+import {
+  GrokBotCreateInput,
+  GrokBotRuntimeActivity,
+  grokBotAgentStamp,
+  splitGrokBotAgentStamp,
+} from "./grokBot.ts";
 
 const accepts = Schema.is(GrokBotRuntimeActivity);
 const activity = {
@@ -45,5 +50,16 @@ describe("Grok Bot agent stamp", () => {
     expect(splitGrokBotAgentStamp("ship it")).toEqual({ fromAgent: false, text: "ship it" });
     const quoted = "[message from another agent, x] is how it looks";
     expect(splitGrokBotAgentStamp(quoted)).toEqual({ fromAgent: false, text: quoted });
+  });
+});
+
+describe("native group creation", () => {
+  it("accepts existing bot members and bounds the native one-to-six membership", () => {
+    const accepts = Schema.is(GrokBotCreateInput);
+    expect(accepts({ name: "Team" })).toBe(true);
+    expect(accepts({ name: "Team", memberIds: ["a", "b"] })).toBe(true);
+    for (const memberIds of [[], [""], Array.from({ length: 7 }, (_, i) => String(i))]) {
+      expect(accepts({ name: "Team", memberIds })).toBe(false);
+    }
   });
 });

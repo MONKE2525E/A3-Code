@@ -27,7 +27,7 @@ import {
   grokBotConnectorCardLabel,
 } from "../../grokBot/GrokBotConnectorCard.ts";
 import { grokBotWorkflowReferences } from "../../grokBot/GrokBotWorkflowReferences.ts";
-import { grokBotMessagePeer } from "../../grokBot/GrokBotMessagePeer.ts";
+import { grokBotMessagePeer, grokBotMessageAuthor } from "../../grokBot/GrokBotMessagePeer.ts";
 import {
   grokBotVoiceCallIdFromChannel,
   grokBotVoiceCallMarker,
@@ -159,6 +159,7 @@ const NativeImages = Schema.Array(
 );
 const NativeTextEntry = Schema.Struct({
   fromAgent: Schema.optionalKey(Schema.Unknown),
+  author: Schema.optionalKey(Schema.Unknown),
   toAgent: Schema.optionalKey(Schema.Unknown),
   id: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
   kind: Schema.String,
@@ -608,6 +609,7 @@ export const makeGrokBotTranscriptProjection = (input: {
       if (text === undefined && media.length === 0) continue;
       const workflowReferences = grokBotWorkflowReferences(entry.richText);
       const peer = grokBotMessagePeer(input.native.botId, entry);
+      const author = entry.kind === "send-message" ? grokBotMessageAuthor(entry.author) : undefined;
       const assistant =
         peer !== undefined ||
         entry.kind === "send-message" ||
@@ -669,6 +671,7 @@ export const makeGrokBotTranscriptProjection = (input: {
         role: assistant ? "assistant" : "user",
         createdBy: assistant || peer !== undefined ? "agent" : "user",
         ...(peer === undefined ? {} : { grokBotPeer: peer }),
+        ...(author === undefined ? {} : { grokBotAuthor: author }),
         ...(reactions === undefined || reactions.length === 0
           ? {}
           : { grokBotReactions: reactions }),

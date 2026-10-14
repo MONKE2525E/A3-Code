@@ -161,6 +161,7 @@ export function grokBotMessageTurnItem(
     text: message.text,
     attachments: message.attachments,
     ...(message.grokBotPeer === undefined ? {} : { grokBotPeer: message.grokBotPeer }),
+    ...(message.grokBotAuthor === undefined ? {} : { grokBotAuthor: message.grokBotAuthor }),
     ...(message.grokBotReactions === undefined
       ? {}
       : { grokBotReactions: message.grokBotReactions }),

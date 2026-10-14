@@ -597,6 +597,28 @@ it.layer(NodeServices.layer)("Direct Grok Bot read transport", (it) => {
       assert.strictEqual(remote.attempts, before);
     }),
   );
+  it.effect("preserves native group identity and members alongside single bots", () =>
+    Effect.gen(function* () {
+      const { service, remote } = yield* fixture;
+      remote.roster = {
+        agents: [
+          { agentId: "bot-1", name: "Builder" },
+          { agentId: "group-1", name: "Team", memberAgentIds: ["bot-1", "bot-2"] },
+          { agentId: "group-empty", name: "Empty group", memberAgentIds: [] },
+        ],
+      };
+      const roster = yield* service.list;
+      assert.deepStrictEqual(
+        roster.map((entry) => [entry.id, entry.isGroup, entry.memberIds]),
+        [
+          ["bot-1", false, []],
+          ["group-1", true, ["bot-1", "bot-2"]],
+          ["group-empty", true, []],
+        ],
+      );
+    }),
+  );
+
   it.effect("reads the bound roster and rejects account changes during its response", () =>
     Effect.gen(function* () {
       const { service, remote, requests } = yield* fixture;
