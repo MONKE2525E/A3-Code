@@ -34,6 +34,8 @@ import {
   FileDiff,
   Files,
   Globe2,
+  ListChecks,
+  ShieldCheck,
   Plus,
   TerminalSquare,
 } from "lucide-react";
@@ -145,6 +147,9 @@ interface RightPanelTabsProps {
   onAddPullRequests: () => void;
   onAddComputer?: (() => void) | undefined;
   computerAvailable?: boolean | undefined;
+  nativeAgentThread?: boolean | undefined;
+  onAddMuseActivity?: (() => void) | undefined;
+  onAddMuseApprovals?: (() => void) | undefined;
   onAddDevice: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
@@ -327,6 +332,42 @@ function SurfaceMenuItem(props: {
   return <DisabledReasonTooltip reason={props.disabledReason} trigger={item} />;
 }
 
+/** Surfaces that need a project or git checkout. A Muse thread has neither, so they are left out. */
+const PROJECT_SURFACE_LABELS: ReadonlySet<string> = new Set([
+  "Terminal",
+  "Files",
+  "Diff",
+  "Pull request",
+  "Linked pull requests",
+]);
+
+/** Muse's sections, offered only in a Muse thread. They open the Muse features panel on a tab. */
+function museSurfaceEntries(props: {
+  readonly nativeAgentThread?: boolean | undefined;
+  readonly onAddMuseActivity?: (() => void) | undefined;
+  readonly onAddMuseApprovals?: (() => void) | undefined;
+}) {
+  if (!props.nativeAgentThread || !props.onAddMuseActivity || !props.onAddMuseApprovals) return [];
+  return [
+    {
+      label: "Activity",
+      icon: ListChecks,
+      shortcut: "A",
+      available: true,
+      disabledReason: "",
+      onClick: props.onAddMuseActivity,
+    },
+    {
+      label: "Approvals",
+      icon: ShieldCheck,
+      shortcut: "R",
+      available: true,
+      disabledReason: "",
+      onClick: props.onAddMuseApprovals,
+    },
+  ];
+}
+
 /**
  * List launcher shown when the right panel has no surfaces. Keyboard-first
  * without palette chrome: a surface's letter opens it directly from anywhere
@@ -345,6 +386,9 @@ function RightPanelEmptyState(props: {
   onAddPullRequests: () => void;
   onAddComputer?: (() => void) | undefined;
   computerAvailable?: boolean | undefined;
+  nativeAgentThread?: boolean | undefined;
+  onAddMuseActivity?: (() => void) | undefined;
+  onAddMuseApprovals?: (() => void) | undefined;
   onAddDevice: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
@@ -358,6 +402,7 @@ function RightPanelEmptyState(props: {
   const [highlight, setHighlight] = useState(-1);
 
   const actions = [
+    ...museSurfaceEntries(props),
     ...(props.computerAvailable && props.onAddComputer
       ? [
           {
@@ -427,7 +472,7 @@ function RightPanelEmptyState(props: {
       disabledReason: SURFACE_UNAVAILABLE_HINTS.device,
       onClick: props.onAddDevice,
     },
-  ] as const;
+  ].filter((action) => !(props.nativeAgentThread && PROJECT_SURFACE_LABELS.has(action.label)));
 
   type SurfaceAction = (typeof actions)[number];
 
@@ -962,6 +1007,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
   }, []);
 
   const addSurfaceActions = [
+    ...museSurfaceEntries(props),
     ...(props.computerAvailable && props.onAddComputer
       ? [
           {
@@ -1030,7 +1076,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       disabledReason: SURFACE_DISABLED_REASONS.device,
       onClick: props.onAddDevice,
     },
-  ] as const;
+  ].filter((action) => !(props.nativeAgentThread && PROJECT_SURFACE_LABELS.has(action.label)));
 
   const handleAddSurfaceMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     const action = surfaceShortcutActionForKey(addSurfaceActions, event.nativeEvent);
@@ -1523,6 +1569,9 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddPullRequests={props.onAddPullRequests}
             onAddComputer={props.onAddComputer}
             computerAvailable={props.computerAvailable}
+            nativeAgentThread={props.nativeAgentThread}
+            onAddMuseActivity={props.onAddMuseActivity}
+            onAddMuseApprovals={props.onAddMuseApprovals}
             onAddDevice={props.onAddDevice}
             browserAvailable={props.browserAvailable}
             terminalAvailable={props.terminalAvailable}

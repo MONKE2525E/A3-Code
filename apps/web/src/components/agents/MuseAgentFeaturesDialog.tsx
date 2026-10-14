@@ -39,6 +39,7 @@ import {
 } from "~/components/ui/alert-dialog";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
+import type { MuseFeaturesTab } from "~/rightPanelStore";
 import {
   Dialog,
   DialogDescription,
@@ -449,8 +450,9 @@ function MuseAgentFeaturesBody({
   environmentId,
   providerInstanceId,
   onClose,
-}: Target & { readonly onClose: () => void }) {
-  const [tab, setTab] = useState<MusePanelTab>("activity");
+  initialTab,
+}: Target & { readonly onClose: () => void; readonly initialTab?: MuseFeaturesTab | undefined }) {
+  const [tab, setTab] = useState<MusePanelTab>(initialTab ?? "activity");
   const [detail, setDetail] = useState<MuseDetail | null>(null);
   const canWrite = useAtomValue(museAgentFeatureUpdate.permissionAtom(environmentId));
   const inventory = useFeatureRead(environmentId, { operation: "inventory", providerInstanceId });
@@ -736,9 +738,11 @@ function BackToProfile({ onBack }: { readonly onBack: () => void }) {
 export function MuseAgentFeaturesPanel({
   environmentId,
   onClose,
+  initialTab,
 }: {
   readonly environmentId: EnvironmentId;
   readonly onClose: () => void;
+  readonly initialTab?: MuseFeaturesTab | undefined;
 }) {
   const canRead = useEnvironmentScope(environmentId, AuthOrchestrationReadScope);
   const status = useEnvironmentQuery(
@@ -751,6 +755,7 @@ export function MuseAgentFeaturesPanel({
         environmentId={environmentId}
         providerInstanceId={status.provider.instanceId}
         onClose={onClose}
+        initialTab={initialTab}
       />
     </div>
   );
