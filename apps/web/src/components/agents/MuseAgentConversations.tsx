@@ -1,5 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -15,7 +15,6 @@ import { ArchiveIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { Button } from "~/components/ui/button";
-import { Skeleton } from "~/components/ui/skeleton";
 import { useSidebar } from "~/components/ui/sidebar";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { useThreadActions } from "~/hooks/useThreadActions";
@@ -27,14 +26,20 @@ import {
 } from "~/state/museAgent";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { buildThreadRouteParams } from "~/threadRoutes";
+import { useUiStateStore } from "~/uiStateStore";
 import { cn } from "~/lib/utils";
 
 import { AgentRosterNotice } from "./AgentRoster";
-import { isMuseSessionThread } from "./aiAgents";
+import {
+  isMuseSessionThread,
+  museAvatarStateForStatus,
+  resolveMuseAgentStatusDot,
+} from "./aiAgents";
 
 /**
- * Muse's conversations, nested under its sidebar row: Main chat first, then side chats. Each opens as
- * its own thread, and archiving one removes it from Muse and from the sidebar.
+ * Muse's side chats as a quiet indented list under its sidebar row. Main chat is the row itself, so
+ * an empty or still-loading list renders nothing. Each chat opens as its own thread, and archiving
+ * one removes it from Muse and from the sidebar.
  */
 export function MuseAgentConversations({
   environmentId,
@@ -57,10 +62,7 @@ export function MuseAgentConversations({
   );
   const sessions = read.data?.operation === "sessions" ? read.data.data : null;
   const conversations = useMemo(
-    () =>
-      (sessions ?? [])
-        .filter((session) => session.isThread)
-        .toSorted((a, b) => Number(b.isPrimary) - Number(a.isPrimary)),
+    () => (sessions ?? []).filter((session) => session.isThread && !session.isPrimary),
     [sessions],
   );
   if (read.error !== null && sessions === null) {
@@ -68,19 +70,9 @@ export function MuseAgentConversations({
       <AgentRosterNotice message={read.error} actionLabel="Retry" onAction={() => read.refresh()} />
     );
   }
-  if (sessions === null) {
-    return (
-      <div className="flex flex-col gap-2 px-6 py-1">
-        <Skeleton className="h-9 w-full" shape="card" />
-        <Skeleton className="h-9 w-full" shape="card" />
-      </div>
-    );
-  }
-  if (conversations.length === 0) {
-    return <p className="px-6 py-2 text-xs text-sidebar-muted-foreground">No conversations yet.</p>;
-  }
+  if (conversations.length === 0) return null;
   return (
-    <ul className="flex flex-col gap-px pr-1 pb-1 pl-6">
+    <ul className="flex flex-col gap-px pt-px pl-(--sidebar-row-content-inset)">
       {conversations.map((session) => (
         <li key={session.sessionId}>
           <MuseConversationRow
@@ -89,8 +81,7 @@ export function MuseAgentConversations({
             session={session}
             threads={threads}
             selected={
-              routeThreadId !== null &&
-              isMuseSessionThread(routeThreadId, session.isPrimary ? null : session.sessionId)
+              routeThreadId !== null && isMuseSessionThread(routeThreadId, session.sessionId)
             }
           />
         </li>
@@ -119,7 +110,7 @@ function MuseConversationRow({
   const { archiveThread } = useThreadActions();
   const canWrite = useAtomValue(museAgentFeatureUpdate.permissionAtom(environmentId));
   const [busy, setBusy] = useState(false);
-  const label = session.isPrimary ? "Main chat" : session.title?.trim() || "Untitled conversation";
+  const label = session.title?.trim() || "Untitled conversation";
 
   const open = async () => {
     if (busy) return;
@@ -128,13 +119,13 @@ function MuseConversationRow({
       (entry) =>
         entry.providerInstanceId === providerInstanceId &&
         entry.archivedAt === null &&
-        isMuseSessionThread(entry.id, session.isPrimary ? null : session.sessionId),
+        isMuseSessionThread(entry.id, session.sessionId),
     );
     const request = {
       environmentId,
       input: {
         providerInstanceId,
-        ...(session.isPrimary ? {} : { sessionId: session.sessionId }),
+        sessionId: session.sessionId,
       },
     };
     if (cached) {
@@ -156,7 +147,6 @@ function MuseConversationRow({
       return;
     }
     setBusy(true);
-    // Main chat opens without a session, so it keeps its canonical thread.
     const result = await openThread(request);
     setBusy(false);
     if (result._tag !== "Success") return;
@@ -184,7 +174,7 @@ function MuseConversationRow({
         (entry) =>
           entry.providerInstanceId === providerInstanceId &&
           entry.archivedAt === null &&
-          isMuseSessionThread(entry.id, session.isPrimary ? null : session.sessionId),
+          isMuseSessionThread(entry.id, session.sessionId),
       );
       if (thread) await archiveThread(scopeThreadRef(environmentId, thread.id));
     } else if (!isAtomCommandInterrupted(result)) {
@@ -199,10 +189,29 @@ function MuseConversationRow({
     setBusy(false);
   };
 
+  const cachedThread = threads.find(
+    (entry) =>
+      entry.providerInstanceId === providerInstanceId &&
+      entry.archivedAt === null &&
+      isMuseSessionThread(entry.id, session.sessionId),
+  );
+  const localVisitedAt = useUiStateStore((state) =>
+    cachedThread
+      ? state.threadLastVisitedAtById[
+          scopedThreadKey(scopeThreadRef(environmentId, cachedThread.id))
+        ]
+      : undefined,
+  );
+  const statusDot = resolveMuseAgentStatusDot({
+    active: museAvatarStateForStatus(cachedThread?.status) !== "idle",
+    thread: cachedThread ?? null,
+    localVisitedAt,
+  });
+
   return (
     <div
       className={cn(
-        "group/conversation relative flex w-full items-center rounded-md text-sidebar-foreground",
+        "group/conversation flex h-7 w-full items-center rounded-md text-sidebar-foreground",
         selected ? "bg-sidebar-row-active" : "hover:bg-sidebar-row-hover",
       )}
     >
@@ -210,13 +219,25 @@ function MuseConversationRow({
         type="button"
         aria-current={selected ? "page" : undefined}
         disabled={busy}
-        className="min-w-0 flex-1 cursor-pointer truncate px-2 py-1.5 text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:opacity-60"
+        className="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:opacity-60"
         onClick={() => void open()}
       >
-        {label}
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        {statusDot ? (
+          <>
+            <span
+              aria-hidden
+              className={cn(
+                "size-2 shrink-0 rounded-full",
+                statusDot === "active" ? "bg-success" : "bg-info",
+              )}
+            />
+            <span className="sr-only">{statusDot === "active" ? "Working" : "New activity"}</span>
+          </>
+        ) : null}
       </button>
-      {canWrite && !session.isPrimary ? (
-        <span className="mr-1 opacity-0 group-hover/conversation:opacity-100 group-focus-within/conversation:opacity-100">
+      {canWrite ? (
+        <span className="mr-1 shrink-0 opacity-0 group-hover/conversation:opacity-100 group-focus-within/conversation:opacity-100">
           <Button
             size="icon-micro"
             variant="ghost"

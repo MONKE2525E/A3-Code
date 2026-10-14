@@ -1,5 +1,6 @@
 import {
   ChevronDownIcon,
+  ChevronUpIcon,
   EllipsisIcon,
   EyeOffIcon,
   HistoryIcon,
@@ -36,66 +37,66 @@ export function AgentRosterRow(props: {
   /** Opening is in flight; the row stays disabled so repeat clicks cannot queue. */
   readonly pending?: boolean;
   readonly pendingLabel?: string;
-  /** Extra row content under the button, such as an inline error with a retry. */
+  /** Extra content under the row, outside its highlight, such as an inline error with a retry. */
   readonly footer?: ReactNode;
   readonly onOpen: () => void;
 }) {
   return (
-    <div
-      className={cn(
-        "group/sidebar-row group/agent relative w-full overflow-hidden rounded-md text-sidebar-foreground",
-        props.selected ? "bg-sidebar-row-active" : "hover:bg-sidebar-row-hover",
-      )}
-    >
-      <button
-        type="button"
-        aria-current={props.selected ? "page" : undefined}
-        disabled={props.disabled || props.pending}
-        aria-busy={props.pending || undefined}
+    <div>
+      <div
         className={cn(
-          "relative z-10 flex h-[3.375rem] w-full min-w-0 cursor-pointer items-center gap-2 pl-(--sidebar-row-content-inset) py-(--sidebar-content-inset) text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
-          props.disclosure ? "pr-16" : "pr-8.5",
+          "group/sidebar-row group/agent relative w-full overflow-hidden rounded-md text-sidebar-foreground",
+          props.selected ? "bg-sidebar-row-active" : "hover:bg-sidebar-row-hover",
         )}
-        onClick={props.onOpen}
       >
-        {props.avatar}
-        <span className="flex h-5 min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
-          <span className="min-w-0 max-w-full shrink-0 truncate text-sm font-medium">
-            {props.name}
+        <button
+          type="button"
+          aria-current={props.selected ? "page" : undefined}
+          disabled={props.disabled || props.pending}
+          aria-busy={props.pending || undefined}
+          className={cn(
+            "relative z-10 flex h-[3.375rem] w-full min-w-0 cursor-pointer items-center gap-2 pl-(--sidebar-row-content-inset) py-(--sidebar-content-inset) text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
+            props.disclosure ? "pr-16" : "pr-8.5",
+          )}
+          onClick={props.onOpen}
+        >
+          {props.avatar}
+          <span className="flex h-5 min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+            <span className="min-w-0 max-w-full shrink-0 truncate text-sm font-medium">
+              {props.name}
+            </span>
+            {props.label ? (
+              <span className="min-w-0 shrink truncate rounded-full bg-sidebar-control-surface px-2 py-0.5 text-xs leading-4 text-secondary-label">
+                {props.label}
+              </span>
+            ) : null}
           </span>
-          {props.label ? (
-            <span className="min-w-0 shrink truncate rounded-full bg-sidebar-control-surface px-2 py-0.5 text-xs leading-4 text-secondary-label">
-              {props.label}
+          {props.pending ? (
+            <span role="status" className="shrink-0 text-xs text-sidebar-muted-foreground">
+              {props.pendingLabel ?? "Opening…"}
             </span>
           ) : null}
-        </span>
-        {props.pending ? (
-          <span role="status" className="shrink-0 text-xs text-sidebar-muted-foreground">
-            {props.pendingLabel ?? "Opening…"}
+          <AgentStatusText statusDot={props.statusDot} />
+        </button>
+        {props.statusText ? (
+          <span role="status" className="sr-only">
+            {props.statusText}
           </span>
         ) : null}
-        <AgentStatusText statusDot={props.statusDot} />
-      </button>
-      {props.statusText ? (
-        <span role="status" className="sr-only">
-          {props.statusText}
-        </span>
-      ) : null}
-      {props.disclosure ? (
-        <Button
-          size="icon-micro"
-          variant="ghost"
-          aria-label={props.disclosure.expanded ? "Hide conversations" : "Show conversations"}
-          aria-expanded={props.disclosure.expanded}
-          className="absolute top-1/2 right-8 z-20 -translate-y-1/2"
-          onClick={props.disclosure.onToggle}
-        >
-          <ChevronDownIcon
-            className={cn("transition-transform", props.disclosure.expanded && "rotate-180")}
-          />
-        </Button>
-      ) : null}
-      {props.menu}
+        {props.disclosure ? (
+          <Button
+            size="icon-micro"
+            variant="ghost"
+            aria-label={props.disclosure.expanded ? "Hide conversations" : "Show conversations"}
+            aria-expanded={props.disclosure.expanded}
+            className="absolute top-1/2 right-8 z-20 -translate-y-1/2"
+            onClick={props.disclosure.onToggle}
+          >
+            {props.disclosure.expanded ? <ChevronUpIcon /> : <ChevronDownIcon />}
+          </Button>
+        ) : null}
+        {props.menu}
+      </div>
       {props.footer}
     </div>
   );

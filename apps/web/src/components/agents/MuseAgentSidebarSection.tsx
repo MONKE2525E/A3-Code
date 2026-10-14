@@ -233,7 +233,7 @@ function MuseAgentRoster({
   const name = data?.name?.trim() || "Muse";
   const avatar = useMuseAgentAvatar(environmentId, data, { state: avatarState });
   const errorFooter = openError ? (
-    <div className="relative z-10 flex items-center gap-2 pr-2 pb-2 pl-(--sidebar-row-content-inset)">
+    <div className="flex items-center gap-2 py-1 pr-2 pl-(--sidebar-row-content-inset)">
       <p role="alert" className="min-w-0 flex-1 text-xs leading-4.5 text-destructive">
         {openError}
       </p>
