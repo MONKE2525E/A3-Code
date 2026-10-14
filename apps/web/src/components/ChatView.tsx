@@ -11228,9 +11228,8 @@ export default function ChatView(props: ChatViewProps) {
       <ThreadPullRequestsPanel threadRef={activeThreadRef} />
     ) : renderedRightPanelSurface?.kind === "muse-features" && isMuseAgentThread && activeThread ? (
       <MuseAgentFeaturesPanel
-        key={`${activeThread.environmentId}:${renderedRightPanelSurface.tab ?? "activity"}`}
+        key={activeThread.environmentId}
         environmentId={activeThread.environmentId}
-        initialTab={renderedRightPanelSurface.tab}
         onClose={() => {
           if (activeThreadRef === null) return;
           useRightPanelStore.getState().toggle(activeThreadRef, "muse-features");
@@ -12185,12 +12184,6 @@ export default function ChatView(props: ChatViewProps) {
           onAddComputer={() => useRightPanelStore.getState().open(activeThreadRef, "grok-computer")}
           computerAvailable={isGrokBotThread}
           nativeAgentThread={isMuseAgentThread}
-          onAddMuseActivity={() =>
-            useRightPanelStore.getState().openMuseFeatures(activeThreadRef, "activity")
-          }
-          onAddMuseApprovals={() =>
-            useRightPanelStore.getState().openMuseFeatures(activeThreadRef, "approvals")
-          }
           onAddDevice={addDeviceSurface}
           browserAvailable={canOperatePreview && browserAvailable}
           terminalAvailable={activeProject !== null && canOperateTerminal}
@@ -12255,12 +12248,6 @@ export default function ChatView(props: ChatViewProps) {
             }
             computerAvailable={isGrokBotThread}
             nativeAgentThread={isMuseAgentThread}
-            onAddMuseActivity={() =>
-              useRightPanelStore.getState().openMuseFeatures(activeThreadRef, "activity")
-            }
-            onAddMuseApprovals={() =>
-              useRightPanelStore.getState().openMuseFeatures(activeThreadRef, "approvals")
-            }
             onAddDevice={addDeviceSurface}
             browserAvailable={canOperatePreview && browserAvailable}
             terminalAvailable={activeProject !== null && canOperateTerminal}

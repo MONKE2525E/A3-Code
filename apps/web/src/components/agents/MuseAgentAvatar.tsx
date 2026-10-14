@@ -4,7 +4,7 @@ import { cn } from "~/lib/utils";
 
 import { resolveMuseAvatarPlayback } from "./aiAgents";
 
-const SIZE_PX = { sm: 22, md: 28, lg: 36, xl: 72, "2xl": 112 } as const;
+const SIZE_PX = { sm: 22, md: 28, lg: 36, tall: 44, xl: 72, "2xl": 112 } as const;
 const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
 
 type MuseAgentAvatarProps = {

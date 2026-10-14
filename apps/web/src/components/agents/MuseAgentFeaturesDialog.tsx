@@ -18,7 +18,6 @@ import {
   ChevronRightIcon,
   FingerprintIcon,
   ListChecksIcon,
-  ListIcon,
   MessageSquareIcon,
   PencilIcon,
   SettingsIcon,
@@ -39,7 +38,6 @@ import {
 } from "~/components/ui/alert-dialog";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
-import type { MuseFeaturesTab } from "~/rightPanelStore";
 import {
   Dialog,
   DialogDescription,
@@ -364,7 +362,7 @@ function SkillsSection({ environmentId, providerInstanceId }: Target) {
 }
 
 /**
- * Muse's record of what it has done. Conversations live under the Muse row in the sidebar; this tab
+ * Muse's record of what it has done. Conversations live under the Muse row in the sidebar; this page
  * holds the tasks and runs Muse recorded, which are the sessions that are not threads.
  */
 function ActivitySection({ environmentId, providerInstanceId }: Target) {
@@ -404,21 +402,9 @@ function ActivitySection({ environmentId, providerInstanceId }: Target) {
   );
 }
 
-/** Top-level panel tabs, matching the original Muse app. Schedules live in Scheduled tasks. */
-type MusePanelTab = "activity" | "approvals" | "profile";
+/** What the Profile page shows instead of its main view: an ability, or Muse's computer from the gear. */
 type MuseAbility = Extract<MuseFeatureTabId, "memory" | "connections" | "skills" | "dictation">;
-/** What the body shows instead of a tab: an ability from Profile, or Muse's computer from the gear. */
 type MuseDetail = MuseAbility | "computer";
-
-const MUSE_PANEL_TABS: ReadonlyArray<{
-  readonly id: MusePanelTab;
-  readonly label: string;
-  readonly icon: typeof ListIcon;
-}> = [
-  { id: "activity", label: "Activity", icon: ListIcon },
-  { id: "approvals", label: "Approvals", icon: ShieldCheckIcon },
-  { id: "profile", label: "Profile", icon: FingerprintIcon },
-];
 
 const MUSE_ABILITIES: ReadonlyArray<{
   readonly id: MuseAbility;
@@ -431,15 +417,9 @@ const MUSE_ABILITIES: ReadonlyArray<{
   { id: "dictation", label: "Dictation", description: "Speak to Muse" },
 ];
 
-/** The inventory feature each tab reads; Approvals has none, because Muse does not share it yet. */
-const PANEL_FEATURE: Record<Exclude<MusePanelTab, "approvals">, MuseFeatureTabId> = {
-  activity: "conversations",
-  profile: "profile",
-};
-
 type MuseLeave =
   | { readonly kind: "close" }
-  | { readonly kind: "go"; readonly tab: MusePanelTab; readonly detail: MuseDetail | null };
+  | { readonly kind: "go"; readonly detail: MuseDetail | null };
 
 /**
  * Muse's features for one connected provider instance. The same body fills the thread's right
@@ -450,9 +430,7 @@ function MuseAgentFeaturesBody({
   environmentId,
   providerInstanceId,
   onClose,
-  initialTab,
-}: Target & { readonly onClose: () => void; readonly initialTab?: MuseFeaturesTab | undefined }) {
-  const [tab, setTab] = useState<MusePanelTab>(initialTab ?? "activity");
+}: Target & { readonly onClose: () => void }) {
   const [detail, setDetail] = useState<MuseDetail | null>(null);
   const canWrite = useAtomValue(museAgentFeatureUpdate.permissionAtom(environmentId));
   const inventory = useFeatureRead(environmentId, { operation: "inventory", providerInstanceId });
@@ -480,7 +458,6 @@ function MuseAgentFeaturesBody({
       onClose();
       return;
     }
-    setTab(leave.tab);
     setDetail(leave.detail);
   };
   const requestLeave = (leave: MuseLeave) => {
@@ -509,14 +486,14 @@ function MuseAgentFeaturesBody({
   if (detail === "computer") {
     body = (
       <div className="flex flex-col gap-4 px-5 pb-6">
-        <BackToProfile onBack={() => requestLeave({ kind: "go", tab: "profile", detail: null })} />
+        <BackToProfile onBack={() => requestLeave({ kind: "go", detail: null })} />
         <MuseAgentComputerSection {...target} canWrite={canWrite} />
       </div>
     );
   } else if (detail !== null) {
     body = (
       <div className="flex flex-col gap-4 px-5 pb-6">
-        <BackToProfile onBack={() => requestLeave({ kind: "go", tab: "profile", detail: null })} />
+        <BackToProfile onBack={() => requestLeave({ kind: "go", detail: null })} />
         {panelSupport(detail) === "unavailable" ? (
           unavailable
         ) : detail === "memory" ? (
@@ -535,36 +512,10 @@ function MuseAgentFeaturesBody({
         )}
       </div>
     );
-  } else if (tab === "approvals") {
-    body = (
-      <div className="grid gap-3 px-5 pb-6">
-        <h3 className="text-base font-semibold text-foreground">Approvals history</h3>
-        <div className="flex flex-col items-center gap-3 rounded-2xl bg-muted/50 px-6 py-10 text-center">
-          <span
-            aria-hidden="true"
-            className="flex size-10 items-center justify-center rounded-xl bg-muted text-muted-foreground"
-          >
-            <ShieldCheckIcon className="size-4" />
-          </span>
-          <p role="status" className="text-sm text-muted-foreground">
-            Muse hasn't shared its approval history with T3 yet.
-          </p>
-        </div>
-      </div>
-    );
-  } else if (tab === "activity") {
-    body =
-      panelSupport(PANEL_FEATURE.activity) === "unavailable" ? (
-        unavailable
-      ) : (
-        <div className="px-5 pb-6">
-          <ActivitySection {...target} />
-        </div>
-      );
   } else {
     body = (
       <div className="flex flex-col gap-6 px-5 pb-6">
-        {panelSupport(PANEL_FEATURE.profile) === "unavailable" ? (
+        {panelSupport("profile") === "unavailable" ? (
           unavailable
         ) : (
           <MuseAgentProfileSection
@@ -580,7 +531,7 @@ function MuseAgentFeaturesBody({
               <button
                 type="button"
                 className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                onClick={() => requestLeave({ kind: "go", tab: "profile", detail: item.id })}
+                onClick={() => requestLeave({ kind: "go", detail: item.id })}
               >
                 <span className="min-w-0 flex-1">
                   <span className="block text-sm font-semibold">{item.label}</span>
@@ -613,7 +564,6 @@ function MuseAgentFeaturesBody({
                   onClick={() =>
                     requestLeave({
                       kind: "go",
-                      tab: "profile",
                       detail: detail === "computer" ? null : "computer",
                     })
                   }
@@ -640,7 +590,7 @@ function MuseAgentFeaturesBody({
                   variant="secondary"
                   aria-label="Edit Muse's profile"
                   className="absolute right-0 bottom-1"
-                  onClick={() => requestLeave({ kind: "go", tab: "profile", detail: null })}
+                  onClick={() => requestLeave({ kind: "go", detail: null })}
                 />
               }
             >
@@ -655,44 +605,10 @@ function MuseAgentFeaturesBody({
         </p>
       </div>
       <div
-        role="tablist"
-        aria-label="Muse features"
-        className="mx-5 mb-5 flex gap-1 rounded-full bg-muted p-1"
+        role="tabpanel"
+        aria-label={detail ?? "profile"}
+        className="min-h-0 flex-1 overflow-y-auto"
       >
-        {MUSE_PANEL_TABS.map((item) => {
-          const Icon = item.icon;
-          const selected = tab === item.id && detail === null;
-          return (
-            <Tooltip key={item.id}>
-              <TooltipTrigger
-                render={
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={selected}
-                    aria-label={item.label}
-                    className={cn(
-                      "flex flex-1 items-center justify-center rounded-full py-2 transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-                      selected
-                        ? "bg-background text-foreground shadow-sm"
-                        : "text-muted-foreground hover:text-foreground",
-                    )}
-                    onClick={() => {
-                      if (item.id !== tab || detail !== null) {
-                        requestLeave({ kind: "go", tab: item.id, detail: null });
-                      }
-                    }}
-                  />
-                }
-              >
-                <Icon className="size-4" />
-              </TooltipTrigger>
-              <TooltipPopup side="bottom">{item.label}</TooltipPopup>
-            </Tooltip>
-          );
-        })}
-      </div>
-      <div role="tabpanel" aria-label={detail ?? tab} className="min-h-0 flex-1 overflow-y-auto">
         {body}
       </div>
       <AlertDialog
@@ -738,11 +654,9 @@ function BackToProfile({ onBack }: { readonly onBack: () => void }) {
 export function MuseAgentFeaturesPanel({
   environmentId,
   onClose,
-  initialTab,
 }: {
   readonly environmentId: EnvironmentId;
   readonly onClose: () => void;
-  readonly initialTab?: MuseFeaturesTab | undefined;
 }) {
   const canRead = useEnvironmentScope(environmentId, AuthOrchestrationReadScope);
   const status = useEnvironmentQuery(
@@ -755,8 +669,65 @@ export function MuseAgentFeaturesPanel({
         environmentId={environmentId}
         providerInstanceId={status.provider.instanceId}
         onClose={onClose}
-        initialTab={initialTab}
       />
+    </div>
+  );
+}
+
+/** Muse has not shared its approval history with T3, so the page says so instead of guessing. */
+function MuseApprovalsSection() {
+  return (
+    <div className="grid gap-3 px-5 pb-6">
+      <div className="flex flex-col items-center gap-3 rounded-2xl bg-muted/50 px-6 py-10 text-center">
+        <span
+          aria-hidden="true"
+          className="flex size-10 items-center justify-center rounded-xl bg-muted text-muted-foreground"
+        >
+          <ShieldCheckIcon className="size-4" />
+        </span>
+        <p role="status" className="text-sm text-muted-foreground">
+          Muse hasn't shared its approval history with T3 yet.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Activity and Approvals each open as their own page from the sidebar, rather than as tabs in one
+ * panel. Profile keeps the features panel.
+ */
+export function MuseAgentSectionPage({
+  environmentId,
+  providerInstanceId,
+  section,
+}: Target & { readonly section: "activity" | "approvals" }) {
+  const inventory = useFeatureRead(environmentId, { operation: "inventory", providerInstanceId });
+  const inventoryData = inventory.data?.operation === "inventory" ? inventory.data.data : null;
+  const activityUnavailable =
+    section === "activity" &&
+    resolveMuseTabSupport(inventoryData, "conversations") === "unavailable";
+  return (
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      <h2 className="px-5 pt-5 pb-3 text-xl font-semibold">
+        {section === "activity" ? "Activity" : "Approvals"}
+      </h2>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {section === "approvals" ? (
+          <MuseApprovalsSection />
+        ) : activityUnavailable ? (
+          <p role="status" className="px-6 py-10 text-center text-sm text-muted-foreground">
+            This isn't available for Muse yet.
+          </p>
+        ) : (
+          <div className="px-5 pb-6">
+            <ActivitySection
+              environmentId={environmentId}
+              providerInstanceId={providerInstanceId}
+            />
+          </div>
+        )}
+      </div>
     </div>
   );
 }

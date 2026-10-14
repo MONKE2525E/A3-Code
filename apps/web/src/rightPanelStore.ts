@@ -42,12 +42,9 @@ export interface DeviceTabTarget {
   name: string;
 }
 
-/** The Muse features panel tabs a launcher entry can open directly. */
-export type MuseFeaturesTab = "activity" | "approvals";
-
 export type RightPanelSurface =
   | { id: "grok-computer"; kind: "grok-computer" }
-  | { id: "muse-features"; kind: "muse-features"; tab?: MuseFeaturesTab }
+  | { id: "muse-features"; kind: "muse-features" }
   | { id: `browser:${string}`; kind: "preview"; resourceId: string }
   | { id: "browser:new"; kind: "preview"; resourceId: null }
   | { id: "device" | `device:${string}`; kind: "device"; target?: DeviceTabTarget; title?: string }
@@ -155,8 +152,6 @@ interface RightPanelStoreState {
     ref: ScopedThreadRef,
     kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request">,
   ) => void;
-  /** Opens Muse's features panel on one tab, moving an already-open panel to that tab. */
-  openMuseFeatures: (ref: ScopedThreadRef, tab: MuseFeaturesTab) => void;
   openDevice: (ref: ScopedThreadRef, target: DeviceTabTarget, automatic?: boolean) => void;
   renameDevice: (ref: ScopedThreadRef, surfaceId: string, title: string) => void;
   openBrowser: (ref: ScopedThreadRef, tabId: string | null) => void;
@@ -658,16 +653,6 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               return upsertSurface(current, existing ?? browserSurface(null));
             }
             return upsertSurface(current, singletonSurface(kind));
-          }),
-        ),
-      openMuseFeatures: (ref, tab) =>
-        set((state) =>
-          userAction(state, scopedThreadKey(ref), (current) => {
-            const surface: RightPanelSurface = { id: "muse-features", kind: "muse-features", tab };
-            const surfaces = current.surfaces.map((entry) =>
-              entry.id === surface.id ? surface : entry,
-            );
-            return upsertSurface({ ...current, surfaces }, surface);
           }),
         ),
       openDevice: (ref, target, automatic = false) =>

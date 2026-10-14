@@ -30,22 +30,6 @@ beforeEach(() => {
 });
 
 describe("rightPanelStore", () => {
-  it("opens Muse's features panel on the requested tab and moves an open panel to it", () => {
-    const store = useRightPanelStore.getState();
-    store.openMuseFeatures(refA, "activity");
-    const first = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA);
-    expect(first.surfaces).toEqual([
-      { id: "muse-features", kind: "muse-features", tab: "activity" },
-    ]);
-
-    useRightPanelStore.getState().openMuseFeatures(refA, "approvals");
-    const moved = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA);
-    expect(moved.surfaces).toEqual([
-      { id: "muse-features", kind: "muse-features", tab: "approvals" },
-    ]);
-    expect(moved.activeSurfaceId).toBe("muse-features");
-  });
-
   it("records single and bulk tab closes, newest first", () => {
     const store = useRightPanelStore.getState();
     const pr = pullRequestSurface({

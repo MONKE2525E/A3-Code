@@ -4,14 +4,16 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { type EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
+import { type EnvironmentId, ProviderInstanceId, type ThreadId } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { useNavigate, useParams } from "@tanstack/react-router";
-import { useCallback, useMemo, useState } from "react";
+import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
+import { ChevronLeftIcon, ListChecksIcon, ShieldCheckIcon } from "lucide-react";
+import { useCallback, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 
 import { Button } from "~/components/ui/button";
 import { useSidebar } from "~/components/ui/sidebar";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
+import { cn } from "~/lib/utils";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import {
   museAgentOpenThread,
@@ -36,6 +38,8 @@ import {
 } from "./aiAgents";
 import { MuseAgentAvatar } from "./MuseAgentAvatar";
 import { MuseAgentConversations } from "./MuseAgentConversations";
+import { MuseSubChatConnector } from "./MuseSubChatConnector";
+import { resolveMuseSubChatList, type MuseSubChatEntry } from "./museSubChatList";
 import { useMuseAgentAvatar } from "./useMuseAgentAvatar";
 
 const MUSE_PINNED_STORAGE_KEY = "t3code:muse-agent-pinned";
@@ -259,7 +263,32 @@ function MuseAgentRoster({
       }
     />
   );
-  const avatarNode = (size: "lg" | "xl") => (
+  const subChats = useMemo(
+    () => resolveMuseSubChatList({ threads, providerInstanceId: instanceId, routeThreadId }),
+    [instanceId, routeThreadId, threads],
+  );
+  const rosterRef = useRef<HTMLDivElement | null>(null);
+  const avatarRef = useRef<HTMLSpanElement | null>(null);
+  const subChatLabelRef = useRef<HTMLSpanElement | null>(null);
+  const openEntry = subChats.open;
+  const inSideChat = routeEnvironmentId === environmentId && openEntry !== null;
+  const pathname = useLocation({ select: (location) => location.pathname });
+  const openMuseSection = (section: "activity" | "approvals") => {
+    if (isMobile) setOpenMobile(false);
+    void navigate({
+      to: "/muse/$section",
+      params: { section },
+      search: { environmentId },
+    });
+  };
+  const openSubChat = (entry: MuseSubChatEntry) => {
+    if (isMobile) setOpenMobile(false);
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: buildThreadRouteParams(scopeThreadRef(environmentId, entry.id as ThreadId)),
+    });
+  };
+  const avatarNode = (size: "lg" | "tall" | "xl") => (
     <MuseAgentAvatar
       name={name}
       imageUrl={avatar.imageUrl}
@@ -286,19 +315,128 @@ function MuseAgentRoster({
     );
   }
   return (
-    <div className="flex flex-col gap-px">
+    <div ref={rosterRef} className="relative flex flex-col gap-px">
       <AgentRosterRow
         name={name}
-        avatar={avatarNode("lg")}
+        avatar={
+          <span ref={avatarRef} className="inline-flex shrink-0">
+            {avatarNode(inSideChat ? "tall" : "lg")}
+          </span>
+        }
         selected={selected}
         statusDot={statusDot}
         disabled={!canOpen}
         pending={opening}
-        menu={menu("row")}
+        expanded={inSideChat}
+        menu={
+          inSideChat ? (
+            <Button
+              size="icon-micro"
+              variant="ghost"
+              aria-label="Back to Main chat"
+              className="absolute top-1/2 right-1.5 z-20 -translate-y-1/2"
+              onClick={() => void open()}
+            >
+              <ChevronLeftIcon />
+            </Button>
+          ) : (
+            menu("row")
+          )
+        }
         footer={errorFooter}
         onOpen={() => void open()}
       />
+      {openEntry ? (
+        <MuseSubChatRow
+          entry={openEntry}
+          labelRef={subChatLabelRef}
+          onOpen={() => openSubChat(openEntry)}
+        />
+      ) : null}
+      {subChats.pinned.length > 0 ? (
+        <>
+          <p className="pt-1 pl-10.5 text-2xs leading-4 text-sidebar-muted-foreground">Pinned</p>
+          {subChats.pinned.map((entry) => (
+            <MuseSubChatRow key={entry.id} entry={entry} onOpen={() => openSubChat(entry)} />
+          ))}
+        </>
+      ) : null}
+      <MuseSectionRow
+        label="Activity"
+        icon={<ListChecksIcon />}
+        active={pathname === "/muse/activity"}
+        onOpen={() => openMuseSection("activity")}
+      />
+      <MuseSectionRow
+        label="Approvals"
+        icon={<ShieldCheckIcon />}
+        active={pathname === "/muse/approvals"}
+        onOpen={() => openMuseSection("approvals")}
+      />
+      {inSideChat ? (
+        <MuseSubChatConnector
+          containerRef={rosterRef}
+          avatarRef={avatarRef}
+          targetRef={subChatLabelRef}
+        />
+      ) : null}
     </div>
+  );
+}
+
+/** A dedicated Muse page in the sidebar: each one opens its own route, not a tab in a shared panel. */
+function MuseSectionRow({
+  label,
+  icon,
+  active,
+  onOpen,
+}: {
+  readonly label: string;
+  readonly icon: ReactNode;
+  readonly active: boolean;
+  readonly onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-current={active ? "page" : undefined}
+      className={cn(
+        "relative z-10 flex h-[1.875rem] w-full min-w-0 cursor-pointer items-center gap-2 rounded-md pr-2 pl-10.5 text-left text-sm text-sidebar-foreground outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+        active ? "bg-sidebar-row-active" : "hover:bg-sidebar-row-hover",
+      )}
+      onClick={onOpen}
+    >
+      <span className="flex size-3.5 shrink-0 items-center justify-center text-sidebar-muted-foreground [&>svg]:size-3.5">
+        {icon}
+      </span>
+      <span className="min-w-0 truncate">{label}</span>
+    </button>
+  );
+}
+
+function MuseSubChatRow({
+  entry,
+  labelRef,
+  onOpen,
+}: {
+  readonly entry: MuseSubChatEntry;
+  readonly labelRef?: RefObject<HTMLSpanElement | null>;
+  readonly onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-current={entry.active ? "page" : undefined}
+      className={cn(
+        "relative z-10 flex h-[1.875rem] w-full min-w-0 cursor-pointer items-center rounded-md pr-2 pl-10.5 text-left text-sm text-sidebar-foreground outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+        entry.active ? "bg-sidebar-row-active" : "hover:bg-sidebar-row-hover",
+      )}
+      onClick={onOpen}
+    >
+      <span ref={labelRef} className="min-w-0 truncate">
+        {entry.title}
+      </span>
+    </button>
   );
 }
 

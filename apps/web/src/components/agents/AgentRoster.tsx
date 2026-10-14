@@ -33,6 +33,8 @@ export function AgentRosterRow(props: {
   /** Opening is in flight; the row stays disabled so repeat clicks cannot queue. */
   readonly pending?: boolean;
   readonly pendingLabel?: string;
+  /** Taller row with the avatar at the top, for an agent whose sub-chats are listed beneath it. */
+  readonly expanded?: boolean;
   /** Extra content under the row, outside its highlight, such as an inline error with a retry. */
   readonly footer?: ReactNode;
   readonly onOpen: () => void;
@@ -51,8 +53,9 @@ export function AgentRosterRow(props: {
           disabled={props.disabled || props.pending}
           aria-busy={props.pending || undefined}
           className={cn(
-            "relative z-10 flex h-[3.375rem] w-full min-w-0 cursor-pointer items-center gap-2 pl-(--sidebar-row-content-inset) py-(--sidebar-content-inset) text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
+            "relative z-10 flex w-full min-w-0 cursor-pointer gap-2 pl-(--sidebar-row-content-inset) py-(--sidebar-content-inset) text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
             "pr-8.5",
+            props.expanded ? "h-[5.25rem] items-start" : "h-[3.375rem] items-center",
           )}
           onClick={props.onOpen}
         >
