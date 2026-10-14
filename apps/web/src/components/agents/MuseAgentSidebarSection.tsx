@@ -164,7 +164,6 @@ function MuseAgentRoster({
 
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
-  const [conversationsOpen, setConversationsOpen] = useState(false);
 
   const open = useCallback(async () => {
     if (opening) return;
@@ -242,6 +241,7 @@ function MuseAgentRoster({
       </Button>
     </div>
   ) : null;
+  // Side chats live in the menu, so the row stays one line and a pinned tile still lists them.
   const menu = (variant: "row" | "tile") => (
     <AgentRowMenu
       name={name}
@@ -250,6 +250,13 @@ function MuseAgentRoster({
       canUpdate
       onTogglePin={() => setPinned(!pinned)}
       onEdit={onOpenSettings}
+      footer={
+        <MuseAgentConversations
+          environmentId={environmentId}
+          providerInstanceId={ProviderInstanceId.make(instanceId)}
+          threads={threads}
+        />
+      }
     />
   );
   const avatarNode = (size: "lg" | "xl") => (
@@ -262,7 +269,6 @@ function MuseAgentRoster({
     />
   );
 
-  // A pinned tile has no room for a disclosure, so its conversations wait until it is unpinned.
   if (pinned) {
     return (
       <ul className="grid grid-cols-[repeat(auto-fit,minmax(80px,1fr))] gap-x-1 gap-y-3 py-1.5">
@@ -289,23 +295,7 @@ function MuseAgentRoster({
         disabled={!canOpen}
         pending={opening}
         menu={menu("row")}
-        disclosure={{
-          expanded: conversationsOpen,
-          onToggle: () => setConversationsOpen((expanded) => !expanded),
-        }}
-        footer={
-          <>
-            {errorFooter}
-            {conversationsOpen ? (
-              <MuseAgentConversations
-                environmentId={environmentId}
-                providerInstanceId={ProviderInstanceId.make(instanceId)}
-                threads={threads}
-                routeThreadId={routeEnvironmentId === environmentId ? routeThreadId : null}
-              />
-            ) : null}
-          </>
-        }
+        footer={errorFooter}
         onOpen={() => void open()}
       />
     </div>

@@ -15,6 +15,7 @@ import { ArchiveIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { Button } from "~/components/ui/button";
+import { MenuItem, MenuSeparator } from "~/components/ui/menu";
 import { useSidebar } from "~/components/ui/sidebar";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { useThreadActions } from "~/hooks/useThreadActions";
@@ -27,9 +28,7 @@ import {
 import { useAtomCommand } from "~/state/use-atom-command";
 import { buildThreadRouteParams } from "~/threadRoutes";
 import { useUiStateStore } from "~/uiStateStore";
-import { cn } from "~/lib/utils";
 
-import { AgentRosterNotice } from "./AgentRoster";
 import {
   isMuseSessionThread,
   museAvatarStateForStatus,
@@ -37,23 +36,19 @@ import {
 } from "./aiAgents";
 
 /**
- * Muse's side chats as a quiet indented list under its sidebar row. Main chat is the row itself, so
- * an empty or still-loading list renders nothing. Each chat opens as its own thread, and archiving
- * one removes it from Muse and from the sidebar.
+ * Muse's side chats, listed in the row's menu below its pin and edit actions. Main chat is the row
+ * itself, so an empty or still-loading list adds nothing. Each chat opens as its own thread.
  */
 export function MuseAgentConversations({
   environmentId,
   providerInstanceId,
   threads,
-  routeThreadId,
 }: {
   readonly environmentId: EnvironmentId;
   readonly providerInstanceId: ProviderInstanceId;
   readonly threads: ReadonlyArray<OrchestrationV2ThreadShell>;
-  /** The open thread id, or null when the route is not a thread in this environment. */
-  readonly routeThreadId: string | null;
 }) {
-  // Mounted only while the row is expanded, so a collapsed Muse costs no list read.
+  // Mounted only while the menu is open, so a closed menu costs no list read.
   const read = useEnvironmentQuery(
     museAgentFeatureReadQuery({
       environmentId,
@@ -67,41 +62,39 @@ export function MuseAgentConversations({
   );
   if (read.error !== null && sessions === null) {
     return (
-      <AgentRosterNotice message={read.error} actionLabel="Retry" onAction={() => read.refresh()} />
+      <>
+        <MenuSeparator />
+        <MenuItem onClick={() => read.refresh()}>Couldn't load conversations. Retry</MenuItem>
+      </>
     );
   }
   if (conversations.length === 0) return null;
   return (
-    <ul className="flex flex-col gap-px pt-px pl-(--sidebar-row-content-inset)">
+    <>
+      <MenuSeparator />
       {conversations.map((session) => (
-        <li key={session.sessionId}>
-          <MuseConversationRow
-            environmentId={environmentId}
-            providerInstanceId={providerInstanceId}
-            session={session}
-            threads={threads}
-            selected={
-              routeThreadId !== null && isMuseSessionThread(routeThreadId, session.sessionId)
-            }
-          />
-        </li>
+        <MuseConversationItem
+          key={session.sessionId}
+          environmentId={environmentId}
+          providerInstanceId={providerInstanceId}
+          session={session}
+          threads={threads}
+        />
       ))}
-    </ul>
+    </>
   );
 }
 
-function MuseConversationRow({
+function MuseConversationItem({
   environmentId,
   providerInstanceId,
   session,
   threads,
-  selected,
 }: {
   readonly environmentId: EnvironmentId;
   readonly providerInstanceId: ProviderInstanceId;
   readonly session: MuseAgentFeatureSession;
   readonly threads: ReadonlyArray<OrchestrationV2ThreadShell>;
-  readonly selected: boolean;
 }) {
   const navigate = useNavigate();
   const { isMobile, setOpenMobile } = useSidebar();
@@ -112,15 +105,28 @@ function MuseConversationRow({
   const [busy, setBusy] = useState(false);
   const label = session.title?.trim() || "Untitled conversation";
 
+  const cachedThread = threads.find(
+    (entry) =>
+      entry.providerInstanceId === providerInstanceId &&
+      entry.archivedAt === null &&
+      isMuseSessionThread(entry.id, session.sessionId),
+  );
+  const localVisitedAt = useUiStateStore((state) =>
+    cachedThread
+      ? state.threadLastVisitedAtById[
+          scopedThreadKey(scopeThreadRef(environmentId, cachedThread.id))
+        ]
+      : undefined,
+  );
+  const statusDot = resolveMuseAgentStatusDot({
+    active: museAvatarStateForStatus(cachedThread?.status) !== "idle",
+    thread: cachedThread ?? null,
+    localVisitedAt,
+  });
+
   const open = async () => {
     if (busy) return;
     if (isMobile) setOpenMobile(false);
-    const cached = threads.find(
-      (entry) =>
-        entry.providerInstanceId === providerInstanceId &&
-        entry.archivedAt === null &&
-        isMuseSessionThread(entry.id, session.sessionId),
-    );
     const request = {
       environmentId,
       input: {
@@ -128,11 +134,11 @@ function MuseConversationRow({
         sessionId: session.sessionId,
       },
     };
-    if (cached) {
+    if (cachedThread) {
       // Open the cached conversation now. The guarded open still runs and reports a failure here.
       void navigate({
         to: "/$environmentId/$threadId",
-        params: buildThreadRouteParams(scopeThreadRef(environmentId, cached.id)),
+        params: buildThreadRouteParams(scopeThreadRef(environmentId, cachedThread.id)),
       });
       const validated = await openThread(request);
       if (validated._tag !== "Success" && !isAtomCommandInterrupted(validated)) {
@@ -170,13 +176,7 @@ function MuseConversationRow({
     });
     if (result._tag === "Success") {
       // Muse archived it, so its T3 thread goes too; the next open restores both.
-      const thread = threads.find(
-        (entry) =>
-          entry.providerInstanceId === providerInstanceId &&
-          entry.archivedAt === null &&
-          isMuseSessionThread(entry.id, session.sessionId),
-      );
-      if (thread) await archiveThread(scopeThreadRef(environmentId, thread.id));
+      if (cachedThread) await archiveThread(scopeThreadRef(environmentId, cachedThread.id));
     } else if (!isAtomCommandInterrupted(result)) {
       toastManager.add(
         stackedThreadToast({
@@ -189,66 +189,39 @@ function MuseConversationRow({
     setBusy(false);
   };
 
-  const cachedThread = threads.find(
-    (entry) =>
-      entry.providerInstanceId === providerInstanceId &&
-      entry.archivedAt === null &&
-      isMuseSessionThread(entry.id, session.sessionId),
-  );
-  const localVisitedAt = useUiStateStore((state) =>
-    cachedThread
-      ? state.threadLastVisitedAtById[
-          scopedThreadKey(scopeThreadRef(environmentId, cachedThread.id))
-        ]
-      : undefined,
-  );
-  const statusDot = resolveMuseAgentStatusDot({
-    active: museAvatarStateForStatus(cachedThread?.status) !== "idle",
-    thread: cachedThread ?? null,
-    localVisitedAt,
-  });
-
   return (
-    <div
-      className={cn(
-        "group/conversation flex h-7 w-full items-center rounded-md text-sidebar-foreground",
-        selected ? "bg-sidebar-row-active" : "hover:bg-sidebar-row-hover",
-      )}
-    >
-      <button
-        type="button"
-        aria-current={selected ? "page" : undefined}
-        disabled={busy}
-        className="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:opacity-60"
-        onClick={() => void open()}
-      >
-        <span className="min-w-0 flex-1 truncate">{label}</span>
-        {statusDot ? (
-          <>
-            <span
-              aria-hidden
-              className={cn(
-                "size-2 shrink-0 rounded-full",
-                statusDot === "active" ? "bg-success" : "bg-info",
-              )}
-            />
-            <span className="sr-only">{statusDot === "active" ? "Working" : "New activity"}</span>
-          </>
-        ) : null}
-      </button>
+    <MenuItem disabled={busy} onClick={() => void open()}>
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {statusDot ? (
+        <>
+          <span
+            aria-hidden
+            className={
+              statusDot === "active"
+                ? "size-2 shrink-0 rounded-full bg-success"
+                : "size-2 shrink-0 rounded-full bg-info"
+            }
+          />
+          <span className="sr-only">{statusDot === "active" ? "Working" : "New activity"}</span>
+        </>
+      ) : null}
       {canWrite ? (
-        <span className="mr-1 shrink-0 opacity-0 group-hover/conversation:opacity-100 group-focus-within/conversation:opacity-100">
+        // Archive shows only while its row is highlighted, so the list stays quiet at rest.
+        <span className="shrink-0 opacity-0 in-data-highlighted:opacity-100">
           <Button
             size="icon-micro"
             variant="ghost"
             aria-label={`Archive ${label}`}
             disabled={busy}
-            onClick={() => void archive()}
+            onClick={(event) => {
+              event.stopPropagation();
+              void archive();
+            }}
           >
             <ArchiveIcon />
           </Button>
         </span>
       ) : null}
-    </div>
+    </MenuItem>
   );
 }
