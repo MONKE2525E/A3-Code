@@ -101,7 +101,7 @@ export class NativeAgentService extends Context.Service<
       NativeAgentError
     >;
     readonly open: (
-      reference: NativeAgentReference,
+      reference: NativeAgentOpenThreadInput,
     ) => Effect.Effect<typeof NativeAgentOpenThreadResult.Type, NativeAgentError>;
   }
 >()("t3/nativeAgents/NativeAgentService") {}
