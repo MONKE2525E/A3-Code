@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   isAtomCommandInterrupted,
+  settlePromise,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type {
@@ -11,14 +12,22 @@ import type {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
-import { ArchiveIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { Button } from "~/components/ui/button";
+import {
+  Dialog,
+  DialogFooter,
+  DialogHeader,
+  DialogPopup,
+  DialogTitle,
+} from "~/components/ui/dialog";
+import { Input } from "~/components/ui/input";
 import { MenuItem, MenuSeparator } from "~/components/ui/menu";
 import { useSidebar } from "~/components/ui/sidebar";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { useThreadActions } from "~/hooks/useThreadActions";
+import { readLocalApi } from "~/localApi";
 import { useEnvironmentQuery } from "~/state/query";
 import {
   museAgentFeatureReadQuery,
@@ -100,9 +109,11 @@ function MuseConversationItem({
   const { isMobile, setOpenMobile } = useSidebar();
   const openThread = useAtomCommand(museAgentOpenThread, { reportFailure: false });
   const update = useAtomCommand(museAgentFeatureUpdate, { reportFailure: false });
-  const { archiveThread } = useThreadActions();
+  const { archiveThread, pinThread, unpinThread } = useThreadActions();
   const canWrite = useAtomValue(museAgentFeatureUpdate.permissionAtom(environmentId));
   const [busy, setBusy] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [draft, setDraft] = useState("");
   const label = session.title?.trim() || "Untitled conversation";
 
   const cachedThread = threads.find(
@@ -111,6 +122,8 @@ function MuseConversationItem({
       entry.archivedAt === null &&
       isMuseSessionThread(entry.id, session.sessionId),
   );
+  const threadRef = cachedThread ? scopeThreadRef(environmentId, cachedThread.id) : null;
+  const pinned = cachedThread?.pinnedAt != null;
   const localVisitedAt = useUiStateStore((state) =>
     cachedThread
       ? state.threadLastVisitedAtById[
@@ -176,7 +189,7 @@ function MuseConversationItem({
     });
     if (result._tag === "Success") {
       // Muse archived it, so its T3 thread goes too; the next open restores both.
-      if (cachedThread) await archiveThread(scopeThreadRef(environmentId, cachedThread.id));
+      if (threadRef) await archiveThread(threadRef);
     } else if (!isAtomCommandInterrupted(result)) {
       toastManager.add(
         stackedThreadToast({
@@ -189,39 +202,132 @@ function MuseConversationItem({
     setBusy(false);
   };
 
+  const rename = async () => {
+    const title = draft.trim();
+    setRenaming(false);
+    if (title.length === 0 || title === label) return;
+    const result = await update({
+      environmentId,
+      input: {
+        operation: "session_rename",
+        providerInstanceId,
+        sessionId: session.sessionId,
+        title,
+      },
+    });
+    if (result._tag !== "Success" && !isAtomCommandInterrupted(result)) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not rename conversation",
+          description: String(squashAtomCommandFailure(result)),
+        }),
+      );
+    }
+  };
+
+  const togglePin = async () => {
+    if (!threadRef) return;
+    const result = pinned ? await unpinThread(threadRef) : await pinThread(threadRef);
+    if (result._tag !== "Success" && !isAtomCommandInterrupted(result)) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: pinned ? "Could not unpin conversation" : "Could not pin conversation",
+          description: String(squashAtomCommandFailure(result)),
+        }),
+      );
+    }
+  };
+
+  // Right-click uses the same native menu as T3's thread rows, so it looks and behaves the same.
+  const showContextMenu = async (position: { x: number; y: number }) => {
+    const api = readLocalApi();
+    if (!api) return;
+    const clicked = await settlePromise(() =>
+      api.contextMenu.show(
+        [
+          {
+            id: "pin",
+            label: pinned ? "Unpin" : "Pin",
+            disabled: threadRef === null || !canWrite,
+          },
+          { id: "rename", label: "Rename", disabled: !canWrite },
+          { id: "archive", label: "Archive", disabled: !canWrite || busy, separatorBefore: true },
+        ],
+        position,
+      ),
+    );
+    if (clicked._tag === "Failure" || clicked.value === null) return;
+    switch (clicked.value) {
+      case "pin":
+        void togglePin();
+        return;
+      case "rename":
+        setDraft(label);
+        setRenaming(true);
+        return;
+      case "archive":
+        void archive();
+        return;
+    }
+  };
+
   return (
-    <MenuItem disabled={busy} onClick={() => void open()}>
-      <span className="min-w-0 flex-1 truncate">{label}</span>
-      {statusDot ? (
-        <>
-          <span
-            aria-hidden
-            className={
-              statusDot === "active"
-                ? "size-2 shrink-0 rounded-full bg-success"
-                : "size-2 shrink-0 rounded-full bg-info"
-            }
-          />
-          <span className="sr-only">{statusDot === "active" ? "Working" : "New activity"}</span>
-        </>
-      ) : null}
-      {canWrite ? (
-        // Archive shows only while its row is highlighted, so the list stays quiet at rest.
-        <span className="shrink-0 opacity-0 in-data-highlighted:opacity-100">
-          <Button
-            size="icon-micro"
-            variant="ghost"
-            aria-label={`Archive ${label}`}
-            disabled={busy}
-            onClick={(event) => {
-              event.stopPropagation();
-              void archive();
+    <>
+      <MenuItem
+        disabled={busy}
+        onClick={() => void open()}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          void showContextMenu({ x: event.clientX, y: event.clientY });
+        }}
+      >
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        {statusDot ? (
+          <>
+            <span
+              aria-hidden
+              className={
+                statusDot === "active"
+                  ? "size-2 shrink-0 rounded-full bg-success"
+                  : "size-2 shrink-0 rounded-full bg-info"
+              }
+            />
+            <span className="sr-only">{statusDot === "active" ? "Working" : "New activity"}</span>
+          </>
+        ) : null}
+      </MenuItem>
+      <Dialog open={renaming} onOpenChange={(open) => (open ? null : setRenaming(false))}>
+        <DialogPopup>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void rename();
             }}
           >
-            <ArchiveIcon />
-          </Button>
-        </span>
-      ) : null}
-    </MenuItem>
+            <DialogHeader>
+              <DialogTitle>Rename conversation</DialogTitle>
+            </DialogHeader>
+            <div className="px-6 pb-4">
+              <Input
+                autoFocus
+                aria-label="Conversation title"
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+              />
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="ghost" onClick={() => setRenaming(false)}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={draft.trim().length === 0}>
+                Rename
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogPopup>
+      </Dialog>
+    </>
   );
 }
