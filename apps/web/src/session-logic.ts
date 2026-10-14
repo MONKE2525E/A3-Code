@@ -657,14 +657,21 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
     if (item.type === "user_message" || item.type === "assistant_message") {
       const message: ChatMessage = {
         ...(item.grokBotPeer === undefined ? {} : { grokBotPeer: item.grokBotPeer }),
+        ...(item.grokBotAuthor === undefined ? {} : { grokBotAuthor: item.grokBotAuthor }),
         ...(item.grokBotWorkflowReferences === undefined
           ? {}
           : { grokBotWorkflowReferences: item.grokBotWorkflowReferences }),
+        ...(item.type === "user_message" && item.grokBotReactions !== undefined
+          ? { grokBotReactions: item.grokBotReactions }
+          : {}),
         ...(item.type === "assistant_message" && item.grokBotVoiceCall !== undefined
           ? { grokBotVoiceCall: item.grokBotVoiceCall }
           : {}),
         ...(item.type === "assistant_message" && item.grokBotVoiceCallId !== undefined
           ? { grokBotVoiceCallId: item.grokBotVoiceCallId }
+          : {}),
+        ...(item.type === "assistant_message" && item.grokBotConnectorCard !== undefined
+          ? { grokBotConnectorCard: item.grokBotConnectorCard }
           : {}),
         id: item.messageId,
         role: item.type === "user_message" ? "user" : "assistant",

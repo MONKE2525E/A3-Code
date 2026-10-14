@@ -3,12 +3,17 @@ import { assert, it } from "@effect/vitest";
 import {
   CommandId,
   EnvironmentId,
+  EventId,
   MessageId,
+  NodeId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   ProviderThreadId,
   ProviderTurnId,
+  RuntimeRequestId,
+  RunId,
   ThreadId,
   TurnItemId,
   OrchestratorMcpDelegateTaskResult,
@@ -33,6 +38,16 @@ import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/Claud
 import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
 import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
+import * as ProviderSessions from "../orchestration-v2/ProviderSessionManager.ts";
+import { createGrokBotAdapterV2 } from "../orchestration-v2/Adapters/GrokBotAdapterV2.ts";
+import * as GrokFixture from "../orchestration-v2/Adapters/GrokBotProvider.testkit.ts";
+import {
+  GrokBotNativeRuntimeService,
+  NativeRuntimeError,
+  type RuntimeFrame,
+} from "../grokBot/GrokBotNativeRuntimeService.ts";
+import { GrokBotManagedBinding } from "../orchestration-v2/Adapters/GrokBotManagedBinding.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as Projections from "../orchestration-v2/ProjectionStore.ts";
@@ -57,6 +72,9 @@ import * as Bridge from "../grokBot/voiceRouting/GrokBotVoiceT3Bridge.ts";
 import * as BotThreads from "../grokBot/GrokBotThreadService.ts";
 import * as Environment from "../environment/ServerEnvironment.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
+import * as ThreadHandlers from "./toolkits/thread/handlers.ts";
+import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
+import * as SourceControl from "../sourceControl/SourceControlRepositoryService.ts";
 import * as Launches from "../orchestration-v2/ThreadLaunchService.ts";
 import * as Folders from "../project/ManagedProjectFolders.ts";
 import * as Git from "../vcs/GitVcsDriver.ts";
@@ -116,6 +134,11 @@ const providers: ReadonlyArray<ServerProvider> = [
 
 // Real event sink, SQLite projections, command receipts and effect worker; only provider I/O is a fixture.
 // A non-repository temporary workspace makes checkpoint capture skip Git writes entirely.
+class NativeCallAdapter extends Context.Service<
+  NativeCallAdapter,
+  ProviderAdapter.ProviderAdapterV2["Service"]
+>()("t3/mcp/CallDelegation.integration.test/NativeCallAdapter") {}
+
 const setup = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "call-delegation-" });
@@ -123,6 +146,11 @@ const setup = Effect.gen(function* () {
     readonly turn: ProviderAdapter.ProviderAdapterV2TurnInput;
     readonly events: Queue.Queue<ProviderAdapter.ProviderAdapterV2Event>;
   }> = [];
+  const approvalResponses: ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput[] = [];
+  const subscriptions = yield* Queue.unbounded<{
+    readonly threadId: ThreadId | undefined;
+    readonly eventType: OrchestrationV2DomainEvent["type"] | undefined;
+  }>();
   const adapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
     instanceId,
     driver,
@@ -189,14 +217,24 @@ const setup = Effect.gen(function* () {
             }),
           steerTurn: () => Effect.die("unused"),
           interruptTurn: () => Effect.void,
-          respondToRuntimeRequest: () => Effect.die("unused"),
+          respondToRuntimeRequest: (input) =>
+            Effect.sync(() => {
+              approvalResponses.push(input);
+            }),
           readThreadSnapshot: () => Effect.die("unused"),
           rollbackThread: () => Effect.die("unused"),
           forkThread: () => Effect.die("unused"),
         };
       }),
   };
-  const adapters = ProviderAdapterRegistry.layerSingle(adapter);
+  const nativeAdapter = Option.getOrUndefined(yield* Effect.serviceOption(NativeCallAdapter));
+  const adapters =
+    nativeAdapter === undefined
+      ? ProviderAdapterRegistry.layerSingle(adapter)
+      : Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistryV2, {
+          get: (id) => Effect.succeed(id === nativeAdapter.instanceId ? nativeAdapter : adapter),
+          list: () => Effect.succeed([instanceId, nativeAdapter.instanceId]),
+        });
   const replay = ProviderReplayHarness.layerWithRegistry({ name: "call-delegation" }, adapters, {
     runEffectWorker: false,
   });
@@ -212,7 +250,30 @@ const setup = Effect.gen(function* () {
     ),
   );
   const services = Mcp.layer.pipe(
-    Layer.provideMerge(orchestration),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        orchestration,
+        Layer.effect(
+          ThreadManagement.ThreadManagementService,
+          Effect.gen(function* () {
+            const threads = yield* ThreadManagement.ThreadManagementService;
+            return ThreadManagement.ThreadManagementService.of({
+              ...threads,
+              streamStoredEventsFrom: (input) =>
+                Stream.concat(
+                  Stream.fromEffect(
+                    Queue.offer(subscriptions, {
+                      threadId: input?.threadId,
+                      eventType: input?.eventType,
+                    }),
+                  ).pipe(Stream.drain),
+                  threads.streamStoredEventsFrom(input),
+                ),
+            });
+          }),
+        ).pipe(Layer.provide(orchestration)),
+      ),
+    ),
     Layer.provide(
       Layer.mergeAll(
         adapters,
@@ -295,7 +356,7 @@ const setup = Effect.gen(function* () {
       Stream.runDrain,
       Effect.forkScoped,
     );
-  const start = (task: typeof OrchestratorMcpDelegateTaskResult.Type) =>
+  const start = (task: { readonly childThreadId: ThreadId }) =>
     Effect.gen(function* () {
       const running = yield* watch(
         (event) =>
@@ -368,6 +429,96 @@ const setup = Effect.gen(function* () {
       yield* worker.drain();
       yield* Fiber.join(terminal);
     });
+  const ask = (
+    task: { readonly childThreadId: ThreadId },
+    kind: "user_input" | "command" | "permission",
+    suffix: string,
+  ) =>
+    Effect.gen(function* () {
+      const child = turns.find((entry) => entry.turn.threadId === task.childThreadId)!;
+      const projection = yield* orchestrator.getThreadProjection(task.childThreadId);
+      const providerTurn = projection.providerTurns[0]!;
+      const requestId = RuntimeRequestId.make(`nested-request:${suffix}`);
+      const itemId = TurnItemId.make(`nested-item:${suffix}`);
+      const now = yield* DateTime.now;
+      const itemPersisted = yield* watch(
+        (event) => event.type === "turn-item.updated" && event.payload.id === itemId,
+      );
+      yield* Queue.offer(child.events, {
+        type: "turn_item.updated",
+        driver,
+        turnItem: {
+          id: itemId,
+          threadId: task.childThreadId,
+          runId: child.turn.runId,
+          nodeId: child.turn.rootNodeId,
+          providerThreadId: providerTurn.providerThreadId,
+          providerTurnId: providerTurn.id,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 1,
+          status: "waiting",
+          title: null,
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+          requestId,
+          ...(kind === "user_input"
+            ? {
+                type: "user_input_request" as const,
+                questions: [
+                  { id: "question", header: "Choice", question: "Which branch?", options: [] },
+                ],
+              }
+            : {
+                type: "approval_request" as const,
+                requestKind: kind,
+                prompt: "May I publish the nested change?",
+              }),
+        },
+      });
+      yield* Fiber.join(itemPersisted);
+      const requestPersisted = yield* watch(
+        (event) => event.type === "runtime-request.updated" && event.payload.id === requestId,
+      );
+      yield* Queue.offer(child.events, {
+        type: "runtime_request.updated",
+        driver,
+        runtimeRequest: {
+          id: requestId,
+          nodeId: child.turn.rootNodeId,
+          providerTurnId: providerTurn.id,
+          nativeRequestRef: { driver, nativeId: `native:${suffix}`, strength: "strong" },
+          kind,
+          status: "pending",
+          responseCapability: {
+            type: "live",
+            providerSessionId: child.turn.providerThread.providerSessionId!,
+          },
+          createdAt: now,
+          resolvedAt: null,
+        },
+      });
+      yield* Fiber.join(requestPersisted);
+      return requestId;
+    });
+  const createOrdinary = (threadId = ThreadId.make("ordinary-watched-thread")) =>
+    orchestrator
+      .dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`create:${threadId}`),
+        threadId,
+        projectId: ProjectId.make("call-project"),
+        title: "Existing ordinary thread",
+        modelSelection: selection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: cwd,
+        createdBy: "user",
+        creationSource: "web",
+      })
+      .pipe(Effect.as({ childThreadId: threadId }));
   return {
     service,
     orchestrator,
@@ -375,14 +526,1230 @@ const setup = Effect.gen(function* () {
     threads,
     turns,
     invoke,
+    watch,
+    approvalResponses,
     delegate,
     expectDenied,
     start,
     finish,
+    ask,
+    createOrdinary,
     context,
     serviceScope,
+    subscriptions,
   };
 }).pipe(Effect.provide(NodeServices.layer));
+
+// The real Grok Bot adapter observes these cards without startTurn or a T3 run.
+// Only the native network boundary and durable binding are fixtures.
+const setupNativeCall = (kind: "user_input" | "command" | "permission" | "connector") =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("native-observed-thread");
+    const providerSessionId = ProviderSessionId.make("native-observation-session");
+    const frames = yield* Queue.unbounded<RuntimeFrame>();
+    const calls: Array<{ readonly method: string; readonly input: object }> = [];
+    let failure: "refused" | "uncertain" | undefined;
+    const callback = (method: string) => (input: object) =>
+      Effect.gen(function* () {
+        calls.push({ method, input });
+        if (failure !== undefined) return yield* new NativeRuntimeError({ kind: failure });
+        return {};
+      });
+    const native = GrokFixture.makeNative({
+      watch: () => Stream.fromQueue(frames),
+      respondToWidget: callback("widget"),
+      resolveAutoReviewApproval: callback("command"),
+      resolveLocalToolPermission: callback("permission"),
+      resolveConnectorGrant: callback("connector"),
+    });
+    const bound = { ...GrokFixture.nativeSession, threadId };
+    const bindings = GrokFixture.makeBindings(yield* GrokFixture.makeTurn, {
+      resolve: () => Effect.succeed(bound),
+    });
+    const adapter = yield* createGrokBotAdapterV2(GrokFixture.options).pipe(
+      Effect.provideService(GrokBotNativeRuntimeService, native),
+      Effect.provideService(GrokBotManagedBinding, bindings),
+      Effect.provide(IdAllocator.layer),
+    );
+    const h = yield* setup.pipe(Effect.provideService(NativeCallAdapter, adapter));
+    const cwd = (yield* h.orchestrator.getThreadProjection(parentThreadId)).thread.worktreePath!;
+    yield* h.orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-native-observed"),
+      threadId,
+      projectId: ProjectId.make("call-project"),
+      title: "Native observed bot",
+      modelSelection: GrokFixture.selection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: cwd,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* Context.get(h.context, ProviderSessions.ProviderSessionManagerV2).open({
+      threadId,
+      providerSessionId,
+      modelSelection: GrokFixture.selection,
+      runtimePolicy: { ...GrokFixture.policy, cwd },
+    });
+    const projected = yield* h.watch(
+      (event) => event.type === "turn-item.updated" && event.threadId === threadId,
+    );
+    const entryId = "native-card";
+    const nativeRequestId = "native-request";
+    yield* Queue.offer(frames, {
+      _tag: "Rows",
+      generation: 0,
+      replay: false,
+      deletes: [],
+      entries: [
+        {
+          seq: "1",
+          updatedSeq: "1",
+          value: {
+            id: entryId,
+            kind: "send-message",
+            message:
+              kind === "user_input"
+                ? {
+                    type: "widget",
+                    widget: {
+                      prompt: "Which branch?",
+                      options: [{ label: "Main", value: "main" }],
+                    },
+                  }
+                : kind === "command"
+                  ? {
+                      type: "auto-review-approval",
+                      approval: {
+                        requestId: nativeRequestId,
+                        status: "pending",
+                        summary: "Run ls",
+                        command: "ls",
+                      },
+                    }
+                  : {
+                      type: kind === "permission" ? "local-tool-permission" : "connector-grant",
+                      ask: {
+                        requestId: nativeRequestId,
+                        status: "pending",
+                        action: "read",
+                        target: "workspace",
+                        serverName: "fixture",
+                      },
+                    },
+          },
+        },
+      ],
+    });
+    yield* Fiber.join(projected);
+    const before = yield* h.orchestrator.getThreadProjection(threadId);
+    const request = before.runtimeRequests[0]!;
+    const node = before.nodes.find((node) => node.id === request.nodeId)!;
+    const card = before.turnItems.find((item) => item.nodeId === node.id)!;
+    assert.equal(node.runId, null);
+    assert.equal(before.runs.length, 0);
+    assert.equal(request.status, "pending");
+    return {
+      ...h,
+      before,
+      threadId,
+      providerSessionId,
+      request,
+      node,
+      card,
+      calls,
+      bound,
+      fail: (kind: typeof failure) => {
+        failure = kind;
+      },
+      response: {
+        threadId,
+        requestId: request.id,
+        ...(kind === "user_input"
+          ? { answers: { [entryId]: "main" } }
+          : { decision: "accept" as const }),
+        userConfirmed: true,
+        clientRequestId: "native-call-response",
+      },
+    };
+  });
+
+it.effect.each(["user_input", "command", "permission", "connector"] as const)(
+  "a call resolves an observed null-run %s card through the real native adapter exactly once",
+  (kind) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* setupNativeCall(kind);
+        const scope = yield* h.service.acquireCallInvocation({
+          ...identity,
+          access: "full-access",
+        });
+        assert.equal(h.request.responseCapability.type, kind === "user_input" ? "message" : "live");
+        assert.deepEqual(yield* h.service.respondToCallRequest(scope, h.response), {
+          resolved: true,
+        });
+        yield* h.service.respondToCallRequest(scope, h.response);
+        // Dispatch leaves native cards pending until their actual callback confirms success.
+        assert.equal(
+          (yield* h.orchestrator.getThreadProjection(h.threadId)).runtimeRequests[0]?.status,
+          "pending",
+        );
+        const settled = yield* h.watch(
+          (event) =>
+            event.type === "turn-item.updated" &&
+            event.payload.id === h.card.id &&
+            event.payload.status === "completed",
+        );
+        yield* h.worker.drain();
+        yield* Fiber.join(settled);
+        yield* h.service.respondToCallRequest(scope, h.response);
+        yield* h.worker.drain();
+        assert.lengthOf(h.calls, 1);
+        assert.equal(h.calls[0]?.method, kind === "user_input" ? "widget" : kind);
+        assert.deepEqual(h.calls[0]?.input, {
+          binding: h.bound.binding,
+          botId: h.bound.botId,
+          sessionId: h.bound.sessionId,
+          ...(kind === "user_input"
+            ? { entryId: "native-card", value: "main" }
+            : kind === "command"
+              ? {
+                  requestId: "native-request",
+                  resolution: "APPROVED",
+                  approvalPlatform: "desktop",
+                  approvedCommand: "ls",
+                }
+              : {
+                  requestId: "native-request",
+                  entryId: "native-card",
+                  resolution: kind === "permission" ? "ALLOW_ONCE" : "ALLOWED",
+                }),
+        });
+        const after = yield* h.orchestrator.getThreadProjection(h.threadId);
+        assert.equal(after.runtimeRequests[0]?.status, "resolved");
+        assert.equal(after.nodes.find((node) => node.id === h.node.id)?.status, "completed");
+        assert.deepEqual(after.runs, h.before.runs);
+        assert.deepEqual(after.messages, h.before.messages);
+        assert.lengthOf(h.turns, 0);
+        const events = Context.get(h.context, EventStore.EventStoreV2);
+        const sequence = yield* events.latestSequence();
+        assert.equal(
+          (yield* h.service
+            .respondToCallRequest(scope, { ...h.response, clientRequestId: "fresh-replay" })
+            .pipe(Effect.flip)).code,
+          "invalid_request",
+        );
+        assert.equal(yield* events.latestSequence(), sequence);
+        yield* h.worker.drain();
+        assert.lengthOf(h.calls, 1);
+      }),
+    ),
+);
+
+it.effect.each([
+  ["user_input", "refused"],
+  ["user_input", "uncertain"],
+  ["permission", "refused"],
+  ["permission", "uncertain"],
+] as const)("a null-run %s stays pending when its native callback is %s", ([kind, failure]) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const h = yield* setupNativeCall(kind);
+      const scope = yield* h.service.acquireCallInvocation({ ...identity, access: "full-access" });
+      h.fail(failure);
+      yield* h.service.respondToCallRequest(scope, h.response);
+      yield* h.worker.drain();
+      assert.lengthOf(h.calls, 1);
+      const after = yield* h.orchestrator.getThreadProjection(h.threadId);
+      assert.equal(after.runtimeRequests[0]?.status, "pending");
+      assert.equal(after.nodes.find((node) => node.id === h.node.id)?.status, "waiting");
+      assert.equal(after.turnItems.find((item) => item.id === h.card.id)?.status, "waiting");
+      assert.deepEqual(after.runs, h.before.runs);
+      assert.deepEqual(after.messages, h.before.messages);
+      yield* h.service.respondToCallRequest(scope, h.response);
+      yield* h.worker.drain();
+      assert.lengthOf(h.calls, 1);
+    }),
+  ),
+);
+
+it.effect.each([
+  "missing-node",
+  "orphan-run",
+  "orphan-runtime-request",
+  "foreign-session",
+  "unbound-capability",
+  "weak-ref",
+  "foreign-node-ref",
+  "wrong-node-request",
+  "ended-node",
+  "missing-card",
+  "foreign-card-node",
+  "stopped-session",
+  "foreign-provider",
+  "wrong-kind",
+  "read-only",
+  "no-consent",
+  "stale-call",
+  "ended-call",
+  "archived",
+  "deleted",
+  "runtime",
+  "interaction",
+] as const)("a null-run native call response rejects %s without writes or callbacks", (scenario) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const h = yield* setupNativeCall("user_input");
+      const scope = yield* h.service.acquireCallInvocation({ ...identity, access: "full-access" });
+      let caller = scope;
+      let code: OrchestratorMcpFailure["code"] = "invalid_request";
+      const base = {
+        id: EventId.make(`corrupt-native:${scenario}`),
+        threadId: h.threadId,
+        occurredAt: yield* DateTime.now,
+      };
+      let corrupt: OrchestrationV2DomainEvent | undefined;
+      switch (scenario) {
+        case "missing-node":
+        case "foreign-session":
+        case "unbound-capability":
+        case "orphan-runtime-request":
+        case "weak-ref":
+        case "wrong-kind":
+          corrupt = {
+            ...base,
+            type: "runtime-request.updated",
+            payload: {
+              ...h.request,
+              ...(scenario === "missing-node"
+                ? { nodeId: NodeId.make("missing-native-node") }
+                : {}),
+              ...(scenario === "foreign-session"
+                ? {
+                    responseCapability: {
+                      type: "message" as const,
+                      providerSessionId: ProviderSessionId.make("foreign-session"),
+                    },
+                  }
+                : {}),
+              ...(scenario === "unbound-capability"
+                ? { responseCapability: { type: "message" as const } }
+                : {}),
+              ...(scenario === "orphan-runtime-request"
+                ? {
+                    nativeRequestRef: null,
+                    responseCapability: {
+                      type: "live" as const,
+                      providerSessionId: h.providerSessionId,
+                    },
+                  }
+                : {}),
+              ...(scenario === "weak-ref"
+                ? {
+                    nativeRequestRef: { ...h.request.nativeRequestRef!, strength: "weak" as const },
+                  }
+                : {}),
+              ...(scenario === "wrong-kind" ? { kind: "command" } : {}),
+            },
+          };
+          break;
+        case "orphan-run":
+        case "foreign-node-ref":
+        case "wrong-node-request":
+        case "ended-node":
+          corrupt = {
+            ...base,
+            type: "node.updated",
+            payload: {
+              ...h.node,
+              ...(scenario === "orphan-run" ? { runId: RunId.make("missing-native-run") } : {}),
+              ...(scenario === "foreign-node-ref"
+                ? { nativeItemRef: { ...h.node.nativeItemRef!, nativeId: "widget/foreign-card" } }
+                : {}),
+              ...(scenario === "wrong-node-request"
+                ? { runtimeRequestId: RuntimeRequestId.make("foreign-request") }
+                : {}),
+              ...(scenario === "ended-node" ? { status: "completed" as const } : {}),
+            },
+          };
+          break;
+        case "missing-card":
+        case "foreign-card-node":
+          if (h.card.type !== "user_input_request")
+            return yield* Effect.die("missing native question card");
+          corrupt = {
+            ...base,
+            type: "turn-item.updated",
+            payload: {
+              ...h.card,
+              ...(scenario === "missing-card"
+                ? { requestId: RuntimeRequestId.make("foreign-request") }
+                : { nodeId: NodeId.make("foreign-node") }),
+            },
+          };
+          break;
+        case "stopped-session":
+        case "foreign-provider":
+          corrupt = {
+            ...base,
+            type: "provider-session.updated",
+            payload: {
+              ...h.before.providerSessions.find((session) => session.id === h.providerSessionId)!,
+              ...(scenario === "stopped-session"
+                ? { status: "stopped" as const }
+                : { providerInstanceId: instanceId }),
+            },
+          };
+          break;
+        case "read-only":
+          caller = yield* h.service.restrictCallInvocation(scope, "read-only");
+          code = "capability_denied";
+          break;
+        case "no-consent":
+          code = "capability_denied";
+          break;
+        case "stale-call":
+          caller = { ...scope };
+          code = "parent_not_active";
+          break;
+        case "ended-call":
+          yield* h.service.releaseCallInvocation(scope);
+          code = "parent_not_active";
+          break;
+        case "archived":
+        case "deleted":
+          yield* h.orchestrator.dispatch({
+            type: scenario === "archived" ? "thread.archive" : "thread.delete",
+            commandId: CommandId.make(`native:${scenario}`),
+            threadId: h.threadId,
+          });
+          code = "thread_not_found";
+          break;
+        case "runtime":
+          yield* h.orchestrator.dispatch({
+            type: "thread.runtime-mode.set",
+            commandId: CommandId.make("narrow-native-call"),
+            threadId: parentThreadId,
+            runtimeMode: "approval-required",
+          });
+          code = "runtime_mode_escalation_denied";
+          break;
+        case "interaction":
+          yield* h.orchestrator.dispatch({
+            type: "thread.interaction-mode.set",
+            commandId: CommandId.make("narrow-native-call"),
+            threadId: parentThreadId,
+            interactionMode: "plan",
+          });
+          code = "interaction_mode_escalation_denied";
+          break;
+      }
+      if (corrupt !== undefined)
+        yield* Context.get(h.context, EventSink.EventSinkV2).write({ events: [corrupt] });
+      const events = Context.get(h.context, EventStore.EventStoreV2);
+      const sequence = yield* events.latestSequence();
+      assert.equal(
+        (yield* h.service
+          .respondToCallRequest(caller, { ...h.response, userConfirmed: scenario !== "no-consent" })
+          .pipe(Effect.flip)).code,
+        code,
+      );
+      assert.equal(yield* events.latestSequence(), sequence);
+      yield* h.worker.drain();
+      assert.lengthOf(h.calls, 0);
+    }),
+  ),
+);
+
+const directLayerFor = (context: Effect.Success<typeof setup>["context"]) =>
+  Direct.layer.pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(
+        Layer.succeed(Environment.ServerEnvironment, {
+          getEnvironmentId: Effect.succeed(identity.environmentId),
+        } as never),
+        Layer.succeed(BotThreads.GrokBotThreadService, {
+          open: () => Effect.succeed({ threadId: parentThreadId, providerInstanceId: instanceId }),
+        } as never),
+        Layer.succeed(Launches.ThreadLaunchService, {} as never),
+        Layer.succeed(Folders.ManagedProjectFolders, {} as never),
+        Layer.succeed(Git.GitVcsDriver, {} as never),
+        Layer.succeed(Config.ServerConfig, {} as never),
+        Layer.succeed(ProjectService.ProjectService, {} as never),
+        ServerSettings.layerTest(),
+        NodeServices.layer,
+        Access.HandlersLayer.layer(ProjectHandlers.layer),
+        Access.HandlersLayer.layer(ThreadHandlers.layer).pipe(
+          Layer.provide(ProviderRegistryMock.layer(providers)),
+          Layer.provide(NodeServices.layer),
+        ),
+        Layer.succeed(ThreadSearch.ThreadSearch, {} as never),
+        Layer.succeed(ScheduledTaskService.ScheduledTaskService, {} as never),
+        Layer.succeed(SourceControl.SourceControlRepositoryService, {} as never),
+        Access.HandlersLayer.layer(Handlers.layer),
+        Layer.succeed(Metadata.ThreadMetadataMcpService, {} as never),
+      ),
+    ),
+    Layer.provideMerge(Layer.succeedContext(context)),
+  );
+
+it.effect.each([
+  ["user_input", "decline"],
+  ["permission", "accept"],
+  ["permission", "decline"],
+] as const)(
+  "an idle ordinary thread watch delivers %s (%s) and responds through the normal provider callback once",
+  ([kind, decision]) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* setup;
+        const context = yield* Layer.build(
+          Bridge.layer.pipe(Layer.provideMerge(directLayerFor(h.context))),
+        );
+        const bridge = Context.get(context, Bridge.GrokBotVoiceT3Bridge);
+        const caller = {
+          binding: identity.accountId,
+          botId: identity.botId,
+          callId: identity.callId,
+          access: "operate" as const,
+        };
+        yield* bridge.activate(caller);
+        const { childThreadId: threadId } = yield* h.createOrdinary();
+        const watched = yield* bridge.call({
+          ...caller,
+          toolCallId: "watch-ordinary",
+          name: "t3_watch_thread",
+          input: { threadId },
+        });
+        assert.equal(watched.kind, "served");
+        assert.isTrue((watched.output as { watching: boolean }).watching);
+        assert.lengthOf(h.turns, 0);
+        const scope = yield* h.service.acquireCallInvocation({
+          ...identity,
+          access: "full-access",
+        });
+        yield* h.service.sendToThread(scope, {
+          threadId,
+          message: "Start the previously idle thread",
+          clientRequestId: "ordinary-run",
+        });
+        yield* h.start({ childThreadId: threadId });
+        const requestId = yield* h.ask({ childThreadId: threadId }, kind, "ordinary");
+        const notice = yield* bridge.call({
+          ...caller,
+          toolCallId: "ordinary-progress",
+          name: Bridge.T3_TASK_PROGRESS,
+          input: { requestToolCallId: "watch-ordinary", seenApprovalIds: [] },
+        });
+        assert.equal(notice.kind, "served");
+        const output = notice.output as {
+          threadId: string;
+          questions?: Array<{ requestId: string }>;
+          approvals?: Array<{ requestId: string }>;
+        };
+        assert.equal(output.threadId, threadId);
+        assert.equal(
+          (kind === "user_input" ? output.questions : output.approvals)?.[0]?.requestId,
+          requestId,
+        );
+        const before = yield* h.orchestrator.getThreadProjection(threadId);
+        const sequence = yield* Context.get(h.context, EventStore.EventStoreV2).latestSequence();
+        const response = {
+          ...caller,
+          toolCallId: "ordinary-response",
+          name:
+            kind === "user_input" ? "t3_pending_request_respond" : "t3_pending_approval_respond",
+          input: {
+            threadId,
+            requestId,
+            userConfirmed: false,
+            ...(kind === "user_input"
+              ? { answers: { question: "release/actual-caller-answer" } }
+              : { decision }),
+          },
+        };
+        const denied = yield* bridge.call(response);
+        assert.equal(denied.kind, "invalid_input");
+        assert.equal((denied.output as { code: string }).code, "capability_denied");
+        assert.equal(
+          yield* Context.get(h.context, EventStore.EventStoreV2).latestSequence(),
+          sequence,
+        );
+        assert.lengthOf(h.approvalResponses, 0);
+        const confirmed = {
+          ...response,
+          toolCallId: "ordinary-confirmed",
+          input: { ...response.input, userConfirmed: true },
+        };
+        assert.equal((yield* bridge.call(confirmed)).kind, "served");
+        assert.equal((yield* bridge.call(confirmed)).kind, "served");
+        // A transport retry with the same key also reaches the command receipt after resolution.
+        yield* h.service.respondToCallRequest(scope, {
+          ...confirmed.input,
+          clientRequestId: confirmed.toolCallId,
+        });
+        yield* h.worker.drain();
+        assert.lengthOf(h.approvalResponses, 1);
+        assert.equal(h.approvalResponses[0]?.requestId, requestId);
+        if (kind === "user_input")
+          assert.deepEqual(h.approvalResponses[0]?.answers, {
+            question: "release/actual-caller-answer",
+          });
+        else assert.equal(h.approvalResponses[0]?.decision, decision);
+        const after = yield* h.orchestrator.getThreadProjection(threadId);
+        assert.deepEqual(after.messages, before.messages);
+        assert.deepEqual(
+          after.runs.map((run) => run.id),
+          before.runs.map((run) => run.id),
+        );
+        assert.lengthOf(h.turns, 1);
+        assert.lengthOf((yield* h.orchestrator.getThreadProjection(parentThreadId)).messages, 0);
+        yield* bridge.forget(caller.callId);
+      }),
+    ),
+);
+
+it.effect.each([
+  "read-only",
+  "no-consent",
+  "stale-call",
+  "ended-call",
+  "archived",
+  "deleted",
+  "runtime",
+  "interaction",
+  "wrong-kind",
+  "stale-request",
+  "ended-run",
+  "implicit-target",
+] as const)(
+  "ordinary call responses reject %s without writing or invoking the provider",
+  (scenario) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* setup;
+        const scope = yield* h.service.acquireCallInvocation({
+          ...identity,
+          access: "full-access",
+        });
+        const task = yield* h.createOrdinary();
+        yield* h.service.sendToThread(scope, {
+          threadId: task.childThreadId,
+          message: "Start ordinary work",
+          clientRequestId: "ordinary-run",
+        });
+        yield* h.start(task);
+        const requestId = yield* h.ask(task, "user_input", "ordinary-rejected");
+        let caller = scope;
+        const response = {
+          threadId: task.childThreadId,
+          requestId,
+          answers: { question: "main" },
+          userConfirmed: scenario !== "no-consent",
+          clientRequestId: "ordinary-rejected-response",
+        };
+        let code: OrchestratorMcpFailure["code"] = "invalid_request";
+        switch (scenario) {
+          case "read-only":
+            caller = yield* h.service.restrictCallInvocation(scope, "read-only");
+            code = "capability_denied";
+            break;
+          case "no-consent":
+            code = "capability_denied";
+            break;
+          case "stale-call":
+            caller = { ...scope };
+            code = "parent_not_active";
+            break;
+          case "ended-call":
+            yield* h.service.releaseCallInvocation(scope);
+            code = "parent_not_active";
+            break;
+          case "archived":
+          case "deleted":
+            yield* h.orchestrator.dispatch({
+              type: scenario === "archived" ? "thread.archive" : "thread.delete",
+              commandId: CommandId.make(`target:${scenario}`),
+              threadId: task.childThreadId,
+            });
+            code = "thread_not_found";
+            break;
+          case "runtime":
+            yield* h.orchestrator.dispatch({
+              type: "thread.runtime-mode.set",
+              commandId: CommandId.make("narrow-call-mode"),
+              threadId: parentThreadId,
+              runtimeMode: "approval-required",
+            });
+            code = "runtime_mode_escalation_denied";
+            break;
+          case "interaction":
+            yield* h.orchestrator.dispatch({
+              type: "thread.interaction-mode.set",
+              commandId: CommandId.make("narrow-call-mode"),
+              threadId: parentThreadId,
+              interactionMode: "plan",
+            });
+            code = "interaction_mode_escalation_denied";
+            break;
+          case "stale-request":
+            yield* h.service.respondToCallRequest(scope, {
+              ...response,
+              clientRequestId: "earlier-response",
+            });
+            yield* h.worker.drain();
+            break;
+          case "ended-run":
+            const child = h.turns.find((entry) => entry.turn.threadId === task.childThreadId)!;
+            const projection = yield* h.orchestrator.getThreadProjection(task.childThreadId);
+            const providerTurn = projection.providerTurns[0]!;
+            const interrupted = yield* h.watch(
+              (event) =>
+                event.type === "run.updated" &&
+                event.payload.id === child.turn.runId &&
+                event.payload.status === "interrupted",
+            );
+            yield* Queue.offer(child.events, {
+              type: "turn.terminal",
+              driver,
+              providerThreadId: providerTurn.providerThreadId,
+              providerTurnId: providerTurn.id,
+              runOrdinal: child.turn.runOrdinal,
+              status: "interrupted",
+              failure: null,
+              threadDisposition: "reusable",
+            });
+            yield* Fiber.join(interrupted);
+            break;
+          case "wrong-kind":
+          case "implicit-target":
+            break;
+        }
+        const events = Context.get(h.context, EventStore.EventStoreV2);
+        const sequence = yield* events.latestSequence();
+        const callbacks = h.approvalResponses.length;
+        const { threadId: _threadId, ...implicit } = response;
+        const refused = yield* h.service
+          .respondToCallRequest(
+            caller,
+            scenario === "wrong-kind"
+              ? {
+                  threadId: task.childThreadId,
+                  requestId,
+                  decision: "accept",
+                  userConfirmed: true,
+                  clientRequestId: response.clientRequestId,
+                }
+              : scenario === "implicit-target"
+                ? implicit
+                : response,
+          )
+          .pipe(Effect.flip);
+        assert.equal(refused.code, code);
+        assert.equal(yield* events.latestSequence(), sequence);
+        yield* h.worker.drain();
+        assert.lengthOf(h.approvalResponses, callbacks);
+      }),
+    ),
+);
+
+it.effect("an ordinary-target response cannot answer another call's delegated thread", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const h = yield* setup;
+      const previous = yield* h.service.acquireCallInvocation(identity);
+      const task = yield* h.delegate(previous, "other-call-task");
+      yield* h.start(task);
+      const requestId = yield* h.ask(task, "user_input", "other-call");
+      yield* h.service.releaseCallInvocation(previous);
+      const scope = yield* h.service.acquireCallInvocation({ ...identity, callId: "new-call" });
+      const events = Context.get(h.context, EventStore.EventStoreV2);
+      const sequence = yield* events.latestSequence();
+      const refused = yield* h.service
+        .respondToCallRequest(scope, {
+          threadId: task.childThreadId,
+          requestId,
+          answers: { question: "main" },
+          userConfirmed: true,
+          clientRequestId: "other-call-response",
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused.code, "invalid_request");
+      assert.equal(yield* events.latestSequence(), sequence);
+      yield* h.worker.drain();
+      assert.lengthOf(h.approvalResponses, 0);
+    }),
+  ),
+);
+
+it.effect.each(["user_input", "command"] as const)(
+  "Direct responds to a nested %s notice through its origin thread and provider callback",
+  (kind) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* setup;
+        const context = yield* Layer.build(directLayerFor(h.context));
+        const voice = Context.get(context, Direct.GrokBotVoiceOrchestration);
+        const caller = {
+          binding: identity.accountId,
+          botId: identity.botId,
+          callId: identity.callId,
+          access: "operate" as const,
+          canonicalThreadId: parentThreadId,
+        };
+        yield* voice.activate(caller);
+        const scope = yield* h.service.acquireCallInvocation({
+          ...identity,
+          access: "full-access",
+        });
+        const task = yield* h.delegate(scope, "direct-root");
+        yield* h.start(task);
+        const { call: _call, ...providerScope } = scope;
+        const grandchild = yield* h.delegate(
+          {
+            ...providerScope,
+            client: undefined,
+            thread: {
+              threadId: task.childThreadId,
+              providerSessionId: "child-provider",
+              providerInstanceId: instanceId,
+            },
+          },
+          "direct-grandchild",
+        );
+        yield* h.start(grandchild);
+        const requestId = yield* h.ask(grandchild, kind, "direct-grandchild");
+        const notice = yield* voice.wait({ ...caller, taskId: task.taskId, seenApprovalIds: [] });
+        const output = notice.result.output as {
+          questions?: Array<{ threadId: string; requestId: string }>;
+          approvals?: Array<{ threadId: string; requestId: string }>;
+        };
+        const request = (kind === "user_input" ? output.questions : output.approvals)?.[0];
+        assert.equal(request?.threadId, grandchild.childThreadId);
+        assert.equal(request?.requestId, requestId);
+        const response = {
+          ...caller,
+          name:
+            kind === "user_input" ? "t3_pending_request_respond" : "t3_pending_approval_respond",
+          toolCallId: "direct-response",
+          input: {
+            ...request,
+            userConfirmed: false,
+            ...(kind === "user_input"
+              ? { answers: { question: "main" } }
+              : { decision: "decline" }),
+          },
+        };
+        assert.equal((yield* voice.call(response)).result.kind, "invalid_input");
+        assert.equal(h.approvalResponses.length, 0);
+        const accepted = yield* voice.call({
+          ...response,
+          input: { ...response.input, userConfirmed: true },
+        });
+        assert.equal(accepted.result.kind, "served");
+        yield* h.worker.drain();
+        assert.equal(h.approvalResponses.length, 1);
+        assert.equal(h.approvalResponses[0]?.requestId, requestId);
+        if (kind === "user_input")
+          assert.deepEqual(h.approvalResponses[0]?.answers, { question: "main" });
+        else assert.equal(h.approvalResponses[0]?.decision, "decline");
+        yield* voice.forget(identity.callId);
+      }),
+    ),
+);
+
+it.effect("a live call posts one visible assistant message without starting a bot turn", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const h = yield* setup;
+      const scope = yield* h.service.acquireCallInvocation({ ...identity, access: "full-access" });
+      assert.equal((yield* h.service.capabilities(scope)).runtimeMode, "full-access");
+      const first = yield* h.service.postCallChat(scope, {
+        text: "Written call summary.",
+        clientRequestId: "post-chat",
+      });
+      const duplicate = yield* h.service.postCallChat(scope, {
+        text: "Written call summary.",
+        clientRequestId: "post-chat",
+      });
+      assert.deepEqual(first, duplicate);
+      const projection = yield* h.orchestrator.getThreadProjection(parentThreadId);
+      assert.equal(projection.messages.length, 1);
+      assert.equal(projection.messages[0]?.role, "assistant");
+      assert.equal(projection.messages[0]?.text, "Written call summary.");
+      assert.equal(projection.runs.length, 0);
+      assert.equal(h.turns.length, 0);
+      const readonly = yield* h.service.restrictCallInvocation(scope, "read-only");
+      assert.equal(
+        (yield* Effect.flip(
+          h.service.postCallChat(readonly, { text: "Denied", clientRequestId: "denied" }),
+        )).code,
+        "capability_denied",
+      );
+      yield* h.service.releaseCallInvocation(scope);
+      assert.equal(
+        (yield* Effect.flip(
+          h.service.postCallChat(scope, { text: "Ended", clientRequestId: "ended" }),
+        )).code,
+        "parent_not_active",
+      );
+    }),
+  ),
+);
+
+it.effect(
+  "a call observes and approves only its own pending request with explicit caller consent",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* setup;
+        const scope = yield* h.service.acquireCallInvocation(identity);
+        const task = yield* h.delegate(scope);
+        const child = yield* h.start(task);
+        const projection = yield* h.orchestrator.getThreadProjection(task.childThreadId);
+        const requestId = RuntimeRequestId.make("call-command-approval");
+        const wait = yield* h.service
+          .waitForTask(scope, task.taskId, 20_000, [])
+          .pipe(Effect.forkScoped);
+        const persisted = yield* h.watch(
+          (event) => event.type === "runtime-request.updated" && event.payload.id === requestId,
+        );
+        const now = yield* DateTime.now;
+        const approvalItemId = TurnItemId.make("call-command-approval-item");
+        const approvalPersisted = yield* h.watch(
+          (event) => event.type === "turn-item.updated" && event.payload.id === approvalItemId,
+        );
+        yield* Queue.offer(child.events, {
+          type: "turn_item.updated",
+          driver,
+          turnItem: {
+            id: approvalItemId,
+            threadId: task.childThreadId,
+            runId: child.turn.runId,
+            nodeId: child.turn.rootNodeId,
+            providerThreadId: projection.providerTurns[0]!.providerThreadId,
+            providerTurnId: projection.providerTurns[0]!.id,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: "waiting",
+            title: null,
+            startedAt: now,
+            completedAt: null,
+            updatedAt: now,
+            type: "approval_request",
+            requestId,
+            requestKind: "command",
+            prompt: "May I publish this release?",
+          },
+        });
+        yield* Fiber.join(approvalPersisted);
+        yield* Queue.offer(child.events, {
+          type: "runtime_request.updated",
+          driver,
+          runtimeRequest: {
+            id: requestId,
+            nodeId: child.turn.rootNodeId,
+            providerTurnId: projection.providerTurns[0]!.id,
+            nativeRequestRef: { driver, nativeId: "native-command-approval", strength: "strong" },
+            kind: "command",
+            status: "pending",
+            responseCapability: {
+              type: "live",
+              providerSessionId: child.turn.providerThread.providerSessionId!,
+            },
+            createdAt: now,
+            resolvedAt: null,
+          },
+        });
+        yield* Fiber.join(persisted);
+        const noticed = yield* Fiber.join(wait);
+        assert.equal(noticed.pendingApprovals?.[0]?.requestId, requestId);
+        assert.equal(noticed.pendingApprovals?.[0]?.title, "May I publish this release?");
+        assert.equal(noticed.pendingApprovals?.[0]?.prompt, "May I publish this release?");
+        assert.equal(noticed.waitTimedOut, false);
+        const request = {
+          taskId: task.taskId,
+          requestId,
+          decision: "accept" as const,
+          userConfirmed: false,
+          clientRequestId: "approve-command",
+        };
+        assert.equal(
+          (yield* Effect.flip(h.service.respondToCallApproval(scope, request))).code,
+          "capability_denied",
+        );
+        const other = yield* h.service.acquireCallInvocation({
+          ...identity,
+          callId: "another-call",
+          threadId: task.childThreadId,
+        });
+        assert.equal(
+          (yield* Effect.flip(
+            h.service.respondToCallApproval(other, { ...request, userConfirmed: true }),
+          )).code,
+          "task_not_found",
+        );
+        yield* h.service.respondToCallApproval(scope, { ...request, userConfirmed: true });
+        yield* h.service.respondToCallApproval(scope, { ...request, userConfirmed: true });
+        yield* h.worker.drain();
+        assert.equal(h.approvalResponses.length, 1);
+        assert.equal(h.approvalResponses[0]?.requestId, requestId);
+        assert.equal(h.approvalResponses[0]?.decision, "accept");
+        const resolved = yield* h.service.taskStatus(scope, task.taskId);
+        assert.deepEqual(resolved.pendingApprovals, []);
+        yield* h.finish(task);
+        const completed = yield* h.service.waitForTask(scope, task.taskId, 20_000, [requestId]);
+        assert.equal(completed.status, "completed");
+      }),
+    ),
+);
+
+it.effect.each(["user_input", "command"] as const)(
+  "a call notices nested %s requests created after its task wait starts",
+  (kind) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* setup;
+        const scope = yield* h.service.acquireCallInvocation(identity);
+        const task = yield* h.delegate(scope, "nested-root");
+        yield* h.start(task);
+        const waiter = yield* h.service
+          .waitForTask(scope, task.taskId, 20_000, [])
+          .pipe(Effect.forkScoped);
+        yield* Stream.fromQueue(h.subscriptions).pipe(
+          Stream.filter(
+            (subscription) =>
+              subscription.threadId === task.childThreadId &&
+              subscription.eventType === "subagent.updated",
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+        );
+        const { call: _call, ...providerFields } = scope;
+        const providerScope: Invocation.McpInvocationScope = {
+          ...providerFields,
+          client: undefined,
+          thread: {
+            threadId: task.childThreadId,
+            providerSessionId: "child-provider",
+            providerInstanceId: instanceId,
+          },
+        };
+        const grandchild = yield* h.delegate(providerScope, "grandchild");
+        yield* h.start(grandchild);
+        const requestId = yield* h.ask(grandchild, kind, "grandchild");
+        const notice = yield* Fiber.join(waiter);
+        assert.isFalse(notice.waitTimedOut);
+        const requests = kind === "user_input" ? notice.pendingQuestions : notice.pendingApprovals;
+        assert.deepEqual(
+          requests?.map((request) => [request.threadId, request.requestId]),
+          [[grandchild.childThreadId, requestId]],
+        );
+        if (kind === "command")
+          assert.equal(notice.pendingApprovals?.[0]?.prompt, "May I publish the nested change?");
+
+        const unrelated = yield* h.delegate(scope, "unrelated-call-task");
+        yield* h.start(unrelated);
+        yield* h.ask(unrelated, kind, "unrelated");
+        const reread = yield* h.service.taskStatus(scope, task.taskId);
+        const scoped = kind === "user_input" ? reread.pendingQuestions : reread.pendingApprovals;
+        assert.deepEqual(
+          scoped?.map((request) => request.threadId),
+          [grandchild.childThreadId],
+        );
+        assert.equal(
+          (yield* h.service
+            .respondToCallApproval(scope, {
+              taskId: task.taskId,
+              requestId: RuntimeRequestId.make("nested-request:unrelated"),
+              userConfirmed: true,
+              decision: "accept",
+              clientRequestId: "unrelated-response",
+            })
+            .pipe(Effect.flip)).code,
+          "invalid_request",
+        );
+        const response = {
+          taskId: task.taskId,
+          threadId: grandchild.childThreadId,
+          requestId,
+          userConfirmed: true,
+          clientRequestId: "nested-response",
+          ...(kind === "user_input"
+            ? { answers: { question: "main" } }
+            : { decision: "accept" as const }),
+        };
+        assert.equal(
+          (yield* h.service
+            .respondToCallRequest(scope, { ...response, userConfirmed: false })
+            .pipe(Effect.flip)).code,
+          "capability_denied",
+        );
+        assert.equal(
+          (yield* h.service
+            .respondToCallRequest(scope, {
+              ...response,
+              threadId: unrelated.childThreadId,
+              requestId: RuntimeRequestId.make("nested-request:unrelated"),
+            })
+            .pipe(Effect.flip)).code,
+          "invalid_request",
+        );
+        const command = {
+          type: "call.runtime-request.respond" as const,
+          commandId: CommandId.make("nested-direct-response"),
+          parentThreadId,
+          parentNodeId: scope.call!.parentNodeId,
+          authority: scope.call!,
+          taskId: task.taskId,
+          threadId: grandchild.childThreadId,
+          requestId,
+          ...(kind === "user_input"
+            ? { answers: { question: "main" } }
+            : { decision: "accept" as const }),
+        };
+        const unrelatedDispatch = yield* h.orchestrator
+          .dispatch({
+            ...command,
+            commandId: CommandId.make("unrelated-direct-response"),
+            threadId: unrelated.childThreadId,
+            requestId: RuntimeRequestId.make("nested-request:unrelated"),
+          })
+          .pipe(Effect.flip);
+        assert.equal(unrelatedDispatch._tag, "OrchestratorDispatchError");
+        const stale = yield* h.orchestrator
+          .dispatch({
+            ...command,
+            commandId: CommandId.make("stale-direct-response"),
+            authority: { ...scope.call!, authorityId: "stale-authority" },
+          })
+          .pipe(Effect.flip);
+        assert.equal(stale._tag, "OrchestratorDispatchError");
+        assert.equal(h.approvalResponses.length, 0);
+        const { taskId: _taskId, ...threadResponse } = response;
+        yield* h.service.respondToCallRequest(scope, threadResponse);
+        yield* h.service.respondToCallRequest(scope, response);
+        yield* h.worker.drain();
+        assert.equal(h.approvalResponses.length, 1);
+        assert.equal(h.approvalResponses[0]?.requestId, requestId);
+        if (kind === "user_input")
+          assert.deepEqual(h.approvalResponses[0]?.answers, { question: "main" });
+        else assert.equal(h.approvalResponses[0]?.decision, "accept");
+        const pendingRequestId = yield* h.ask(grandchild, kind, "after-response");
+        yield* h.service.releaseCallInvocation(scope);
+        assert.equal(
+          (yield* h.service
+            .respondToCallRequest(scope, {
+              ...response,
+              requestId: pendingRequestId,
+              clientRequestId: "ended-response",
+            })
+            .pipe(Effect.flip)).code,
+          "parent_not_active",
+        );
+        assert.equal(
+          (yield* h.orchestrator
+            .dispatch({
+              ...command,
+              commandId: CommandId.make("ended-direct-response"),
+              requestId: pendingRequestId,
+            })
+            .pipe(Effect.flip))._tag,
+          "OrchestratorDispatchError",
+        );
+        yield* h.worker.drain();
+        assert.equal(h.approvalResponses.length, 1);
+      }),
+    ),
+);
+
+it.effect.each(["runtime", "interaction"] as const)(
+  "call responses refuse a nested request above the call's %s mode",
+  (mode) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* setup;
+        const scope = yield* h.service.acquireCallInvocation(identity);
+        const task = yield* h.delegate(scope, "limited-root");
+        yield* h.start(task);
+        const { call: _call, ...providerScope } = scope;
+        const grandchild = yield* h.delegate(
+          {
+            ...providerScope,
+            client: undefined,
+            thread: {
+              threadId: task.childThreadId,
+              providerSessionId: "child-provider",
+              providerInstanceId: instanceId,
+            },
+          },
+          "limited-grandchild",
+        );
+        yield* h.start(grandchild);
+        const requestId = yield* h.ask(grandchild, "user_input", "limited-grandchild");
+        yield* h.orchestrator.dispatch(
+          mode === "runtime"
+            ? {
+                type: "thread.runtime-mode.set",
+                commandId: CommandId.make("raise-descendant-mode"),
+                threadId: grandchild.childThreadId,
+                runtimeMode: "full-access",
+              }
+            : {
+                type: "thread.interaction-mode.set",
+                commandId: CommandId.make("tighten-parent-mode"),
+                threadId: parentThreadId,
+                interactionMode: "plan",
+              },
+        );
+        const refused = yield* h.service
+          .respondToCallRequest(scope, {
+            threadId: grandchild.childThreadId,
+            requestId,
+            answers: { question: "main" },
+            userConfirmed: true,
+            clientRequestId: "limited-response",
+          })
+          .pipe(Effect.flip);
+        assert.equal(
+          refused.code,
+          mode === "runtime"
+            ? "runtime_mode_escalation_denied"
+            : "interaction_mode_escalation_denied",
+        );
+        const commandRefused = yield* h.orchestrator
+          .dispatch({
+            type: "call.runtime-request.respond",
+            commandId: CommandId.make("limited-direct-response"),
+            parentThreadId,
+            parentNodeId: scope.call!.parentNodeId,
+            authority: scope.call!,
+            taskId: task.taskId,
+            threadId: grandchild.childThreadId,
+            requestId,
+            answers: { question: "main" },
+          })
+          .pipe(Effect.flip);
+        assert.equal(
+          commandRefused._tag,
+          mode === "runtime"
+            ? "OrchestratorThreadAboveModeLimitError"
+            : "OrchestratorDispatchError",
+        );
+        yield* h.worker.drain();
+        assert.equal(h.approvalResponses.length, 0);
+        assert.equal(
+          (yield* h.orchestrator.getThreadProjection(
+            grandchild.childThreadId,
+          )).runtimeRequests.find((request) => request.id === requestId)?.status,
+          "pending",
+        );
+      }),
+    ),
+);
 
 it.effect("startup recovers an idle persisted call once without starting a provider", () =>
   Effect.scoped(
@@ -561,6 +1928,22 @@ it.effect(
         const scope = yield* h.service.acquireCallInvocation(identity);
         assert.strictEqual(yield* h.service.acquireCallInvocation(identity), scope);
         assert.isUndefined(scope.thread);
+        const capabilities = yield* h.service.capabilities(scope);
+        assert.isNull(capabilities.inheritedProviderInstanceId);
+        assert.isNull(capabilities.inheritedModel);
+        assert.isFalse(capabilities.features.batchThreadCreation);
+        yield* h.expectDenied(
+          scope,
+          "delegate_task",
+          { task: "Use the requested coding model", mode: "async" },
+          "invalid_request",
+        );
+        yield* h.expectDenied(
+          scope,
+          "delegate_task",
+          { task: "Use the requested coding model", target: { model: selection.model } },
+          "invalid_request",
+        );
         const task = yield* h.delegate(scope);
         assert.equal((yield* h.delegate(scope)).taskId, task.taskId);
         const parent = yield* h.orchestrator.getThreadProjection(parentThreadId);
@@ -609,6 +1992,68 @@ it.effect(
     ),
 );
 
+it.effect(
+  "a call forwards only chat-owned screenshot references into its child's first provider turn",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const h = yield* setup;
+        const attachment = {
+          type: "image" as const,
+          id: "call-screenshot",
+          name: "screenshot.png",
+          mimeType: "image/png",
+          sizeBytes: 42,
+        };
+        yield* h.orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("record-screenshot"),
+          threadId: parentThreadId,
+          messageId: MessageId.make("image-only-message"),
+          text: "",
+          attachments: [attachment],
+          dispatchMode: { type: "defer_start" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const scope = yield* h.service.acquireCallInvocation(identity);
+        yield* h.expectDenied(
+          scope,
+          "delegate_task",
+          {
+            task: "Inspect this screenshot",
+            target: { providerInstanceId: instanceId, model: selection.model },
+            attachmentIds: ["another-threads-file"],
+          },
+          "invalid_request",
+        );
+        const result = yield* h.invoke(scope, "delegate_task", {
+          task: "Inspect this screenshot",
+          title: "Inspect screenshot",
+          mode: "async",
+          clientRequestId: "forward-image",
+          target: { providerInstanceId: instanceId, model: selection.model },
+          attachmentIds: [attachment.id, attachment.id],
+        });
+        assert.isFalse(result.isFailure);
+        const task = yield* decodeTask(result.encodedResult);
+        const child = yield* h.orchestrator.getThreadProjection(task.childThreadId);
+        assert.deepStrictEqual(child.messages[0]?.attachments, [attachment]);
+        const turn = yield* h.start(task);
+        assert.deepStrictEqual(turn.turn.message.attachments, [attachment]);
+        const replay = yield* h.invoke(scope, "delegate_task", {
+          task: "Inspect this screenshot",
+          title: "Inspect screenshot",
+          mode: "async",
+          clientRequestId: "forward-image",
+          target: { providerInstanceId: instanceId, model: selection.model },
+          attachmentIds: [attachment.id],
+        });
+        assert.deepStrictEqual((replay.encodedResult as { taskId: string }).taskId, task.taskId);
+      }),
+    ),
+);
+
 it.effect("checked call tools enforce ownership, client ceiling, ended and new-call denial", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -617,7 +2062,11 @@ it.effect("checked call tools enforce ownership, client ceiling, ended and new-c
       yield* h.expectDenied(
         scope,
         "delegate_task",
-        { task: "Escalate", runtimeMode: "full-access" },
+        {
+          task: "Escalate",
+          runtimeMode: "full-access",
+          target: { providerInstanceId: instanceId, model: selection.model },
+        },
         "runtime_mode_escalation_denied",
       );
       yield* h.expectDenied(
@@ -826,6 +2275,13 @@ it.effect(
           ServerSettings.layerTest(),
           NodeServices.layer,
           Access.HandlersLayer.layer(ProjectHandlers.layer),
+          Access.HandlersLayer.layer(ThreadHandlers.layer).pipe(
+            Layer.provide(ProviderRegistryMock.layer(providers)),
+            Layer.provide(NodeServices.layer),
+          ),
+          Layer.succeed(ThreadSearch.ThreadSearch, {} as never),
+          Layer.succeed(ScheduledTaskService.ScheduledTaskService, {} as never),
+          Layer.succeed(SourceControl.SourceControlRepositoryService, {} as never),
           Access.HandlersLayer.layer(Handlers.layer),
           Layer.succeed(Metadata.ThreadMetadataMcpService, {} as never),
         );
@@ -918,6 +2374,13 @@ it.effect(
         message(encode({ type: "session.created" }));
         message(encode({ type: "session.updated" }));
         message(encode({ type: "response.done" }));
+        message(
+          encode({
+            type: "conversation.item.input_audio_transcription.completed",
+            item_id: "current-caller-request",
+            transcript: "Delegate a task to inspect call authority.",
+          }),
+        );
         frames.length = 0;
         message(
           encode({
@@ -951,6 +2414,7 @@ it.effect(
           status: "landed",
           runStatus: "completed",
           updates: ["Child result"],
+          title: "Inspect call authority",
         });
         assert.deepEqual(completion.completion, {
           requestToolCallId: "voice-tool",
@@ -963,7 +2427,7 @@ it.effect(
         const observed = yield* decodeFrames(frames);
         assert.deepEqual(
           observed.map((frame) => frame.type),
-          ["conversation.item.create", "conversation.item.create", "response.create"],
+          ["conversation.item.create", "conversation.item.create", "conversation.item.create"],
         );
         assert.equal(observed[0]?.item?.name, "work_landed");
         assert.equal(observed[1]?.item?.type, "function_call_output");

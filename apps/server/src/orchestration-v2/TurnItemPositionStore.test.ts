@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import {
   MessageId,
+  NodeId,
   ProviderDriverKind,
   RunId,
   ThreadId,
@@ -83,6 +84,47 @@ it.effect(
         runId: RunId.make("run:pagination"),
       });
       assert.isAbove(managedAfterForeign.ordinal, foreignAfter.ordinal);
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect(
+  "positions call-posted chat after preceding runs and repairs an old history position",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const positions = yield* Positions.TurnItemPositionStoreV2;
+      const nodeId = NodeId.make("call-parent:position-test");
+      yield* sql`INSERT INTO orchestration_v2_projection_nodes
+      (node_id, thread_id, root_node_id, kind, status, payload_json)
+      VALUES (${nodeId}, ${threadId}, ${nodeId}, 'call_parent', 'running', '{}')`;
+      yield* sql`INSERT INTO orchestration_v2_projection_runs
+      (run_id, thread_id, ordinal, provider, status, requested_at, payload_json)
+      VALUES ('run:recent', ${threadId}, 11, 'grok-bot', 'completed', '2026-10-11T06:00:00.000Z', '{}')`;
+      const callMessage = {
+        ...item("call:written-message", "2026-10-11T06:30:00.000Z"),
+        type: "assistant_message" as const,
+        nodeId,
+        nativeItemRef: null,
+        createdBy: "agent" as const,
+        creationSource: "mcp" as const,
+        streaming: false,
+      };
+      const old = yield* positions.allocate({ threadId, turnItemId: callMessage.id, runId: null });
+      const managed = yield* positions.allocate({
+        threadId,
+        turnItemId: TurnItemId.make("managed:latest"),
+        runId: RunId.make("run:recent"),
+      });
+      const repaired = yield* positions.normalize(callMessage);
+      assert.isBelow(old, 1_000_000);
+      assert.isAbove(repaired.ordinal, managed);
+      assert.strictEqual((yield* positions.normalize(repaired)).ordinal, repaired.ordinal);
+      const unrelated = yield* positions.normalize({
+        ...callMessage,
+        id: TurnItemId.make("ordinary:assistant"),
+        nodeId: null,
+      });
+      assert.isBelow(unrelated.ordinal, 1_000_000);
     }).pipe(Effect.provide(layer)),
 );
 

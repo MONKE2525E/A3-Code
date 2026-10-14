@@ -3,7 +3,6 @@ import { useSyncExternalStore } from "react";
 /** Reaction lengths from the Grok Bot app, in milliseconds. */
 /** A settled turn keeps its finished or failed pose this long before the bot rests. */
 export const GROK_BOT_SETTLE_LINGER_MS = 8000;
-export const GROK_BOT_SPAWN_MS = 2000;
 /** Happy and celebrate poses, and the spin-and-bounce after a look change. */
 export const GROK_BOT_HAPPY_MS = 2200;
 

@@ -338,7 +338,7 @@ export function resolveSelectableProviderInstance(
  * defaults, and fallbacks drop them, so a stale bot selection cannot come back
  * as a new thread's provider. Bot threads keep them via their own composer.
  */
-export function isGrokBotDriverKind(driver: string): boolean {
+function isGrokBotDriverKind(driver: string): boolean {
   return driver === "grok-bot";
 }
 

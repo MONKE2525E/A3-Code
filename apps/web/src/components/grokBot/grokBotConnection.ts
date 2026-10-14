@@ -30,7 +30,7 @@ export function grokBotNativeSignedIn(bridge: Bridge | null | undefined): boolea
 }
 
 export function grokBotCliCopy(bridge: Bridge | null | undefined): GrokBotConnectionCopy {
-  if (bridge?.installed !== true && bridge?.nativeAvailable === true) {
+  if (bridge?.installed !== true && bridge?.nativeAvailable !== undefined) {
     return {
       title: "CLI bridge",
       description:

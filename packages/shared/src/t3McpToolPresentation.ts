@@ -285,6 +285,10 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     "question-list",
   ),
   t3_pending_request_read: tool(["Read", "Reading", "Read", "pending questions"], "question-read"),
+  t3_pending_approval_respond: tool(
+    ["Respond to", "Responding to", "Responded to", "a permission request"],
+    "question-respond",
+  ),
   t3_pending_request_respond: tool(
     ["Answer", "Answering", "Answered", "pending questions"],
     "question-respond",

@@ -3,6 +3,7 @@ import type {
   NodeId,
   OrchestrationV2ConversationMessage,
   OrchestrationV2TurnItem,
+  MessageId,
   ProviderThreadId,
   ProviderTurnId,
   RunAttemptId,
@@ -24,6 +25,8 @@ const GROK_BOT_DRIVER_KIND = ProviderDriverKind.make("grok-bot");
 /** Durable correlation contains no prompt, account token, or MCP bearer. */
 export interface GrokBotTurnIdentity {
   readonly native: GrokBotBoundSession;
+  /** App-owned user message that initiated this native turn; absent on pre-reaction records. */
+  readonly userMessageId?: MessageId;
   readonly messageId: string;
   readonly sentAtMs: number;
   readonly runId: RunId;
@@ -76,6 +79,7 @@ export function grokBotTurnIdentity(turn: GrokBotManagedTurn): GrokBotTurnIdenti
   return {
     ...(turn.managedSkill === undefined ? {} : { managedSkill: turn.managedSkill }),
     native: turn.native,
+    userMessageId: turn.input.message.messageId,
     messageId: turn.messageId,
     sentAtMs: turn.sentAtMs,
     runId: turn.input.runId,
@@ -157,6 +161,10 @@ export function grokBotMessageTurnItem(
     text: message.text,
     attachments: message.attachments,
     ...(message.grokBotPeer === undefined ? {} : { grokBotPeer: message.grokBotPeer }),
+    ...(message.grokBotAuthor === undefined ? {} : { grokBotAuthor: message.grokBotAuthor }),
+    ...(message.grokBotReactions === undefined
+      ? {}
+      : { grokBotReactions: message.grokBotReactions }),
     ...(message.grokBotWorkflowReferences === undefined
       ? {}
       : { grokBotWorkflowReferences: message.grokBotWorkflowReferences }),
@@ -166,6 +174,9 @@ export function grokBotMessageTurnItem(
     ...(message.grokBotVoiceCallId === undefined
       ? {}
       : { grokBotVoiceCallId: message.grokBotVoiceCallId }),
+    ...(message.grokBotConnectorCard === undefined
+      ? {}
+      : { grokBotConnectorCard: message.grokBotConnectorCard }),
   };
   const turnItem: OrchestrationV2TurnItem =
     message.role === "user"

@@ -96,11 +96,12 @@ export function callAcpMcpTool(
     const send = (message: unknown): Effect.Effect<ReadonlyArray<unknown>, AcpMcpBridgeError> =>
       Effect.gen(function* () {
         const response = yield* Effect.tryPromise({
-          try: () =>
+          try: (signal) =>
             fetchImplementation(options.endpoint, {
               method: "POST",
-              ...(options.signal === undefined ? {} : { signal: options.signal }),
-              ...(options.redirect === undefined ? {} : { redirect: options.redirect }),
+              signal:
+                options.signal === undefined ? signal : AbortSignal.any([signal, options.signal]),
+              redirect: options.redirect ?? "error",
               headers: {
                 "content-type": "application/json",
                 accept: "application/json, text/event-stream",
@@ -137,7 +138,7 @@ export function callAcpMcpTool(
                     const response = await fetchImplementation(options.endpoint, {
                       method: "DELETE",
                       signal: AbortSignal.timeout(2000),
-                      ...(options.redirect === undefined ? {} : { redirect: options.redirect }),
+                      redirect: options.redirect ?? "error",
                       headers: {
                         authorization: options.authorization,
                         "mcp-session-id": sessionId!,
@@ -232,9 +233,11 @@ export function runAcpMcpStdioBridge(options: AcpMcpStdioBridgeOptions): Effect.
     const forward = (line: string, envelope: JsonRpcEnvelope): Effect.Effect<void> =>
       Effect.gen(function* () {
         const response = yield* Effect.tryPromise({
-          try: () =>
+          try: (signal) =>
             fetchImplementation(options.endpoint, {
               method: "POST",
+              signal,
+              redirect: "error",
               headers: {
                 "content-type": "application/json",
                 accept: "application/json, text/event-stream",
@@ -259,6 +262,7 @@ export function runAcpMcpStdioBridge(options: AcpMcpStdioBridgeOptions): Effect.
         yield* Stream.runForEach(responsePayloads(response, bridgeError), handleServerPayload);
       }).pipe(
         Effect.catchCause((cause) => {
+          if (Cause.hasInterrupts(cause)) return Effect.failCause(cause).pipe(Effect.orDie);
           if (envelope.id === undefined) return Effect.void;
           const error = Cause.squash(cause);
           return respondWithError(
@@ -335,12 +339,15 @@ export function runAcpMcpStdioBridge(options: AcpMcpStdioBridgeOptions): Effect.
         return yield* launch(task);
       });
 
-    const reader = NodeReadline.createInterface({ input: options.input });
+    const reader = yield* Effect.acquireRelease(
+      Effect.sync(() => NodeReadline.createInterface({ input: options.input })),
+      (reader) => Effect.sync(() => reader.close()),
+    );
     yield* Stream.runForEach(Stream.fromAsyncIterable(reader, bridgeError), dispatch).pipe(
       Effect.catchCause(() => Effect.void),
     );
     yield* Fiber.awaitAll(running);
-  });
+  }).pipe(Effect.scoped);
 }
 
 /**

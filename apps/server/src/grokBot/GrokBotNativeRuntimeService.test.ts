@@ -782,6 +782,111 @@ it.effect("dispatches native approvals with exact wire names and verifies dispat
   }),
 );
 
+it.effect("requires explicit dispatch for every verified once-only permission resolution", () =>
+  Effect.gen(function* () {
+    const { service, state, calls } = yield* fixture;
+    for (const resolution of ["APPROVED", "DENIED"] as const) {
+      yield* service.resolveAutoReviewApproval({
+        ...owner,
+        requestId: "command-request",
+        resolution,
+        approvalPlatform: "desktop",
+      });
+      assert.deepStrictEqual(calls.at(-1), {
+        method: "ResolveGrokBotAutoReviewApproval",
+        input: {
+          agentId: owner.botId,
+          sessionId: owner.sessionId,
+          requestId: "command-request",
+          resolution,
+          approvalPlatform: "desktop",
+        },
+      });
+    }
+    for (const resolution of ["ALLOW_ONCE", "DENY"] as const) {
+      yield* service.resolveLocalToolPermission({
+        ...owner,
+        entryId: "local-entry",
+        requestId: "local-request",
+        resolution,
+      });
+      assert.deepStrictEqual(calls.at(-1), {
+        method: "ResolveGrokBotLocalToolPermission",
+        input: {
+          agentId: owner.botId,
+          sessionId: owner.sessionId,
+          entryId: "local-entry",
+          requestId: "local-request",
+          resolution,
+        },
+      });
+    }
+    for (const resolution of ["ALLOWED", "SKIPPED"] as const) {
+      yield* service.resolveConnectorGrant({
+        ...owner,
+        entryId: "connector-entry",
+        requestId: "connector-request",
+        resolution,
+      });
+      assert.deepStrictEqual(calls.at(-1), {
+        method: "ResolveGrokBotConnectorGrant",
+        input: {
+          agentId: owner.botId,
+          sessionId: owner.sessionId,
+          entryId: "connector-entry",
+          requestId: "connector-request",
+          resolution,
+        },
+      });
+    }
+    for (const result of [
+      {},
+      { dispatched: false },
+      { accepted: true },
+      { dispatched: true, refusal: {} },
+    ]) {
+      state.approvalResult = result;
+      const expected = "refusal" in result ? "refused" : "uncertain";
+      for (const call of [
+        service.resolveAutoReviewApproval({
+          ...owner,
+          requestId: "command-request",
+          resolution: "APPROVED",
+          approvalPlatform: "desktop",
+        }),
+        service.resolveLocalToolPermission({
+          ...owner,
+          entryId: "local-entry",
+          requestId: "local-request",
+          resolution: "ALLOW_ONCE",
+        }),
+        service.resolveConnectorGrant({
+          ...owner,
+          entryId: "connector-entry",
+          requestId: "connector-request",
+          resolution: "ALLOWED",
+        }),
+      ])
+        assert.equal(kind(yield* call.pipe(Effect.flip)), expected);
+    }
+    state.widgetResult = { accepted: true };
+    yield* service.respondToWidget({
+      ...owner,
+      entryId: "widget-entry",
+      value: "first\nsecond\ncustom text",
+    });
+    assert.deepStrictEqual(calls.at(-1), {
+      method: "RespondGrokBotWidget",
+      input: {
+        agentId: owner.botId,
+        sessionId: owner.sessionId,
+        entryId: "widget-entry",
+        value: "first\nsecond\ncustom text",
+      },
+    });
+  }),
+);
+
 it.effect("submits a secret to native only on acceptance and never leaks it in failures", () =>
   Effect.gen(function* () {
     const { service, state, calls } = yield* fixture;

@@ -31,7 +31,9 @@ vi.mock("@react-navigation/native", () => {
     useNavigation: () => navigation,
   };
 });
-vi.mock("../../native/useOpenPullRequest", () => ({ useOpenPullRequest: () => () => {} }));
+vi.mock("../pull-requests/useOpenPullRequestFromRoute", () => ({
+  useOpenPullRequest: () => () => {},
+}));
 
 vi.mock("../../state/session", () => ({ useEnvironmentScope: () => true }));
 vi.mock("react-native", () => ({ Alert: { alert: () => {} }, Linking: {}, Platform: {} }));

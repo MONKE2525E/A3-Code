@@ -121,6 +121,7 @@ export interface ThreadFeedActivity {
 }
 
 export interface ThreadFeedMessage {
+  readonly grokBotAuthor?: import("@t3tools/contracts").OrchestrationV2ConversationMessage["grokBotAuthor"];
   readonly context?: import("@t3tools/contracts").OrchestrationMessageContext | undefined;
   readonly id: MessageId;
   readonly role: "user" | "assistant";
@@ -1821,6 +1822,7 @@ export function buildThreadFeed(
         id: item.messageId,
         createdAt,
         message: {
+          ...(item.grokBotAuthor === undefined ? {} : { grokBotAuthor: item.grokBotAuthor }),
           id: item.messageId,
           role: item.type === "user_message" ? "user" : "assistant",
           text: item.text,

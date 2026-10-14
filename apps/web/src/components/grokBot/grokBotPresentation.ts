@@ -1,5 +1,4 @@
 import { EnvironmentId, type GrokBot } from "@t3tools/contracts";
-import type { SearchMiddleware } from "@tanstack/react-router";
 
 import {
   GROK_BOT_AVATAR_KINDS,
@@ -37,6 +36,27 @@ export function sortGrokBotsForEditor(bots: readonly GrokBot[]): readonly GrokBo
 export function grokBotFailureMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim().length > 0) return error.message;
   return "Grok Bot could not complete that request.";
+}
+
+/** A failed background roster read should not replace a recent successful list. */
+export function isGrokBotRosterRecovering(input: {
+  readonly failure: unknown;
+  readonly hasData: boolean;
+  readonly dataUpdatedAt: number;
+  readonly nowMs: number;
+}): boolean {
+  return (
+    input.hasData &&
+    input.dataUpdatedAt > 0 &&
+    input.nowMs >= input.dataUpdatedAt &&
+    input.nowMs - input.dataUpdatedAt < 30_000 &&
+    typeof input.failure === "object" &&
+    input.failure !== null &&
+    "_tag" in input.failure &&
+    input.failure._tag === "GrokBotError" &&
+    "reason" in input.failure &&
+    input.failure.reason === "gateway_failed"
+  );
 }
 
 export function grokBotSurfaceKey(environmentId: string, botId: string): string {
@@ -82,11 +102,6 @@ export function retainGrokBotSettingsBotIdSearch<T extends GrokBotSettingsSearch
     ? { ...next, botId: previous.botId }
     : next;
 }
-
-export const retainGrokBotSettingsBotId: SearchMiddleware<GrokBotSettingsSearch> = ({
-  search,
-  next,
-}) => retainGrokBotSettingsBotIdSearch(search, next(search));
 
 /**
  * Old `/settings/grok-bots` links land on Providers. A stale `instanceId` is dropped and the
@@ -150,6 +165,19 @@ export function resolveGrokBotSelectedEnvironment(input: {
   return input.connectedEnvironmentIds.includes(input.selectedEnvironmentId)
     ? { kind: "environment", environmentId: input.selectedEnvironmentId }
     : { kind: "disconnected", environmentId: input.selectedEnvironmentId };
+}
+
+/**
+ * A selected environment that is not connected yet but is still on its way (initial connect,
+ * reconnect, or a catalog that has not loaded) is loading, not unavailable. Final phases
+ * (offline, error, unsupported, a settled catalog without the environment) stay failures.
+ */
+export function isGrokBotEnvironmentConnecting(input: {
+  readonly catalogReady: boolean;
+  readonly phase: string | null;
+}): boolean {
+  if (input.phase === null) return !input.catalogReady;
+  return input.phase === "connecting" || input.phase === "reconnecting";
 }
 
 /** `view=history` opens the read-only transcript from before bots were ordinary threads. */
@@ -285,7 +313,7 @@ export function environmentChangeSearch(
 }
 
 /** Settings-search ids that live in the Grok Bot area of Providers. */
-export function isGrokBotSettingsSearchItem(id: string): boolean {
+function isGrokBotSettingsSearchItem(id: string): boolean {
   return (
     id === "grok-bots" ||
     id === "grok-bots-bridge" ||

@@ -46,7 +46,7 @@ export function pluginCategoryTitle(key: string): string {
 }
 
 /** Most popular first; plugins the catalog has not ranked follow, alphabetically. */
-export function sortPlugins(plugins: readonly MarketplacePlugin[]): MarketplacePlugin[] {
+function sortPlugins(plugins: readonly MarketplacePlugin[]): MarketplacePlugin[] {
   return plugins.toSorted(
     (a, b) =>
       (a.popularityRank ?? Number.MAX_SAFE_INTEGER) -

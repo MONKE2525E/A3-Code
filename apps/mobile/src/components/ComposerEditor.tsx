@@ -23,7 +23,7 @@ import {
 } from "../state/use-composer-drafts";
 import { importComposerContextClipboard } from "../lib/composerContextClipboard";
 import { mobilePreferencesAtom } from "../state/preferences";
-import { ComposerContextSheet } from "./ComposerContextSheet";
+import { ComposerContextSheet } from "../features/threads/ComposerContextSheet";
 import { AppText as Text } from "./AppText";
 import {
   composerDocumentAttachment,
@@ -35,8 +35,12 @@ export type ComposerEditorProps = NativeComposerEditorProps & {
   readonly draftKey?: string | null;
   readonly environmentId?: EnvironmentId;
   readonly onOpenMention?: (path: string) => void;
-  /** Opens a pull request link from a chip, in the native viewer where the environment allows. */
-  readonly onOpenPullRequest?: (url: string) => Promise<boolean>;
+  /**
+   * Opens a pull request link from a chip, in the native viewer where the environment allows.
+   * `environmentId` is the draft's environment once the draft has a project; otherwise the caller
+   * decides from its own route.
+   */
+  readonly onOpenPullRequest?: (url: string, environmentId?: string) => Promise<boolean>;
   /** Documents open in the file screen; pictures, video and PDF keep their native viewers. */
   readonly onOpenAttachment?: (attachment: ComposerDocumentAttachment) => void;
   /**
@@ -60,6 +64,10 @@ export function ComposerEditor({
   ...props
 }: ComposerEditorProps) {
   const draft = useComposerDraft(draftKey ?? null);
+  // Links from a draft with a project open in that project's environment; others follow the route.
+  const pullRequestEnvironmentId = draft.project?.projectId
+    ? (environmentId ?? draft.project?.environmentId)
+    : undefined;
   const preferencesResult = useAtomValue(mobilePreferencesAtom);
   const preferredEnterBehavior = AsyncResult.isSuccess(preferencesResult)
     ? preferencesResult.value.composerEnterBehavior
@@ -245,12 +253,11 @@ export function ComposerEditor({
             ? {
                 onOpenPullRequestUrl: (url: string) => {
                   setSelected(null);
-                  return onOpenPullRequest(url);
+                  return onOpenPullRequest(url, pullRequestEnvironmentId);
                 },
               }
             : {})}
           environmentId={environmentId ?? draft.project?.environmentId}
-          projectId={draft.project?.projectId}
           records={draft.context?.records}
           attachments={draft.attachments}
           onClose={() => setSelected(null)}

@@ -3,7 +3,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { beforeEach, vi } from "vite-plus/test";
+import { afterEach, beforeEach, vi } from "vite-plus/test";
 
 const {
   appendSwitchMock,
@@ -53,6 +53,9 @@ import * as DesktopPreReadyPlatform from "./DesktopPreReadyPlatform.ts";
 
 describe("DesktopPreReadyPlatform", () => {
   beforeEach(() => {
+    vi.stubEnv("VITE_DEV_SERVER_URL", "");
+    vi.stubEnv("XDG_DATA_HOME", "/xdg");
+    vi.stubEnv("APPIMAGE", "/Applications/current.AppImage");
     appendSwitchMock.mockReset();
     getSwitchValueMock.mockReset();
     hasSwitchMock.mockReset();
@@ -61,6 +64,10 @@ describe("DesktopPreReadyPlatform", () => {
     mkdirSyncMock.mockReset();
     writeFileSyncMock.mockReset();
     copyFileSyncMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it.effect("preserves an explicit Linux password-store switch", () => {
@@ -85,21 +92,18 @@ describe("DesktopPreReadyPlatform", () => {
     { previousEntry: undefined, label: "missing" },
     { previousEntry: 'Exec="/Applications/deleted-previous.AppImage" %U', label: "stale" },
   ])("prepares a $label Linux desktop entry before startup yields", ({ previousEntry }) => {
-    vi.stubEnv("VITE_DEV_SERVER_URL", "");
-    vi.stubEnv("XDG_DATA_HOME", "/xdg");
-    vi.stubEnv("APPIMAGE", "/Applications/current.AppImage");
     getSwitchValueMock.mockReturnValue("");
     let desktopName = "t3code.desktop";
     let desktopEntry = previousEntry;
     let iconInstalled = false;
     copyFileSyncMock.mockImplementation((_source: string, destination: string) => {
-      iconInstalled = destination === "/xdg/icons/com.t3tools.T3Code.desktop.png";
+      iconInstalled = destination === "/xdg/icons/com.monke.t3code.grokbot.desktop.png";
     });
     setDesktopNameMock.mockImplementation((name: string) => {
       desktopName = name;
     });
     writeFileSyncMock.mockImplementation((path: string, contents: string) => {
-      if (path === "/xdg/applications/com.t3tools.T3Code.desktop") desktopEntry = contents;
+      if (path === "/xdg/applications/com.monke.t3code.grokbot.desktop") desktopEntry = contents;
     });
 
     return Effect.scoped(
@@ -115,17 +119,17 @@ describe("DesktopPreReadyPlatform", () => {
           ),
         );
         const identity = yield* Effect.promise(() => portalIdentity);
-        assert.equal(identity.desktopName, "com.t3tools.T3Code.desktop");
+        assert.equal(identity.desktopName, "com.monke.t3code.grokbot.desktop");
         assert.include(identity.desktopEntry ?? "", 'Exec="/Applications/current.AppImage" %U');
-        assert.include(identity.desktopEntry ?? "", "Name=T3 Code (Alpha)");
-        assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/t3code;");
+        assert.include(identity.desktopEntry ?? "", "Name=T3 Code plus Grokbot (Alpha)");
+        assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/t3code-grokbot;");
         assert.include(
           identity.desktopEntry ?? "",
-          "Icon=/xdg/icons/com.t3tools.T3Code.desktop.png",
+          "Icon=/xdg/icons/com.monke.t3code.grokbot.desktop.png",
         );
         assert.isTrue(identity.iconInstalled);
       }),
-    ).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())));
+    );
   });
 
   it.effect("keeps startup available when the early desktop entry cannot be written", () => {
@@ -148,9 +152,9 @@ describe("DesktopPreReadyPlatform", () => {
     return Effect.gen(function* () {
       yield* DesktopPreReadyPlatform.make;
       const contents = writeFileSyncMock.mock.calls[0]?.[1];
-      assert.include(contents, "MimeType=x-scheme-handler/t3code;");
-      assert.include(contents, "Icon=");
-      assert.equal(setDesktopNameMock.mock.calls.length, 1);
+      assert.include(contents, "MimeType=x-scheme-handler/t3code-grokbot;");
+      assert.include(contents, "Icon=/xdg/icons/com.monke.t3code.grokbot.desktop.png");
+      assert.deepEqual(setDesktopNameMock.mock.calls, [["com.monke.t3code.grokbot.desktop"]]);
     }).pipe(Effect.provideService(HostProcess.Platform, "linux"));
   });
 

@@ -1,4 +1,4 @@
-import { useOpenPullRequest } from "../../native/useOpenPullRequest";
+import { useOpenPullRequest } from "../pull-requests/useOpenPullRequestFromRoute";
 import { ThreadContextDivider } from "./thread-context-divider";
 import { ThreadHandoffRow } from "./thread-handoff-row";
 import { SecretRequestCard } from "./SecretRequestCard";
@@ -34,7 +34,7 @@ import {
   collectComposerContextReferences,
   replaceComposerContextReferences,
 } from "@t3tools/shared/composerContextReferences";
-import { ComposerContextSheet } from "../../components/ComposerContextSheet";
+import { ComposerContextSheet } from "./ComposerContextSheet";
 import { writeComposerContextClipboard } from "../../lib/composerContextClipboard";
 import {
   codexArtifactTemplatePresentationLabel,
@@ -1950,6 +1950,11 @@ function renderFeedEntry(
         )}
         {...(enterAnimated ? { entering: FadeIn.duration(220) } : {})}
       >
+        {message.grokBotAuthor?.name ? (
+          <Text className="mb-1 font-t3-medium text-sm text-foreground-secondary">
+            {message.grokBotAuthor.name}
+          </Text>
+        ) : null}
         {renderedText.trim().length > 0 ? (
           <MarkdownImageAvailableWidthContext value={props.markdownContentWidth}>
             <AssistantMarkdownContent

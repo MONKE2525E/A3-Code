@@ -103,8 +103,13 @@ export function presentEnvironmentConnection(
 export function environmentMcpUrl(input: {
   readonly entry: ConnectionCatalogEntry;
   readonly relayHttpBaseUrl?: string | undefined;
+  readonly preferRelay?: boolean;
   readonly connectedTarget?: ConnectionTarget | null | undefined;
 }): string | null {
+  if (input.preferRelay && input.relayHttpBaseUrl) {
+    const relayMcpUrl = mcpUrlFromBase(input.relayHttpBaseUrl);
+    if (relayMcpUrl !== null) return relayMcpUrl;
+  }
   const connectedRouteId = input.connectedTarget ? connectionRouteId(input.connectedTarget) : null;
   const routes = connectionRoutes(input.entry);
   const connectedRoute = routes.find(

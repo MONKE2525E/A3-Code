@@ -1,4 +1,4 @@
-import { useOpenPullRequest } from "../../../native/useOpenPullRequest";
+import { useOpenPullRequest } from "../../pull-requests/useOpenPullRequestFromRoute";
 import {
   type GitActionRequestInput,
   buildMenuItems,

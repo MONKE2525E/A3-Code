@@ -442,6 +442,10 @@
     "./pull-request-markdown": {
       "types": "./src/pullRequestMarkdown.ts",
       "default": "./src/pullRequestMarkdown.ts"
+    },
+    "./grok-bot-voice/call-collection": {
+      "types": "./src/grokBotVoice/callCollection.ts",
+      "default": "./src/grokBotVoice/callCollection.ts"
     }
   },
   "scripts": {

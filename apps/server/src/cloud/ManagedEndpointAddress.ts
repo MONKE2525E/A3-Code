@@ -31,7 +31,7 @@ export class ManagedEndpointAddressError extends Schema.TaggedError<ManagedEndpo
   }
 }
 
-/** Addresses come from authenticated relay replies, never a cloud tool's parameters. */
+/** Addresses come from relay link replies; web clients persist them after confirming the tunnel. */
 export class ManagedEndpointAddress extends Context.Service<
   ManagedEndpointAddress,
   {

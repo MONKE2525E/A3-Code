@@ -2,6 +2,7 @@ import { ThreadFindTimelineContext } from "./ThreadFindProvider";
 import { AgentSenderAttribution, GrokBotPeerMessageLink } from "../grokBot/GrokBotPeerMessageLink";
 import { GrokBotVoiceCallMarkerLabel } from "../grokBot/GrokBotVoiceCallMarkerLabel";
 import { GrokBotWorkflowReferenceChips } from "../grokBot/GrokBotWorkflowReferenceChips";
+import { GrokBotReactions } from "../grokBot/GrokBotReactions";
 import { shouldPreserveAssistantLineBreaks } from "@t3tools/shared/markdownPipeline";
 import { MarkdownFindContext, useFindRevealRef } from "./markdownFindContext";
 import { ComputerUseAppIcon } from "~/components/Icons";
@@ -276,6 +277,8 @@ import { useOpenPrLink } from "~/lib/openPullRequestLink";
 import { useClientSettings } from "~/hooks/useSettings";
 import type { ChatMarkdownContextReference, ChatMarkdownLinkOverride } from "../ChatMarkdown";
 import { createGrokBotConnectorAuthLinkOverride } from "../grokBot/GrokBotConnectorAuthAction";
+import { GrokBotConnectorCardView } from "../grokBot/GrokBotConnectorCardView";
+import { settledConnectorCardIds } from "../grokBot/grokBotConnectorCards";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
@@ -329,6 +332,8 @@ interface TimelineRowSharedState {
   grokBotConnectorAuthLinkOverride:
     | ((link: ChatMarkdownLinkOverride) => ReactNode | undefined)
     | null;
+  /** Connector cards the bot has since confirmed connected, so they stop offering a connection. */
+  grokBotSettledConnectorCardIds: ReadonlySet<string>;
   /** Provider snapshots for resolving handoff endpoints to icons + model names. */
   providerStatuses: ReadonlyArray<ServerProvider>;
   /** Projection runs, for recovering handoff models on legacy items. */
@@ -1358,6 +1363,11 @@ const ConversationTimeline = memo(function ConversationTimeline({
       isGrokBotThread ? createGrokBotConnectorAuthLinkOverride(activeThreadEnvironmentId) : null,
     [activeThreadEnvironmentId, isGrokBotThread],
   );
+  const grokBotSettledConnectorCardIds = useMemo(
+    () =>
+      settledConnectorCardIds(rows.flatMap((row) => (row.kind === "message" ? [row.message] : []))),
+    [rows],
+  );
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
       citationRequest: readyCitationRequest,
@@ -1374,6 +1384,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       runs,
       activeThreadEnvironmentId,
       grokBotConnectorAuthLinkOverride,
+      grokBotSettledConnectorCardIds,
       onRevertToTurnCount,
       onRunShellCommand,
       findActive,
@@ -1413,6 +1424,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       runs,
       activeThreadEnvironmentId,
       grokBotConnectorAuthLinkOverride,
+      grokBotSettledConnectorCardIds,
       onRevertToTurnCount,
       onRunShellCommand,
       findActive,
@@ -2612,6 +2624,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           />
         </div>
       </div>
+      <GrokBotReactions reactions={row.message.grokBotReactions} />
       {row.projectedItem &&
       row.projectedItem.item.status !== "completed" &&
       row.projectedItem.item.status !== "pending" &&
@@ -2980,6 +2993,17 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
       </div>
     );
   }
+  if (row.message.grokBotConnectorCard !== undefined) {
+    return (
+      <div className="min-w-0 px-1 py-1">
+        <GrokBotConnectorCardView
+          environmentId={ctx.activeThreadEnvironmentId}
+          card={row.message.grokBotConnectorCard}
+          settled={ctx.grokBotSettledConnectorCardIds.has(row.message.id)}
+        />
+      </div>
+    );
+  }
   // Only a bot's own thread shows assistant attachments; other providers stay text-only.
   const isGrokBotChat =
     ctx.threadRef !== null && isGrokBotBackingThread({ id: ctx.threadRef.threadId });
@@ -2998,7 +3022,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
             peer={row.message.grokBotPeer}
           />
         ) : null}
-        <MessageAuthorHeading>T3 Code</MessageAuthorHeading>
+        <MessageAuthorHeading>{row.message.grokBotAuthor?.name || "T3 Code"}</MessageAuthorHeading>
         {row.message.grokBotWorkflowReferences ? (
           <GrokBotWorkflowReferenceChips references={row.message.grokBotWorkflowReferences} />
         ) : null}

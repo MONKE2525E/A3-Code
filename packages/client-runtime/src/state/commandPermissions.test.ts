@@ -137,6 +137,8 @@ describe("command permissions", () => {
           WS_METHODS.grokBotsImportMarketplaceTemplate,
           WS_METHODS.grokBotsPluginAuthenticate,
           WS_METHODS.grokBotsPluginCompleteAuth,
+          WS_METHODS.grokBotsHostMachineUpdate,
+          WS_METHODS.grokBotsNetworkSet,
           WS_METHODS.grokBotsInstallMarketplacePlugin,
           WS_METHODS.grokBotsUninstallMarketplacePlugin,
           WS_METHODS.grokBotsOrchestratorConfig,

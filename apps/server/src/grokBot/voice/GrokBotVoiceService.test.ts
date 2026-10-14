@@ -3,6 +3,7 @@ import { GrokBotVoiceError } from "@t3tools/contracts/grokBotVoice";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Bridge from "../voiceRouting/GrokBotVoiceT3Bridge.ts";
 import * as Layer from "effect/Layer";
@@ -23,7 +24,11 @@ const line = {
   alreadySpokeThisTurn: false,
 };
 
-const makeBackend = (websocketUrl: string, expiresIn = 600) =>
+const makeBackend = (
+  websocketUrl: string,
+  expiresIn = 600,
+  overrides: Partial<Voice.GrokBotVoiceBackend["Service"]> = {},
+) =>
   Effect.gen(function* () {
     const binding = yield* Ref.make("account-1");
     const minted = yield* Ref.make({ websocketUrl, expiresIn });
@@ -31,15 +36,19 @@ const makeBackend = (websocketUrl: string, expiresIn = 600) =>
     const presence: { botId: string; callId: string; onTheLine: boolean }[] = [];
     const records: { binding: string; record: Voice.VoiceCallRecord }[] = [];
     const failRecord = { value: false };
-    // Holds a presence-true in flight so a test can end the call underneath it.
-    const presenceDelay = { ms: 0 };
-    let mints = 0;
+    const failBinding = { value: false };
+    const presenceReady = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+    const mints = { value: 0 };
     const layer = Layer.succeed(Voice.GrokBotVoiceBackend, {
-      accountBinding: Ref.get(binding),
+      accountBinding: Effect.suspend(() =>
+        failBinding.value
+          ? Effect.fail(new GrokBotVoiceError({ reason: "unavailable" }))
+          : Ref.get(binding),
+      ),
       mintCredential: () =>
         Effect.all([Clock.currentTimeMillis, Ref.get(minted)]).pipe(
           Effect.map(([now, next]) => ({
-            clientSecret: `ephemeral-secret-${(mints += 1)}`,
+            clientSecret: `ephemeral-secret-${(mints.value += 1)}`,
             expiresAtUnixSeconds: Math.floor(now / 1000) + next.expiresIn,
             model: "grok-voice",
             websocketUrl: next.websocketUrl,
@@ -52,15 +61,30 @@ const makeBackend = (websocketUrl: string, expiresIn = 600) =>
           return { kind: "served" as const, output: { ok: true } };
         }),
       setPresence: (_binding, input) =>
-        Effect.sleep(input.onTheLine ? presenceDelay.ms : 0).pipe(
-          Effect.andThen(Effect.sync(() => void presence.push(input))),
+        Effect.withFiber((fiber) =>
+          Effect.sync(() => void presence.push(input)).pipe(
+            Effect.andThen(input.onTheLine ? Deferred.succeed(presenceReady, fiber) : Effect.void),
+            Effect.asVoid,
+          ),
         ),
       recordCall: (boundTo, record) =>
         failRecord.value
           ? Effect.fail(new GrokBotVoiceError({ reason: "unavailable" }))
           : Effect.sync(() => void records.push({ binding: boundTo, record })),
+      ...overrides,
     });
-    return { layer, toolCalls, presence, records, failRecord, presenceDelay, binding, minted };
+    return {
+      layer,
+      toolCalls,
+      presence,
+      records,
+      failRecord,
+      failBinding,
+      presenceReady,
+      mints,
+      binding,
+      minted,
+    };
   });
 type Backend = Effect.Success<ReturnType<typeof makeBackend>>;
 const routed: { botId: string; callId: string; name: string; access: string }[] = [];
@@ -84,7 +108,68 @@ const serviceLayer = (backend: Backend) =>
 
 const start = { botId: "bot-a" };
 const url = "wss://api.x.ai/v1/realtime";
+
+it.effect("keeps the registered call through a temporary account-read failure", () =>
+  Effect.gen(function* () {
+    const backend = yield* makeBackend(url);
+    yield* Effect.gen(function* () {
+      const voice = yield* Voice.GrokBotVoiceService;
+      const call = yield* voice.start(start);
+      backend.failBinding.value = true;
+      const failure = yield* Effect.flip(voice.refresh(call.callId));
+      assert.equal(failure.reason, "unavailable");
+      backend.failBinding.value = false;
+      const credential = yield* voice.refresh(call.callId);
+      assert.equal(credential.model, "grok-voice");
+      assert.isTrue((yield* voice.connected(call.callId)).first);
+      yield* voice.end({ callId: call.callId });
+    }).pipe(Effect.provide(serviceLayer(backend)));
+  }),
+);
 const request = { toolCallId: "t1", name: "stay_silent", input: {}, line };
+
+it.effect.each(["account switch", "hang-up"] as const)(
+  "does not return a late refreshed credential after %s",
+  (ending) =>
+    Effect.gen(function* () {
+      const mintStarted = yield* Deferred.make<void>();
+      const releaseMint = yield* Deferred.make<void>();
+      let mints = 0;
+      const backend = yield* makeBackend(url, 600, {
+        mintCredential: () =>
+          Effect.gen(function* () {
+            if (++mints === 2) {
+              yield* Deferred.succeed(mintStarted, undefined);
+              yield* Deferred.await(releaseMint);
+            }
+            return {
+              clientSecret: "test-refreshed-secret",
+              expiresAtUnixSeconds: 600,
+              model: "grok-voice",
+              websocketUrl: url,
+            };
+          }),
+      });
+      yield* Effect.gen(function* () {
+        const voice = yield* Voice.GrokBotVoiceService;
+        const call = yield* voice.start(start);
+        const refreshing = yield* voice.refresh(call.callId).pipe(Effect.flip, Effect.forkChild);
+        yield* Deferred.await(mintStarted);
+        if (ending === "account switch") yield* Ref.set(backend.binding, "account-2");
+        else yield* voice.end({ callId: call.callId });
+        yield* Deferred.succeed(releaseMint, undefined);
+        assert.equal(
+          (yield* Fiber.join(refreshing)).reason,
+          ending === "account switch" ? "account_unavailable" : "unknown_call",
+        );
+        yield* Ref.set(backend.binding, "account-1");
+        assert.equal(
+          (yield* voice.connected(call.callId).pipe(Effect.flip)).reason,
+          "unknown_call",
+        );
+      }).pipe(Effect.provide(serviceLayer(backend)));
+    }),
+);
 
 it.effect("rejects delayed results after hang-up or an account switch", () =>
   Effect.gen(function* () {
@@ -171,6 +256,115 @@ it.effect("refuses a credential that is about to expire", () =>
   }),
 );
 
+it.effect("mints a fresh credential after held session and chat-context preparation", () =>
+  Effect.gen(function* () {
+    const sessionStarted = yield* Deferred.make<void>();
+    const sessionReady = yield* Deferred.make<void>();
+    const contextStarted = yield* Deferred.make<void>();
+    const contextReady = yield* Deferred.make<void>();
+    const backend = yield* makeBackend(url, 10, {
+      openSession: () =>
+        Deferred.succeed(sessionStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(sessionReady)),
+          Effect.as(session),
+        ),
+    });
+    const delayedBridge = Layer.succeed(Bridge.GrokBotVoiceT3Bridge, {
+      context: () =>
+        Deferred.succeed(contextStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(contextReady)),
+          Effect.as(undefined),
+        ),
+      activate: () => Effect.void,
+      forget: () => Effect.void,
+      call: () => Effect.succeed({ kind: "served", output: null }),
+    });
+    yield* Effect.gen(function* () {
+      const voice = yield* Voice.GrokBotVoiceService;
+      const starting = yield* voice.start(start).pipe(Effect.forkChild);
+      yield* Deferred.await(sessionStarted);
+      assert.strictEqual(backend.mints.value, 0);
+      yield* TestClock.adjust("1 minute");
+      yield* Deferred.succeed(sessionReady, undefined);
+      yield* Deferred.await(contextStarted);
+      assert.strictEqual(backend.mints.value, 0);
+      yield* TestClock.adjust("1 minute");
+      yield* Deferred.succeed(contextReady, undefined);
+      const call = yield* Fiber.join(starting);
+      const now = yield* Clock.currentTimeMillis;
+      assert.strictEqual(call.credential.expiresAtUnixSeconds * 1000 - now, 10_000);
+      assert.isTrue((yield* voice.connected(call.callId)).first);
+      yield* voice.end({ callId: call.callId });
+    }).pipe(
+      Effect.provide(Voice.layer.pipe(Layer.provide(Layer.merge(backend.layer, delayedBridge)))),
+    );
+  }),
+);
+
+it.effect("rejects an account change during preparation before minting a credential", () =>
+  Effect.gen(function* () {
+    const preparing = yield* Deferred.make<void>();
+    const ready = yield* Deferred.make<void>();
+    const backend = yield* makeBackend(url, 10, {
+      openSession: () =>
+        Deferred.succeed(preparing, undefined).pipe(
+          Effect.andThen(Deferred.await(ready)),
+          Effect.as(session),
+        ),
+    });
+    yield* Effect.gen(function* () {
+      const voice = yield* Voice.GrokBotVoiceService;
+      const starting = yield* voice.start(start).pipe(Effect.flip, Effect.forkChild);
+      yield* Deferred.await(preparing);
+      yield* Ref.set(backend.binding, "account-2");
+      yield* Deferred.succeed(ready, undefined);
+      assert.strictEqual((yield* Fiber.join(starting)).reason, "account_unavailable");
+      assert.strictEqual(backend.mints.value, 0);
+    }).pipe(Effect.provide(serviceLayer(backend)));
+  }),
+);
+
+it.effect("checks account binding and credential expiry again after minting", () =>
+  Effect.gen(function* () {
+    for (const change of ["account", "expiry"] as const) {
+      const backend = yield* makeBackend(url, 10);
+      const minting = yield* Deferred.make<void>();
+      const minted = yield* Deferred.make<void>();
+      const delayed = Layer.succeed(Voice.GrokBotVoiceBackend, {
+        accountBinding: Ref.get(backend.binding),
+        openSession: () => Effect.succeed(session),
+        mintCredential: () =>
+          Effect.gen(function* () {
+            const now = yield* Clock.currentTimeMillis;
+            yield* Deferred.succeed(minting, undefined);
+            yield* Deferred.await(minted);
+            return {
+              clientSecret: "ephemeral-secret",
+              expiresAtUnixSeconds: now / 1000 + 10,
+              model: "grok-voice",
+              websocketUrl: url,
+            };
+          }),
+        callTool: () => Effect.succeed({ kind: "served", output: null }),
+        setPresence: () => Effect.void,
+        recordCall: () => Effect.void,
+      });
+      yield* Effect.gen(function* () {
+        const voice = yield* Voice.GrokBotVoiceService;
+        const starting = yield* voice.start(start).pipe(Effect.flip, Effect.forkChild);
+        yield* Deferred.await(minting);
+        if (change === "account") yield* Ref.set(backend.binding, "account-2");
+        else yield* TestClock.adjust("6 seconds");
+        yield* Deferred.succeed(minted, undefined);
+        assert.strictEqual(
+          (yield* Fiber.join(starting)).reason,
+          change === "account" ? "account_unavailable" : "expired_credential",
+        );
+      }).pipe(Effect.provide(Voice.layer.pipe(Layer.provide(Layer.merge(delayed, bridgeLayer)))));
+    }
+  }),
+);
+
 it.effect("ties tool calls to the bot and account the call was opened for", () =>
   Effect.gen(function* () {
     const backend = yield* makeBackend(url);
@@ -189,6 +383,9 @@ it.effect("ties tool calls to the bot and account the call was opened for", () =
       assert.isFalse((yield* voice.end({ callId: first.callId })).ended);
       const error = yield* Effect.flip(voice.tool({ callId: first.callId, ...request }, "operate"));
       assert.strictEqual(error.reason, "unknown_call");
+      assert.isDefined(yield* voice.refresh(second.callId));
+      yield* voice.tool({ callId: second.callId, ...request }, "operate");
+      assert.strictEqual(backend.toolCalls.at(-1)?.botId, "bot-b");
     }).pipe(Effect.provide(serviceLayer(backend)));
   }),
 );
@@ -252,9 +449,17 @@ it.effect("enforces the maximum call age on tool and refresh, not only on start"
     yield* Effect.gen(function* () {
       const voice = yield* Voice.GrokBotVoiceService;
       const stale = yield* voice.start(start);
+      yield* voice.connected(stale.callId);
+      assert.isTrue(
+        Exit.isSuccess(yield* Fiber.await(yield* Deferred.await(backend.presenceReady))),
+      );
       yield* TestClock.adjust("5 hours");
       const tool = yield* Effect.flip(voice.tool({ callId: stale.callId, ...request }, "operate"));
       assert.strictEqual(tool.reason, "unknown_call");
+      assert.deepStrictEqual(backend.presence, [
+        onLine(stale.callId, true),
+        onLine(stale.callId, false),
+      ]);
       assert.isFalse((yield* voice.end({ callId: stale.callId })).ended);
       const other = yield* voice.start(start);
       yield* TestClock.adjust("5 hours");
@@ -271,9 +476,18 @@ it.effect("drops calls that outlive the maximum age when a new call starts", () 
     yield* Effect.gen(function* () {
       const voice = yield* Voice.GrokBotVoiceService;
       const stale = yield* voice.start(start);
+      yield* voice.connected(stale.callId);
+      assert.isTrue(
+        Exit.isSuccess(yield* Fiber.await(yield* Deferred.await(backend.presenceReady))),
+      );
       yield* TestClock.adjust("5 hours");
       yield* voice.start(start);
       assert.isFalse((yield* voice.end({ callId: stale.callId })).ended);
+      assert.deepStrictEqual(backend.presence, [
+        onLine(stale.callId, true),
+        onLine(stale.callId, false),
+      ]);
+      assert.deepStrictEqual(backend.records, []);
     }).pipe(Effect.provide(serviceLayer(backend)));
   }),
 );
@@ -345,6 +559,101 @@ it.effect("records a connected call natively once, with its turns and served too
 
 const onLine = (callId: string, onTheLine: boolean) => ({ botId: "bot-a", callId, onTheLine });
 
+it.effect("clears presence before waiting for the finished call's history record", () =>
+  Effect.gen(function* () {
+    const recording = yield* Deferred.make<void>();
+    const recordReady = yield* Deferred.make<void>();
+    const records: Voice.VoiceCallRecord[] = [];
+    const backend = yield* makeBackend(url, 600, {
+      recordCall: (_binding, record) =>
+        Deferred.succeed(recording, undefined).pipe(
+          Effect.andThen(Deferred.await(recordReady)),
+          Effect.andThen(Effect.sync(() => void records.push(record))),
+        ),
+    });
+    yield* Effect.gen(function* () {
+      const voice = yield* Voice.GrokBotVoiceService;
+      const call = yield* voice.start(start);
+      yield* voice.connected(call.callId);
+      assert.isTrue(
+        Exit.isSuccess(yield* Fiber.await(yield* Deferred.await(backend.presenceReady))),
+      );
+      yield* TestClock.adjust("3 seconds");
+      const ending = yield* voice.end({ callId: call.callId, ...hungUp }).pipe(Effect.forkChild);
+      yield* Deferred.await(recording);
+      assert.deepStrictEqual(backend.presence, [
+        onLine(call.callId, true),
+        onLine(call.callId, false),
+      ]);
+      assert.deepStrictEqual(records, []);
+      assert.deepStrictEqual(yield* voice.end({ callId: call.callId, ...hungUp }), {
+        ended: false,
+        recorded: false,
+      });
+      yield* TestClock.adjust("1 minute");
+      yield* Deferred.succeed(recordReady, undefined);
+      assert.deepStrictEqual(yield* Fiber.join(ending), { ended: true, recorded: true });
+      assert.strictEqual(records.length, 1);
+      assert.strictEqual(records[0]?.durationMs, 3000);
+    }).pipe(Effect.provide(serviceLayer(backend)));
+  }),
+);
+
+it.effect("clears completed cloud presence when the voice service shuts down", () =>
+  Effect.gen(function* () {
+    const backend = yield* makeBackend(url);
+    let callId = "";
+    yield* Effect.gen(function* () {
+      const voice = yield* Voice.GrokBotVoiceService;
+      const call = yield* voice.start(start);
+      callId = call.callId;
+      yield* voice.connected(callId);
+      assert.isTrue(
+        Exit.isSuccess(yield* Fiber.await(yield* Deferred.await(backend.presenceReady))),
+      );
+      assert.deepStrictEqual(backend.presence, [onLine(callId, true)]);
+    }).pipe(Effect.provide(serviceLayer(backend)), Effect.scoped);
+    assert.deepStrictEqual(backend.presence, [onLine(callId, true), onLine(callId, false)]);
+    assert.deepStrictEqual(backend.records, []);
+  }),
+);
+
+it.effect("clears an invalidated call's presence under its original account binding", () =>
+  Effect.gen(function* () {
+    const connected = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+    const presence: { binding: string; callId: string; onTheLine: boolean }[] = [];
+    const backend = yield* makeBackend(url, 600, {
+      setPresence: (binding, input) =>
+        Effect.withFiber((fiber) =>
+          Effect.sync(
+            () => void presence.push({ binding, callId: input.callId, onTheLine: input.onTheLine }),
+          ).pipe(
+            Effect.andThen(input.onTheLine ? Deferred.succeed(connected, fiber) : Effect.void),
+            Effect.asVoid,
+          ),
+        ),
+    });
+    yield* Effect.gen(function* () {
+      const voice = yield* Voice.GrokBotVoiceService;
+      const call = yield* voice.start(start);
+      yield* voice.connected(call.callId);
+      assert.isTrue(Exit.isSuccess(yield* Fiber.await(yield* Deferred.await(connected))));
+      yield* Ref.set(backend.binding, "account-2");
+      assert.strictEqual(
+        (yield* Effect.flip(voice.refresh(call.callId))).reason,
+        "account_unavailable",
+      );
+      assert.deepStrictEqual(presence, [
+        { binding: "account-1", callId: call.callId, onTheLine: true },
+        { binding: "account-1", callId: call.callId, onTheLine: false },
+      ]);
+      yield* Ref.set(backend.binding, "account-1");
+      assert.strictEqual((yield* Effect.flip(voice.connected(call.callId))).reason, "unknown_call");
+      assert.deepStrictEqual(backend.records, []);
+    }).pipe(Effect.provide(serviceLayer(backend)));
+  }),
+);
+
 it.effect(
   "a connected call with no tool calls goes on the line once and is recorded from connect",
   () =>
@@ -361,6 +670,7 @@ it.effect(
           { concurrency: "unbounded" },
         );
         assert.deepStrictEqual(results.map((r) => r.first).toSorted(), [false, true]);
+        yield* Deferred.await(backend.presenceReady);
         assert.deepStrictEqual(backend.presence, [onLine(call.callId, true)]);
         // A tool call after connect does not repeat presence.
         yield* voice.tool({ callId: call.callId, ...request }, "operate");
@@ -391,21 +701,88 @@ it.effect("connected after end is unknown_call and never puts the bot on the lin
   }),
 );
 
-it.effect("an end racing an in-flight connected leaves the bot off the line", () =>
+it.effect("the first local tool awaits authority and returns while cloud presence is held", () =>
   Effect.gen(function* () {
-    const backend = yield* makeBackend(url);
-    backend.presenceDelay.ms = 1000;
+    const acquiring = yield* Deferred.make<void>();
+    const acquired = yield* Deferred.make<void>();
+    const presenceStarted = yield* Deferred.make<void>();
+    const presenceReady = yield* Deferred.make<void>();
+    const presenceCleared = yield* Deferred.make<void>();
+    const presence: boolean[] = [];
+    let dispatched = false;
+    const backend = yield* makeBackend(url, 600, {
+      setPresence: (_binding, input) =>
+        Effect.gen(function* () {
+          if (input.onTheLine) {
+            yield* Deferred.succeed(presenceStarted, undefined);
+            yield* Deferred.await(presenceReady);
+          }
+          presence.push(input.onTheLine);
+          if (!input.onTheLine && presence.includes(true))
+            yield* Deferred.succeed(presenceCleared, undefined);
+        }),
+    });
+    const delayedBridge = Layer.succeed(Bridge.GrokBotVoiceT3Bridge, {
+      context: () => Effect.succeed(undefined),
+      activate: () =>
+        Deferred.succeed(acquiring, undefined).pipe(Effect.andThen(Deferred.await(acquired))),
+      forget: () => Effect.void,
+      call: () =>
+        Effect.sync(() => {
+          dispatched = true;
+          return { kind: "served", output: { spoken: "done" } } as const;
+        }),
+    });
     yield* Effect.gen(function* () {
       const voice = yield* Voice.GrokBotVoiceService;
       const call = yield* voice.start(start);
-      const connecting = yield* Effect.forkChild(voice.connected(call.callId));
-      yield* Effect.yieldNow;
+      const tool = yield* voice
+        .tool({ callId: call.callId, ...request, name: "delegate_task" }, "operate")
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(acquiring);
+      assert.isFalse(dispatched);
+      yield* Deferred.succeed(acquired, undefined);
+      assert.strictEqual((yield* Fiber.join(tool)).kind, "served");
+      yield* Deferred.await(presenceStarted);
+      assert.deepStrictEqual(presence, []);
+      assert.isFalse((yield* voice.connected(call.callId)).first);
       yield* voice.end({ callId: call.callId, ...hungUp });
-      yield* TestClock.adjust("2 seconds");
-      yield* Fiber.join(connecting);
-      assert.strictEqual(backend.presence.at(-1)?.onTheLine, false);
+      assert.deepStrictEqual(presence, [false]);
+      yield* Deferred.succeed(presenceReady, undefined);
+      yield* Deferred.await(presenceCleared);
+      assert.deepStrictEqual(presence, [false, true, false]);
       assert.strictEqual(backend.records.length, 1);
-    }).pipe(Effect.provide(serviceLayer(backend)));
+    }).pipe(
+      Effect.provide(Voice.layer.pipe(Layer.provide(Layer.merge(backend.layer, delayedBridge)))),
+    );
+  }),
+);
+
+it.effect("interrupts held cloud presence and clears it when the voice service shuts down", () =>
+  Effect.gen(function* () {
+    const presenceStarted = yield* Deferred.make<void>();
+    const presenceReady = yield* Deferred.make<void>();
+    const presenceInterrupted = yield* Deferred.make<void>();
+    const presence: boolean[] = [];
+    const backend = yield* makeBackend(url, 600, {
+      setPresence: (_binding, input) =>
+        input.onTheLine
+          ? Deferred.succeed(presenceStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(presenceReady)),
+              Effect.onInterrupt(() => Deferred.succeed(presenceInterrupted, undefined)),
+              Effect.asVoid,
+            )
+          : Effect.sync(() => void presence.push(false)),
+    });
+    yield* Effect.gen(function* () {
+      const voice = yield* Voice.GrokBotVoiceService;
+      const call = yield* voice.start(start);
+      assert.isTrue((yield* voice.connected(call.callId)).first);
+      yield* Deferred.await(presenceStarted);
+    }).pipe(Effect.provide(serviceLayer(backend)), Effect.scoped);
+    yield* Deferred.await(presenceInterrupted);
+    // Scope cleanup and the interrupted write both reset this call.
+    assert.deepStrictEqual(presence, [false, false]);
   }),
 );
 
@@ -479,7 +856,7 @@ it.effect("refuses stale connector tools locally, in whichever environment the c
     yield* Effect.gen(function* () {
       const voice = yield* Voice.GrokBotVoiceService;
       const call = yield* voice.start(start);
-      for (const name of ["t3_thread_send", "t3-code__delegate_task", ""]) {
+      for (const name of ["t3-code__t3_thread_send", "t3-code__delegate_task", ""]) {
         const result = yield* voice.tool({ callId: call.callId, ...request, name }, "operate");
         assert.strictEqual(result.kind, "unknown_tool");
       }

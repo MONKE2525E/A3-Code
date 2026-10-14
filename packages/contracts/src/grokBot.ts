@@ -1,6 +1,6 @@
 import * as Schema from "effect/Schema";
 import { PullRequestRef } from "./pullRequest.ts";
-import { TrimmedNonEmptyString, ThreadId, MessageId, RunId } from "./baseSchemas.ts";
+import { PositiveInt, TrimmedNonEmptyString, ThreadId, MessageId, RunId } from "./baseSchemas.ts";
 
 export const GrokBotId = TrimmedNonEmptyString.check(Schema.isMaxLength(128));
 export const GrokBotPullRequest = Schema.Struct({
@@ -36,6 +36,9 @@ export const GrokBotRuntimeActivity = Schema.Struct({
 });
 export const GrokBot = Schema.Struct({
   id: GrokBotId,
+  /** Native group agent metadata; omitted by older servers. */
+  isGroup: Schema.optionalKey(Schema.Boolean),
+  memberIds: Schema.optionalKey(Schema.Array(GrokBotId)),
   name: Schema.String,
   label: Schema.String,
   description: Schema.String,
@@ -58,11 +61,14 @@ export const GrokBotStatus = Schema.Struct({
   nativeAvailable: Schema.optionalKey(Schema.Boolean),
 });
 export const GrokBotReadInput = Schema.Struct({ botId: GrokBotId });
-const GrokBotReaction = Schema.Struct({
+export const GrokBotReaction = Schema.Struct({
   emoji: Schema.String,
   from: Schema.Literals(["bot", "user"]),
   messageId: Schema.String,
+  id: Schema.optionalKey(Schema.String),
+  timestampMs: Schema.optionalKey(Schema.Number.check(Schema.isFinite())),
 });
+export const GrokBotReactions = Schema.Array(GrokBotReaction);
 /**
  * Another bot in a bot-to-bot exchange. `bot` is resolved on id against the roster, so its
  * name is the current one; `unknown` keeps the wire name when the id is not in the roster.
@@ -98,8 +104,22 @@ export const GrokBotVoiceCallMarker = Schema.Struct({
 });
 export type GrokBotVoiceCallMarker = typeof GrokBotVoiceCallMarker.Type;
 
+/**
+ * A sign-in card the bot sent for one of its MCP connectors. `serverId` is native's id for the
+ * connector, the same id the plugin authentication flow takes. Any variant native adds that is not
+ * `connected` still needs the user to connect, so it reads as `connect`.
+ */
+export const GrokBotConnectorCard = Schema.Struct({
+  connector: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  serverId: PositiveInt,
+  variant: Schema.Literals(["connect", "connected"]),
+});
+export type GrokBotConnectorCard = typeof GrokBotConnectorCard.Type;
+
 export const GrokBotMessage = Schema.Struct({
   grokBotWorkflowReferences: Schema.optionalKey(GrokBotWorkflowReferences),
+  /** Set on a bot-sent connector card; `text` holds its plain label for clients without the card. */
+  connectorCard: Schema.optionalKey(GrokBotConnectorCard),
   /** Set on the row that stands for a voice call; its text is empty. */
   voiceCall: Schema.optionalKey(GrokBotVoiceCallMarker),
   id: Schema.String,
@@ -111,7 +131,7 @@ export const GrokBotMessage = Schema.Struct({
   text: Schema.String,
   timestampMs: Schema.Number,
   streaming: Schema.Boolean,
-  reactions: Schema.optionalKey(Schema.Array(GrokBotReaction)),
+  reactions: Schema.optionalKey(GrokBotReactions),
   reactionOnly: Schema.optionalKey(Schema.Boolean),
 });
 export const GrokBotConversation = Schema.Struct({
@@ -159,8 +179,11 @@ export const GrokBotUpdateInput = Schema.Struct({
   pinned: Schema.optionalKey(Schema.Boolean),
   featured: Schema.optionalKey(Schema.Boolean),
 });
-/** A single bot. Group creation is not part of this input yet. */
+/** Members select native group creation through the same guarded create command. */
 export const GrokBotCreateInput = Schema.Struct({
+  memberIds: Schema.optionalKey(
+    Schema.Array(GrokBotId).check(Schema.isMinLength(1), Schema.isMaxLength(6)),
+  ),
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
   description: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(16000))),
   avatarShape: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(32))),

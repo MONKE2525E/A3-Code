@@ -3,9 +3,12 @@
  * desktop app: ephemeral secret as a WebSocket subprotocol, 24 kHz mono PCM16 as base64 frames,
  * server VAD, `grok-transcribe` input transcription. Browser-safe: no Node APIs.
  */
-export const VOICE_REALTIME_ORIGIN = "wss://api.x.ai/";
+const VOICE_REALTIME_ORIGIN = "wss://api.x.ai/";
 export const VOICE_SAMPLE_RATE = 24_000;
-export const VOICE_TRANSCRIPTION_MODEL = "grok-transcribe";
+const VOICE_TRANSCRIPTION_MODEL = "grok-transcribe";
+
+const speechInstructions =
+  "Keep spoken replies to one or two short sentences by default. Give longer explanations only when the caller asks. Refer to threads and delegated tasks by their title or a short descriptive name. Never read or spell internal thread, task, run, provider, or model IDs, UUIDs, paths, or URLs aloud; those are tool arguments, not spoken content. If a name is unavailable, say 'that task' or 'that thread'. Acknowledge background work once, then speak again only for a meaningful result, failure, approval needed, or a direct question. Do not narrate tool calls or repeat status updates.";
 
 export interface VoiceRealtimeCredential {
   readonly clientSecret: string;
@@ -62,7 +65,8 @@ export function sessionUpdateFrame(input: {
     session: {
       ...(voice.voiceId === null ? {} : { voice: voice.voiceId }),
       ...(input.reconnecting ? { keep_context: false } : {}),
-      instructions: input.instructions,
+      instructions: `${input.instructions}\n${speechInstructions}`,
+      resumption: { enabled: true },
       turn_detection: { type: "server_vad" },
       audio: {
         input: {
@@ -79,7 +83,7 @@ export function sessionUpdateFrame(input: {
   });
 }
 
-export function floatToPcm16(samples: Float32Array): Uint8Array {
+function floatToPcm16(samples: Float32Array): Uint8Array {
   const out = new Int16Array(samples.length);
   for (let i = 0; i < samples.length; i += 1) {
     const s = Math.max(-1, Math.min(1, samples[i] ?? 0));
@@ -88,7 +92,7 @@ export function floatToPcm16(samples: Float32Array): Uint8Array {
   return new Uint8Array(out.buffer);
 }
 
-export function pcm16ToFloat(bytes: Uint8Array): Float32Array {
+function pcm16ToFloat(bytes: Uint8Array): Float32Array {
   const view = new DataView(
     bytes.buffer,
     bytes.byteOffset,
@@ -151,11 +155,45 @@ export function responseCreateFrame(instructions: string | null): string {
   return JSON.stringify(
     instructions === null
       ? { type: "response.create" }
-      : { type: "response.create", response: { instructions } },
+      : {
+          type: "response.create",
+          response: { instructions: `${instructions}\n${speechInstructions}` },
+        },
   );
 }
 
-export function truncateFrame(cut: { itemId: string; contentIndex: number; audioEndMs: number }) {
+/** A concise work notification is spoken without a model continuation. */
+export function spokenMessageFrame(message: string): string {
+  // Preserve tool errors in the UI; scripted speech must not spell internal identifiers.
+  const spoken = message
+    .replace(
+      /\b(?:node:delegated-task|thread:|provider-session:|provider-instance:)[^\s,;]+/gi,
+      "that task",
+    )
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "that task")
+    .replace(/https?:\/\/[^\s]+/gi, "the link in T3")
+    .trim()
+    .split(/\s+/)
+    .slice(0, 35)
+    .join(" ");
+  return JSON.stringify({
+    type: "conversation.item.create",
+    item: {
+      type: "force_message",
+      role: "assistant",
+      interruptible: true,
+      content: [{ type: "output_text", text: spoken.slice(0, 300) }],
+    },
+  });
+}
+
+export interface VoiceAudioCut {
+  readonly itemId: string;
+  readonly contentIndex: number;
+  readonly audioEndMs: number;
+}
+
+export function truncateFrame(cut: VoiceAudioCut) {
   return JSON.stringify({
     type: "conversation.item.truncate",
     item_id: cut.itemId,
@@ -178,20 +216,45 @@ export type VoiceServerEvent =
   | {
       readonly type: "audio.delta";
       readonly itemId: string | null;
-      readonly contentIndex: number;
+      readonly responseId: string | null;
+      readonly contentIndex: number | null;
       readonly samples: Float32Array;
     }
+  | { readonly type: "item.ended"; readonly itemId: string | null }
+  | { readonly type: "item.truncated"; readonly itemId: string | null }
   | { readonly type: "speech.started" }
   | { readonly type: "speech.stopped" }
-  | { readonly type: "transcript.user"; readonly itemId: string | null; readonly text: string }
+  | {
+      readonly type: "transcript.user";
+      readonly itemId: string | null;
+      readonly text: string;
+      readonly final: boolean;
+    }
+  | {
+      readonly type: "transcript.item";
+      readonly itemId: string | null;
+      readonly responseId: string | null;
+      readonly speaker: "user" | "assistant";
+      readonly text: string;
+      /** Explicit caller text input; generic conversation text can be startup context. */
+      readonly inputText: string | null;
+    }
   | {
       readonly type: "transcript.assistant.delta";
       readonly itemId: string | null;
+      readonly responseId: string | null;
       readonly delta: string;
+    }
+  | {
+      readonly type: "transcript.assistant.final";
+      readonly itemId: string | null;
+      readonly responseId: string | null;
+      readonly text: string;
     }
   | {
       readonly type: "tool.call";
       readonly callId: string;
+      readonly responseId: string | null;
       readonly name: string;
       readonly argumentsJson: string;
     }
@@ -222,6 +285,7 @@ export function parseServerEvent(raw: string): VoiceServerEvent | null {
   }
   if (!isRecord(value) || typeof value.type !== "string") return null;
   const itemId = str(value.item_id) ?? (isRecord(value.item) ? str(value.item.id) : null);
+  const responseId = str(value.response_id);
   switch (value.type) {
     case "session.created":
       return { type: "session.ready" };
@@ -252,10 +316,13 @@ export function parseServerEvent(raw: string): VoiceServerEvent | null {
       return {
         type: "audio.delta",
         itemId,
+        responseId,
         contentIndex:
-          typeof value.content_index === "number" && Number.isInteger(value.content_index)
+          typeof value.content_index === "number" &&
+          Number.isInteger(value.content_index) &&
+          value.content_index >= 0
             ? value.content_index
-            : 0,
+            : null,
         samples: pcm16ToFloat(fromBase64(delta)),
       };
     }
@@ -263,23 +330,86 @@ export function parseServerEvent(raw: string): VoiceServerEvent | null {
       return { type: "speech.started" };
     case "input_audio_buffer.speech_stopped":
       return { type: "speech.stopped" };
+    case "conversation.item.input_audio_transcription.updated":
     case "conversation.item.input_audio_transcription.completed": {
-      const t = text(value.transcript) ?? text(value.text);
+      const t = str(value.transcript) ?? str(value.text);
       return t === null
         ? { type: "unsupported", wireType: value.type }
-        : { type: "transcript.user", itemId, text: t };
+        : {
+            type: "transcript.user",
+            itemId,
+            text: t,
+            final: value.type === "conversation.item.input_audio_transcription.completed",
+          };
     }
     case "response.audio_transcript.delta":
     case "response.output_audio_transcript.delta": {
       const delta = str(value.delta);
-      return delta === null ? null : { type: "transcript.assistant.delta", itemId, delta };
+      return delta === null
+        ? null
+        : { type: "transcript.assistant.delta", itemId, responseId, delta };
     }
+    case "response.audio_transcript.done":
+    case "response.output_audio_transcript.done": {
+      const transcript = str(value.transcript);
+      return transcript === null
+        ? null
+        : { type: "transcript.assistant.final", itemId, responseId, text: transcript };
+    }
+    case "conversation.item.added": {
+      const item = value.item;
+      if (
+        !isRecord(item) ||
+        item.type !== "message" ||
+        (item.role !== "user" && item.role !== "assistant") ||
+        !Array.isArray(item.content)
+      )
+        return { type: "unsupported", wireType: value.type };
+      const transcript = item.content
+        .flatMap((part: unknown) => {
+          if (!isRecord(part)) return [];
+          if (part.type === "text" || part.type === "input_text" || part.type === "output_text")
+            return str(part.text) ?? [];
+          if (part.type === "audio" || part.type === "input_audio" || part.type === "output_audio")
+            return str(part.transcript) ?? [];
+          return [];
+        })
+        .join("");
+      const inputText =
+        item.role === "user" && responseId === null
+          ? item.content
+              .flatMap((part: unknown) =>
+                isRecord(part) && part.type === "input_text" ? (str(part.text) ?? []) : [],
+              )
+              .join("")
+          : "";
+      return transcript.length === 0
+        ? { type: "unsupported", wireType: value.type }
+        : {
+            type: "transcript.item",
+            itemId,
+            responseId,
+            speaker: item.role,
+            text: transcript,
+            inputText: inputText.trim() ? inputText : null,
+          };
+    }
+    case "response.output_item.done":
+      return { type: "item.ended", itemId };
+    case "conversation.item.truncated":
+      return { type: "item.truncated", itemId };
     case "response.function_call_arguments.done": {
       const callId = str(value.call_id);
       const name = str(value.name);
       return callId === null || name === null
         ? null
-        : { type: "tool.call", callId, name, argumentsJson: str(value.arguments) ?? "{}" };
+        : {
+            type: "tool.call",
+            callId,
+            responseId,
+            name,
+            argumentsJson: str(value.arguments) ?? "{}",
+          };
     }
     case "error": {
       const error = isRecord(value.error) ? value.error : value;

@@ -13,6 +13,7 @@ import {
   TerminalProviderInstanceNotFoundError,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as Data from "effect/Data";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
@@ -421,6 +422,29 @@ it.layer(
   Layer.merge(NodeServices.layer, ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer))),
   { excludeTestServices: true },
 )("TerminalManager", (it) => {
+  it.effect("cleans up detached scope children when the terminal shell exits", () =>
+    Effect.gen(function* () {
+      const reaped = yield* Deferred.make<void>();
+      const { manager, ptyAdapter } = yield* createManager().pipe(
+        Effect.provideService(AgentScope, {
+          ...AgentScope.defaultValue(),
+          wrap: ({ command, args }) =>
+            Effect.succeed({
+              command,
+              args,
+              cleanup: Deferred.succeed(reaped, undefined).pipe(Effect.asVoid),
+            }),
+        }),
+      );
+      yield* manager.open(openInput());
+      ptyAdapter.processes[0]!.emitExit({ exitCode: 0, signal: 0 });
+      yield* Deferred.await(reaped);
+      const terminal = yield* manager.open(openInput());
+      assert.equal(terminal.status, "running");
+      assert.equal(ptyAdapter.processes.length, 2);
+    }),
+  );
+
   it.effect("spawns lazily and reuses running terminal per thread", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();
@@ -2942,9 +2966,17 @@ it.layer(
   it.effect("scoped runtime shutdown stops active terminals cleanly", () =>
     Effect.gen(function* () {
       const scope = yield* Scope.make("sequential");
+      const reaped = yield* Ref.make(0);
       const { manager, ptyAdapter } = yield* createManager(5, {
         processKillGraceMs: 10,
-      }).pipe(Effect.provideService(Scope.Scope, scope));
+      }).pipe(
+        Effect.provideService(Scope.Scope, scope),
+        Effect.provideService(AgentScope, {
+          ...AgentScope.defaultValue(),
+          wrap: ({ command, args }) =>
+            Effect.succeed({ command, args, cleanup: Ref.update(reaped, (count) => count + 1) }),
+        }),
+      );
       yield* manager.open(openInput());
       const process = ptyAdapter.processes[0];
       expect(process).toBeDefined();
@@ -2957,6 +2989,7 @@ it.layer(
 
       assert.equal(process.killSignals[0], "SIGTERM");
       expect(process.killSignals).toContain("SIGKILL");
+      assert.equal(yield* Ref.get(reaped), 1);
     }).pipe(Effect.provide(TestClock.layer())),
   );
 });

@@ -1,5 +1,6 @@
 import * as NativeAgentService from "./nativeAgents/NativeAgentService.ts";
 import * as GrokBotComputerService from "./grokBot/GrokBotComputerService.ts";
+import * as GrokBotNetworkService from "./grokBot/GrokBotNetworkService.ts";
 import * as GrokBotSecretService from "./grokBot/GrokBotSecretService.ts";
 import * as GrokBotVoiceService from "./grokBot/voice/GrokBotVoiceService.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
@@ -579,6 +580,10 @@ const MainWsRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.grokBotsComputerRecreate,
   WS_METHODS.grokBotsComputerReset,
   WS_METHODS.grokBotsComputerUpgradeSchedule,
+  WS_METHODS.grokBotsHostMachines,
+  WS_METHODS.grokBotsHostMachineUpdate,
+  WS_METHODS.grokBotsNetworkRead,
+  WS_METHODS.grokBotsNetworkSet,
   WS_METHODS.grokBotsSecretPending,
   WS_METHODS.grokBotsSecretSubmit,
   WS_METHODS.grokBotsSecretDismiss,
@@ -855,6 +860,31 @@ const layerGrokExtensionsRpc = Layer.mergeAll(
     Effect.map(
       GrokBotComputerService.GrokBotComputerService,
       (service) => () => service.upgradeSchedule(),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsHostMachines,
+    Effect.map(
+      GrokBotComputerService.GrokBotComputerService,
+      (service) => () => service.machines(),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsHostMachineUpdate,
+    Effect.map(
+      GrokBotComputerService.GrokBotComputerService,
+      (service) => (input) => service.updateMachine(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsNetworkRead,
+    Effect.map(GrokBotNetworkService.GrokBotNetworkService, (service) => () => service.read()),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.grokBotsNetworkSet,
+    Effect.map(
+      GrokBotNetworkService.GrokBotNetworkService,
+      (service) => (input) => service.set(input.enabled),
     ),
   ),
   ServerWsRpcGroup.toLayerHandler(

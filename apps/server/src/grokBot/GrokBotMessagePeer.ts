@@ -28,3 +28,13 @@ export function grokBotMessagePeer(
   }
   return undefined;
 }
+
+/** Native group replies name the member independently of peer exchange routing. */
+export function grokBotMessageAuthor(
+  author: unknown,
+): OrchestrationV2ConversationMessage["grokBotAuthor"] {
+  const decoded = decodePeer(author);
+  return Option.isNone(decoded)
+    ? undefined
+    : { botId: decoded.value.id, name: decoded.value.name || decoded.value.id };
+}

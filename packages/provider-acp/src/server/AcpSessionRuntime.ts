@@ -1556,7 +1556,12 @@ export const make = (
           });
     // A cgroup lease is already its own leaf cgroup, so it only needs the
     // raised OOM score (in its wrapper). Other agents get their own scope.
-    const scopedSpawnCommand =
+    const scopedSpawnCommand: {
+      readonly command: string;
+      readonly args: ReadonlyArray<string>;
+      readonly shell: boolean;
+      readonly cleanup?: Effect.Effect<void>;
+    } =
       linuxCgroupLease !== undefined || spawnCommand.shell
         ? spawnCommand
         : {
@@ -1569,6 +1574,9 @@ export const make = (
             })),
             shell: false,
           };
+    if ("cleanup" in scopedSpawnCommand && scopedSpawnCommand.cleanup !== undefined) {
+      yield* Scope.addFinalizer(runtimeScope, scopedSpawnCommand.cleanup);
+    }
     const containedSpawnCommand =
       linuxCgroupLease === undefined
         ? scopedSpawnCommand

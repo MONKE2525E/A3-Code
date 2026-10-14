@@ -28,7 +28,8 @@ export function GrokBotVoiceControl(props: {
   const { call, start, hangUp, setMuted } = useGrokBotVoiceCall();
   const canCall = useAtomValue(grokBotsVoiceStart.permissionAtom(environmentId));
   const roster = useEnvironmentQuery(grokBotsListQuery({ environmentId, input: {} })).data;
-  const botName = roster?.find((entry) => entry.id === botId)?.name ?? fallbackTitle;
+  const bot = roster?.find((entry) => entry.id === botId);
+  const botName = bot?.name ?? fallbackTitle;
   const ownTarget = { environmentId, botId, botName };
 
   const live = call !== null && call.state.phase !== "idle";
@@ -36,6 +37,8 @@ export function GrokBotVoiceControl(props: {
   const inThisCall = live && sameBot;
   // Shows the pinned call whenever one is live or ended for this bot; otherwise this bot's idle panel.
   const shown = call !== null && (live || sameBot) ? call : { ...ownTarget, state: IDLE_STATE };
+
+  if (bot?.isGroup) return null;
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -56,7 +59,11 @@ export function GrokBotVoiceControl(props: {
         <GrokBotVoiceCallPanel
           botName={shown.botName}
           state={shown.state}
-          start={live ? undefined : { canStart: canCall, onStart: () => start(ownTarget) }}
+          start={
+            live
+              ? undefined
+              : { canStart: canCall && bot !== undefined, onStart: () => start(ownTarget) }
+          }
           hint={live && !sameBot ? `Hang up ${call.botName} to call ${botName}.` : null}
           onSetMuted={setMuted}
           onHangUp={hangUp}

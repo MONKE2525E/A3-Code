@@ -34,6 +34,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as ServerConfig from "../config.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as GrokBotNativeService from "./GrokBotNativeService.ts";
+import { grokBotConnectorCard, grokBotConnectorCardLabel } from "./GrokBotConnectorCard.ts";
 import { grokBotWorkflowReferences } from "./GrokBotWorkflowReferences.ts";
 import { grokBotVoiceCallMarker, isGrokBotVoiceCallInstruction } from "./GrokBotVoiceCall.ts";
 import { waitingWidget } from "./GrokBotWidget.ts";
@@ -111,6 +112,10 @@ const CLI_CREATE_SHAPES: ReadonlySet<string> = new Set([
   "leaf",
 ]);
 const RawBot = Schema.Struct({
+  kind: Schema.optionalKey(Schema.Literals(["bot", "group"])),
+  members: Schema.optionalKey(Schema.Array(GrokBotId)),
+  isGroup: Schema.optionalKey(Schema.Boolean),
+  memberIds: Schema.optionalKey(Schema.Array(GrokBotId)),
   id: GrokBotId,
   name: Schema.String,
   title: Schema.optionalKey(Schema.String),
@@ -290,12 +295,15 @@ export function messagesFrom(
       });
       continue;
     }
+    const connectorCard = entry.kind === "send-message" ? grokBotConnectorCard(message) : undefined;
     const text =
-      entry.kind === "send-message" && message?.type === "text"
-        ? message.content
-        : entry.kind === "message"
-          ? entry.content
-          : undefined;
+      connectorCard !== undefined
+        ? grokBotConnectorCardLabel(connectorCard)
+        : entry.kind === "send-message" && message?.type === "text"
+          ? message.content
+          : entry.kind === "message"
+            ? entry.content
+            : undefined;
     if (typeof text !== "string") continue;
     // A peer's message is `role: "user"` on the wire, but it is not the human user's.
     const fromAgent = record(entry.fromAgent)
@@ -304,7 +312,9 @@ export function messagesFrom(
     const toAgent = record(entry.toAgent) ? participantFrom(entry.toAgent, roster) : undefined;
     const sender =
       entry.kind === "send-message"
-        ? me
+        ? record(entry.author)
+          ? participantFrom(entry.author, roster)
+          : me
         : fromAgent !== undefined
           ? fromAgent
           : entry.role === "user"
@@ -315,6 +325,7 @@ export function messagesFrom(
     messages.push({
       id: entry.id,
       ...(workflowReferences.length === 0 ? {} : { grokBotWorkflowReferences: workflowReferences }),
+      ...(connectorCard === undefined ? {} : { connectorCard }),
       role:
         fromAgent !== undefined || entry.role === "user"
           ? ("user" as const)
@@ -471,11 +482,12 @@ const make = Effect.gen(function* () {
   const managedCli = path.join(root, "node_modules", "grok-bot-cli", "dist", "bin", "gbot.mjs");
   const preferencesPath = path.join(config.stateDir, "grok-bots.json");
   const appData =
-    platform === "win32"
+    env.T3CODE_GROK_BOT_APP_DATA_DIR?.trim() ||
+    (platform === "win32"
       ? path.join(env.APPDATA ?? path.join(home, "AppData", "Roaming"), "Grok Bot")
       : platform === "darwin"
         ? path.join(home, "Library", "Application Support", "Grok Bot")
-        : path.join(env.XDG_CONFIG_HOME ?? path.join(home, ".config"), "Grok Bot");
+        : path.join(env.XDG_CONFIG_HOME ?? path.join(home, ".config"), "Grok Bot"));
   const storageError = () => new GrokBotError({ reason: "storage_failed" });
   const invalidResponse = () => new GrokBotError({ reason: "invalid_response" });
   const load = Effect.gen(function* () {
@@ -555,7 +567,7 @@ const make = Effect.gen(function* () {
       timeToLive: (exit) =>
         Exit.isSuccess(exit) && (exit.value.installed || exit.value.nativeAvailable)
           ? "30 seconds"
-          : 0,
+          : "5 seconds",
     },
   );
   const status = Cache.get(statusCache, undefined);
@@ -608,8 +620,22 @@ const make = Effect.gen(function* () {
     Effect.catchTags({
       GrokBotNativeSignedOutError: () => Effect.fail(new GrokBotError({ reason: "signed_out" })),
       GrokBotNativeReadError: () =>
-        cli(["bots", "list", "--gateway", "--json"]).pipe(
-          Effect.flatMap((text) => decodeRoster(text).pipe(Effect.mapError(invalidResponse))),
+        Effect.all(
+          ["bots", "groups"].map((kind) =>
+            cli([kind, "list", "--gateway", "--json"]).pipe(
+              Effect.flatMap((text) => decodeRoster(text).pipe(Effect.mapError(invalidResponse))),
+              // A missing legacy descriptor after a native read failure is a connection failure,
+              // not proof that the user's native account signed out.
+              Effect.mapError((error) =>
+                error.reason === "signed_out"
+                  ? new GrokBotError({ reason: "gateway_failed" })
+                  : error,
+              ),
+            ),
+          ),
+          { concurrency: 2 },
+        ).pipe(
+          Effect.map((lists) => [...new Map(lists.flat().map((bot) => [bot.id, bot])).values()]),
         ),
     }),
   );
@@ -619,6 +645,8 @@ const make = Effect.gen(function* () {
     desktopPinned: ReadonlySet<string>,
   ): GrokBot => ({
     id: bot.id,
+    isGroup: bot.isGroup ?? bot.kind === "group",
+    memberIds: bot.memberIds ?? bot.members ?? [],
     name: bot.name,
     label: bot.title ?? "",
     description: bot.description ?? "",
@@ -722,6 +750,11 @@ const make = Effect.gen(function* () {
             botId,
           ]).pipe(
             Effect.flatMap((text) => decodeTranscript(text).pipe(Effect.mapError(invalidResponse))),
+            Effect.mapError((error) =>
+              error.reason === "signed_out"
+                ? new GrokBotError({ reason: "gateway_failed" })
+                : error,
+            ),
             Effect.map((result) => ({
               entries: result.transcript.entries,
             })),
@@ -780,11 +813,12 @@ const make = Effect.gen(function* () {
       )
         return yield* new GrokBotError({ reason: "invalid_avatar" });
       const text = yield* cli([
-        "bots",
+        input.memberIds === undefined ? "bots" : "groups",
         "create",
         "--gateway",
         "--json",
         `--name=${input.name}`,
+        ...(input.memberIds?.map((id) => `--member=${id}`) ?? []),
         ...(input.description ? [`--description=${input.description}`] : []),
         ...(input.avatarShape === undefined ? [] : [`--avatar-shape=${input.avatarShape}`]),
         ...(input.avatarColor === undefined ? [] : [`--avatar-color=${input.avatarColor}`]),
@@ -991,9 +1025,14 @@ const make = Effect.gen(function* () {
         }),
       );
       if (binding === undefined) {
-        yield* cli(["bots", "delete", "--gateway", "--json", "--", input.botId]).pipe(
-          Effect.ignore,
-        );
+        yield* cli([
+          current.isGroup ? "groups" : "bots",
+          "delete",
+          "--gateway",
+          "--json",
+          "--",
+          input.botId,
+        ]).pipe(Effect.ignore);
       } else {
         const nativeBot = (yield* native
           .listForBinding(binding)

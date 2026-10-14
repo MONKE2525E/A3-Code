@@ -36,6 +36,8 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.grokBotsComputerStart]: AuthOrchestrationOperateScope,
   [WS_METHODS.grokBotsComputerRecreate]: AuthSettingsWriteScope,
   [WS_METHODS.grokBotsComputerReset]: AuthSettingsWriteScope,
+  [WS_METHODS.grokBotsHostMachineUpdate]: AuthSettingsWriteScope,
+  [WS_METHODS.grokBotsNetworkSet]: AuthSettingsWriteScope,
   [WS_METHODS.grokBotsSecretSubmit]: AuthOrchestrationOperateScope,
   [WS_METHODS.grokBotsSecretDismiss]: AuthOrchestrationOperateScope,
   [WS_METHODS.grokBotsVoiceStart]: AuthOrchestrationOperateScope,
@@ -94,7 +96,12 @@ export function clientRpcRequiredScopes(
   // Status is a read. Only explicit setup changes the environment's provider.
   // An omitted input still asks for write availability on the setup command.
   if (method === WS_METHODS.grokBotsOrchestratorConfig && input !== undefined) {
-    return decodeBotOrchestrator(input).action === "setup" ? [AuthSettingsWriteScope] : [];
+    const action = decodeBotOrchestrator(input).action;
+    return action === "send_setup_prompt"
+      ? [AuthSettingsWriteScope, AuthOrchestrationOperateScope]
+      : action === "setup"
+        ? [AuthSettingsWriteScope]
+        : [];
   }
   if (method === WS_METHODS.gitPreparePullRequestThread && input !== undefined) {
     const payload = decodePrepareThread(input);

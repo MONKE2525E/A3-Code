@@ -286,6 +286,13 @@ describe("web cloud link environment client", () => {
       );
 
       expect(relayClientInstallDialog.requestConfirmation).not.toHaveBeenCalled();
+      expect(JSON.parse(bodyText(fetchMock.mock.calls[3]?.[1]?.body))).toMatchObject({
+        endpoint: {
+          httpBaseUrl: "https://desktop.example.test",
+          wsBaseUrl: "wss://desktop.example.test",
+          providerKind: "cloudflare_tunnel",
+        },
+      });
       expect(String(fetchMock.mock.calls[1]?.[0])).toBe(
         "http://127.0.0.1:3000/api/connect/link-proof",
       );

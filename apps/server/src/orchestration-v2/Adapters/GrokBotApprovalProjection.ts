@@ -16,6 +16,9 @@ import type * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
 import type {
   GrokBotNativeRuntimeService,
   RuntimeError,
@@ -29,16 +32,10 @@ import type { GrokBotTurnIdentity } from "./GrokBotSettlementProjection.ts";
 const DRIVER = ProviderDriverKind.make("grok-bot");
 
 /**
- * Two native card kinds become runtime requests here:
- * - auto-review approval `{kind:"send-message", id, message:{type:"approval", approval:{...}}}`,
- *   resolved with the fixed desktop approval platform.
- * - widget question `{kind:"send-message", id, message:{type:"widget", widget:{prompt, options}}}`,
- *   a `message` question. A single-choice pick and a dismissal stay pending until native
- *   confirms them, then this projection emits the settled events. Any other answer is chat text
- *   that the orchestrator already recorded; the card is then cleared silently, so the recorded
- *   transcript is never overwritten by a native cleanup.
+ * Native command approvals, local-tool permissions, connector grants and widget questions
+ * become runtime requests. Responses remain pending until their native callback confirms them.
  */
-export const GROK_BOT_APPROVAL_PLATFORM = "desktop";
+const GROK_BOT_APPROVAL_PLATFORM = "desktop";
 
 export interface GrokBotNativeApproval {
   readonly entryId: string;
@@ -49,22 +46,57 @@ export interface GrokBotNativeApproval {
   readonly answered: boolean;
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
 const text = (value: unknown, max = 4096) =>
   typeof value === "string" && value.length > 0 && value.length <= max ? value : undefined;
 
+const NativeId = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024));
+const NativeText = Schema.String.check(Schema.isMaxLength(65536));
+const ApprovalEntry = Schema.Struct({
+  kind: Schema.Literal("send-message"),
+  id: NativeId,
+  message: Schema.Struct({
+    type: Schema.Literal("auto-review-approval"),
+    approval: Schema.Struct({
+      requestId: NativeId,
+      status: NativeId,
+      summary: Schema.optionalKey(NativeText),
+      command: Schema.optionalKey(NativeText),
+    }),
+  }),
+});
+const LocalPermissionEntry = Schema.Struct({
+  kind: Schema.Literal("send-message"),
+  id: NativeId,
+  message: Schema.Struct({
+    type: Schema.Literal("local-tool-permission"),
+    ask: Schema.Struct({
+      requestId: NativeId,
+      status: NativeId,
+      action: NativeId,
+      target: NativeText,
+      description: Schema.optionalKey(NativeText),
+    }),
+  }),
+});
+const ConnectorGrantEntry = Schema.Struct({
+  kind: Schema.Literal("send-message"),
+  id: NativeId,
+  message: Schema.Struct({
+    type: Schema.Literal("connector-grant"),
+    ask: Schema.Struct({ requestId: NativeId, status: NativeId, serverName: NativeId }),
+  }),
+});
+const decodeApproval = Schema.decodeUnknownOption(ApprovalEntry);
+const decodeLocalPermission = Schema.decodeUnknownOption(LocalPermissionEntry);
+const decodeConnectorGrant = Schema.decodeUnknownOption(ConnectorGrantEntry);
+
 export function decodeGrokBotApproval(value: unknown): GrokBotNativeApproval | undefined {
-  if (!isRecord(value) || !isRecord(value.message) || value.message.type !== "approval")
-    return undefined;
-  const approval = value.message.approval;
-  if (!isRecord(approval)) return undefined;
-  const entryId = text(value.id, 1024);
-  const requestId = text(approval.requestId, 1024) ?? text(value.requestId, 1024);
-  if (entryId === undefined || requestId === undefined) return undefined;
+  const entry = Option.getOrUndefined(decodeApproval(value));
+  if (entry === undefined) return undefined;
+  const approval = entry.message.approval;
   return {
-    entryId,
-    requestId,
+    entryId: entry.id,
+    requestId: approval.requestId,
     prompt: text(approval.summary),
     approvedCommand: text(approval.command, 65536),
     answered: text(approval.status) !== "pending",
@@ -72,14 +104,18 @@ export function decodeGrokBotApproval(value: unknown): GrokBotNativeApproval | u
 }
 
 /** Always-allow needs the native client's rule store, which T3 cannot write; approve or deny only. */
-export const GROK_BOT_APPROVAL_OPTIONS: readonly ProviderApprovalOption[] = [
+const GROK_BOT_APPROVAL_OPTIONS: readonly ProviderApprovalOption[] = [
   { decision: "accept", label: "Approve" },
   { decision: "decline", label: "Deny" },
 ];
 
 type ApprovalRuntime = Pick<
   GrokBotNativeRuntimeService["Service"],
-  "resolveAutoReviewApproval" | "respondToWidget" | "dismissWidget"
+  | "resolveAutoReviewApproval"
+  | "respondToWidget"
+  | "dismissWidget"
+  | "resolveLocalToolPermission"
+  | "resolveConnectorGrant"
 >;
 type NativeCall = (
   runtime: ApprovalRuntime,
@@ -107,12 +143,14 @@ export function grokBotApprovalCall(
 
 type Native =
   | { readonly kind: "approval"; readonly approval: GrokBotNativeApproval }
+  | { readonly kind: "local_permission"; readonly entry: typeof LocalPermissionEntry.Type }
+  | { readonly kind: "connector_grant"; readonly entry: typeof ConnectorGrantEntry.Type }
   | { readonly kind: "widget"; readonly widget: GrokBotWidget };
 
 /** One native card as this projection sees it. `settled` is set only when native already settled it. */
 interface Observed {
   readonly entryId: string;
-  /** Stable native identity: the approval request id, or the widget entry id. */
+  /** Stable native identity: the permission request id, or the widget entry id. */
   readonly key: string;
   readonly native: Native;
   readonly settled: "resolved" | "cancelled" | undefined;
@@ -130,11 +168,6 @@ interface Tracked {
   readonly seq: bigint;
   status: "pending" | "resolved" | "cancelled";
   inflight: boolean;
-  /**
-   * The orchestrator already recorded this question as a chat answer, so the transcript owns its
-   * outcome. Native frames and supersedes must not emit settled events over that record.
-   */
-  recordedInChat: boolean;
   version: bigint;
 }
 
@@ -145,6 +178,15 @@ interface Outcome {
 }
 
 function observe(value: unknown): Observed | undefined {
+  if (
+    !Predicate.isObject(value) ||
+    !Predicate.isObject(value.message) ||
+    typeof value.message.type !== "string" ||
+    !["auto-review-approval", "local-tool-permission", "connector-grant", "widget"].includes(
+      value.message.type,
+    )
+  )
+    return undefined;
   const approval = decodeGrokBotApproval(value);
   if (approval !== undefined)
     return {
@@ -154,7 +196,25 @@ function observe(value: unknown): Observed | undefined {
       settled: approval.answered ? "resolved" : undefined,
     };
   const widget = decodeGrokBotWidget(value);
-  if (widget === undefined) return undefined;
+  if (widget === undefined) {
+    const local = Option.getOrUndefined(decodeLocalPermission(value));
+    if (local !== undefined)
+      return {
+        entryId: local.id,
+        key: `local_tool_permission/${local.message.ask.requestId}`,
+        native: { kind: "local_permission", entry: local },
+        settled: local.message.ask.status === "pending" ? undefined : "resolved",
+      };
+    const connector = Option.getOrUndefined(decodeConnectorGrant(value));
+    if (connector !== undefined)
+      return {
+        entryId: connector.id,
+        key: `connector_grant/${connector.message.ask.requestId}`,
+        native: { kind: "connector_grant", entry: connector },
+        settled: connector.message.ask.status === "pending" ? undefined : "resolved",
+      };
+    return undefined;
+  }
   return {
     entryId: widget.entryId,
     key: `widget/${widget.entryId}`,
@@ -168,8 +228,6 @@ function observe(value: unknown): Observed | undefined {
   };
 }
 
-// Custom answers are always offered: the answer is sent back as a chat message, so the native
-// widget's allowCustom flag does not limit what the user can type.
 const widgetQuestion = (widget: GrokBotWidget): OrchestrationV2UserInputQuestion => ({
   id: widget.entryId,
   header: "Question",
@@ -180,15 +238,67 @@ const widgetQuestion = (widget: GrokBotWidget): OrchestrationV2UserInputQuestion
     ...(option.value === undefined ? {} : { value: option.value }),
   })),
   multiSelect: widget.multiSelect,
-  allowCustomAnswer: true,
+  allowCustomAnswer: widget.allowCustom,
 });
 
-/** Native accepts one nonempty string per single-answer widget, including custom text. */
+/** Shipped XBe/A0: option order, normalized parts, then one newline-delimited string. */
 function widgetChoiceValue(widget: GrokBotWidget, answer: unknown): string | undefined {
-  return !widget.multiSelect && typeof answer === "string" && answer.trim().length > 0
-    ? answer
-    : undefined;
+  const choices = widget.options.map((option) => option.value ?? option.label);
+  if (!widget.multiSelect) {
+    return typeof answer === "string" &&
+      answer.trim().length > 0 &&
+      (choices.includes(answer) || widget.allowCustom) &&
+      answer.length <= 65536
+      ? answer
+      : undefined;
+  }
+  const parts = typeof answer === "string" ? [answer] : Array.isArray(answer) ? answer : [];
+  if (parts.some((part) => typeof part !== "string")) return undefined;
+  const selected = new Set(parts);
+  const custom = parts.filter(
+    (part): part is string => typeof part === "string" && !choices.includes(part),
+  );
+  if (!widget.allowCustom && custom.some((part) => part.trim().length > 0)) return undefined;
+  const value = [
+    ...choices.filter((choice) => selected.has(choice)),
+    ...(widget.allowCustom ? custom : []),
+  ]
+    .map((part) => part.replace(/\s*\n\s*/g, " ").trim())
+    .filter((part) => part.length > 0)
+    .join("\n");
+  return value.length > 0 && value.length <= 65536 ? value : undefined;
 }
+
+const approvalPresentation = (native: Exclude<Native, { kind: "widget" }>) => {
+  switch (native.kind) {
+    case "approval":
+      return {
+        kind: "command" as const,
+        prompt: native.approval.prompt,
+        options: GROK_BOT_APPROVAL_OPTIONS,
+      };
+    case "local_permission": {
+      const ask = native.entry.message.ask;
+      return {
+        kind: "permission" as const,
+        prompt: [ask.description, `${ask.action}: ${ask.target}`].filter(Boolean).join("\n"),
+        options: [
+          { decision: "accept", label: "Allow once" },
+          { decision: "decline", label: "Deny" },
+        ] satisfies ProviderApprovalOption[],
+      };
+    }
+    case "connector_grant":
+      return {
+        kind: "permission" as const,
+        prompt: `Allow access to ${native.entry.message.ask.serverName}?`,
+        options: [
+          { decision: "accept", label: "Allow" },
+          { decision: "decline", label: "Skip" },
+        ] satisfies ProviderApprovalOption[],
+      };
+  }
+};
 
 /**
  * Projects native approval and widget cards of one owned account/bot/session into T3 runtime
@@ -206,6 +316,7 @@ export const makeGrokBotApprovalProjection = (input: {
 }) => {
   const tracked = new Map<string, Tracked>();
   const byRequest = new Map<string, Tracked>();
+  const deletedVersions = new Map<string, bigint>();
   const threadId = input.native.threadId;
   let latestWidgetSeq = -1n;
 
@@ -221,7 +332,9 @@ export const makeGrokBotApprovalProjection = (input: {
       nativeId: item.key,
       strength: "strong" as const,
     };
-    const isApproval = item.native.kind === "approval";
+    const presentation =
+      item.native.kind === "widget" ? undefined : approvalPresentation(item.native);
+    const isApproval = presentation !== undefined;
     const node: OrchestrationV2ExecutionNode = {
       id: item.nodeId,
       threadId,
@@ -245,7 +358,7 @@ export const makeGrokBotApprovalProjection = (input: {
           nodeId: item.nodeId,
           providerTurnId: item.turn?.providerTurnId ?? null,
           nativeRequestRef: nativeItemRef,
-          kind: "command",
+          kind: presentation.kind,
           status: pending ? "pending" : item.status === "resolved" ? "resolved" : "cancelled",
           responseCapability: { type: "live", providerSessionId: input.providerSessionId },
           createdAt: item.createdAt,
@@ -282,16 +395,14 @@ export const makeGrokBotApprovalProjection = (input: {
       updatedAt: now,
     };
     const turnItem: OrchestrationV2TurnItem =
-      item.native.kind === "approval"
+      item.native.kind !== "widget"
         ? {
             ...base,
             type: "approval_request",
             requestId: item.requestId,
-            requestKind: "command",
-            ...(item.native.approval.prompt === undefined
-              ? {}
-              : { prompt: item.native.approval.prompt }),
-            options: [...GROK_BOT_APPROVAL_OPTIONS],
+            requestKind: presentation!.kind,
+            ...(presentation!.prompt === undefined ? {} : { prompt: presentation!.prompt }),
+            options: [...presentation!.options],
           }
         : {
             ...base,
@@ -320,10 +431,26 @@ export const makeGrokBotApprovalProjection = (input: {
     const events: ProviderAdapter.ProviderAdapterV2Event[] = [];
     if (frame._tag !== "Rows") return events;
     const now = yield* DateTime.now;
+    const cards = frame.entries.flatMap((row) => {
+      const observed = observe(row.value);
+      return observed === undefined ? [] : [{ row, observed }];
+    });
+    for (const { row, observed } of cards) {
+      if (row.entryId !== undefined && row.entryId !== observed.entryId)
+        return yield* new GrokBotBindingError({
+          reason: "Native approval row identity does not match its body.",
+        });
+    }
+    for (const row of frame.deletes) {
+      if (row.entryId === undefined) continue;
+      const version = BigInt(row.updatedSeq);
+      if (version > (deletedVersions.get(row.entryId) ?? -1n))
+        deletedVersions.set(row.entryId, version);
+    }
     // Full snapshots can contain old widgets whose native pending flag was never cleared.
     // Native displays only the newest card, even when that card has already been answered.
-    for (const row of frame.entries) {
-      if (observe(row.value)?.native.kind === "widget") {
+    for (const { row, observed } of cards) {
+      if (observed.native.kind === "widget") {
         const seq = BigInt(row.seq);
         if (seq > latestWidgetSeq) latestWidgetSeq = seq;
       }
@@ -332,34 +459,36 @@ export const makeGrokBotApprovalProjection = (input: {
       if (
         older.native.kind === "widget" &&
         older.seq < latestWidgetSeq &&
-        older.status === "pending" &&
-        !older.recordedInChat
+        older.status === "pending"
       ) {
         older.status = "cancelled";
         events.push(...artifacts(older, now));
       }
     }
-    for (const row of frame.entries) {
-      const observed = observe(row.value);
-      if (observed === undefined) continue;
-      if (row.entryId !== undefined && row.entryId !== observed.entryId)
-        return yield* new GrokBotBindingError({
-          reason: "Native approval row identity does not match its body.",
-        });
+    for (const { row, observed } of cards.sort((a, b) =>
+      BigInt(a.row.updatedSeq) > BigInt(b.row.updatedSeq)
+        ? -1
+        : BigInt(a.row.updatedSeq) < BigInt(b.row.updatedSeq)
+          ? 1
+          : 0,
+    )) {
       const version = BigInt(row.updatedSeq);
       const seq = BigInt(row.seq);
+      if ((deletedVersions.get(observed.entryId) ?? -1n) >= version) continue;
       if (observed.native.kind === "widget" && seq < latestWidgetSeq) continue;
       const existing = tracked.get(observed.key);
       if (existing === undefined) {
         // Settled approvals were never actionable here. The latest settled widget still needs
         // to reconcile questions persisted by older observers when no native question is open.
-        if (observed.settled !== undefined && observed.native.kind === "approval") continue;
         // Observation sessions reopen independently of the native card. Allocation adds a UUID,
         // so derive the request from its owned thread and native identity across those reopens.
         const requestId = RuntimeRequestId.make(
-          `runtime-request:grok-bot:${encodeURIComponent(threadId)}:${encodeURIComponent(input.native.sessionId)}:${encodeURIComponent(observed.key)}`,
+          `runtime-request:grok-bot:${encodeURIComponent(threadId)}:${encodeURIComponent(input.native.binding)}:${encodeURIComponent(input.native.botId)}:${encodeURIComponent(input.native.sessionId)}:${encodeURIComponent(observed.key)}`,
         );
-        const nativeRequestId = isRecord(row.value) ? text(row.value.requestId, 1024) : undefined;
+        const nativeRequestId =
+          Predicate.isObject(row.value) && !Array.isArray(row.value)
+            ? text(row.value.requestId, 1024)
+            : undefined;
         const item: Tracked = {
           nativeRequestId,
           turn: nativeRequestId === undefined ? undefined : input.turnForRequest?.(nativeRequestId),
@@ -372,12 +501,12 @@ export const makeGrokBotApprovalProjection = (input: {
           seq,
           status: observed.settled ?? "pending",
           inflight: false,
-          recordedInChat: false,
           version,
         };
         tracked.set(observed.key, item);
         byRequest.set(String(requestId), item);
-        events.push(...artifacts(item, now));
+        if (observed.settled === undefined || observed.native.kind === "widget")
+          events.push(...artifacts(item, now));
         continue;
       }
       // Replays, duplicates and stale versions never change state; a settled card never reopens.
@@ -386,7 +515,7 @@ export const makeGrokBotApprovalProjection = (input: {
       existing.version = version;
       if (observed.settled !== undefined) {
         existing.status = observed.settled;
-        if (!existing.recordedInChat) events.push(...artifacts(existing, now));
+        events.push(...artifacts(existing, now));
       }
     }
     // A reply can precede its owned echo. Re-associate the pending card once that
@@ -405,8 +534,13 @@ export const makeGrokBotApprovalProjection = (input: {
     }
     for (const row of frame.deletes) {
       for (const item of tracked.values()) {
-        if (item.entryId !== row.entryId || item.status !== "pending" || item.recordedInChat)
+        if (
+          item.entryId !== row.entryId ||
+          item.status !== "pending" ||
+          BigInt(row.updatedSeq) <= item.version
+        )
           continue;
+        item.version = BigInt(row.updatedSeq);
         item.status = "cancelled";
         events.push(...artifacts(item, now));
       }
@@ -432,6 +566,7 @@ export const makeGrokBotApprovalProjection = (input: {
         }),
       ),
     );
+    if (item.status !== "pending") return [];
     item.status = status;
     return artifacts(item, yield* DateTime.now, outcome);
   });
@@ -481,7 +616,31 @@ export const makeGrokBotApprovalProjection = (input: {
         { decision: "cancel" },
       );
     }
-    const call = grokBotApprovalCall(item.native.approval, decision);
+    const permission = item.native;
+    const call =
+      permission.kind === "approval"
+        ? grokBotApprovalCall(permission.approval, decision)
+        : ["accept", "decline", "cancel"].includes(decision)
+          ? (runtime: ApprovalRuntime, native: GrokBotBoundSession) => {
+              const entry = permission.entry;
+              const owner = {
+                binding: native.binding,
+                botId: native.botId,
+                sessionId: native.sessionId,
+                requestId: entry.message.ask.requestId,
+                entryId: entry.id,
+              };
+              return permission.kind === "local_permission"
+                ? runtime.resolveLocalToolPermission({
+                    ...owner,
+                    resolution: decision === "accept" ? "ALLOW_ONCE" : "DENY",
+                  })
+                : runtime.resolveConnectorGrant({
+                    ...owner,
+                    resolution: decision === "accept" ? "ALLOWED" : "SKIPPED",
+                  });
+            }
+          : undefined;
     if (call === undefined)
       return yield* new GrokBotBindingError({
         reason: "Grok Bot cannot apply that approval choice.",
@@ -489,11 +648,7 @@ export const makeGrokBotApprovalProjection = (input: {
     return yield* settle(item, call, "resolved", { decision });
   });
 
-  /**
-   * Answers a widget. A native single choice is confirmed natively and reported. Any other answer
-   * was recorded as chat text by the orchestrator, so this only clears the native card and emits
-   * nothing that could overwrite that record.
-   */
+  /** Answers only this widget; invalid input never dismisses it or becomes a chat turn. */
   const answer = Effect.fnUntraced(function* (
     requestId: RuntimeRequestId,
     answers: ProviderUserInputAnswers,
@@ -505,18 +660,15 @@ export const makeGrokBotApprovalProjection = (input: {
         reason: "This approval needs an approve or deny choice.",
       });
     const widget = item.native.widget;
-    const dismiss: NativeCall = (runtime, native) =>
-      runtime.dismissWidget({
-        binding: native.binding,
-        botId: native.botId,
-        sessionId: native.sessionId,
-        entryId: item.entryId,
+    if (Object.keys(answers).length !== 1 || !Object.hasOwn(answers, item.entryId))
+      return yield* new GrokBotBindingError({
+        reason: "The answer does not belong to this native question.",
       });
     const value = widgetChoiceValue(widget, answers[item.entryId]);
     if (value === undefined) {
-      item.recordedInChat = true;
-      yield* settle(item, dismiss, "cancelled");
-      return [];
+      return yield* new GrokBotBindingError({
+        reason: "Choose an offered option or an allowed custom answer.",
+      });
     }
     return yield* settle(
       item,
@@ -536,7 +688,7 @@ export const makeGrokBotApprovalProjection = (input: {
   const replayPending = Effect.fnUntraced(function* () {
     const now = yield* DateTime.now;
     return [...tracked.values()].flatMap((item) =>
-      item.status === "pending" && !item.recordedInChat ? artifacts(item, now) : [],
+      item.status === "pending" ? artifacts(item, now) : [],
     );
   });
   /** A pending native question or approval means the bot is waiting on the user, not stalled. */

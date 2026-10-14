@@ -1,18 +1,21 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Spinner } from "~/components/ui/spinner";
+import { useEnvironmentHttpBaseUrl } from "~/state/environments";
 import {
   grokBotsPluginAuthenticate,
   grokBotsPluginCompleteAuth,
   grokBotsPluginConnectionsQuery,
+  grokBotsOrchestratorConfigQuery,
 } from "~/state/grokBots";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { parseManualCallback } from "./grokBotPluginAuthReturn";
+import { resolveGrokBotOAuthRedirect } from "./grokBotSetupFlow";
 
 export const PLUGIN_AUTH_STORAGE_PREFIX = "t3:grok-plugin-auth:";
 const POLL_INTERVAL_MS = 2_000;
@@ -26,6 +29,8 @@ const invalidAddressMessage = {
 } as const;
 
 type SignInFlow = {
+  readonly environmentId: EnvironmentId;
+  readonly pluginId: string;
   readonly serverId: number;
   readonly accountKey: string;
   readonly stateId: string;
@@ -33,6 +38,8 @@ type SignInFlow = {
   readonly popup: Window | null;
   /** The relay returns to this machine's listener, so the server finishes sign-in without the page. */
   readonly completesOnServer: boolean;
+  readonly startedAtMs: number;
+  readonly expiresAtMs: number;
 };
 
 /** Account connections belong to the selected environment's Grok Bot account. */
@@ -49,29 +56,56 @@ export function GrokBotPluginAccounts({
   const allowed = useAtomValue(grokBotsPluginAuthenticate.permissionAtom(environmentId));
   const authenticate = useAtomCommand(grokBotsPluginAuthenticate, { reportFailure: false });
   const complete = useAtomCommand(grokBotsPluginCompleteAuth, { reportFailure: false });
+  const httpBaseUrl = useEnvironmentHttpBaseUrl(environmentId);
+  const config = useEnvironmentQuery(grokBotsOrchestratorConfigQuery({ environmentId, input: {} }));
   const [pending, setPending] = useState<string | null>(null);
   const [flow, setFlow] = useState<SignInFlow | null>(null);
   const [callbackUrl, setCallbackUrl] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const activeFlow = useRef<SignInFlow | null>(null);
+  const latestQuery = useRef(query);
+  useEffect(() => {
+    latestQuery.current = query;
+  }, [query]);
+  const flowWatch = useRef<{
+    flow: SignInFlow;
+    connectionsUpdatedAt: number;
+    closedAtMs: number | null;
+    closeCheck: { startedAtMs: number; dataUpdatedAt: number } | null;
+  } | null>(null);
   const refreshAccounts = query.refresh;
   useEffect(() => {
+    const refreshCurrentFlow = () => {
+      const watch = flowWatch.current;
+      if (watch?.flow === activeFlow.current) {
+        // A returning tab can close while its callback is still committing. Give that refresh time
+        // to settle before treating a closed popup as an abandoned sign-in.
+        watch.closedAtMs = null;
+        watch.closeCheck = null;
+      }
+      refreshAccounts();
+    };
     const refresh = (event: StorageEvent) => {
-      if (event.key?.startsWith(PLUGIN_AUTH_STORAGE_PREFIX) && event.newValue === null)
-        refreshAccounts();
+      if (!event.key?.startsWith(PLUGIN_AUTH_STORAGE_PREFIX) || event.newValue !== null) return;
+      const current = activeFlow.current;
+      if (current && event.key !== PLUGIN_AUTH_STORAGE_PREFIX + current.stateId) return;
+      refreshCurrentFlow();
     };
     window.addEventListener("storage", refresh);
-    window.addEventListener("focus", refreshAccounts);
+    window.addEventListener("focus", refreshCurrentFlow);
     return () => {
       window.removeEventListener("storage", refresh);
-      window.removeEventListener("focus", refreshAccounts);
+      window.removeEventListener("focus", refreshCurrentFlow);
     };
   }, [refreshAccounts]);
 
   const endFlow = useCallback(
     (ended: SignInFlow, message?: { readonly notice?: string; readonly error?: string }) => {
-      setFlow((current) => (current?.stateId === ended.stateId ? null : current));
+      if (activeFlow.current !== ended) return;
+      activeFlow.current = null;
+      setFlow(null);
       setCallbackUrl("");
       setNotice(message?.notice ?? null);
       setError(message?.error ?? null);
@@ -84,95 +118,171 @@ export function GrokBotPluginAccounts({
     [],
   );
 
-  // Only server-completed flows poll: the account status is the sole signal that sign-in finished.
+  // Both loopback and HTTPS callbacks can finish elsewhere, including in another browser origin.
   useEffect(() => {
-    if (!flow?.completesOnServer) return;
-    let closedTicks = 0;
+    if (!flow) return;
+    if (flow.environmentId !== environmentId || flow.pluginId !== pluginId) {
+      endFlow(flow);
+      return;
+    }
+    const watch = {
+      flow,
+      // Authentication and a cached-status update can commit together. Neither completes this flow.
+      connectionsUpdatedAt: latestQuery.current.dataUpdatedAt,
+      closedAtMs: null,
+      closeCheck: null,
+    } as NonNullable<typeof flowWatch.current>;
+    flowWatch.current = watch;
     const deadline = window.setTimeout(
       () =>
         endFlow(flow, { error: "Sign-in did not finish in time. Authenticate again to retry." }),
-      SIGN_IN_WAIT_MS,
+      Math.max(0, flow.expiresAtMs - Date.now()),
     );
     const timer = window.setInterval(() => {
+      const now = Date.now();
       if (flow.popup?.closed) {
-        closedTicks += 1;
-        if (closedTicks * POLL_INTERVAL_MS >= POPUP_CLOSE_GRACE_MS) {
-          endFlow(flow, {
-            error: "The sign-in tab closed before sign-in finished. Authenticate again to retry.",
-          });
-          return;
-        }
+        watch.closedAtMs ??= now;
       }
+      if (latestQuery.current.isPending) return;
+      if (watch.closedAtMs !== null && now - watch.closedAtMs >= POPUP_CLOSE_GRACE_MS) {
+        watch.closeCheck ??= { startedAtMs: now, dataUpdatedAt: latestQuery.current.dataUpdatedAt };
+      }
+      // Verify a fresh result after the grace period, rather than failing before this refresh returns.
       refreshAccounts();
     }, POLL_INTERVAL_MS);
+    refreshAccounts();
     return () => {
+      if (flowWatch.current === watch) flowWatch.current = null;
       window.clearTimeout(deadline);
       window.clearInterval(timer);
     };
-  }, [flow, endFlow, refreshAccounts]);
+  }, [flow, endFlow, refreshAccounts, environmentId, pluginId]);
 
   useEffect(() => {
-    if (!flow?.completesOnServer || !query.data) return;
+    const watch = flowWatch.current;
+    if (
+      !flow ||
+      watch?.flow !== flow ||
+      flow.environmentId !== environmentId ||
+      flow.pluginId !== pluginId ||
+      !query.data ||
+      !query.isSuccess ||
+      query.isPending ||
+      query.dataUpdatedAt <= watch.connectionsUpdatedAt ||
+      query.dataUpdatedAt < flow.startedAtMs
+    )
+      return;
     const account = query.data.servers
       .find((server) => server.id === flow.serverId)
       ?.accounts.find((candidate) => candidate.accountKey === flow.accountKey);
-    if (account?.status === "connected") endFlow(flow, { notice: "Connector connected." });
-  }, [flow, query.data, endFlow]);
-
-  const run = async (serverId: number, accountKey: string) => {
-    if (pending !== null) return;
-    const key = `${serverId}:${accountKey}`;
-    const popup = window.open("about:blank", "_blank");
-    setPending(key);
-    setFlow(null);
-    setError(null);
-    setNotice(null);
-    const redirectUri = new URL("/settings/marketplace?grokBotOAuth=1", window.location.origin)
-      .href;
-    const result = await authenticate({
-      environmentId,
-      input: { serverId, accountKey, redirectUri },
-    });
-    setPending(null);
-    if (result._tag !== "Success") {
-      popup?.close();
-      setError("Authentication could not start. Please try again.");
+    if (account?.status === "connected") {
+      endFlow(flow, { notice: "Connector connected." });
       return;
     }
-    const response = result.value;
-    if (response.authenticated) {
-      popup?.close();
-      refreshAccounts();
-      setNotice("Connector connected.");
-      return;
-    }
-    if (!response.authorizationUrl || !response.stateId) {
-      popup?.close();
-      setError("This connector did not provide an authentication link.");
-      return;
-    }
-    try {
-      localStorage.setItem(
-        PLUGIN_AUTH_STORAGE_PREFIX + response.stateId,
-        JSON.stringify({ environmentId, pluginId }),
-      );
-      if (popup) {
-        popup.opener = null;
-        popup.location.href = response.authorizationUrl;
-      }
-      setFlow({
-        serverId,
-        accountKey,
-        stateId: response.stateId,
-        authorizationUrl: response.authorizationUrl,
-        popup,
-        completesOnServer: response.loopbackPort !== null,
+    const closeCheck = watch.closeCheck;
+    if (
+      closeCheck &&
+      query.dataUpdatedAt > closeCheck.dataUpdatedAt &&
+      query.dataUpdatedAt >= closeCheck.startedAtMs
+    ) {
+      endFlow(flow, {
+        error: "The sign-in tab closed before sign-in finished. Authenticate again to retry.",
       });
-    } catch {
-      popup?.close();
-      setError("Allow browser storage to finish connector authentication.");
     }
-  };
+  }, [
+    flow,
+    query.data,
+    query.dataUpdatedAt,
+    query.isPending,
+    query.isSuccess,
+    endFlow,
+    environmentId,
+    pluginId,
+  ]);
+
+  const run = useCallback(
+    async (serverId: number, accountKey: string) => {
+      if (pending !== null) return;
+      // The sign-in returns to the environment's own web address. Electron's page origin and a client
+      // paired to another host are not it.
+      const redirectUri = resolveGrokBotOAuthRedirect(
+        window.location.origin,
+        httpBaseUrl,
+        config.data?.setupStatus?.mcpUrl ?? null,
+      );
+      if (activeFlow.current) endFlow(activeFlow.current);
+      setNotice(null);
+      if (redirectUri === null) {
+        setError("This environment has no web address to return to. Reconnect and try again.");
+        return;
+      }
+      const key = `${serverId}:${accountKey}`;
+      // Opened synchronously so the click still counts as a user gesture.
+      const popup = window.open("about:blank", "_blank");
+      setPending(key);
+      setError(null);
+      const result = await authenticate({
+        environmentId,
+        input: { serverId, accountKey, redirectUri },
+      });
+      setPending(null);
+      if (result._tag !== "Success") {
+        popup?.close();
+        setError("Authentication could not start. Please try again.");
+        return;
+      }
+      const response = result.value;
+      if (response.authenticated) {
+        popup?.close();
+        refreshAccounts();
+        setNotice("Connector connected.");
+        return;
+      }
+      if (!response.authorizationUrl || !response.stateId) {
+        popup?.close();
+        setError("This connector did not provide an authentication link.");
+        return;
+      }
+      try {
+        localStorage.setItem(
+          PLUGIN_AUTH_STORAGE_PREFIX + response.stateId,
+          JSON.stringify({ environmentId, pluginId }),
+        );
+        if (popup) {
+          popup.opener = null;
+          popup.location.href = response.authorizationUrl;
+        }
+        const startedAtMs = Date.now();
+        const nextFlow = {
+          environmentId,
+          pluginId,
+          serverId,
+          accountKey,
+          stateId: response.stateId,
+          authorizationUrl: response.authorizationUrl,
+          popup,
+          completesOnServer: response.loopbackPort !== null,
+          startedAtMs,
+          expiresAtMs: startedAtMs + SIGN_IN_WAIT_MS,
+        };
+        activeFlow.current = nextFlow;
+        setFlow(nextFlow);
+      } catch {
+        popup?.close();
+        setError("Allow browser storage to finish connector authentication.");
+      }
+    },
+    [
+      pending,
+      httpBaseUrl,
+      config.data?.setupStatus?.mcpUrl,
+      endFlow,
+      authenticate,
+      environmentId,
+      pluginId,
+      refreshAccounts,
+    ],
+  );
 
   const submitCallback = async (current: SignInFlow) => {
     // The address holds a one-time code, so it leaves the field on every outcome.
@@ -273,7 +383,7 @@ export function GrokBotPluginAccounts({
                 Finish signing in in the new tab. This updates when sign-in completes.
               </>
             ) : (
-              "Finish signing in in the new tab. The page it lands on may not load, which is expected. Copy its full address from the address bar and paste it below."
+              "Finish signing in in the new tab. This updates when sign-in completes. If the return page does not load, copy its full address from the address bar and paste it below."
             )}{" "}
             <a
               className="underline"

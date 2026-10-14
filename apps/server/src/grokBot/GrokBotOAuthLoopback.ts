@@ -7,7 +7,7 @@ import * as NodeHttp from "node:http";
  * knows; the first free one is used. A busy port is never taken over.
  */
 export const LOOPBACK_PORTS: readonly number[] = [8787, 18787, 28787, 31787];
-export const RELAY_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback";
+const RELAY_REDIRECT_URI = "https://www.cursor.com/agents/mcp/oauth/callback";
 const RELAY_LOOPBACK_SUFFIX = ".tgd";
 const DEFAULT_PORT = LOOPBACK_PORTS[0];
 
@@ -97,17 +97,25 @@ export async function startLoopbackListener(options: {
   readonly handle: (callback: LoopbackCallback) => Promise<boolean>;
 }): Promise<LoopbackListener | null> {
   const listener: NodeHttp.RequestListener = (request, response) => {
-    const url = new URL(request.url ?? "/", "http://localhost");
+    let url: URL;
+    try {
+      url = new URL(request.url ?? "/", "http://localhost");
+    } catch {
+      response.writeHead(400, { Connection: "close" }).end();
+      return;
+    }
     if (request.method !== "GET" || url.pathname !== "/callback") {
       response.writeHead(404, { Connection: "close" }).end();
       return;
     }
-    options
-      .handle({
-        state: url.searchParams.get("state"),
-        code: url.searchParams.get("code"),
-        error: url.searchParams.get("error"),
-      })
+    void Promise.resolve()
+      .then(() =>
+        options.handle({
+          state: url.searchParams.get("state"),
+          code: url.searchParams.get("code"),
+          error: url.searchParams.get("error"),
+        }),
+      )
       .catch(() => false)
       .then((ok) => {
         response
@@ -118,7 +126,8 @@ export async function startLoopbackListener(options: {
             Connection: "close",
           })
           .end(page(ok));
-      });
+      })
+      .catch(() => response.destroy());
   };
   const create = () => {
     const server = NodeHttp.createServer(listener);

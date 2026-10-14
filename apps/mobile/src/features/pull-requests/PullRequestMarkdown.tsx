@@ -19,7 +19,7 @@ import {
 } from "react-native-nitro-markdown";
 import { markdownHtmlContent } from "@t3tools/mobile-markdown-text/markdown";
 
-import { useOpenPullRequest } from "../../native/useOpenPullRequest";
+import { useOpenPullRequest } from "./useOpenPullRequestFromRoute";
 import {
   hasNativeSelectableMarkdownText,
   SelectableMarkdownText,

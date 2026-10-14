@@ -5,6 +5,50 @@ import * as Native from "./GrokBotNativeService.ts";
 import * as Computer from "./GrokBotComputerService.ts";
 import * as Runtime from "./GrokBotNativeRuntimeService.ts";
 
+it.effect("updates only a registered native computer and rereads its permission", () =>
+  Effect.gen(function* () {
+    const machines = [
+      { machineId: "pc", label: "PC", localToolPermission: "never" },
+      { machineId: "other", label: "Other", localToolPermission: "always" },
+    ];
+    const updates: unknown[] = [];
+    const native = Layer.mock(Native.GrokBotNativeService)({
+      accountBinding: Effect.succeed("account"),
+      runtimeRequest: (_binding, method, body) =>
+        Effect.sync(() => {
+          if (method === "ListSandMachines") return { machines };
+          updates.push({ method, body });
+          if (method === "UpdateSandMachineLocalToolPermission")
+            machines[0]!.localToolPermission = "ask";
+          return {};
+        }),
+    });
+    yield* Effect.gen(function* () {
+      const service = yield* Computer.GrokBotComputerService;
+      const result = yield* service.updateMachine({ machineId: "pc", permission: "ask" });
+      assert.strictEqual(result.machines[0]!.permission, "ask");
+      assert.strictEqual(result.machines[1]!.permission, "always");
+      yield* service
+        .updateMachine({ machineId: "missing", permission: "always" })
+        .pipe(Effect.flip);
+      assert.deepStrictEqual(updates, [
+        {
+          method: "UpdateSandMachineLocalToolPermission",
+          body: { machineId: "pc", localToolPermission: "ask" },
+        },
+      ]);
+    }).pipe(
+      Effect.provide(
+        Computer.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(native, Layer.mock(Runtime.GrokBotNativeRuntimeService)({})),
+          ),
+        ),
+      ),
+    );
+  }),
+);
+
 it.effect("uses native bot identity and preserves save versus discard for teaching", () =>
   Effect.gen(function* () {
     const calls: {

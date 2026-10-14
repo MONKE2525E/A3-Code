@@ -24,6 +24,7 @@ import * as Mutator from "../provider/ProviderInstanceRegistryMutator.ts";
 import * as Settings from "../serverSettings.ts";
 import * as Native from "./GrokBotNativeRuntimeService.ts";
 import * as GrokBotService from "./GrokBotService.ts";
+import * as GuidedSetup from "./GrokBotSetupService.ts";
 
 const instructions =
   "Open a bot from Grok Bots. Its persistent conversation stays in No project. Name the project where its agents should work; use t3_project_list to find it and pass projectId to delegate_task. Its native V2 run owns delegated tasks, permissions, delegated task cancellation, and completion delivery. Link this environment to T3 Connect when public endpoint readiness is blocked.";
@@ -64,6 +65,7 @@ const make = Effect.gen(function* () {
     workflowPath: Binding.GROK_BOT_MANAGED_WORKFLOW_PATH,
     prompt: Binding.grokBotSkillSetupPrompt(Buffer.from(hash).toString("hex")),
   };
+  const guidedSetup = yield* GuidedSetup.GrokBotSetupService;
   const bots = yield* GrokBotService.GrokBotService;
   const native = yield* Native.GrokBotNativeRuntimeService;
   const settings = yield* Settings.ServerSettingsService;
@@ -106,6 +108,26 @@ const make = Effect.gen(function* () {
     const botIds = Option.isSome(selection) ? selection.value.roster.map((bot) => bot.agentId) : [];
     if (input.botId !== undefined && Option.isSome(selection) && !botIds.includes(input.botId))
       return yield* new GrokBotError({ reason: "bot_not_found" });
+    const guidedStatus = yield* guidedSetup.status.pipe(
+      Effect.catchTags({
+        GrokBotSetupError: (error) =>
+          Effect.succeed({
+            phase:
+              error.stage === "account" ? ("needs_prerequisite" as const) : ("failed" as const),
+            complete: false,
+            primaryBot: null,
+            mcpUrl: null,
+            terminalCommand: null,
+            authorizationUrl: null,
+            retryable: error.stage === "read",
+            error:
+              error.stage === "account"
+                ? "Sign in to GrokBot on the hosting computer, then check again."
+                : "Setup status could not be read. Check the account and connection, then try again.",
+            updatedAtMs: 0,
+          }),
+      }),
+    );
     return {
       bridge,
       botIds: botIds.filter((id) => input.botId === undefined || id === input.botId),
@@ -124,6 +146,7 @@ const make = Effect.gen(function* () {
       publicEndpointReadiness: { ready: availability.ready, reason: availability.reason ?? null },
       instructions,
       skillSetup,
+      setupStatus: guidedStatus,
     };
   });
 
@@ -156,6 +179,14 @@ const make = Effect.gen(function* () {
           )) !== selection.accountBinding
         )
           return yield* new GrokBotOrchestratorError({ reason: "account_changed" });
+        // The bridge adds bot management, but its installation must not block native chats.
+        if (!(yield* bots.status).installed) {
+          yield* bots.setup.pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("Grok Bot bridge setup failed; native chats continue", { error }),
+            ),
+          );
+        }
         if (matching === undefined || matching.instance.enabled === false) {
           yield* settings
             .updateProviderInstance({
@@ -183,7 +214,26 @@ const make = Effect.gen(function* () {
     );
   });
   return GrokBotOrchestratorService.of({
-    inspect: (input) => (input.action === "setup" ? setup(input) : status(input)),
+    inspect: (input) =>
+      input.action === "send_setup_prompt"
+        ? Effect.gen(function* () {
+            yield* setup(input);
+            const setupStatus = yield* guidedSetup.send.pipe(
+              Effect.mapError(
+                (error) =>
+                  new GrokBotOrchestratorError({
+                    reason:
+                      error.stage === "account"
+                        ? "native_account_unavailable"
+                        : "provider_unavailable",
+                  }),
+              ),
+            );
+            return { ...(yield* status(input)), setupStatus };
+          })
+        : input.action === "setup"
+          ? setup(input)
+          : status(input),
     setup,
   });
 });

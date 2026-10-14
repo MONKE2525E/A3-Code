@@ -1,9 +1,33 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Native from "../GrokBotNativeService.ts";
 import * as BackendLive from "./GrokBotVoiceBackendLive.ts";
 import { GrokBotVoiceBackend } from "./GrokBotVoiceService.ts";
+
+it.effect("distinguishes an unreadable account cache from an actual sign-out", () =>
+  Effect.gen(function* () {
+    for (const [error, reason] of [
+      [new Native.NativeReadError({ stage: "session" }), "unavailable"],
+      [new Native.NativeSignedOutError({}), "account_unavailable"],
+    ] as const) {
+      const failed = yield* Effect.gen(function* () {
+        return yield* (yield* GrokBotVoiceBackend).accountBinding;
+      }).pipe(
+        Effect.flip,
+        Effect.provide(
+          BackendLive.layer.pipe(
+            Layer.provide(
+              Layer.mock(Native.GrokBotNativeService)({ accountBinding: Effect.fail(error) }),
+            ),
+          ),
+        ),
+      );
+      assert.equal(failed.reason, reason);
+    }
+  }),
+);
 
 const line = {
   theyJustTalked: true,
@@ -82,6 +106,144 @@ it.effect("maps a changed account binding to account_unavailable", () =>
       }).pipe(Effect.provide(native.layer)),
     );
     assert.strictEqual(error.reason, "account_unavailable");
+  }),
+);
+
+it.effect("keeps session-cache failures recoverable for runtime and gateway operations", () =>
+  Effect.gen(function* () {
+    for (const operation of ["runtime", "gateway"] as const) {
+      let unreadable = true;
+      const native = Layer.mock(Native.GrokBotNativeService)({
+        accountBinding: Effect.succeed("binding-1"),
+        runtimeRequest: () =>
+          Effect.suspend(() =>
+            unreadable
+              ? Effect.fail(new Native.NativeReadError({ stage: "session" }))
+              : Effect.succeed({
+                  clientSecret: "ephemeral-secret",
+                  expiresAtUnixSeconds: 1900000000,
+                  model: "grok-voice",
+                  websocketUrl: "wss://api.x.ai/v1/realtime",
+                }),
+          ),
+        voiceGateway: () =>
+          Effect.suspend(() =>
+            unreadable
+              ? Effect.fail(new Native.NativeReadError({ stage: "session" }))
+              : Effect.void,
+          ),
+      });
+      yield* Effect.gen(function* () {
+        const backend = yield* GrokBotVoiceBackend;
+        const request =
+          operation === "runtime"
+            ? backend.mintCredential("binding-1").pipe(Effect.asVoid)
+            : backend.setPresence("binding-1", {
+                botId: "bot-a",
+                callId: "call-1",
+                onTheLine: true,
+              });
+        assert.strictEqual((yield* Effect.flip(request)).reason, "unavailable");
+        unreadable = false;
+        yield* request;
+      }).pipe(Effect.provide(BackendLive.layer.pipe(Layer.provide(native))));
+    }
+  }),
+);
+
+it.effect(
+  "distinguishes an unreadable cache from confirmed account loss during native operations",
+  () =>
+    Effect.gen(function* () {
+      for (const operation of ["runtime", "gateway"] as const) {
+        for (const [accountBinding, reason] of [
+          [Effect.succeed("binding-1"), "unavailable"],
+          [Effect.succeed("binding-2"), "account_unavailable"],
+          [Effect.fail(new Native.NativeSignedOutError({})), "account_unavailable"],
+          [Effect.fail(new Native.NativeReadError({ stage: "session" })), "unavailable"],
+        ] as const) {
+          const failed = yield* Effect.gen(function* () {
+            const backend = yield* GrokBotVoiceBackend;
+            return yield* operation === "runtime"
+              ? backend.mintCredential("binding-1").pipe(Effect.asVoid)
+              : backend.setPresence("binding-1", {
+                  botId: "bot-a",
+                  callId: "call-1",
+                  onTheLine: false,
+                });
+          }).pipe(
+            Effect.flip,
+            Effect.provide(
+              BackendLive.layer.pipe(
+                Layer.provide(
+                  Layer.mock(Native.GrokBotNativeService)({
+                    accountBinding,
+                    runtimeRequest: () =>
+                      Effect.fail(new Native.NativeReadError({ stage: "session" })),
+                    voiceGateway: () =>
+                      Effect.fail(new Native.NativeReadError({ stage: "session" })),
+                  }),
+                ),
+              ),
+            ),
+          );
+          assert.strictEqual(failed.reason, reason);
+        }
+      }
+    }),
+);
+
+it.effect("maps HTTP failures safely and logs only bounded operation, stage, and category", () =>
+  Effect.gen(function* () {
+    for (const operation of ["runtime", "gateway"] as const) {
+      for (const [status, reason, category] of [
+        [408, "unavailable", "timeout"],
+        [429, "unavailable", "rate_limited"],
+        [503, "unavailable", "unavailable"],
+        [401, "account_unavailable", "account_unavailable"],
+        [403, "refused", "refused"],
+      ] as const) {
+        const logs: unknown[] = [];
+        const logger = Logger.make(({ message }) => void logs.push(message));
+        const native = Layer.mock(Native.GrokBotNativeService)({
+          accountBinding: Effect.succeed("private-binding"),
+          runtimeRequest: () =>
+            Effect.fail(new Native.NativeReadError({ stage: "request", status })),
+          voiceGateway: () => Effect.fail(new Native.NativeReadError({ stage: "request", status })),
+        });
+        const error = yield* Effect.gen(function* () {
+          const backend = yield* GrokBotVoiceBackend;
+          return yield* operation === "runtime"
+            ? backend.mintCredential("private-binding").pipe(Effect.asVoid)
+            : backend.setPresence("private-binding", {
+                botId: "private-bot",
+                callId: "private-call",
+                onTheLine: true,
+              });
+        }).pipe(
+          Effect.flip,
+          Effect.provide(
+            Layer.merge(
+              BackendLive.layer.pipe(Layer.provide(native)),
+              Logger.layer([logger], { mergeWithExisting: false }),
+            ),
+          ),
+        );
+        assert.strictEqual(error.reason, reason);
+        assert.notInclude(error.message, "private");
+        assert.deepStrictEqual(logs, [
+          [
+            "grok-bot.voice.native-operation-failed",
+            {
+              operation:
+                operation === "runtime" ? "MintSandVoiceCallSecret" : "setVoiceCallPresence",
+              stage: "request",
+              category,
+            },
+          ],
+        ]);
+      }
+    }
   }),
 );
 
@@ -206,5 +368,25 @@ it.effect("sends presence and the call record to the gateway under the call's bi
       args: { record },
     });
     assert.strictEqual(error.reason, "account_unavailable");
+  }),
+);
+
+it.effect("refuses native group agents before opening an unsupported multi-speaker session", () =>
+  Effect.gen(function* () {
+    const native = makeNative({
+      ListGrokBotAgents: {
+        agents: [{ agentId: "group", name: "Team", memberAgentIds: ["bot-a", "bot-b"] }],
+      },
+    });
+    const error = yield* Effect.flip(
+      Effect.gen(function* () {
+        return yield* (yield* GrokBotVoiceBackend).openSession("binding-1", { botId: "group" });
+      }).pipe(Effect.provide(native.layer)),
+    );
+    assert.strictEqual(error.reason, "refused");
+    assert.deepStrictEqual(
+      native.sent.map((request) => request.method),
+      ["ListGrokBotAgents"],
+    );
   }),
 );
