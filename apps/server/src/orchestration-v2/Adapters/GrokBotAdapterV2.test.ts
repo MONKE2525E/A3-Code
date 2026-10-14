@@ -295,7 +295,7 @@ it.effect("repairs a previously imported owned echo once without introducing ano
     const projection = makeGrokBotTranscriptProjection({
       native: nativeSession,
       idAllocator,
-      existingMessage: (id) => Effect.succeed(id === old.id ? old : undefined),
+      existingMessages: (ids) => Effect.succeed(ids.includes(old.id) ? [old] : []),
     });
     projection.registerManagedTurn(grokBotTurnIdentity(turn));
     const events = yield* projection.project(frame);
@@ -307,7 +307,7 @@ it.effect("repairs a previously imported owned echo once without introducing ano
     const fresh = makeGrokBotTranscriptProjection({
       native: nativeSession,
       idAllocator,
-      existingMessage: () => Effect.succeed(undefined),
+      existingMessages: () => Effect.succeed([]),
     });
     fresh.registerManagedTurn(grokBotTurnIdentity(turn));
     assert.deepEqual(yield* fresh.project(frame), []);
@@ -1777,6 +1777,43 @@ it.effect("preserves settled native message and turn item times when history rep
     const newItem = replayed.find((event) => event.type === "turn_item.updated")?.turnItem;
     assert.deepEqual(newItem?.completedAt, oldItem?.completedAt);
     assert.equal(DateTime.toEpochMillis(newItem!.completedAt!), 1000);
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.effect("keeps timestamp-free bot replies in their original position across reconnects", () =>
+  Effect.gen(function* () {
+    const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    const frame = transcript([
+      {
+        seq: "1",
+        updatedSeq: "1",
+        value: {
+          id: "old-bot-reply",
+          kind: "send-message",
+          message: { type: "text", content: "Starting an audit thread now." },
+        },
+      },
+    ]);
+    yield* TestClock.setTime(1000);
+    const original = makeGrokBotTranscriptProjection({ native: nativeSession, idAllocator });
+    const first = yield* original.project(frame);
+    const oldMessage = first.find((event) => event.type === "message.updated")!.message;
+    const oldItem = first.find((event) => event.type === "turn_item.updated")!.turnItem;
+    for (const nowMs of [2000, 3000]) {
+      yield* TestClock.setTime(nowMs);
+      const reconnected = makeGrokBotTranscriptProjection({
+        native: nativeSession,
+        idAllocator,
+        existingMessages: (ids) => Effect.succeed(ids.includes(oldMessage.id) ? [oldMessage] : []),
+      });
+      const replayed = yield* reconnected.project(frame);
+      const message = replayed.find((event) => event.type === "message.updated")!.message;
+      const item = replayed.find((event) => event.type === "turn_item.updated")!.turnItem;
+      assert.deepEqual(message.createdAt, oldMessage.createdAt);
+      assert.deepEqual(message.updatedAt, oldMessage.updatedAt);
+      assert.deepEqual(item.startedAt, oldItem.startedAt);
+      assert.deepEqual(item.completedAt, oldItem.completedAt);
+    }
   }).pipe(Effect.provide(IdAllocator.layer)),
 );
 

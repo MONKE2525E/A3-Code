@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import {
   EventId,
   NodeId,
@@ -13,10 +14,13 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
 import * as Endpoint from "../cloud/ManagedEndpointAddress.ts";
 import * as Registry from "../mcp/McpSessionRegistry.ts";
 import type { GrokBotTurnIdentity } from "../orchestration-v2/Adapters/GrokBotSettlementProjection.ts";
 import { GrokBotManagedBinding } from "../orchestration-v2/Adapters/GrokBotManagedBinding.ts";
+import { makeGrokBotTranscriptProjection } from "../orchestration-v2/Adapters/GrokBotAdapterV2.ts";
+import { nativeSession } from "../orchestration-v2/Adapters/GrokBotProvider.testkit.ts";
 import * as Projection from "../orchestration-v2/ProjectionStore.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -29,7 +33,9 @@ const projectionLayer = Projection.layer.pipe(Layer.provideMerge(SqlitePersisten
 const bindingLayer = Live.layer.pipe(
   Layer.provide([
     Layer.mock(Store.GrokBotManagedStateStore)({}),
-    Layer.mock(Native.GrokBotNativeRuntimeService)({}),
+    Layer.mock(Native.GrokBotNativeRuntimeService)({
+      accountBinding: Effect.succeed(nativeSession.binding),
+    }),
     Layer.mock(Registry.McpSessionRegistry)({}),
     Layer.mock(Endpoint.ManagedEndpointAddress)({}),
     Layer.mock(ServerSettings.ServerSettingsService)({}),
@@ -161,7 +167,69 @@ const inFlight = (threadId: ThreadId, runId: RunId) =>
     Effect.flatMap((binding) => binding.inFlightWork!(identity(threadId, runId))),
   );
 
-it.effect("inFlightWork reads real projection rows for tools and child tasks", () =>
+it.effect("one live batch preserves timestamp-free assistant replies after reconnect", () =>
+  Effect.gen(function* () {
+    const home = ThreadId.make("grok-bot:replay-lookup");
+    yield* seedThread(home);
+    const native = { ...nativeSession, threadId: home };
+    const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    const projections = yield* Projection.ProjectionStoreV2;
+    const binding = yield* GrokBotManagedBinding;
+    const frame = {
+      _tag: "Rows",
+      generation: 0,
+      replay: true,
+      deletes: [],
+      entries: ["First reply.", "Second reply.", "Third reply."].map((content, index) => ({
+        seq: String(index + 1),
+        updatedSeq: "1",
+        value: {
+          id: `earlier-reply-${index}`,
+          kind: "send-message",
+          message: { type: "text", content },
+        },
+      })),
+    } as const;
+    yield* TestClock.setTime(DateTime.toEpochMillis(at));
+    const first = yield* makeGrokBotTranscriptProjection({ native, idAllocator }).project(frame);
+    const originals = first
+      .filter((event) => event.type === "message.updated")
+      .map((event) => event.message);
+    for (const original of originals)
+      yield* projections.apply({
+        id: eventId(),
+        type: "message.updated",
+        threadId: home,
+        occurredAt: at,
+        payload: original,
+      });
+    yield* TestClock.adjust("2 minutes");
+    let reads = 0;
+    const projector = makeGrokBotTranscriptProjection({
+      native,
+      idAllocator,
+      existingMessages: (ids) => {
+        reads++;
+        assert.deepEqual(
+          ids,
+          originals.map((message) => message.id),
+        );
+        return binding.existingMessages!(native, ids);
+      },
+    });
+    const replay = yield* projector.project(frame);
+    assert.deepEqual(
+      replay
+        .filter((event) => event.type === "message.updated")
+        .map((event) => ({ text: event.message.text, createdAt: event.message.createdAt })),
+      originals.map((message) => ({ text: message.text, createdAt: message.createdAt })),
+    );
+    assert.deepEqual(yield* projector.project(frame), []);
+    assert.equal(reads, 1);
+  }).pipe(Effect.provide(Layer.merge(bindingLayer, IdAllocator.layer))),
+);
+
+it.effect("inFlightWork holds live tools without holding the native turn for async children", () =>
   Effect.gen(function* () {
     const home = ThreadId.make("grok-bot:home");
     const other = ThreadId.make("grok-bot:other");
@@ -187,7 +255,7 @@ it.effect("inFlightWork reads real projection rows for tools and child tasks", (
     yield* child("child:other-thread", other, run, root, "running");
     assert.isFalse(yield* inFlight(home, run), "foreign scope");
 
-    // Each live shape holds the turn on its own.
+    // A blocking MCP tool holds the turn; async children do not.
     yield* tool("tool:live", home, run, "running");
     assert.isTrue(yield* inFlight(home, run), "running root dynamic_tool");
     yield* tool("tool:live", home, run, "completed");
@@ -195,18 +263,18 @@ it.effect("inFlightWork reads real projection rows for tools and child tasks", (
 
     for (const status of ["pending", "running", "waiting"] as const) {
       yield* child("child:live", home, run, root, status);
-      assert.isTrue(yield* inFlight(home, run), `child ${status}`);
+      assert.isFalse(yield* inFlight(home, run), `async child ${status}`);
     }
     yield* child("child:live", home, run, root, "completed");
     assert.isFalse(yield* inFlight(home, run), "child closed releases");
 
-    // A child of this run under a different node still counts (same runId).
+    // Nested async work has its own lifecycle.
     yield* child("child:run-scoped", home, run, NodeId.make("node:nested"), "running");
-    assert.isTrue(yield* inFlight(home, run), "run-scoped child");
-    // A child parented on this root from another run still counts (parent node ownership).
+    assert.isFalse(yield* inFlight(home, run), "async run-scoped child");
+    // Root-parented async work likewise leaves native completion free to settle.
     yield* child("child:run-scoped", home, run, NodeId.make("node:nested"), "completed");
     yield* child("child:parented", home, foreignRun, root, "waiting");
-    assert.isTrue(yield* inFlight(home, run), "root-parented child");
+    assert.isFalse(yield* inFlight(home, run), "async root-parented child");
   }).pipe(Effect.provide(bindingLayer)),
 );
 

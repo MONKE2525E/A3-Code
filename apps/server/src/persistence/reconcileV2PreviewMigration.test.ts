@@ -45,6 +45,7 @@ describe("V2 preview upgrade", () => {
         [62, "GrokBotManagedRuntime"],
         [63, "GrokBotManagedCompletion"],
         [64, "GrokBotMigrationCompatibility"],
+        [65, "ThreadSenderIndex"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -132,6 +133,7 @@ describe("V2 preview upgrade", () => {
         [62, "GrokBotManagedRuntime"],
         [63, "GrokBotManagedCompletion"],
         [64, "GrokBotMigrationCompatibility"],
+        [65, "ThreadSenderIndex"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

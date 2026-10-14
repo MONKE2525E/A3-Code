@@ -240,3 +240,33 @@ it("keeps reclaim state after a stale link, ignores retired events, and omits if
   expect(claimed.socket.headers["x-sand-egress-if-match"]).toBeUndefined();
   claimed.client.stop();
 });
+
+it.each([
+  [
+    "private-service.example",
+    5432,
+    { ...policy, allowedTcpDestinations: [{ cidr: "10.0.0.0/8", port: 5432 }] },
+  ],
+  ["example.com", 443, policy],
+  ["private-service.example", 5432, { ...policy, restricted: false }],
+])(
+  "connects to a policy-approved private destination %s:%s using its resolved address",
+  async (host, port, egressPolicy) => {
+    const { client, socket } = start({ policy: egressPolicy });
+    const connected = Promise.withResolvers<unknown>();
+    transport.lookup.mockResolvedValue([{ address: "10.1.2.3", family: 4 }]);
+    const tcp = Object.assign(new NodeEvents.EventEmitter(), {
+      setTimeout: vi.fn(),
+      write: vi.fn(),
+      destroy: vi.fn(),
+    });
+    transport.connect.mockImplementation((destination) => {
+      connected.resolve(destination);
+      return tcp;
+    });
+    socket.emit("message", openFrame(host, port), true);
+    expect(await connected.promise).toEqual({ host: "10.1.2.3", port });
+    expect(transport.lookup).toHaveBeenCalledExactlyOnceWith(host, { all: true });
+    client.stop();
+  },
+);

@@ -126,6 +126,17 @@ const advance = (ms: number) =>
     { discard: true },
   );
 
+it.effect("settles a native final reply without complete_turn or native live state", () =>
+  Effect.gen(function* () {
+    const turn = yield* makeTurn;
+    const { terminals } = yield* openRestored(turn, [history(turn.messageId, true)]);
+    yield* advance(3 * MINUTE);
+    assert.deepEqual(yield* Ref.get(terminals), [{ status: "completed", code: null }]);
+    yield* advance(3 * MINUTE);
+    assert.lengthOf(yield* Ref.get(terminals), 1);
+  }).pipe(Effect.scoped, Effect.provide(IdAllocator.layer)),
+);
+
 it.effect("completes a restored stale turn once native is idle and its answer is delivered", () =>
   Effect.gen(function* () {
     const turn = yield* makeTurn;
@@ -168,7 +179,7 @@ it.effect("leaves a turn alone while native keeps reporting running work", () =>
 it.effect("times out an unobservable turn only after sustained total silence", () =>
   Effect.gen(function* () {
     const turn = yield* makeTurn;
-    const { terminals } = yield* openRestored(turn, [history(turn.messageId, true)]);
+    const { terminals } = yield* openRestored(turn, [history(turn.messageId, false)]);
     yield* advance(59 * MINUTE);
     assert.deepEqual(yield* Ref.get(terminals), []);
     yield* advance(2 * MINUTE);
@@ -240,7 +251,7 @@ it.effect(
 );
 
 it.effect(
-  "never settles while a managed tool or delegated child is in flight past every deadline",
+  "never settles while a managed tool or blocking delegate wait is in flight past every deadline",
   () =>
     Effect.gen(function* () {
       const turn = yield* makeTurn;

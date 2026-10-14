@@ -153,6 +153,58 @@ const notificationMarkers = Effect.gen(function* () {
   // A streaming record becomes eligible only when its completed update lands.
   yield* message({ id: streamingId, streaming: false });
   yield* assertMarker(streamingId);
+  assert.isUndefined(yield* store.getLastThreadSender(nativeId));
+  const firstSender = ThreadId.make("bot:first-sender");
+  const lastSender = ThreadId.make("bot:last-sender");
+  yield* message({
+    id: MessageId.make("sender:first"),
+    role: "user",
+    senderThreadId: firstSender,
+    createdAt,
+  });
+  yield* message({
+    id: MessageId.make("sender:last"),
+    role: "user",
+    senderThreadId: lastSender,
+    createdAt: completedAt,
+  });
+  // A new human prompt and a replayed old send do not replace the latest agent sender.
+  yield* message({
+    id: MessageId.make("sender:human"),
+    role: "user",
+    createdBy: "user",
+    createdAt: importedAt,
+  });
+  yield* message({
+    id: MessageId.make("sender:first"),
+    role: "user",
+    senderThreadId: firstSender,
+    createdAt,
+    updatedAt: importedAt,
+  });
+  assert.deepEqual(yield* store.getLastThreadSender(nativeId), {
+    threadId: lastSender,
+    createdAt: completedAt,
+  });
+  // Equal timestamps keep insertion order; an update to the earlier send keeps its position.
+  const tiedSender = ThreadId.make("bot:tied-later-sender");
+  yield* message({
+    id: MessageId.make("a:later-send"),
+    role: "user",
+    senderThreadId: tiedSender,
+    createdAt: completedAt,
+  });
+  yield* message({
+    id: MessageId.make("sender:last"),
+    role: "user",
+    senderThreadId: lastSender,
+    createdAt: completedAt,
+    updatedAt: importedAt,
+  });
+  assert.deepEqual(yield* store.getLastThreadSender(nativeId), {
+    threadId: tiedSender,
+    createdAt: completedAt,
+  });
 });
 
 it.effect("SQL shell publishes bounded completed native GrokBot notification markers", () =>
