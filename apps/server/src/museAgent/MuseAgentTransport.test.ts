@@ -599,10 +599,6 @@ it.effect(
         { concurrency: "unbounded" },
       );
       assert.strictEqual(f.calls.filter((call) => call.method === "watch").length, 1);
-      assert.strictEqual(
-        (yield* Effect.flip(transport.watch(binding, "other-session"))).kind,
-        "protocol",
-      );
       yield* observer.close;
       yield* observer.close;
       assert.strictEqual(f.calls.filter((call) => call.method === "unwatch").length, 0);
@@ -614,6 +610,33 @@ it.effect(
     }).pipe(Effect.provide(f.layer));
   },
 );
+
+it.effect("hands the page subscription to another session and ends the old readers cleanly", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const transport = yield* Transport.MuseAgentTransport;
+    const binding = yield* transport.connect;
+    const [observer, turn] = yield* Effect.all(
+      [transport.watch(binding, "primary"), transport.watch(binding, "primary")],
+      { concurrency: "unbounded" },
+    );
+    const replacement = yield* transport.watch(binding, "other-session");
+    assert.strictEqual(f.calls.filter((call) => call.method === "watch").length, 2);
+    const ended = yield* Effect.all(
+      [observer.events.pipe(Stream.runCollect), turn.events.pipe(Stream.runCollect)],
+      { concurrency: "unbounded" },
+    );
+    assert.deepStrictEqual(
+      ended.map((events) => events.map((event) => event.event)),
+      [["transport.session_superseded"], ["transport.session_superseded"]],
+    );
+    yield* observer.close;
+    yield* turn.close;
+    assert.strictEqual(f.calls.filter((call) => call.method === "unwatch").length, 0);
+    yield* replacement.close;
+    assert.strictEqual(f.calls.filter((call) => call.method === "unwatch").length, 1);
+  }).pipe(Effect.provide(f.layer));
+});
 
 it.effect(
   "removes page registration after response validation fails and permits a later clean registration",

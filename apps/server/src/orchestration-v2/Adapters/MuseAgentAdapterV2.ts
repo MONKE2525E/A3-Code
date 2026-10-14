@@ -14,6 +14,7 @@ import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import * as Exit from "effect/Exit";
+import type { Done } from "effect/Cause";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
@@ -354,9 +355,32 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
             yield* publish(batch);
             return batch.filter((event) => event.type === "message.updated").length;
           });
+        // Another session took the page's subscription. This session ends as stopped, not failed.
+        let superseded = false;
         yield* watch.events.pipe(
           Stream.runForEach((frame) =>
             Effect.gen(function* () {
+              if (frame.event === "transport.session_superseded") {
+                superseded = true;
+                yield* Queue.offer(inbox, {
+                  type: "provider_session.updated",
+                  driver: MUSE_AGENT_DRIVER_KIND,
+                  providerSession: {
+                    ...providerSession,
+                    status: "stopped",
+                    updatedAt: yield* DateTime.now,
+                    lastError: null,
+                  },
+                });
+                // Done ends the queue cleanly; the inbox's error channel never carries it.
+                yield* Queue.end(
+                  inbox as Queue.Enqueue<
+                    ProviderAdapter.ProviderAdapterV2Event,
+                    ProviderAdapter.ProviderAdapterV2Error | Done
+                  >,
+                );
+                return;
+              }
               if (frame.event === "transport.turn_superseded") {
                 const batch = projection.project(frame);
                 if (!batch.some((event) => event.type === "turn.terminal")) return;
@@ -417,7 +441,13 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
               } else yield* projectFrame(frame);
             }),
           ),
-          Effect.andThen(Effect.fail(new Native.MuseAgentRuntimeError({ kind: "protocol" }))),
+          Effect.andThen(
+            Effect.suspend(() =>
+              superseded
+                ? Effect.void
+                : Effect.fail(new Native.MuseAgentRuntimeError({ kind: "protocol" })),
+            ),
+          ),
           Effect.mapError(
             (cause) =>
               new ProviderAdapter.ProviderAdapterEventStreamError({

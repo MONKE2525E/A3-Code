@@ -891,6 +891,34 @@ it.effect("ignores a delayed supersession notice without revoking the current de
   ),
 );
 
+it.effect("a session taken over by a side chat stops cleanly instead of failing", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const frames = yield* Queue.unbounded<MuseAgentNativeEvent>();
+      const native = makeNative({
+        watch: () => Effect.succeed({ events: Stream.fromQueue(frames), close: Effect.void }),
+      });
+      const port = ToolsPort.MuseAgentDirectToolsPort.of({
+        install: () => Effect.fail(new NativeAgentDirectToolsError({ code: "already_installed" })),
+        start: () => Effect.succeed({ revoke: Effect.void, close: Effect.void }),
+      });
+      const adapter = yield* createMuseAgentAdapterV2(options).pipe(
+        Effect.provideService(Native.MuseAgentNativeRuntimeService, native),
+        Effect.provideService(ProviderHost.ProviderHost, host),
+        Effect.provideService(ToolsPort.MuseAgentDirectToolsPort, port),
+      );
+      const runtime = yield* adapter.openSession(sessionInput);
+      const seen = yield* runtime.events.pipe(Stream.runCollect, Effect.forkScoped);
+      yield* Queue.offer(frames, { event: "transport.session_superseded" });
+      const events = yield* Fiber.join(seen);
+      const statuses = events.flatMap((event) =>
+        event.type === "provider_session.updated" ? [event.providerSession.status] : [],
+      );
+      assert.deepStrictEqual(statuses, ["stopped"]);
+    }),
+  ),
+);
+
 it.effect("sends Monke context without changing visible prompts or attachment-only turns", () =>
   Effect.forEach(["Synthetic task", ""], (text) =>
     Effect.scoped(

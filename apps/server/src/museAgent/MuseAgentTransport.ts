@@ -206,6 +206,11 @@ class EventMailbox implements AsyncIterable<MuseAgentNativeEvent> {
       waiter.resolve({ done: false, value });
     } else this.pending.push(value);
   }
+  /** Hands the page's subscription to another session: one last frame, then a clean end. */
+  supersede() {
+    this.offer({ event: "transport.session_superseded" });
+    this.close();
+  }
   close(error?: MuseAgentTransportError) {
     if (this.ended) return;
     this.ended = true;
@@ -680,8 +685,12 @@ export const makeMuseAgentTransportLayer = (
             yield* watchPermit
               .withPermits(1)(
                 Effect.gen(function* () {
-                  if (mailboxes.size && watchedSessionId !== sessionId)
-                    return yield* new MuseAgentTransportError({ kind: "protocol" });
+                  // The page keeps one subscription. A different session takes it over, and the
+                  // readers of the old session end cleanly instead of failing.
+                  if (watchedSessionId !== sessionId) {
+                    for (const previous of mailboxes) previous.supersede();
+                    mailboxes.clear();
+                  }
                   const subscribe = mailboxes.size === 0;
                   watchedSessionId = sessionId;
                   mailboxes.add(box);
