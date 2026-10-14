@@ -7290,8 +7290,9 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadShell,
     activeThreadWokeAt,
   ]);
+  // Muse conversations are settled by Muse, never by T3, so a stale settled flag is not shown.
   const activeThreadSettled =
-    supportsSettlement && activeThreadShell?.settledOverride === "settled";
+    supportsSettlement && !isMuseAgentThread && activeThreadShell?.settledOverride === "settled";
   const unsettleThreadMutation = useOrchestrationCommand(threadEnvironment.unsettle, {
     reportFailure: false,
   });

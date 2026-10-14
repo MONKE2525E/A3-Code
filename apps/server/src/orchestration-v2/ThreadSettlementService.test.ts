@@ -785,6 +785,36 @@ describe("ThreadSettlementServiceV2 worker", () => {
       }),
     ),
   );
+  it.effect("keeps idle Muse conversations out of the auto-settle sweep", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const museId = ProviderInstanceId.make("muse-instance");
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([
+            makeThread("muse-idle", { providerInstanceId: museId }),
+            makeThread("ordinary-idle"),
+          ]),
+          settings: {
+            ...DEFAULT_SERVER_SETTINGS,
+            sidebarAutoSettleAfterDays: 2,
+            providerInstances: {
+              ...DEFAULT_SERVER_SETTINGS.providerInstances,
+              [museId]: { driver: ProviderDriverKind.make("muse-agent"), enabled: true },
+            },
+          },
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+          yield* startHarness(reactor, fixture.activation, fixture.snapshotReads);
+          assert.deepStrictEqual(
+            (yield* Ref.get(fixture.commands)).map((command) => command.threadId),
+            [ThreadId.make("ordinary-idle")],
+          );
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
   it.effect("settles a merged pull request stored only in the thread links", () =>
     Effect.scoped(
       Effect.gen(function* () {

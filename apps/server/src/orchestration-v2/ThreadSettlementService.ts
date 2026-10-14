@@ -3,9 +3,10 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import {
   CommandId,
-  type ThreadId,
+  nativeAgentSourceForDriver,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ThreadShell,
+  type ThreadId,
 } from "@t3tools/contracts";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import * as Cause from "effect/Cause";
@@ -332,17 +333,21 @@ export const make = Effect.gen(function* () {
     // the merged pull request: most threads carry no link and settle from
     // their branch lookup, which would otherwise wait for the next minute's
     // sweep on a possibly stale cached answer.
+    // Native agents (Grok Bot, Muse) keep their own conversations; T3 never settles them.
     const candidates = threads.filter(
       (thread) =>
-        settings.providerInstances[thread.providerInstanceId]?.driver !== "grok-bot" &&
-        isAutoSettlementCandidate(thread, nowMs),
+        nativeAgentSourceForDriver(
+          settings.providerInstances[thread.providerInstanceId]?.driver ?? "",
+        ) === undefined && isAutoSettlementCandidate(thread, nowMs),
     );
 
     const settleThread = Effect.fn("ThreadSettlementServiceV2.settleThread")(
       function* (thread: (typeof candidates)[number], pullRequest: SettlementPullRequest | null) {
         const environmentSettings = yield* settingsService.getSettings;
         if (
-          environmentSettings.providerInstances[thread.providerInstanceId]?.driver === "grok-bot"
+          nativeAgentSourceForDriver(
+            environmentSettings.providerInstances[thread.providerInstanceId]?.driver ?? "",
+          ) !== undefined
         ) {
           return null;
         }
