@@ -1,7 +1,10 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { resolveGrokBotVoiceCallActivity } from "./grokBotVoiceCallActivity";
+import {
+  isGrokBotVoiceCallLive,
+  resolveGrokBotVoiceCallActivity,
+} from "./grokBotVoiceCallActivity";
 import type { GrokBotVoicePhase } from "./grokBotVoiceCall";
 import type { PinnedGrokBotVoiceCall } from "./useGrokBotVoiceCall";
 
@@ -67,5 +70,17 @@ describe("resolveGrokBotVoiceCallActivity", () => {
       }),
     ).toBe("listening");
     expect(resolveGrokBotVoiceCallActivity({ ...target, call: null })).toBe("running");
+  });
+});
+
+describe("isGrokBotVoiceCallLive", () => {
+  const target = { environmentId: ENVIRONMENT, botId: "bot-one" };
+
+  it("badges only the called bot while its call is not idle", () => {
+    expect(isGrokBotVoiceCallLive({ call: call("live"), ...target })).toBe(true);
+    expect(isGrokBotVoiceCallLive({ call: call("connecting"), ...target })).toBe(true);
+    expect(isGrokBotVoiceCallLive({ call: call("idle"), ...target })).toBe(false);
+    expect(isGrokBotVoiceCallLive({ call: call("live"), ...target, botId: "bot-two" })).toBe(false);
+    expect(isGrokBotVoiceCallLive({ call: null, ...target })).toBe(false);
   });
 });

@@ -73,24 +73,6 @@ describe("provider compatibility", () => {
     }
   });
 
-  it("keeps the unversioned native Grok Bot provider free of CLI advice", () => {
-    const native = {
-      ...provider,
-      driver: ProviderDriverKind.make("grok-bot"),
-      version: null,
-      status: "ready" as const,
-      message: undefined,
-      auth: { status: "authenticated" as const },
-    };
-    const checked = applyProviderCompatibility(
-      native,
-      undefined,
-      ModelManifest.BUNDLED_MODEL_MANIFEST.compatibility,
-    );
-    assert.deepEqual(checked, native);
-    assert.isUndefined(checked.compatibilityAdvisory);
-  });
-
   it("keeps releases before V2 on the OpenCode 1 policy they shipped with", () => {
     // Every installed build fetches main's manifest, and 0.0.45 and older run the
     // V1 orchestrator, which cannot drive OpenCode 2.

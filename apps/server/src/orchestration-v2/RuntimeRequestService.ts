@@ -85,15 +85,22 @@ export const layer: Layer.Layer<
               requestId: input.requestId,
             });
           }
-          // A bound native message card stays pending until native confirms the call, so it may
-          // run while pending; the adapter settles it. Every other request runs only once
-          // dispatch has resolved it and persisted that projection.
+          // Bound native cards stay pending until native confirms their callback. Other requests
+          // run only after dispatch resolves them and persists that projection.
           const boundNativeMessage =
             request.responseCapability.type === "message" &&
             request.responseCapability.providerSessionId === input.providerSessionId;
+          const boundNativeApproval =
+            request.responseCapability.type === "live" &&
+            request.responseCapability.providerSessionId === input.providerSessionId &&
+            request.nativeRequestRef?.driver === "grok-bot" &&
+            request.nativeRequestRef.strength === "strong" &&
+            ["auto_review_approval/", "local_tool_permission/", "connector_grant/"].some((prefix) =>
+              request.nativeRequestRef?.nativeId?.startsWith(prefix),
+            );
           if (
             request.status !== "resolved" &&
-            !(request.status === "pending" && boundNativeMessage)
+            !(request.status === "pending" && (boundNativeMessage || boundNativeApproval))
           ) {
             return yield* new RuntimeRequestResponseExecutionError({
               reason: "request-not-ready",

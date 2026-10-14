@@ -650,38 +650,371 @@ it.effect.each([
   }),
 );
 
-it.effect("waitForThread reads the run again only when the run updates", () =>
+it.effect.each(["user_input", "command"] as const)(
+  "thread watches wake for %s, acknowledge it, and keep waiting for completion",
+  (kind) =>
+    Effect.gen(function* () {
+      const events = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+      const subscribed = yield* Deferred.make<void>();
+      const resubscribed = yield* Deferred.make<void>();
+      let subscriptions = 0;
+      const threadId = ThreadId.make("watched-thread");
+      const projectId = ProjectId.make("watched-project");
+      const runId = RunId.make("watched-run");
+      const nodeId = NodeId.make("watched-node");
+      let pending = false;
+      let status: OrchestrationV2Run["status"] = "running";
+      const layerTest = ThreadManagementService.layer.pipe(
+        Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+        Layer.provide(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadEventSequence: () => Effect.succeed(0),
+            streamStoredEventsFrom: (input) =>
+              input?.eventType === "runtime-request.updated"
+                ? Stream.fromEffect(
+                    Effect.gen(function* () {
+                      yield* Deferred.succeed(
+                        subscriptions++ === 0 ? subscribed : resubscribed,
+                        undefined,
+                      );
+                    }),
+                  ).pipe(Stream.drain, Stream.concat(Stream.fromQueue(events)))
+                : Stream.never,
+            getThreadRecords: () =>
+              Effect.sync(
+                () =>
+                  ({
+                    thread: { id: threadId, projectId, deletedAt: null },
+                    runs: [{ id: runId, status }],
+                    nodes: [{ id: nodeId, runId }],
+                    runtimeRequests: pending
+                      ? [{ id: "request", nodeId, kind, status: "pending" }]
+                      : [],
+                    turnItems: pending
+                      ? [
+                          {
+                            id: "question",
+                            requestId: "request",
+                            type: kind === "user_input" ? "user_input_request" : "approval_request",
+                            status: "waiting",
+                            runId,
+                            questions: [
+                              { id: "question", question: "May I continue?", options: [] },
+                            ],
+                          },
+                        ]
+                      : [],
+                  }) as unknown as OrchestrationV2ThreadProjection,
+              ),
+          }),
+        ),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(layerReceiptsTest),
+      );
+      const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+        Effect.provide(layerTest),
+      );
+      const first = yield* service
+        .waitForThread({ projectId, threadId, runId, timeoutMs: 60_000, seenRequestIds: [] })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(subscribed);
+      pending = true;
+      yield* Queue.offer(events, {
+        sequence: 1,
+        event: { threadId, type: "runtime-request.updated" },
+      } as unknown as OrchestrationV2StoredEvent);
+      const notice = yield* Fiber.join(first);
+      expect(notice.pendingRequests?.map((item) => item.requestId)).toEqual(["request"]);
+      expect(notice.run?.status).toBe("running");
+      const second = yield* service
+        .waitForThread({
+          projectId,
+          threadId,
+          runId,
+          timeoutMs: 60_000,
+          seenRequestIds: ["request"],
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(resubscribed);
+      // The queue is retained across event-driven waits; no sleep or polling is needed.
+      status = "completed";
+      yield* Queue.offer(events, {
+        sequence: 2,
+        event: { threadId, type: "runtime-request.updated" },
+      } as unknown as OrchestrationV2StoredEvent);
+      const finished = yield* Fiber.join(second);
+      expect(finished.run?.status).toBe("completed");
+      expect(finished.pendingRequests ?? []).toEqual([]);
+    }),
+);
+
+it.effect(
+  "an explicit watch follows an idle thread across completed runs without repeating a result",
+  () =>
+    Effect.gen(function* () {
+      const events = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+      const subscribed = yield* Deferred.make<void>();
+      const resubscribed = yield* Deferred.make<void>();
+      let subscriptions = 0;
+      let ordinal = 0;
+      const threadId = ThreadId.make("future-thread");
+      const projectId = ProjectId.make("future-project");
+      const layerTest = ThreadManagementService.layer.pipe(
+        Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+        Layer.provide(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadEventSequence: () => Effect.succeed(0),
+            streamStoredEventsFrom: (input) =>
+              input?.eventType === "run.updated"
+                ? Stream.fromEffect(
+                    Effect.gen(function* () {
+                      yield* Deferred.succeed(
+                        subscriptions++ === 0 ? subscribed : resubscribed,
+                        undefined,
+                      );
+                    }),
+                  ).pipe(Stream.drain, Stream.concat(Stream.fromQueue(events)))
+                : Stream.never,
+            getThreadRecords: () =>
+              Effect.sync(
+                () =>
+                  ({
+                    thread: { id: threadId, projectId, deletedAt: null },
+                    runs:
+                      ordinal === 0
+                        ? []
+                        : [
+                            {
+                              id: RunId.make(`future-run-${ordinal}`),
+                              ordinal,
+                              status: "completed",
+                            },
+                          ],
+                    nodes: [],
+                    runtimeRequests: [],
+                    turnItems: [],
+                  }) as unknown as OrchestrationV2ThreadProjection,
+              ),
+          }),
+        ),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(layerReceiptsTest),
+      );
+      const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+        Effect.provide(layerTest),
+      );
+      const first = yield* service
+        .waitForThread({
+          projectId,
+          threadId,
+          timeoutMs: 60_000,
+          followThread: true,
+          seenRequestIds: [],
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(subscribed);
+      ordinal = 1;
+      yield* Queue.offer(events, {
+        sequence: 1,
+        event: { threadId, type: "run.updated", payload: { id: "future-run-1" } },
+      } as unknown as OrchestrationV2StoredEvent);
+      expect((yield* Fiber.join(first)).run?.id).toBe("future-run-1");
+      const second = yield* service
+        .waitForThread({
+          projectId,
+          threadId,
+          timeoutMs: 60_000,
+          followThread: true,
+          seenRequestIds: [],
+          completionAfterOrdinal: 1,
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(resubscribed);
+      ordinal = 2;
+      yield* Queue.offer(events, {
+        sequence: 2,
+        event: { threadId, type: "run.updated", payload: { id: "future-run-2" } },
+      } as unknown as OrchestrationV2StoredEvent);
+      expect((yield* Fiber.join(second)).run?.id).toBe("future-run-2");
+    }),
+);
+
+it.effect.each([
+  { kind: "user_input", terminalStatus: "completed" },
+  { kind: "command", terminalStatus: "completed" },
+  { kind: "user_input", terminalStatus: "failed" },
+  { kind: "command", terminalStatus: "failed" },
+] as const)(
+  "follow watches replay $kind ahead of queued work, acknowledge $terminalStatus, and await the next run",
+  ({ kind, terminalStatus }) =>
+    Effect.gen(function* () {
+      const runEvents = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+      const requestEvents = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+      let subscribed = yield* Deferred.make<void>();
+      const threadId = ThreadId.make("follow-queued-thread");
+      const projectId = ProjectId.make("follow-queued-project");
+      const runA = RunId.make("follow-run-a");
+      const runB = RunId.make("follow-run-b");
+      const nodeId = NodeId.make("follow-node-a");
+      let statusA: OrchestrationV2Run["status"] = "running";
+      let statusB: OrchestrationV2Run["status"] = "queued";
+      let pending = false;
+      let sequence = 10;
+      let reads = 0;
+      const layerTest = ThreadManagementService.layer.pipe(
+        Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+        Layer.provide(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadEventSequence: () => Effect.sync(() => sequence),
+            streamStoredEventsFrom: (input) => {
+              const events =
+                input?.eventType === "run.updated"
+                  ? runEvents
+                  : input?.eventType === "runtime-request.updated"
+                    ? requestEvents
+                    : undefined;
+              if (events === undefined) return Stream.empty;
+              return Stream.fromEffect(
+                input?.eventType === "runtime-request.updated"
+                  ? Deferred.succeed(subscribed, undefined)
+                  : Effect.void,
+              ).pipe(
+                Stream.drain,
+                Stream.concat(Stream.fromQueue(events)),
+                Stream.filter((stored) => stored.sequence > (input?.afterSequence ?? 0)),
+              );
+            },
+            getThreadRecords: () =>
+              Effect.gen(function* () {
+                const projection = {
+                  thread: { id: threadId, projectId, deletedAt: null },
+                  runs: [
+                    { id: runB, ordinal: 2, status: statusB },
+                    { id: runA, ordinal: 1, status: statusA },
+                  ],
+                  nodes: [{ id: nodeId, runId: runA }],
+                  runtimeRequests: pending
+                    ? [{ id: "request-a", nodeId, kind, status: "pending" }]
+                    : [],
+                  turnItems: pending
+                    ? [
+                        {
+                          id: "question-a",
+                          requestId: "request-a",
+                          type: kind === "user_input" ? "user_input_request" : "approval_request",
+                          status: "waiting",
+                          runId: runA,
+                          questions: [{ id: "question", question: "May I continue?", options: [] }],
+                        },
+                      ]
+                    : [],
+                } as unknown as OrchestrationV2ThreadProjection;
+                if (reads++ === 0) {
+                  // The question arrives after this snapshot, before either stream subscribes.
+                  pending = true;
+                  yield* Queue.offer(requestEvents, {
+                    sequence: ++sequence,
+                    event: { threadId, type: "runtime-request.updated" },
+                  } as unknown as OrchestrationV2StoredEvent);
+                }
+                return projection;
+              }),
+          }),
+        ),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(layerReceiptsTest),
+      );
+      const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+        Effect.provide(layerTest),
+      );
+      const wait = (seenRequestIds: readonly string[], completionAfterOrdinal?: number) =>
+        service.waitForThread({
+          projectId,
+          threadId,
+          followThread: true,
+          timeoutMs: 60_000,
+          seenRequestIds,
+          ...(completionAfterOrdinal === undefined ? {} : { completionAfterOrdinal }),
+        });
+      const question = yield* wait([]);
+      expect(question).toMatchObject({ timedOut: false, run: { id: runA, status: "running" } });
+      expect(question.pendingRequests?.map((item) => item.requestId)).toEqual(["request-a"]);
+
+      subscribed = yield* Deferred.make<void>();
+      const afterQuestion = yield* wait(["request-a"]).pipe(Effect.forkChild);
+      yield* Deferred.await(subscribed);
+      pending = false;
+      statusA = terminalStatus;
+      yield* Queue.offer(runEvents, {
+        sequence: ++sequence,
+        event: { threadId, type: "run.updated", payload: { id: runA } },
+      } as unknown as OrchestrationV2StoredEvent);
+      const resultA = yield* Fiber.join(afterQuestion);
+      expect(resultA).toMatchObject({ timedOut: false, run: { id: runA, status: terminalStatus } });
+      expect(resultA.pendingRequests ?? []).toEqual([]);
+
+      subscribed = yield* Deferred.make<void>();
+      const afterResult = yield* wait(["request-a"], 1).pipe(Effect.forkChild);
+      yield* Deferred.await(subscribed);
+      statusB = "completed";
+      yield* Queue.offer(runEvents, {
+        sequence: ++sequence,
+        event: { threadId, type: "run.updated", payload: { id: runB } },
+      } as unknown as OrchestrationV2StoredEvent);
+      expect(yield* Fiber.join(afterResult)).toMatchObject({
+        timedOut: false,
+        run: { id: runB, status: "completed" },
+        pendingRequests: [],
+      });
+    }),
+);
+
+it.effect.each([
+  { notice: "input", kind: "user_input", status: "running", runless: false },
+  { notice: "approval", kind: "command", status: "running", runless: false },
+  { notice: "completion", kind: null, status: "completed", runless: false },
+  { notice: "failure", kind: null, status: "failed", runless: false },
+  { notice: "runless input", kind: "user_input", status: "running", runless: true },
+  { notice: "runless approval", kind: "command", status: "running", runless: true },
+] as const)("follow watches select an existing $notice ahead of queued runs", (scenario) =>
   Effect.gen(function* () {
-    const projectId = ProjectId.make("project:thread-management:wait-event");
-    const threadId = ThreadId.make("thread:thread-management:wait-event");
-    const runId = RunId.make("run:thread-management:wait-event");
-    const subscribed = yield* Deferred.make<void>();
-    const events = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
-    let status: OrchestrationV2Run["status"] = "running";
-    let reads = 0;
-    const stored = (sequence: number, event: object) =>
-      ({ sequence, event: { threadId, ...event } }) as unknown as OrchestrationV2StoredEvent;
+    const threadId = ThreadId.make("follow-existing-thread");
+    const projectId = ProjectId.make("follow-existing-project");
+    const runA = RunId.make("follow-existing-a");
+    const runB = RunId.make("follow-existing-b");
+    const historicalRun = RunId.make("follow-existing-history");
+    const nodeId = NodeId.make("follow-existing-node");
     const layerTest = ThreadManagementService.layer.pipe(
       Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
           getThreadEventSequence: () => Effect.succeed(0),
-          // Only the run.updated stream carries events in this test.
-          streamStoredEventsFrom: (input) =>
-            input?.eventType === "run.updated"
-              ? Stream.fromEffect(Deferred.succeed(subscribed, undefined)).pipe(
-                  Stream.drain,
-                  Stream.concat(Stream.fromQueue(events)),
-                )
-              : Stream.never,
+          streamStoredEventsFrom: () => Stream.empty,
           getThreadRecords: () =>
-            Effect.sync(() => {
-              reads += 1;
-              return {
-                thread: { id: threadId, projectId, deletedAt: null },
-                runs: [{ id: runId, status }],
-              } as unknown as OrchestrationV2ThreadProjection;
-            }),
+            Effect.succeed({
+              thread: { id: threadId, projectId, deletedAt: null },
+              runs: [
+                { id: runB, ordinal: 3, status: "queued" },
+                { id: runA, ordinal: 2, status: scenario.status },
+                { id: historicalRun, ordinal: 1, status: "completed" },
+              ],
+              nodes: [{ id: nodeId, runId: scenario.runless ? null : runA }],
+              runtimeRequests: scenario.kind
+                ? [{ id: "request-a", nodeId, kind: scenario.kind, status: "pending" }]
+                : [],
+              turnItems: scenario.kind
+                ? [
+                    {
+                      id: "question-a",
+                      requestId: "request-a",
+                      type:
+                        scenario.kind === "user_input" ? "user_input_request" : "approval_request",
+                      status: "waiting",
+                      runId: scenario.runless ? null : runA,
+                    },
+                  ]
+                : [],
+            } as unknown as OrchestrationV2ThreadProjection),
         }),
       ),
       Layer.provide(ServerSettings.layerTest()),
@@ -690,19 +1023,235 @@ it.effect("waitForThread reads the run again only when the run updates", () =>
     const service = yield* ThreadManagementService.ThreadManagementService.pipe(
       Effect.provide(layerTest),
     );
-    const fiber = yield* service
-      .waitForThread({ projectId, threadId, runId, timeoutMs: 60 * 60 * 1_000 })
-      .pipe(Effect.forkChild);
-    yield* Deferred.await(subscribed);
-    status = "completed";
-    yield* Queue.offer(events, stored(1, { type: "run.updated", payload: { id: "other-run" } }));
-    yield* Queue.offer(events, stored(2, { type: "run.updated", payload: { id: runId, status } }));
-    const result = yield* Fiber.join(fiber);
-
-    expect(result).toMatchObject({ timedOut: false, run: { id: runId, status: "completed" } });
-    // The first read plus one for this run's update. The other run caused none.
-    expect(reads).toBe(2);
+    const wait = (seenRequestIds: readonly string[], completionAfterOrdinal?: number) =>
+      service.waitForThread({
+        projectId,
+        threadId,
+        followThread: true,
+        timeoutMs: 60_000,
+        seenRequestIds,
+        ...(completionAfterOrdinal === undefined ? {} : { completionAfterOrdinal }),
+      });
+    const result = yield* wait([]);
+    expect(result).toMatchObject({
+      timedOut: false,
+      run: scenario.runless ? null : { id: runA, status: scenario.status },
+    });
+    expect(result.pendingRequests?.map((item) => item.requestId) ?? []).toEqual(
+      scenario.kind ? ["request-a"] : [],
+    );
+    if (scenario.kind) {
+      expect(yield* wait(["request-a"])).toMatchObject({
+        timedOut: true,
+        run: { id: runB, status: "queued" },
+      });
+      // An explicit older cursor can include history, but requests still take priority.
+      expect(yield* wait([], 0)).toMatchObject({
+        timedOut: false,
+        run: scenario.runless ? null : { id: runA, status: "running" },
+      });
+      expect(yield* wait(["request-a"], 0)).toMatchObject({
+        timedOut: false,
+        run: { id: historicalRun, status: "completed" },
+      });
+    } else {
+      expect(yield* wait([], 0)).toMatchObject({
+        timedOut: false,
+        run: { id: historicalRun, status: "completed" },
+      });
+      expect(yield* wait([], 2)).toMatchObject({
+        timedOut: true,
+        run: { id: runB, status: "queued" },
+      });
+    }
   }),
+);
+
+it.effect(
+  "follow watches keep a completion cursor past 513 historical runs while request acknowledgements rotate",
+  () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("follow-history-thread");
+      const projectId = ProjectId.make("follow-history-project");
+      const history = Array.from({ length: 513 }, (_, index) => ({
+        id: RunId.make(`history-${index + 1}`),
+        ordinal: index + 1,
+        status: "completed" as const,
+      })).toReversed();
+      const runA = RunId.make("history-active-a");
+      const runB = RunId.make("history-queued-b");
+      const runC = RunId.make("history-future-c");
+      let statusA: OrchestrationV2Run["status"] | undefined;
+      let statusB: OrchestrationV2Run["status"] = "queued";
+      let includeC = false;
+      const events = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+      let subscribed = yield* Deferred.make<void>();
+      const layerTest = ThreadManagementService.layer.pipe(
+        Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+        Layer.provide(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadEventSequence: () => Effect.succeed(0),
+            streamStoredEventsFrom: (input) =>
+              input?.eventType === "run.updated"
+                ? Stream.fromEffect(Deferred.succeed(subscribed, undefined)).pipe(
+                    Stream.drain,
+                    Stream.concat(Stream.fromQueue(events)),
+                  )
+                : Stream.never,
+            getThreadRecords: () =>
+              Effect.sync(
+                () =>
+                  ({
+                    thread: { id: threadId, projectId, deletedAt: null },
+                    runs: [
+                      ...history,
+                      ...(statusA === undefined
+                        ? []
+                        : [
+                            { id: runB, ordinal: 515, status: statusB },
+                            { id: runA, ordinal: 514, status: statusA },
+                          ]),
+                      ...(includeC ? [{ id: runC, ordinal: 516, status: "completed" }] : []),
+                    ],
+                    nodes: [],
+                    runtimeRequests: [],
+                    turnItems: [],
+                  }) as unknown as OrchestrationV2ThreadProjection,
+              ),
+          }),
+        ),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(layerReceiptsTest),
+      );
+      const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+        Effect.provide(layerTest),
+      );
+      const wait = (seenRequestIds: readonly string[], completionAfterOrdinal?: number) =>
+        service.waitForThread({
+          projectId,
+          threadId,
+          followThread: true,
+          timeoutMs: 60_000,
+          seenRequestIds,
+          ...(completionAfterOrdinal === undefined ? {} : { completionAfterOrdinal }),
+        });
+      const seenRequestIds = Array.from({ length: 512 }, (_, index) => `request-${index}`);
+      const latest = yield* wait(seenRequestIds);
+      expect(latest).toMatchObject({ timedOut: false, run: { id: "history-513", ordinal: 513 } });
+
+      // A default baseline includes waiting A even though queued B has the highest ordinal.
+      statusA = "waiting";
+      const active = yield* wait(seenRequestIds).pipe(Effect.forkChild);
+      yield* Deferred.await(subscribed);
+      statusA = "completed";
+      yield* Queue.offer(events, {
+        sequence: 1,
+        event: { threadId, type: "run.updated", payload: { id: runA } },
+      } as unknown as OrchestrationV2StoredEvent);
+      const resultA = yield* Fiber.join(active);
+      expect(resultA).toMatchObject({ timedOut: false, run: { id: runA, ordinal: 514 } });
+
+      subscribed = yield* Deferred.make<void>();
+      const next = yield* wait(
+        seenRequestIds.map((id) => `new-${id}`),
+        resultA.run!.ordinal,
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(subscribed);
+      statusB = "failed";
+      yield* Queue.offer(events, {
+        sequence: 2,
+        event: { threadId, type: "run.updated", payload: { id: runB } },
+      } as unknown as OrchestrationV2StoredEvent);
+      const resultB = yield* Fiber.join(next);
+      expect(resultB).toMatchObject({
+        timedOut: false,
+        run: { id: runB, ordinal: 515, status: "failed" },
+      });
+
+      subscribed = yield* Deferred.make<void>();
+      const future = yield* wait([], resultB.run!.ordinal).pipe(Effect.forkChild);
+      yield* Deferred.await(subscribed);
+      includeC = true;
+      yield* Queue.offer(events, {
+        sequence: 3,
+        event: { threadId, type: "run.updated", payload: { id: runC } },
+      } as unknown as OrchestrationV2StoredEvent);
+      expect(yield* Fiber.join(future)).toMatchObject({
+        timedOut: false,
+        run: { id: runC, ordinal: 516 },
+      });
+    }),
+);
+
+it.effect.each(["explicit", "latest"] as const)(
+  "waitForThread reads the %s selected run again only when that run updates",
+  (selection) =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project:thread-management:wait-event");
+      const threadId = ThreadId.make("thread:thread-management:wait-event");
+      const runId = RunId.make("run:thread-management:wait-event");
+      const subscribed = yield* Deferred.make<void>();
+      const events = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+      let status: OrchestrationV2Run["status"] = "running";
+      let queued = false;
+      let reads = 0;
+      const stored = (sequence: number, event: object) =>
+        ({ sequence, event: { threadId, ...event } }) as unknown as OrchestrationV2StoredEvent;
+      const layerTest = ThreadManagementService.layer.pipe(
+        Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+        Layer.provide(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadEventSequence: () => Effect.succeed(0),
+            // Only the run.updated stream carries events in this test.
+            streamStoredEventsFrom: (input) =>
+              input?.eventType === "run.updated"
+                ? Stream.fromEffect(Deferred.succeed(subscribed, undefined)).pipe(
+                    Stream.drain,
+                    Stream.concat(Stream.fromQueue(events)),
+                  )
+                : Stream.never,
+            getThreadRecords: () =>
+              Effect.sync(() => {
+                reads += 1;
+                return {
+                  thread: { id: threadId, projectId, deletedAt: null },
+                  runs: [
+                    { id: runId, ordinal: 1, status },
+                    ...(queued ? [{ id: "other-run", ordinal: 2, status: "queued" }] : []),
+                  ],
+                } as unknown as OrchestrationV2ThreadProjection;
+              }),
+          }),
+        ),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(layerReceiptsTest),
+      );
+      const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+        Effect.provide(layerTest),
+      );
+      const fiber = yield* service
+        .waitForThread({
+          projectId,
+          threadId,
+          ...(selection === "explicit" ? { runId } : {}),
+          completionAfterOrdinal: 100,
+          timeoutMs: 60 * 60 * 1_000,
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(subscribed);
+      queued = true;
+      status = "completed";
+      yield* Queue.offer(events, stored(1, { type: "run.updated", payload: { id: "other-run" } }));
+      yield* Queue.offer(
+        events,
+        stored(2, { type: "run.updated", payload: { id: runId, status } }),
+      );
+      const result = yield* Fiber.join(fiber);
+
+      expect(result).toMatchObject({ timedOut: false, run: { id: runId, status: "completed" } });
+      // The first read plus one for this run's update. The other run caused none.
+      expect(reads).toBe(2);
+    }),
 );
 
 it.effect.each([

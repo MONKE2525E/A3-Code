@@ -208,6 +208,33 @@ describe("voice call history", () => {
   });
 });
 
+describe("native group authors", () => {
+  it("uses the member author rather than the group and retains removed members by wire name", () => {
+    const rows = messagesFrom(
+      [
+        {
+          kind: "send-message",
+          id: "g1",
+          author: { id: "bot-chicken", name: "Old name" },
+          message: { type: "text", content: "hello" },
+        },
+        {
+          kind: "send-message",
+          id: "g2",
+          author: { id: "removed", name: "Former member" },
+          message: { type: "text", content: "bye" },
+        },
+      ],
+      { id: "group", name: "Group" },
+      roster,
+    );
+    expect(rows.map((row) => row.sender)).toEqual([
+      { kind: "bot", id: "bot-chicken", name: "Dr. Chicken" },
+      { kind: "unknown", label: "Former member" },
+    ]);
+  });
+});
+
 describe("connector cards", () => {
   // The shape native writes when the bot asks to connect an MCP server.
   const card = { type: "connector", connector: "mcp.linear.app", serverId: 7, variant: "connect" };

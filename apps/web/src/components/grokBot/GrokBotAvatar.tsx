@@ -1,5 +1,5 @@
 import type { EnvironmentId, GrokBot } from "@t3tools/contracts";
-import { StarIcon } from "lucide-react";
+import { PhoneIcon, StarIcon } from "lucide-react";
 import {
   type ComponentRef,
   type CSSProperties,
@@ -23,6 +23,7 @@ import {
 } from "./grokBotAvatarEngine";
 import {
   type GrokBotAvatarActivity,
+  isGrokBotVoiceCallLive,
   resolveGrokBotVoiceCallActivity,
 } from "./grokBotVoiceCallActivity";
 import { GrokBotVoiceCallContext } from "./useGrokBotVoiceCall";
@@ -87,6 +88,8 @@ type GrokBotAvatarProps = {
   readonly gazeHost?: HTMLElement | null;
   /** Keep catalog marks upright while their face looks up and to the right, until they have a state. */
   readonly restingPose?: "upright";
+  /** The bot is on a live call; set by `GrokBotAvatar` from the call provider. */
+  readonly onCall?: boolean;
   readonly className?: string;
   /** The environment whose avatar engine draws the bot; defaults to the selected Grok Bot environment. */
   readonly environmentId?: EnvironmentId;
@@ -112,11 +115,16 @@ export function GrokBotAvatar(props: GrokBotAvatarProps) {
     botId: props.bot.id,
     activity: props.state,
   });
+  const onCall = isGrokBotVoiceCallLive({
+    call: voiceCall?.call ?? null,
+    environmentId,
+    botId: props.bot.id,
+  });
   const engine = useGrokBotAvatarEngine(environmentId);
   return engine === null ? (
-    <GrokBotAvatarFallback {...props} />
+    <GrokBotAvatarFallback {...props} onCall={onCall} />
   ) : (
-    <GrokBotEngineAvatar engine={engine} {...props} state={state} />
+    <GrokBotEngineAvatar engine={engine} {...props} state={state} onCall={onCall} />
   );
 }
 
@@ -200,6 +208,7 @@ function GrokBotEngineAvatar({
   featured = false,
   state,
   statusDot = null,
+  onCall = false,
   spinSignal = 0,
   appearanceSignal = 0,
   emphasized = false,
@@ -366,6 +375,7 @@ function GrokBotEngineAvatar({
       />
       {featured ? <FeaturedBadge pixels={pixels} /> : null}
       {statusDot ? <StatusDot status={statusDot} pixels={pixels} featured={featured} /> : null}
+      {onCall ? <CallBadge pixels={pixels} /> : null}
     </span>
   );
 }
@@ -377,6 +387,7 @@ function GrokBotAvatarFallback({
   fillPx,
   featured = false,
   statusDot = null,
+  onCall = false,
   className,
 }: GrokBotAvatarProps) {
   const pixels = fillPx ?? SIZE_PX[size];
@@ -393,6 +404,23 @@ function GrokBotAvatarFallback({
       />
       {featured ? <FeaturedBadge pixels={pixels} /> : null}
       {statusDot ? <StatusDot status={statusDot} pixels={pixels} featured={featured} /> : null}
+      {onCall ? <CallBadge pixels={pixels} /> : null}
+    </span>
+  );
+}
+
+/** Marks the bot you are on a call with; the top-right corner is free of the star and status dot. */
+function CallBadge({ pixels }: { readonly pixels: number }) {
+  const large = pixels >= 36;
+  return (
+    <span
+      data-grok-bot-call-badge=""
+      className={cn(
+        "absolute -top-0.5 -right-0.5 flex items-center justify-center rounded-full bg-success text-white shadow-sm ring-2 ring-sidebar",
+        large ? "size-4.5" : "size-3.5",
+      )}
+    >
+      <PhoneIcon className={cn("fill-current", large ? "size-2.5" : "size-2")} />
     </span>
   );
 }

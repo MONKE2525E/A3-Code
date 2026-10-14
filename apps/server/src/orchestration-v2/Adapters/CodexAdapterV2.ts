@@ -1370,6 +1370,10 @@ export const makeCodexAppServerSpawnCommand = Effect.fn(
     threadId: input.threadId,
     env: input.env,
   });
+  if (launch.cleanup !== undefined) {
+    const cleanup = launch.cleanup;
+    yield* Effect.addFinalizer(() => cleanup);
+  }
   const spawnCommand = yield* resolveSpawnCommand(launch.command, launch.args, {
     ...(input.env === undefined ? {} : { env: input.env }),
     ...(input.extendEnv === undefined ? {} : { extendEnv: input.extendEnv }),

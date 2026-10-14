@@ -349,6 +349,15 @@ export interface ShellSnapshotOptions {
 }
 
 export interface ProjectionStoreV2Shape {
+  /** Active runs only; no transcript, sidebar state, or pending-item decoding. */
+  readonly getResourceAdmissionRuns: Effect.Effect<
+    ReadonlyArray<{
+      readonly runId: RunId;
+      readonly threadId: ThreadId;
+      readonly status: "starting" | "running" | "waiting";
+    }>,
+    ProjectionStoreV2Error
+  >;
   readonly searchThreadStream: (
     input: OrchestrationV2SearchThreadInput,
   ) => Stream.Stream<OrchestrationV2SearchThreadResult, ProjectionStoreV2Error>;
@@ -6102,7 +6111,40 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         )
         .pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })));
 
+    const getResourceAdmissionRuns: ProjectionStoreV2Shape["getResourceAdmissionRuns"] = Effect.gen(
+      function* () {
+        const rows = yield* sql<{
+          readonly run_id: string;
+          readonly thread_id: string;
+          readonly status: "starting" | "running" | "waiting";
+        }>`
+        SELECT run.run_id, run.thread_id, run.status
+        FROM orchestration_v2_projection_runs AS run
+        LEFT JOIN orchestration_v2_projection_provider_threads AS provider_thread
+          ON provider_thread.provider_thread_id = run.provider_thread_id
+        WHERE run.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+          AND run.status IN ('starting', 'running', 'waiting')
+          AND (provider_thread.driver IS NULL OR provider_thread.driver != 'grok-bot')
+      `;
+        // The first status predicate matches the existing partial recovery index.
+        return rows.map((row) => ({
+          runId: RunId.make(row.run_id),
+          threadId: ThreadId.make(row.thread_id),
+          status: row.status,
+        }));
+      },
+    ).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProjectionStoreReadError({
+            threadId: ThreadId.make("thread:resource-admission"),
+            cause,
+          }),
+      ),
+    );
+
     return {
+      getResourceAdmissionRuns,
       apply,
       getShellSnapshot,
       readShellSnapshot,
@@ -6173,6 +6215,24 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           }
           yield* Ref.update(sequence, (current) => current + 1);
         }),
+      getResourceAdmissionRuns: Effect.gen(function* () {
+        const existing = (yield* Ref.get(replayState)).projections;
+        return [...existing.values()].flatMap((projection) =>
+          projection.runs.flatMap((run) =>
+            (run.status === "starting" || run.status === "running" || run.status === "waiting") &&
+            projection.providerThreads.find((thread) => thread.id === run.providerThreadId)
+              ?.driver !== "grok-bot"
+              ? [
+                  {
+                    runId: run.id,
+                    threadId: run.threadId,
+                    status: run.status,
+                  },
+                ]
+              : [],
+          ),
+        );
+      }),
       getShellSnapshot: (options) =>
         Effect.gen(function* () {
           const existing = (yield* Ref.get(replayState)).projections;

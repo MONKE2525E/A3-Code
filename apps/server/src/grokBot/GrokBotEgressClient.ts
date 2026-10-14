@@ -8,11 +8,79 @@ export type EgressPolicy = {
   readonly allowedDomains: readonly string[];
   readonly allowedTcpDestinations: readonly { readonly cidr: string; readonly port: number }[];
 };
+const domainMatches = (name: string, domain: string) => {
+  const rule = domain.trim().toLowerCase().replace(/\.$/, "");
+  return rule.length > 0 && (rule.startsWith("*.") ? name.endsWith(rule.slice(1)) : name === rule);
+};
+const ipv4 = (host: string) => host.split(".").reduce((a, n) => (a << 8) | Number(n), 0) >>> 0;
+const cidr = (value: string) => {
+  const [host, prefix = "32"] = value.split("/");
+  const bits = Number(prefix);
+  if (!host || NodeNet.isIP(host) !== 4 || !Number.isInteger(bits) || bits < 0 || bits > 32)
+    return null;
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  return { bits, mask, network: (ipv4(host) & mask) >>> 0 };
+};
+/** Refreshes can remove permissions, but loosening requires a new account/box connection context. */
+export function intersectEgressPolicies(current: EgressPolicy, next: EgressPolicy): EgressPolicy {
+  if (!current.restricted) return next;
+  if (!next.restricted) return current;
+  const domainCovered = (domain: string, rules: readonly string[]) => {
+    const name = domain.trim().toLowerCase().replace(/\.$/, "");
+    return name.startsWith("*.")
+      ? rules.some((rule) => {
+          const normalized = rule.trim().toLowerCase().replace(/\.$/, "");
+          return (
+            normalized.startsWith("*.") &&
+            (name === normalized || name.slice(2).endsWith(normalized.slice(1)))
+          );
+        })
+      : rules.some((rule) => domainMatches(name, rule));
+  };
+  const tcpCovered = (
+    destination: EgressPolicy["allowedTcpDestinations"][number],
+    rules: EgressPolicy["allowedTcpDestinations"],
+  ) => {
+    const candidate = cidr(destination.cidr);
+    return (
+      candidate !== null &&
+      rules.some((rule) => {
+        const allowed = cidr(rule.cidr);
+        return (
+          rule.port === destination.port &&
+          allowed !== null &&
+          allowed.bits <= candidate.bits &&
+          (candidate.network & allowed.mask) >>> 0 === allowed.network
+        );
+      })
+    );
+  };
+  const domains = [
+    ...next.allowedDomains.filter((rule) => domainCovered(rule, current.allowedDomains)),
+    ...current.allowedDomains.filter((rule) => domainCovered(rule, next.allowedDomains)),
+  ];
+  const destinations = [
+    ...next.allowedTcpDestinations.filter((rule) =>
+      tcpCovered(rule, current.allowedTcpDestinations),
+    ),
+    ...current.allowedTcpDestinations.filter((rule) =>
+      tcpCovered(rule, next.allowedTcpDestinations),
+    ),
+  ];
+  return {
+    restricted: true,
+    allowedDomains: [...new Set(domains)],
+    allowedTcpDestinations: [
+      ...new Map(destinations.map((rule) => [`${rule.cidr}:${rule.port}`, rule])).values(),
+    ],
+  };
+}
 export function egressAllows(host: string, port: number, policy: EgressPolicy): boolean {
   if (
     !Number.isInteger(port) ||
     port < 1 ||
     port > 65535 ||
+    host.length === 0 ||
     host.length > 253 ||
     !/^[a-z\d.:-]+$/i.test(host)
   )
@@ -21,30 +89,28 @@ export function egressAllows(host: string, port: number, policy: EgressPolicy): 
   const name = host.toLowerCase().replace(/\.$/, "");
   if (
     (port === 80 || port === 443) &&
-    policy.allowedDomains.some((domain) => {
-      const rule = domain.toLowerCase().replace(/\.$/, "");
-      return rule.startsWith("*.") ? name.endsWith(rule.slice(1)) : name === rule;
-    })
+    policy.allowedDomains.some((domain) => domainMatches(name, domain))
   )
     return true;
   if (NodeNet.isIP(host) !== 4) return false;
-  const value = host.split(".").reduce((a, n) => (a << 8) | Number(n), 0) >>> 0;
+  const value = ipv4(host);
   return policy.allowedTcpDestinations.some((rule) => {
-    const [ip, prefix = "32"] = rule.cidr.split("/");
-    const bits = Number(prefix);
-    if (
-      rule.port !== port ||
-      !ip ||
-      NodeNet.isIP(ip) !== 4 ||
-      !Number.isInteger(bits) ||
-      bits < 0 ||
-      bits > 32
-    )
-      return false;
-    const network = ip.split(".").reduce((a, n) => (a << 8) | Number(n), 0) >>> 0;
-    const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
-    return (value & mask) >>> 0 === (network & mask) >>> 0;
+    const allowed = cidr(rule.cidr);
+    return (
+      rule.port === port && allowed !== null && (value & allowed.mask) >>> 0 === allowed.network
+    );
   });
+}
+function egressDecision(host: string, port: number, policy: EgressPolicy) {
+  if (egressAllows(host, port, policy)) return "allow";
+  if (
+    port !== 80 &&
+    port !== 443 &&
+    NodeNet.isIP(host) === 0 &&
+    policy.allowedTcpDestinations.some((rule) => rule.port === port)
+  )
+    return "recheck-after-resolve";
+  return "refuse";
 }
 export function egressFrame(bytes: Buffer) {
   if (bytes.length < 5) return null;
@@ -68,12 +134,17 @@ const closeFrame = (id: number) => {
 };
 const MAX_BUFFER = 1024 * 1024;
 
-/** Same native framing and if-free ownership. Never claims or replaces another desktop tunnel. */
+/** One transport attachment; its controller retains only confirmed ownership across recovery. */
 export function startEgressClient(input: {
   readonly url: string;
   readonly headers: Record<string, string>;
   readonly policy: EgressPolicy;
   readonly now: () => number;
+  readonly attachMode?: "if-free" | "claim";
+  readonly clientId?: string;
+  readonly ownership?: { generation: string | null };
+  readonly opened?: () => void;
+  readonly disconnected?: (state: "standby" | "error") => void;
   readonly status: (
     state: "connecting" | "connected" | "standby" | "error",
     active: number,
@@ -84,6 +155,8 @@ export function startEgressClient(input: {
   let relayed = 0;
   let state: "connecting" | "connected" | "standby" | "error" = "connecting";
   let heard = input.now();
+  let attachGeneration: string | null = null;
+  let confirmed = false;
   const streams = new Map<
     number,
     { socket?: NodeNet.Socket; pending: Buffer[]; bytes: number; ended: boolean; openedAt: number }
@@ -93,7 +166,14 @@ export function startEgressClient(input: {
     for (const stream of streams.values()) if (stream.socket?.isPaused()) stream.socket.resume();
   };
   const ws = new NodeWS.WebSocket(input.url, {
-    headers: { ...input.headers, "x-sand-egress-attach": "if-free" },
+    headers: {
+      ...input.headers,
+      "x-sand-egress-attach": input.attachMode ?? "if-free",
+      ...(input.clientId === undefined ? {} : { "x-sand-egress-client": input.clientId }),
+      ...(input.attachMode !== "claim" && input.ownership?.generation != null
+        ? { "x-sand-egress-if-match": input.ownership.generation }
+        : {}),
+    },
     handshakeTimeout: 15000,
     maxPayload: MAX_BUFFER,
   });
@@ -110,6 +190,11 @@ export function startEgressClient(input: {
     publish();
   };
   const open = async (id: number, host: string, port: number) => {
+    const decision = egressDecision(host, port, input.policy);
+    if (decision === "refuse") {
+      send(closeFrame(id));
+      return;
+    }
     if (streams.has(id) || streams.size >= 64) {
       send(closeFrame(id));
       return;
@@ -131,8 +216,7 @@ export function startEgressClient(input: {
       // Resolve once and connect to that exact policy-approved address, preventing DNS rebinding.
       const addresses = await NodeDnsPromises.lookup(host, { all: true });
       const address = addresses.find(
-        (entry) =>
-          egressAllows(host, port, input.policy) || egressAllows(entry.address, port, input.policy),
+        (entry) => decision === "allow" || egressAllows(entry.address, port, input.policy),
       );
       if (
         !address ||
@@ -172,19 +256,31 @@ export function startEgressClient(input: {
       close(id, stream);
     }
   };
+  ws.on("upgrade", (response) => {
+    if (stopped) return;
+    const value = response.headers["x-sand-egress-attach-gen"];
+    attachGeneration = typeof value === "string" && /^\d{1,20}$/.test(value) ? value : null;
+  });
   ws.on("open", () => {
+    if (stopped) return;
     heard = input.now();
+    input.opened?.();
     ws.ping();
   });
   const alive = () => {
     if (stopped) return;
     heard = input.now();
+    if (!confirmed) {
+      confirmed = true;
+      if (input.ownership) input.ownership.generation = attachGeneration;
+    }
     state = "connected";
     publish();
   };
   ws.on("ping", alive);
   ws.on("pong", alive);
   ws.on("message", (data, binary) => {
+    if (stopped) return;
     alive();
     if (!binary) return;
     const bytes = Buffer.isBuffer(data)
@@ -225,6 +321,7 @@ export function startEgressClient(input: {
   ws.on("unexpected-response", (_request, response) => {
     if (stopped) return;
     state = response.statusCode === 409 ? "standby" : "error";
+    if (response.statusCode === 409 && input.ownership) input.ownership.generation = null;
     ws.terminate();
     publish();
   });
@@ -238,7 +335,9 @@ export function startEgressClient(input: {
     streams.clear();
     if (!stopped) {
       state = code === 4001 || code === 4002 || state === "standby" ? "standby" : "error";
+      if (state === "standby" && input.ownership) input.ownership.generation = null;
       publish();
+      input.disconnected?.(state);
     }
   });
   publish();

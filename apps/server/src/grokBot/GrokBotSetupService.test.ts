@@ -15,7 +15,9 @@ import * as Native from "./GrokBotNativeService.ts";
 import * as Runtime from "./GrokBotNativeRuntimeService.ts";
 import * as Bots from "./GrokBotService.ts";
 import * as Setup from "./GrokBotSetupService.ts";
+import * as Marketplace from "./GrokBotMarketplaceService.ts";
 import * as Binding from "../orchestration-v2/Adapters/GrokBotManagedBinding.ts";
+import { resolveGrokBotOAuthRedirect } from "../../../web/src/components/grokBot/grokBotSetupFlow.ts";
 
 const fixtureWith = (
   options: {
@@ -189,6 +191,66 @@ it.layer(NodeServices.layer)("guided GrokBot setup", (it) => {
       assert.equal(status.connectorServerId, 7);
       assert.equal(status.authorizationUrl, null);
       assert.equal(status.complete, false);
+    }),
+  );
+  it.effect("offers the matching connector when the native transcript is unavailable", () =>
+    Effect.gen(function* () {
+      const f = yield* fixtureWith({ connector: true, conversation: false });
+      yield* f.service.send;
+      yield* Deferred.await(f.persisted);
+      const status = yield* f.service.status;
+      assert.equal(status.phase, "awaiting_authorization");
+      assert.equal(status.connectorServerId, 7);
+      assert.equal(status.authorizationUrl, null);
+      assert.equal(status.complete, false);
+    }),
+  );
+  it.effect("accepts UI-generated callbacks for remote and loopback environment routes", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const published = (yield* f.service.status).mcpUrl;
+      const redirects: string[] = [];
+      const context = yield* Layer.build(
+        Marketplace.layer.pipe(
+          Layer.provide(
+            Layer.mock(Native.GrokBotNativeService)({
+              accountBinding: Ref.get(f.account),
+              readMcp: () => Effect.succeed({ servers: [{ id: 7, name: "T3", url: published }] }),
+              marketplaceRequest: (_binding, request) =>
+                Effect.sync(() => {
+                  if (request.method !== "CheckHttpMcpStatus")
+                    assert.fail("Callback validation should only check the native OAuth status");
+                  redirects.push(request.input.oauthRedirectUri);
+                  return { statuses: [{ id: 7, isAvailable: true, requiresAuth: false }] };
+                }),
+            }),
+          ),
+        ),
+      );
+      const marketplace = Context.get(context, Marketplace.GrokBotMarketplaceService);
+      for (const route of [
+        "http://192.168.1.10:3773",
+        "http://100.64.0.2:3773",
+        "http://127.0.0.1:3773",
+        "https://direct.example.test",
+      ]) {
+        const redirectUri = resolveGrokBotOAuthRedirect("t3code://app", route, published);
+        assert.isNotNull(redirectUri);
+        assert.equal(
+          (yield* marketplace.authenticate({
+            serverId: 7,
+            accountKey: "default",
+            redirectUri: redirectUri!,
+          })).authenticated,
+          true,
+        );
+      }
+      assert.deepEqual(redirects, [
+        "https://dev.example.test/settings/marketplace?grokBotOAuth=1",
+        "https://dev.example.test/settings/marketplace?grokBotOAuth=1",
+        "http://127.0.0.1:3773/settings/marketplace?grokBotOAuth=1",
+        "https://direct.example.test/settings/marketplace?grokBotOAuth=1",
+      ]);
     }),
   );
   it.effect("waits for verification after connector authorization", () =>

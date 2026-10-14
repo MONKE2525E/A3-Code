@@ -13,6 +13,7 @@ import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -174,27 +175,51 @@ interface ActiveCall {
 const make = Effect.gen(function* () {
   const backend = yield* GrokBotVoiceBackend;
   const bridge = yield* Bridge.GrokBotVoiceT3Bridge;
+  const scope = yield* Effect.scope;
   // callId -> the account and bot it speaks for. Later requests can only reach those.
   const calls = yield* Ref.make(new Map<string, ActiveCall>());
 
-  const forget = (callId: string) =>
-    Ref.update(calls, (current) => {
+  const cleanup = Effect.fnUntraced(function* (callId: string, call: ActiveCall) {
+    yield* bridge.forget(callId);
+    if (call.connectedAtMs !== undefined)
+      yield* backend
+        .setPresence(call.binding, { botId: call.botId, callId, onTheLine: false })
+        .pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("Failed to clear the voice call presence", { error }),
+          ),
+        );
+  });
+
+  const forget = Effect.fnUntraced(function* (callId: string) {
+    // Removal is the single decision point: only the caller that removes the call may finalize it.
+    const call = yield* Ref.modify(calls, (current) => {
+      const entry = current.get(callId);
+      if (entry === undefined) return [undefined, current] as const;
       const next = new Map(current);
       next.delete(callId);
-      return next;
-    }).pipe(Effect.andThen(bridge.forget(callId)));
+      return [entry, next] as const;
+    });
+    if (call !== undefined) yield* cleanup(callId, call);
+    return call;
+  }, Effect.uninterruptible);
 
   const sweep = (now: number) =>
     Ref.modify(calls, (current) => {
       const next = new Map(current);
-      const expired: string[] = [];
+      const expired: [string, ActiveCall][] = [];
       for (const [id, call] of next)
         if (now - call.at > CALL_MAX_AGE_MS) {
           next.delete(id);
-          expired.push(id);
+          expired.push([id, call]);
         }
       return [expired, next] as const;
-    }).pipe(Effect.flatMap((expired) => Effect.forEach(expired, bridge.forget, { discard: true })));
+    }).pipe(
+      Effect.flatMap((expired) =>
+        Effect.forEach(expired, ([id, call]) => cleanup(id, call), { discard: true }),
+      ),
+      Effect.uninterruptible,
+    );
 
   /** The call, if it is still within its lifetime and the selected account is the one that opened it. */
   const active = Effect.fnUntraced(function* (callId: string) {
@@ -227,8 +252,8 @@ const make = Effect.gen(function* () {
   });
 
   /**
-   * Marks the call connected exactly once and puts the bot on the line. Presence is best effort.
-   * If the call ended while the true was in flight, `end` may have sent false first, so false is
+   * Awaits local authority exactly once, then sends best-effort presence in the service's scope.
+   * If the call ended while the true was in flight, cleanup may have sent false first, so false is
    * sent again to keep a late true from resurrecting presence.
    */
   const markConnected = Effect.fnUntraced(function* (callId: string, call: ActiveCall) {
@@ -247,13 +272,29 @@ const make = Effect.gen(function* () {
     yield* bridge
       .activate({ binding: call.binding, botId: call.botId, callId })
       .pipe(Effect.ensuring(Deferred.succeed(call.authorityReady, undefined)));
-    if (!(yield* Ref.get(calls)).has(callId)) yield* bridge.forget(callId);
+    if ((yield* Ref.get(calls)).get(callId) !== call) {
+      yield* bridge.forget(callId);
+      return true;
+    }
     const presence = { botId: call.botId, callId };
-    yield* backend.setPresence(call.binding, { ...presence, onTheLine: true }).pipe(Effect.ignore);
-    if (!(yield* Ref.get(calls)).has(callId))
-      yield* backend
-        .setPresence(call.binding, { ...presence, onTheLine: false })
-        .pipe(Effect.ignore);
+    yield* backend.setPresence(call.binding, { ...presence, onTheLine: true }).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("Failed to put the voice call on the line", { error }),
+      ),
+      Effect.onExit((exit) =>
+        Effect.gen(function* () {
+          if (Exit.isFailure(exit) || (yield* Ref.get(calls)).get(callId) !== call)
+            yield* backend
+              .setPresence(call.binding, { ...presence, onTheLine: false })
+              .pipe(
+                Effect.catch((error) =>
+                  Effect.logWarning("Failed to clear the voice call presence", { error }),
+                ),
+              );
+        }),
+      ),
+      Effect.forkIn(scope),
+    );
     return true;
   });
 
@@ -269,12 +310,17 @@ const make = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
       yield* sweep(now);
       const binding = yield* backend.accountBinding;
-      const credential = yield* backend.mintCredential(binding).pipe(Effect.flatMap(dialable));
       const session = yield* backend.openSession(binding, input);
       const chatContext = yield* bridge.context(input.botId);
-      // The account may have changed while the credential and session were being fetched.
+      // Prepare the session before starting the short-lived credential's lifetime.
       if ((yield* backend.accountBinding) !== binding)
         return yield* new GrokBotVoiceError({ reason: "account_unavailable" });
+      const credential = yield* backend.mintCredential(binding);
+      // Revalidate after minting, then check expiry at the point the credential will be returned.
+      if ((yield* backend.accountBinding) !== binding)
+        return yield* new GrokBotVoiceError({ reason: "account_unavailable" });
+      yield* dialable(credential);
+      const registeredAt = yield* Clock.currentTimeMillis;
       // Same shape as the desktop's call ids.
       const callId = yield* Effect.sync(() => `call-${NodeCrypto.randomUUID()}`);
       const authorityReady = yield* Deferred.make<void>();
@@ -283,7 +329,7 @@ const make = Effect.gen(function* () {
           binding,
           botId: input.botId,
           model: credential.model,
-          at: now,
+          at: registeredAt,
           connectedAtMs: undefined,
           authorityReady,
           toolCalls: [],
@@ -306,7 +352,10 @@ const make = Effect.gen(function* () {
   const refresh: GrokBotVoiceService["Service"]["refresh"] = Effect.fn("GrokBotVoice.refresh")(
     function* (callId) {
       const call = yield* active(callId);
-      return yield* backend.mintCredential(call.binding).pipe(Effect.flatMap(dialable));
+      const credential = yield* backend.mintCredential(call.binding);
+      // Minting can outlive hang-up or an account switch, just like a tool request.
+      yield* active(callId);
+      return yield* dialable(credential);
     },
   );
 
@@ -364,17 +413,9 @@ const make = Effect.gen(function* () {
 
   const end: GrokBotVoiceService["Service"]["end"] = Effect.fn("GrokBotVoice.end")(
     function* (input) {
-      // Removal is the single decision point: only the caller that removes the call may finalize it.
-      const call = yield* Ref.modify(calls, (current) => {
-        const entry = current.get(input.callId);
-        if (entry === undefined) return [undefined, current] as const;
-        const next = new Map(current);
-        next.delete(input.callId);
-        return [entry, next] as const;
-      });
-      if (call === undefined) return { ended: false, recorded: false };
-      yield* bridge.forget(input.callId);
       const endedAtMs = yield* Clock.currentTimeMillis;
+      const call = yield* forget(input.callId);
+      if (call === undefined) return { ended: false, recorded: false };
       // The record and the presence reset both go out under the account that opened the call, so a
       // switched account fails them instead of writing into the new account's history.
       const recorded =
@@ -402,10 +443,6 @@ const make = Effect.gen(function* () {
                 Effect.as(true),
                 Effect.orElseSucceed(() => false),
               );
-      if (call.connectedAtMs !== undefined)
-        yield* backend
-          .setPresence(call.binding, { botId: call.botId, callId: input.callId, onTheLine: false })
-          .pipe(Effect.ignore);
       return { ended: true, recorded };
     },
   );
@@ -413,7 +450,9 @@ const make = Effect.gen(function* () {
   // Hanging up is the only cleanup the credential needs: it lives in the response and nowhere else.
   yield* Effect.addFinalizer(() =>
     Ref.getAndSet(calls, new Map()).pipe(
-      Effect.flatMap((current) => Effect.forEach(current.keys(), bridge.forget, { discard: true })),
+      Effect.flatMap((current) =>
+        Effect.forEach(current, ([id, call]) => cleanup(id, call), { discard: true }),
+      ),
     ),
   );
 

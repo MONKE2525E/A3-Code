@@ -3022,7 +3022,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
             peer={row.message.grokBotPeer}
           />
         ) : null}
-        <MessageAuthorHeading>T3 Code</MessageAuthorHeading>
+        <MessageAuthorHeading>{row.message.grokBotAuthor?.name || "T3 Code"}</MessageAuthorHeading>
         {row.message.grokBotWorkflowReferences ? (
           <GrokBotWorkflowReferenceChips references={row.message.grokBotWorkflowReferences} />
         ) : null}

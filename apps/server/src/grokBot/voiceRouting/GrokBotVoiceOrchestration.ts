@@ -1,13 +1,16 @@
 import {
   NodeId,
   RuntimeRequestId,
+  ProviderUserInputAnswers,
   OrchestratorMcpFailure,
   ThreadId,
   type GrokBotVoiceToolResult,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -22,28 +25,15 @@ import { OrchestratorToolkit } from "../../mcp/toolkits/orchestrator/tools.ts";
 import * as OrchestratorHandlers from "../../mcp/toolkits/orchestrator/handlers.ts";
 import { ProjectToolkit } from "../../mcp/toolkits/project/tools.ts";
 import * as ProjectHandlers from "../../mcp/toolkits/project/handlers.ts";
+import { ThreadToolkit } from "../../mcp/toolkits/thread/tools.ts";
+import * as ThreadHandlers from "../../mcp/toolkits/thread/handlers.ts";
 
-const toolkit = Toolkit.merge(OrchestratorToolkit, ProjectToolkit);
+const toolkit = Toolkit.merge(OrchestratorToolkit, ProjectToolkit, ThreadToolkit);
 const isOrchestratorFailure = Schema.is(OrchestratorMcpFailure);
-const names = [
-  "orchestrator_capabilities",
-  "delegate_task",
-  "task_status",
-  "task_cancel",
-  "t3_thread_launch",
-  "t3_thread_list",
-  "t3_thread_read",
-  "t3_thread_wait",
-  "t3_thread_send",
-  "t3_thread_update",
-  "t3_thread_interrupt",
-  "t3_workflow_stop",
-  "schedule_task",
-  "list_scheduled_tasks",
-  "update_scheduled_task",
-  "delete_scheduled_task",
-  "t3_project_list",
-] as const;
+// These handlers require a provider-thread credential that voice calls do not hold.
+const names = (Object.keys(toolkit.tools) as Array<keyof typeof toolkit.tools>).filter(
+  (name) => name !== "create_threads" && name !== "request_secret",
+);
 const postChatSchema = Schema.Struct({
   text: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(120_000)),
 });
@@ -55,26 +45,64 @@ const respondApprovalSchema = Schema.Struct({
 });
 const decodePostChat = Schema.decodeUnknownEffect(postChatSchema);
 const decodeRespondApproval = Schema.decodeUnknownEffect(respondApprovalSchema);
+const respondQuestionSchema = Schema.Struct({
+  threadId: ThreadId,
+  requestId: RuntimeRequestId,
+  answers: ProviderUserInputAnswers,
+  userConfirmed: Schema.Boolean,
+});
+const decodeRespondQuestion = Schema.decodeUnknownEffect(respondQuestionSchema);
+const respondThreadApprovalSchema = Schema.Struct({
+  threadId: ThreadId,
+  requestId: RuntimeRequestId,
+  decision: Schema.Literals(["accept", "decline"]),
+  userConfirmed: Schema.Boolean,
+});
+const decodeThreadApproval = Schema.decodeUnknownEffect(respondThreadApprovalSchema);
+const watchThreadSchema = Schema.Struct({
+  threadId: Schema.String.check(Schema.isMinLength(1)),
+});
+const decodeWatchThread = Schema.decodeUnknownEffect(watchThreadSchema);
 export const isTool = (
   name: string,
-): name is (typeof names)[number] | "t3_post_call_message" | "t3_respond_call_approval" =>
+): name is
+  | (typeof names)[number]
+  | "t3_post_call_message"
+  | "t3_respond_call_approval"
+  | "t3_watch_thread" =>
   names.some((candidate) => candidate === name) ||
   name === "t3_post_call_message" ||
-  name === "t3_respond_call_approval";
+  name === "t3_respond_call_approval" ||
+  name === "t3_watch_thread";
 
 /** The actual MCP catalog schemas and descriptions, exposed as client-brokered realtime functions. */
 export const tools = [
   ...names.map((name) => {
     const tool = toolkit.tools[name];
-    const document = Schema.toJsonSchemaDocument(tool.parametersSchema);
+    const document = Schema.toJsonSchemaDocument(
+      name === "t3_pending_request_respond"
+        ? respondQuestionSchema
+        : name === "t3_pending_approval_respond"
+          ? respondThreadApprovalSchema
+          : tool.parametersSchema,
+    );
     return {
       type: "function",
       name,
-      description: tool.description ?? "",
+      description:
+        name === "t3_pending_request_respond"
+          ? "Answer a pending question in an existing thread or this call's delegated task lineage using its notice's explicit threadId and requestId, only after the caller gives the actual answer. userConfirmed must reflect that instruction."
+          : (tool.description ?? ""),
       parameters: { ...document.schema, $defs: document.definitions },
     };
   }),
   ...[
+    {
+      name: "t3_watch_thread",
+      description:
+        "Watch a thread for questions, permissions, completion, interruption, or failure while this call stays open, including future runs of an idle thread. Does not send a message or start work. Stop with t3_unwatch_thread. Watches continue after questions, permission notices, and results.",
+      schema: watchThreadSchema,
+    },
     {
       name: "t3_post_call_message",
       description:
@@ -104,10 +132,13 @@ const decodeRunTarget = Schema.decodeUnknownEffect(
   }),
 );
 const decodeTaskTarget = Schema.decodeUnknownEffect(Schema.Struct({ taskId: Schema.String }));
+const decodeWatchTarget = Schema.decodeUnknownEffect(
+  Schema.Struct({ threadId: Schema.String, runId: Schema.NullOr(Schema.String) }),
+);
 
 export type VoiceWorkTarget =
   | { readonly taskId: string }
-  | { readonly threadId: string; readonly runId: string };
+  | { readonly threadId: string; readonly runId: string; readonly watch?: boolean };
 interface CallIdentity {
   readonly binding: string;
   readonly botId: string;
@@ -228,14 +259,24 @@ const make = Effect.gen(function* () {
               if (exit._tag === "Failure") {
                 if (calls.get(input.callId) === entry) calls.delete(input.callId);
                 if (entry.scope !== undefined)
-                  yield* orchestrator.releaseCallInvocation(entry.scope).pipe(Effect.ignore);
+                  yield* orchestrator
+                    .releaseCallInvocation(entry.scope)
+                    .pipe(
+                      Effect.catch((error) =>
+                        Effect.logWarning("Failed to release the voice call invocation", { error }),
+                      ),
+                    );
               }
+              yield* Deferred.succeed(entry.ready, undefined);
             }),
           ),
-          Effect.ensuring(Deferred.succeed(entry.ready, undefined)),
         );
       }).pipe(
-        Effect.catch((error) => {
+        Effect.catchCause((cause) => {
+          const error = Option.getOrUndefined(Cause.findErrorOption(cause));
+          // Defects and interruptions are not authority failures; they keep propagating.
+          // No typed failure means the cause carries none, so it is safe to re-raise as never.
+          if (error === undefined) return Effect.failCause(cause as Cause.Cause<never>);
           activationFailures.set(
             input.callId,
             isOrchestratorFailure(error)
@@ -273,6 +314,12 @@ const make = Effect.gen(function* () {
             : (result.pendingApprovals?.filter(
                 (request) => !input.seenApprovalIds!.includes(request.requestId),
               ) ?? []);
+        const questions =
+          input.seenApprovalIds === undefined
+            ? []
+            : (result.pendingQuestions?.filter(
+                (request) => !input.seenApprovalIds!.includes(request.requestId),
+              ) ?? []);
         return {
           result: {
             kind: "served",
@@ -284,22 +331,29 @@ const make = Effect.gen(function* () {
                     taskId: input.taskId,
                     approvals,
                   }
-                : result.waitTimedOut
-                  ? null
-                  : {
-                      status: "landed",
+                : questions.length > 0
+                  ? {
+                      status: "input_required",
                       title: result.title,
-                      runStatus: result.status,
-                      ...(result.status === "failed"
-                        ? {
-                            error:
-                              "A delegated task from this call failed. Open its T3 thread for the error. That task has not been completed.",
-                          }
-                        : {}),
-                      updates: result.summary === null ? [] : [result.summary.slice(0, 16_000)],
-                    },
+                      taskId: input.taskId,
+                      questions,
+                    }
+                  : result.waitTimedOut
+                    ? null
+                    : {
+                        status: "landed",
+                        title: result.title,
+                        runStatus: result.status,
+                        ...(result.status === "failed"
+                          ? {
+                              error:
+                                "A delegated task from this call failed. Open its T3 thread for the error. That task has not been completed.",
+                            }
+                          : {}),
+                        updates: result.summary === null ? [] : [result.summary.slice(0, 16_000)],
+                      },
           },
-          pending: result.waitTimedOut || approvals.length > 0,
+          pending: result.waitTimedOut || approvals.length > 0 || questions.length > 0,
         } as const;
       }).pipe(
         Effect.catch((error) =>
@@ -312,7 +366,7 @@ const make = Effect.gen(function* () {
                 error: "T3 could not check this task's result. Its status is unknown.",
               },
             },
-            pending: false,
+            pending: error.code === "orchestration_error",
           }),
         ),
         Effect.catchCause(() =>
@@ -367,16 +421,35 @@ const make = Effect.gen(function* () {
             },
           } as const;
         }
+        if (
+          input.name === "t3_pending_request_respond" ||
+          input.name === "t3_pending_approval_respond"
+        ) {
+          const params =
+            input.name === "t3_pending_request_respond"
+              ? yield* decodeRespondQuestion(input.input)
+              : yield* decodeThreadApproval(input.input);
+          const result = yield* orchestrator.respondToCallRequest(scope, {
+            ...params,
+            clientRequestId: input.toolCallId,
+          });
+          return { result: { kind: "served", output: result } } as const;
+        }
+        const toolName = input.name === "t3_watch_thread" ? "t3_thread_wait" : input.name;
+        const toolInput =
+          input.name === "t3_watch_thread" ? yield* decodeWatchThread(input.input) : input.input;
         const params =
-          typeof input.input === "object" && input.input !== null && !Array.isArray(input.input)
-            ? input.input
+          typeof toolInput === "object" && toolInput !== null && !Array.isArray(toolInput)
+            ? toolInput
             : {};
-        const targeted = input.name === "t3_thread_read" || input.name === "t3_thread_wait";
+        const targeted = toolName === "t3_thread_read" || toolName === "t3_thread_wait";
         const argumentsValue = targeted
           ? {
               ...params,
               ...("threadId" in params ? {} : { threadId: input.canonicalThreadId }),
-              ...(input.name === "t3_thread_wait" ? { timeoutMs: 20_000 } : {}),
+              ...(toolName === "t3_thread_wait"
+                ? { timeoutMs: input.name === "t3_watch_thread" ? 1 : 20_000 }
+                : {}),
             }
           : input.name === "delegate_task"
             ? {
@@ -387,7 +460,7 @@ const make = Effect.gen(function* () {
               }
             : params;
         const stream = yield* ready
-          .handle(input.name, argumentsValue as never, input.toolCallId)
+          .handle(toolName, argumentsValue as never, input.toolCallId)
           .pipe(Effect.provideService(Invocation.McpInvocationContext, scope));
         const last = yield* Stream.runLast(stream).pipe(
           Effect.provideService(Invocation.McpInvocationContext, scope),
@@ -406,7 +479,15 @@ const make = Effect.gen(function* () {
             target = yield* decodeTaskTarget(last.value.encodedResult).pipe(Effect.option);
           else if (input.name === "t3_thread_launch" || input.name === "t3_thread_send")
             target = yield* decodeRunTarget(last.value.encodedResult).pipe(Effect.option);
-          else if (input.name === "t3_thread_wait") {
+          else if (input.name === "t3_watch_thread") {
+            const watched = yield* decodeWatchTarget(last.value.encodedResult).pipe(Effect.option);
+            if (Option.isSome(watched))
+              target = Option.some({
+                threadId: watched.value.threadId,
+                runId: watched.value.runId ?? "",
+                watch: true,
+              });
+          } else if (input.name === "t3_thread_wait") {
             const waited = last.value.encodedResult;
             if (
               typeof waited === "object" &&
@@ -420,7 +501,13 @@ const make = Effect.gen(function* () {
         return {
           result: {
             kind: last.value.isFailure ? "invalid_input" : "served",
-            output: last.value.encodedResult,
+            output:
+              input.name === "t3_watch_thread" && !last.value.isFailure && Option.isSome(target)
+                ? {
+                    watching: true,
+                    threadId: "threadId" in target.value ? target.value.threadId : undefined,
+                  }
+                : last.value.encodedResult,
           },
           ...(Option.isNone(target) ? {} : { target: target.value }),
         } as const;
@@ -464,6 +551,7 @@ export const layerLive = layer.pipe(
     Layer.mergeAll(
       Access.HandlersLayer.layer(OrchestratorHandlers.layer),
       Access.HandlersLayer.layer(ProjectHandlers.layer),
+      Access.HandlersLayer.layer(ThreadHandlers.layer),
     ),
   ),
   Layer.provide(Orchestrator.layer),

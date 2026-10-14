@@ -104,6 +104,7 @@ export interface ChatMessage {
   readonly senderThreadId?: ThreadId;
   readonly voiceRequest?: true;
   readonly grokBotPeer?: import("@t3tools/contracts").OrchestrationV2ConversationMessage["grokBotPeer"];
+  readonly grokBotAuthor?: import("@t3tools/contracts").OrchestrationV2ConversationMessage["grokBotAuthor"];
   readonly grokBotWorkflowReferences?: import("@t3tools/contracts").GrokBotWorkflowReferences;
   readonly grokBotReactions?: import("@t3tools/contracts").OrchestrationV2ConversationMessage["grokBotReactions"];
   readonly grokBotVoiceCall?: import("@t3tools/contracts").GrokBotVoiceCallMarker;

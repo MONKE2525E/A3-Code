@@ -1,5 +1,5 @@
-import { useOpenPullRequest } from "../pull-requests/useOpenPullRequestFromRoute";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
+import { useOpenPullRequest } from "../pull-requests/useOpenPullRequestFromRoute";
 import { SourceFileSurface } from "../files/SourceFileSurface";
 import { filePreviewKind } from "@t3tools/shared/filePreview";
 import type {

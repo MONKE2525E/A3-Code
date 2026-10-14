@@ -12,12 +12,15 @@ import {
   ProviderInstanceId,
   RunId,
   RunAttemptId,
+  RuntimeRequestId,
   ThreadId,
   type OrchestrationV2ThreadProjection,
   type ServerProvider,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -44,6 +47,119 @@ import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 describe("OrchestratorMcpService", () => {
+  it.effect(
+    "ordinary call response dispatch keeps its call live until the command is committed",
+    () =>
+      Effect.gen(function* () {
+        const parentThreadId = ThreadId.make("call-response-parent");
+        const targetThreadId = ThreadId.make("ordinary-response-target");
+        const requestId = RuntimeRequestId.make("ordinary-question");
+        const nodeId = NodeId.make("ordinary-request-node");
+        const runId = RunId.make("ordinary-run");
+        let parent = idleThreadProjection(liveThreadShell(parentThreadId, { activeRunId: null }));
+        const target = {
+          ...idleThreadProjection(liveThreadShell(targetThreadId)),
+          nodes: [{ id: nodeId, runId }],
+          runs: [{ id: runId, status: "running" }],
+          runtimeRequests: [{ id: requestId, nodeId, status: "pending", kind: "user_input" }],
+          turnItems: [{ type: "user_input_request", requestId }],
+        } as unknown as OrchestrationV2ThreadProjection;
+        const reading = yield* Deferred.make<void>();
+        const proceed = yield* Deferred.make<void>();
+        const releasing = yield* Deferred.make<void>();
+        const commands: string[] = [];
+        const dependencies = Layer.mergeAll(
+          NodeServices.layer,
+          ServerSettings.layerTest(),
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            getThreadShell: (threadId) =>
+              Effect.succeed(liveThreadShell(threadId, { activeRunId: null })),
+            getThreadRecords: () => Effect.succeed(parent),
+            getProjectThreadRecords: () =>
+              Deferred.succeed(reading, undefined).pipe(
+                Effect.andThen(Deferred.await(proceed)),
+                Effect.as(target),
+              ),
+            hasReceipt: () => Effect.succeed(false),
+            dispatch: (command) =>
+              Effect.sync(() => {
+                if (command.type === "call-parent.acquire")
+                  parent = {
+                    ...parent,
+                    nodes: [
+                      {
+                        id: command.nodeId,
+                        threadId: parentThreadId,
+                        runId: null,
+                        parentNodeId: null,
+                        rootNodeId: command.nodeId,
+                        kind: "call_parent",
+                        status: "running",
+                        callParent: command.authority,
+                        countsForRun: false,
+                        providerThreadId: null,
+                        providerTurnId: null,
+                        nativeItemRef: null,
+                        runtimeRequestId: null,
+                        checkpointScopeId: null,
+                        startedAt: null,
+                        completedAt: null,
+                      },
+                    ],
+                  };
+                commands.push(command.type);
+                return { sequence: 1, storedEvents: [] };
+              }),
+          }),
+          Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+          Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+            list: () => Effect.succeed([]),
+          }),
+          Layer.mock(ProjectService.ProjectService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        );
+        yield* Effect.gen(function* () {
+          const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+          const scope = yield* service.acquireCallInvocation({
+            environmentId: EnvironmentId.make("call-response-environment"),
+            accountId: "account",
+            botId: "bot",
+            callId: "call",
+            threadId: parentThreadId,
+            access: "full-access",
+          });
+          const response = yield* service
+            .respondToCallRequest(scope, {
+              threadId: targetThreadId,
+              requestId,
+              answers: { branch: "main" },
+              userConfirmed: true,
+              clientRequestId: "response",
+            })
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(reading);
+          const release = yield* Deferred.succeed(releasing, undefined).pipe(
+            Effect.andThen(service.releaseCallInvocation(scope)),
+            Effect.forkScoped,
+          );
+          yield* Deferred.await(releasing);
+          yield* Deferred.succeed(proceed, undefined);
+          assert.deepEqual(yield* Fiber.join(response), { resolved: true });
+          yield* Fiber.join(release);
+          assert.deepEqual(commands, [
+            "call-parent.acquire",
+            "runtime-request.respond",
+            "call-parent.release",
+          ]);
+          assert.equal(
+            (yield* service.validateCallInvocation(scope).pipe(Effect.flip)).code,
+            "parent_not_active",
+          );
+        }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))));
+      }),
+  );
+
   it.effect("retries terminal acknowledgement with a fresh command id", () =>
     Effect.gen(function* () {
       const parentThreadId = ThreadId.make("thread:mcp-ack-parent");
@@ -880,6 +996,39 @@ describe("OrchestratorMcpService provider resolution", () => {
     providerThreads: [],
     turnItems: [],
   } as unknown as OrchestrationV2ThreadProjection;
+
+  it.effect("advertises batch creation only to a writable provider-thread caller", () =>
+    Effect.gen(function* () {
+      const dependencies = Layer.mergeAll(
+        NodeServices.layer,
+        ServerSettings.layerTest(),
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: () => Effect.succeed(parentProjection([])),
+        }),
+        providerRegistryLayer([]),
+        adapterRegistryLayer([]),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        assert.isTrue((yield* service.capabilities(scope)).features.batchThreadCreation);
+        for (const caller of [
+          {
+            ...scope,
+            thread: undefined,
+            client: { sessionId: "external", label: "External", access: "full-access" as const },
+          },
+          {
+            ...scope,
+            client: { sessionId: "readonly", label: "Read only", access: "read-only" as const },
+          },
+        ])
+          assert.isFalse((yield* service.capabilities(caller)).features.batchThreadCreation);
+      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))));
+    }),
+  );
 
   it.effect("refuses cloud calls from an earlier parent run or attempt", () =>
     Effect.gen(function* () {

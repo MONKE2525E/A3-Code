@@ -112,6 +112,10 @@ const CLI_CREATE_SHAPES: ReadonlySet<string> = new Set([
   "leaf",
 ]);
 const RawBot = Schema.Struct({
+  kind: Schema.optionalKey(Schema.Literals(["bot", "group"])),
+  members: Schema.optionalKey(Schema.Array(GrokBotId)),
+  isGroup: Schema.optionalKey(Schema.Boolean),
+  memberIds: Schema.optionalKey(Schema.Array(GrokBotId)),
   id: GrokBotId,
   name: Schema.String,
   title: Schema.optionalKey(Schema.String),
@@ -308,7 +312,9 @@ export function messagesFrom(
     const toAgent = record(entry.toAgent) ? participantFrom(entry.toAgent, roster) : undefined;
     const sender =
       entry.kind === "send-message"
-        ? me
+        ? record(entry.author)
+          ? participantFrom(entry.author, roster)
+          : me
         : fromAgent !== undefined
           ? fromAgent
           : entry.role === "user"
@@ -561,7 +567,7 @@ const make = Effect.gen(function* () {
       timeToLive: (exit) =>
         Exit.isSuccess(exit) && (exit.value.installed || exit.value.nativeAvailable)
           ? "30 seconds"
-          : 0,
+          : "5 seconds",
     },
   );
   const status = Cache.get(statusCache, undefined);
@@ -614,13 +620,22 @@ const make = Effect.gen(function* () {
     Effect.catchTags({
       GrokBotNativeSignedOutError: () => Effect.fail(new GrokBotError({ reason: "signed_out" })),
       GrokBotNativeReadError: () =>
-        cli(["bots", "list", "--gateway", "--json"]).pipe(
-          Effect.flatMap((text) => decodeRoster(text).pipe(Effect.mapError(invalidResponse))),
-          // A missing legacy descriptor after a native read failure is a connection failure,
-          // not proof that the user's native account signed out.
-          Effect.mapError((error) =>
-            error.reason === "signed_out" ? new GrokBotError({ reason: "gateway_failed" }) : error,
+        Effect.all(
+          ["bots", "groups"].map((kind) =>
+            cli([kind, "list", "--gateway", "--json"]).pipe(
+              Effect.flatMap((text) => decodeRoster(text).pipe(Effect.mapError(invalidResponse))),
+              // A missing legacy descriptor after a native read failure is a connection failure,
+              // not proof that the user's native account signed out.
+              Effect.mapError((error) =>
+                error.reason === "signed_out"
+                  ? new GrokBotError({ reason: "gateway_failed" })
+                  : error,
+              ),
+            ),
           ),
+          { concurrency: 2 },
+        ).pipe(
+          Effect.map((lists) => [...new Map(lists.flat().map((bot) => [bot.id, bot])).values()]),
         ),
     }),
   );
@@ -630,6 +645,8 @@ const make = Effect.gen(function* () {
     desktopPinned: ReadonlySet<string>,
   ): GrokBot => ({
     id: bot.id,
+    isGroup: bot.isGroup ?? bot.kind === "group",
+    memberIds: bot.memberIds ?? bot.members ?? [],
     name: bot.name,
     label: bot.title ?? "",
     description: bot.description ?? "",
@@ -796,11 +813,12 @@ const make = Effect.gen(function* () {
       )
         return yield* new GrokBotError({ reason: "invalid_avatar" });
       const text = yield* cli([
-        "bots",
+        input.memberIds === undefined ? "bots" : "groups",
         "create",
         "--gateway",
         "--json",
         `--name=${input.name}`,
+        ...(input.memberIds?.map((id) => `--member=${id}`) ?? []),
         ...(input.description ? [`--description=${input.description}`] : []),
         ...(input.avatarShape === undefined ? [] : [`--avatar-shape=${input.avatarShape}`]),
         ...(input.avatarColor === undefined ? [] : [`--avatar-color=${input.avatarColor}`]),
@@ -1007,9 +1025,14 @@ const make = Effect.gen(function* () {
         }),
       );
       if (binding === undefined) {
-        yield* cli(["bots", "delete", "--gateway", "--json", "--", input.botId]).pipe(
-          Effect.ignore,
-        );
+        yield* cli([
+          current.isGroup ? "groups" : "bots",
+          "delete",
+          "--gateway",
+          "--json",
+          "--",
+          input.botId,
+        ]).pipe(Effect.ignore);
       } else {
         const nativeBot = (yield* native
           .listForBinding(binding)

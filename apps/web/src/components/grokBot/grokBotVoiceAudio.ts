@@ -1,4 +1,7 @@
-import { VOICE_SAMPLE_RATE } from "@t3tools/client-runtime/grok-bot-voice/protocol";
+import {
+  VOICE_SAMPLE_RATE,
+  type VoiceAudioCut,
+} from "@t3tools/client-runtime/grok-bot-voice/protocol";
 
 /** One realtime input frame: 20 ms at 24 kHz, the cadence the desktop client sends. */
 export const VOICE_CAPTURE_FRAME_SAMPLES = 480;
@@ -34,9 +37,14 @@ export class VoiceAudioError extends Error {
 }
 
 export interface VoiceAudio {
-  enqueue(samples: Float32Array): void;
+  enqueue(
+    samples: Float32Array,
+    part?: { itemId: string | null; contentIndex: number | null },
+  ): void;
+  /** Null when empty; otherwise settles after every queued/playing source ends or is cleared. */
+  whenDrained(): Promise<void> | null;
   /** Stops everything queued or playing, for barge-in and hang-up. */
-  clear(): void;
+  clear(): readonly VoiceAudioCut[] | void;
   /** Releases the microphone tracks, the capture graph, and the AudioContext. Safe to call twice. */
   close(): void;
 }
@@ -73,10 +81,30 @@ export function createFrameChunker(size: number, emit: (frame: Float32Array) => 
 
 /** Plays model audio back-to-back on the context clock, so chunks never overlap or gap. */
 export function createVoicePlayer(context: AudioContext) {
-  const playing = new Set<AudioBufferSourceNode>();
+  interface PlaybackPart {
+    itemId: string;
+    contentIndex: number;
+    playedSeconds: number;
+    sources: number;
+  }
+  const parts = new Map<string, PlaybackPart>();
+  let latestPart: string | null = null;
+  const playing = new Map<
+    AudioBufferSourceNode,
+    { startAt: number; duration: number; part: PlaybackPart | null }
+  >();
+  const drainWaiters = new Set<() => void>();
+  const notifyDrained = () => {
+    if (playing.size > 0) return;
+    for (const resolve of drainWaiters) resolve();
+    drainWaiters.clear();
+  };
   let nextStart = 0;
   return {
-    enqueue(samples: Float32Array) {
+    enqueue(
+      samples: Float32Array,
+      metadata?: { itemId: string | null; contentIndex: number | null },
+    ) {
       if (samples.length === 0) return;
       const buffer = context.createBuffer(1, samples.length, VOICE_SAMPLE_RATE);
       // copyToChannel only accepts a non-shared buffer, so decoded frames are copied in.
@@ -85,21 +113,78 @@ export function createVoicePlayer(context: AudioContext) {
       source.buffer = buffer;
       source.connect(context.destination);
       const startAt = Math.max(context.currentTime, nextStart);
+      const key =
+        metadata?.itemId != null &&
+        metadata.contentIndex != null &&
+        Number.isInteger(metadata.contentIndex) &&
+        metadata.contentIndex >= 0
+          ? JSON.stringify([metadata.itemId, metadata.contentIndex])
+          : null;
+      latestPart = key;
+      let part = key === null ? null : (parts.get(key) ?? null);
+      if (
+        key !== null &&
+        part === null &&
+        metadata?.itemId != null &&
+        metadata.contentIndex != null
+      ) {
+        part = {
+          itemId: metadata.itemId,
+          contentIndex: metadata.contentIndex,
+          playedSeconds: 0,
+          sources: 0,
+        };
+        parts.set(key, part);
+      }
+      for (const [oldKey, oldPart] of parts) {
+        if (oldKey !== key && oldPart.sources === 0) parts.delete(oldKey);
+      }
       source.start(startAt);
       nextStart = startAt + buffer.duration;
-      playing.add(source);
-      source.addEventListener("ended", () => void playing.delete(source), { once: true });
+      playing.set(source, { startAt, duration: buffer.duration, part });
+      if (part !== null) part.sources += 1;
+      source.addEventListener(
+        "ended",
+        () => {
+          if (!playing.delete(source)) return;
+          if (part !== null) {
+            part.playedSeconds += buffer.duration;
+            part.sources -= 1;
+            if (key !== latestPart && part.sources === 0) parts.delete(key!);
+          }
+          notifyDrained();
+        },
+        { once: true },
+      );
+    },
+    whenDrained() {
+      return playing.size === 0 ? null : new Promise<void>((resolve) => drainWaiters.add(resolve));
     },
     clear() {
-      for (const source of playing) {
+      const queued = [...playing];
+      playing.clear();
+      for (const [source, span] of queued) {
+        if (span.part !== null)
+          span.part.playedSeconds += Math.max(
+            0,
+            Math.min(span.duration, context.currentTime - span.startAt),
+          );
         try {
           source.stop();
         } catch {
           // Already stopped by the clock; nothing to release.
         }
       }
-      playing.clear();
+      const cuts = [...parts.values()].map((part) => ({
+        itemId: part.itemId,
+        contentIndex: part.contentIndex,
+        audioEndMs: part.playedSeconds * 1000,
+      }));
+      parts.clear();
+      latestPart = null;
       nextStart = 0;
+      notifyDrained();
+      return cuts;
     },
   };
 }
@@ -163,8 +248,9 @@ export async function openVoiceAudio(options: {
   }
 
   return {
-    enqueue: (samples) => {
-      if (!closed) player.enqueue(samples);
+    whenDrained: () => player.whenDrained(),
+    enqueue: (samples, part) => {
+      if (!closed) player.enqueue(samples, part);
     },
     clear: () => player.clear(),
     close,

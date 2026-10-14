@@ -657,6 +657,7 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
     if (item.type === "user_message" || item.type === "assistant_message") {
       const message: ChatMessage = {
         ...(item.grokBotPeer === undefined ? {} : { grokBotPeer: item.grokBotPeer }),
+        ...(item.grokBotAuthor === undefined ? {} : { grokBotAuthor: item.grokBotAuthor }),
         ...(item.grokBotWorkflowReferences === undefined
           ? {}
           : { grokBotWorkflowReferences: item.grokBotWorkflowReferences }),

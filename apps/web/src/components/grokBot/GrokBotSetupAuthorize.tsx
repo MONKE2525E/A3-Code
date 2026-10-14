@@ -1,5 +1,7 @@
-import { useAtomValue } from "@effect/atom-react";
+import { useAtomRefresh, useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
+import * as Option from "effect/Option";
+import { AsyncResult, Atom } from "effect/reactivity";
 import { useEffect, useState } from "react";
 
 import { Button } from "~/components/ui/button";
@@ -7,6 +9,7 @@ import { Input } from "~/components/ui/input";
 import { Spinner } from "~/components/ui/spinner";
 import { useEnvironmentHttpBaseUrl } from "~/state/environments";
 import {
+  grokBotsOrchestratorConfigQuery,
   grokBotsPluginAuthenticate,
   grokBotsPluginCompleteAuth,
   grokBotsPluginConnectionsQuery,
@@ -16,6 +19,8 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { PLUGIN_AUTH_STORAGE_PREFIX } from "./GrokBotPluginAccounts";
 import { parseManualCallback } from "./grokBotPluginAuthReturn";
 import { resolveGrokBotOAuthRedirect } from "./grokBotSetupFlow";
+
+const EMPTY_CONNECTION = Atom.make(AsyncResult.initial<never, never>(false));
 
 type Flow = {
   readonly stateId: string;
@@ -61,6 +66,8 @@ export function GrokBotSetupAuthorize({
   const authenticate = useAtomCommand(grokBotsPluginAuthenticate, { reportFailure: false });
   const complete = useAtomCommand(grokBotsPluginCompleteAuth, { reportFailure: false });
   const httpBaseUrl = useEnvironmentHttpBaseUrl(environmentId);
+  // Setup status carries this environment's confirmed published MCP endpoint, even over LAN.
+  const config = useEnvironmentQuery(grokBotsOrchestratorConfigQuery({ environmentId, input: {} }));
   const [busy, setBusy] = useState(false);
   const [flow, setFlow] = useState<Flow | null>(null);
   const [callbackUrl, setCallbackUrl] = useState("");
@@ -78,15 +85,16 @@ export function GrokBotSetupAuthorize({
     );
     return () => window.clearTimeout(timeout);
   }, [flow]);
-  const connection = useEnvironmentQuery(
+  const connectionAtom =
     flow !== null
       ? grokBotsPluginConnectionsQuery({ environmentId, input: { pluginId, serverId } })
-      : null,
-  );
+      : EMPTY_CONNECTION;
+  const connection = useAtomValue(connectionAtom);
+  const refreshConnection = useAtomRefresh(connectionAtom);
   useEffect(() => {
-    if (flow === null) return;
+    if (flow === null || connection.waiting) return;
     if (
-      connection.data?.servers.some(
+      Option.getOrNull(AsyncResult.value(connection))?.servers.some(
         (server) =>
           server.id === serverId &&
           server.accounts.some(
@@ -99,14 +107,21 @@ export function GrokBotSetupAuthorize({
       refresh();
       return;
     }
-    const timer = window.setTimeout(connection.refresh, 5_000);
+    // Depend on the settled result, including failures that retain the previous success.
+    const timer = window.setTimeout(refreshConnection, 5_000);
     return () => window.clearTimeout(timer);
-  }, [flow, connection.dataUpdatedAt, connection.refresh, connection.data, serverId, refresh]);
+  }, [flow, connection, refreshConnection, serverId, refresh]);
 
   const start = async () => {
-    const redirectUri = resolveGrokBotOAuthRedirect(window.location.origin, httpBaseUrl);
+    const redirectUri = resolveGrokBotOAuthRedirect(
+      window.location.origin,
+      httpBaseUrl,
+      config.data?.setupStatus?.mcpUrl ?? null,
+    );
     if (redirectUri === null) {
-      setError("This environment has no web address to return to. Reconnect and try again.");
+      setError(
+        "This environment needs an HTTPS web address to return to. Enable T3 Connect or reconnect and try again.",
+      );
       return;
     }
     // Opened synchronously so the click still counts as a user gesture.

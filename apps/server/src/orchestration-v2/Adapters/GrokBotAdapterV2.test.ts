@@ -2104,3 +2104,31 @@ it.effect("replaying a voice call row keeps one marker with the same identity", 
     assert.isTrue(firstEvents.some((event) => event.type === "turn_item.updated"));
   }).pipe(Effect.provide(IdAllocator.layer)),
 );
+
+it.effect("preserves native group member authors in messages and durable turn items", () =>
+  Effect.gen(function* () {
+    const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    const projection = makeGrokBotTranscriptProjection({ native: nativeSession, idAllocator });
+    const row = answer();
+    const events = yield* projection.project(
+      transcript([
+        { ...row, value: { ...row.value, author: { id: "member-a", name: "Researcher" } } },
+      ]),
+    );
+    assert.deepStrictEqual(projection.messages()[0]?.grokBotAuthor, {
+      botId: "member-a",
+      name: "Researcher",
+    });
+    const item = events.find((event) => event.type === "turn_item.updated");
+    assert.isDefined(item);
+    if (item?.type === "turn_item.updated" && item.turnItem.type === "assistant_message") {
+      assert.deepStrictEqual(item.turnItem.grokBotAuthor, projection.messages()[0]?.grokBotAuthor);
+      const restored = yield* decodePersistedTurnItem(
+        yield* encodePersistedTurnItem(item.turnItem),
+      );
+      assert.isTrue(restored.type === "assistant_message");
+      if (restored.type === "assistant_message")
+        assert.deepStrictEqual(restored.grokBotAuthor, item.turnItem.grokBotAuthor);
+    }
+  }).pipe(Effect.provide(IdAllocator.layer)),
+);

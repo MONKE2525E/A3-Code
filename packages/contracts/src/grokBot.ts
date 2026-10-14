@@ -36,6 +36,9 @@ export const GrokBotRuntimeActivity = Schema.Struct({
 });
 export const GrokBot = Schema.Struct({
   id: GrokBotId,
+  /** Native group agent metadata; omitted by older servers. */
+  isGroup: Schema.optionalKey(Schema.Boolean),
+  memberIds: Schema.optionalKey(Schema.Array(GrokBotId)),
   name: Schema.String,
   label: Schema.String,
   description: Schema.String,
@@ -176,8 +179,11 @@ export const GrokBotUpdateInput = Schema.Struct({
   pinned: Schema.optionalKey(Schema.Boolean),
   featured: Schema.optionalKey(Schema.Boolean),
 });
-/** A single bot. Group creation is not part of this input yet. */
+/** Members select native group creation through the same guarded create command. */
 export const GrokBotCreateInput = Schema.Struct({
+  memberIds: Schema.optionalKey(
+    Schema.Array(GrokBotId).check(Schema.isMinLength(1), Schema.isMaxLength(6)),
+  ),
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
   description: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(16000))),
   avatarShape: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(32))),

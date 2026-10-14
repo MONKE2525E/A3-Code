@@ -70,6 +70,10 @@ const fixtureFor = (platform: NodeJS.Platform) =>
     const remote = {
       bots: [bot] as Array<{
         id: string;
+        kind?: "bot" | "group";
+        members?: string[];
+        isGroup?: boolean;
+        memberIds?: string[];
         nativeProfileId?: string;
         name: string;
         title?: string;
@@ -94,6 +98,7 @@ const fixtureFor = (platform: NodeJS.Platform) =>
       failPr: false,
       prCalls: 0,
       nativeAvailable: false,
+      versionCode: 0,
       npm: "ok" as "ok" | "missing" | "timeout" | number,
       nativePinned: [] as string[],
       nativeBinding: "selected-account-fixture",
@@ -136,12 +141,26 @@ const fixtureFor = (platform: NodeJS.Platform) =>
         if (input.args.includes("list")) {
           if (remote.listStarted) yield* Deferred.succeed(remote.listStarted, undefined);
           if (remote.listGate) yield* Deferred.await(remote.listGate);
-          return output(JSON.stringify(remote.bots));
+          return output(
+            JSON.stringify(
+              remote.bots.filter((bot) =>
+                input.args.includes("groups") ? bot.kind === "group" : bot.kind !== "group",
+              ),
+            ),
+          );
         }
         if (input.args.includes("create")) {
           if (remote.createFailure !== undefined)
             return { ...output("", 2), stderr: remote.createFailure };
           return output(JSON.stringify(remote.created));
+        }
+        if (input.args.includes("delete")) {
+          const id = input.args[input.args.indexOf("--") + 1];
+          const group = input.args.includes("groups");
+          remote.bots = remote.bots.filter(
+            (bot) => bot.id !== id || (bot.kind === "group") !== group,
+          );
+          return output(JSON.stringify({ botId: id }));
         }
         if (input.args.includes("thread"))
           return output(JSON.stringify({ transcript: remote.transcript }));
@@ -149,7 +168,7 @@ const fixtureFor = (platform: NodeJS.Platform) =>
           if (remote.sendFailure) return yield* remote.sendFailure;
           return output(JSON.stringify(remote.receipt), remote.sendCode);
         }
-        return output("0.12.4");
+        return output("0.12.4", remote.versionCode);
       });
     const nativeList = Effect.suspend(
       (): GrokBotNativeService.GrokBotNativeService["Service"]["list"] => {
@@ -797,6 +816,33 @@ it.layer(NodeServices.layer)("Grok Bot bridge", (it) => {
       assert.strictEqual(calls.length, 0);
     }),
   );
+  it.effect(
+    "lists native groups on CLI fallback and creates through the existing group command",
+    () =>
+      Effect.gen(function* () {
+        const { service, remote, calls } = yield* fixture;
+        remote.bots.push({ id: "group-1", name: "Team", kind: "group", members: [bot.id] });
+        const listed = yield* service.list;
+        assert.deepStrictEqual(
+          listed.map((entry) => [entry.id, entry.isGroup, entry.memberIds]),
+          [
+            [bot.id, false, []],
+            ["group-1", true, [bot.id]],
+          ],
+        );
+        remote.created = { id: "group-created", name: "Team", kind: "group", members: [bot.id] };
+        const created = yield* service.create({ name: "Team", memberIds: [bot.id] });
+        assert.isTrue(created.isGroup);
+        assert.deepStrictEqual(created.memberIds, [bot.id]);
+        assert.include(calls.at(-1)?.args ?? [], "groups");
+        assert.include(calls.at(-1)?.args ?? [], `--member=${bot.id}`);
+        assert.include(
+          (yield* service.list).map((entry) => entry.id),
+          "group-1",
+        );
+      }),
+  );
+
   it.effect("creates one bot through the gateway CLI and rejects shapes it does not accept", () =>
     Effect.gen(function* () {
       const { service, remote, calls } = yield* fixture;
@@ -872,6 +918,22 @@ it.layer(NodeServices.layer)("Grok Bot bridge", (it) => {
       assert.deepStrictEqual(remaining?.pullRequests, []);
     }),
   );
+  it.effect.each([
+    { kind: "bot", id: bot.id, remaining: "group-1" },
+    { kind: "group", id: "group-1", remaining: bot.id },
+  ])("deletes a $kind through CLI fallback without removing the other kind", (target) =>
+    Effect.gen(function* () {
+      const { service, remote } = yield* fixture;
+      remote.bots.push({ id: "group-1", name: "Team", kind: "group", members: [bot.id] });
+      assert.deepStrictEqual(yield* service.delete({ botId: target.id }), { botId: target.id });
+      assert.deepStrictEqual(
+        (yield* service.list).map((entry) => entry.id),
+        [target.remaining],
+      );
+      assert.isEmpty(remote.nativeCalls);
+    }),
+  );
+
   it.effect("deletes a bot natively and drops its T3 PR links without touching the PR", () =>
     Effect.gen(function* () {
       const { service, remote, calls } = yield* fixture;
@@ -973,7 +1035,7 @@ it.layer(NodeServices.layer)("Grok Bot bridge", (it) => {
       yield* Deferred.await(remote.listStarted);
       yield* Deferred.succeed(remote.listGate, undefined);
       yield* Fiber.join(reads);
-      assert.strictEqual(calls.filter((call) => call.args.includes("list")).length, 1);
+      assert.strictEqual(calls.filter((call) => call.args.includes("list")).length, 2);
       assert.strictEqual(calls.filter((call) => call.args.includes("thread")).length, 1);
       assert.strictEqual(calls.filter((call) => call.args.includes("--version")).length, 1);
       yield* service.read(bot.id);
@@ -981,7 +1043,22 @@ it.layer(NodeServices.layer)("Grok Bot bridge", (it) => {
       yield* TestClock.adjust("300 millis");
       yield* service.read(bot.id);
       assert.strictEqual(calls.filter((call) => call.args.includes("thread")).length, 2);
-      assert.strictEqual(calls.filter((call) => call.args.includes("list")).length, 1);
+      assert.strictEqual(calls.filter((call) => call.args.includes("list")).length, 2);
+    }),
+  );
+
+  it.effect("backs off an unavailable CLI and discovers recovery after five seconds", () =>
+    Effect.gen(function* () {
+      const { service, remote, calls } = yield* fixture;
+      remote.versionCode = 1;
+      for (let read = 0; read < 6; read++) {
+        assert.equal((yield* service.status).installed, false);
+      }
+      assert.equal(calls.filter((call) => call.args.includes("--version")).length, 1);
+      remote.versionCode = 0;
+      yield* TestClock.adjust("5 seconds");
+      assert.equal((yield* service.status).installed, true);
+      assert.equal(calls.filter((call) => call.args.includes("--version")).length, 2);
     }),
   );
   it.effect("refreshes cached roster and transcript after sends and updates", () =>

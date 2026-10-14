@@ -149,12 +149,21 @@ export interface ThreadManagementWaitInput {
   readonly threadId: ThreadId;
   readonly runId?: RunId;
   readonly timeoutMs: number;
+  /** Call watchers acknowledge delivered questions while continuing to wait for the run. */
+  readonly seenRequestIds?: readonly string[];
+  readonly followThread?: boolean;
+  /** Exclusive completion watermark for persistent watches; exact-run waits ignore it. */
+  readonly completionAfterOrdinal?: number;
 }
 
 export interface ThreadManagementWaitResult {
   readonly threadId: ThreadId;
   readonly run: OrchestrationV2Run | null;
   readonly timedOut: boolean;
+  readonly pendingRequests?: readonly Extract<
+    OrchestrationV2TurnItem,
+    { type: "user_input_request" | "approval_request" }
+  >[];
 }
 
 export interface ThreadManagementInterruptInput {
@@ -838,7 +847,13 @@ const make = Effect.gen(function* () {
       const afterSequence = yield* orchestrator
         .getThreadEventSequence(input.threadId)
         .pipe(Effect.mapError(loadError));
-      const target = yield* getProjectThreadRecords(input, ["runs"]);
+      const fields = [
+        "runs",
+        ...(input.seenRequestIds === undefined
+          ? []
+          : (["nodes", "runtimeRequests", "turnItems"] as const)),
+      ] as const;
+      const target = yield* getProjectThreadRecords(input, fields);
       const selectedRun =
         input.runId === undefined
           ? latestRun(target)
@@ -849,17 +864,92 @@ const make = Effect.gen(function* () {
           runId: input.runId,
         });
       }
-      if (selectedRun === undefined) {
+      if (selectedRun === undefined && !input.followThread) {
         return { threadId: input.threadId, run: null, timedOut: false };
       }
-      if (isTerminalRunStatus(selectedRun.status)) {
-        return { threadId: input.threadId, run: selectedRun, timedOut: false };
+      const initialRuns = input.followThread
+        ? target.runs.toSorted((left, right) => left.ordinal - right.ordinal)
+        : [];
+      // Start with existing active work, even ahead of newer queued runs. An idle
+      // watch may announce its latest result once, without replaying older history.
+      const baselineRun =
+        initialRuns.find(isActiveRun) ??
+        initialRuns.findLast((run) => isTerminalRunStatus(run.status)) ??
+        initialRuns[0];
+      const completionAfterOrdinal =
+        input.completionAfterOrdinal ?? (baselineRun?.ordinal ?? 1) - 1;
+      const questions = (current: typeof target) => {
+        if (input.seenRequestIds === undefined) return [];
+        const nodes = new Set(
+          current.nodes
+            .filter((node) => input.followThread || node.runId === selectedRun?.id)
+            .map((node) => node.id),
+        );
+        const requests = new Set(
+          current.runtimeRequests
+            .filter((request) => request.status === "pending" && nodes.has(request.nodeId))
+            .map((request) => request.id),
+        );
+        return current.turnItems.filter(
+          (
+            item,
+          ): item is Extract<
+            OrchestrationV2TurnItem,
+            { type: "user_input_request" | "approval_request" }
+          > =>
+            (item.type === "user_input_request" || item.type === "approval_request") &&
+            requests.has(item.requestId) &&
+            !input.seenRequestIds!.includes(item.requestId),
+        );
+      };
+      const terminalUnseen = (run: OrchestrationV2Run | undefined) =>
+        run !== undefined &&
+        isTerminalRunStatus(run.status) &&
+        (!input.followThread || run.ordinal > completionAfterOrdinal);
+      const resultFor = (current: typeof target) => {
+        const pendingRequests = questions(current);
+        if (!input.followThread) {
+          return {
+            run: current.runs.find((candidate) => candidate.id === selectedRun?.id),
+            pendingRequests,
+          };
+        }
+        // Deliver questions before results, then drain unseen results in run order.
+        // Queued runs must not hide either; group questions by run for correct attribution.
+        const runs = current.runs.toSorted((left, right) => left.ordinal - right.ordinal);
+        const requestRunIds = new Set(pendingRequests.map((item) => item.runId));
+        const requestingRun = runs.find((candidate) => requestRunIds.has(candidate.id));
+        if (requestingRun !== undefined || requestRunIds.has(null)) {
+          return {
+            run: requestingRun,
+            pendingRequests: pendingRequests.filter(
+              (item) => item.runId === (requestingRun?.id ?? null),
+            ),
+          };
+        }
+        return {
+          run: runs.find(terminalUnseen) ?? runs.at(-1),
+          pendingRequests: [],
+        };
+      };
+      if (!input.followThread && terminalUnseen(selectedRun)) {
+        return { threadId: input.threadId, run: selectedRun ?? null, timedOut: false };
       }
+      const initial = resultFor(target);
+      if (terminalUnseen(initial.run) || initial.pendingRequests.length > 0)
+        return {
+          threadId: input.threadId,
+          run: initial.run ?? null,
+          timedOut: false,
+          ...(input.seenRequestIds === undefined
+            ? {}
+            : { pendingRequests: initial.pendingRequests }),
+        };
 
       // Re-read the run only when the thread records a run update or its
       // deletion, instead of polling the projection for up to an hour. Each
       // stream keeps one event type, so transcript events never fill its buffer.
-      const wait = Stream.merge(
+      const runChanges = Stream.merge(
         orchestrator.streamStoredEventsFrom({
           threadId: input.threadId,
           afterSequence,
@@ -870,47 +960,88 @@ const make = Effect.gen(function* () {
           afterSequence,
           eventType: "thread.deleted",
         }),
-      ).pipe(
+      );
+      const changes =
+        input.seenRequestIds === undefined
+          ? runChanges
+          : Stream.merge(
+              runChanges,
+              Stream.merge(
+                orchestrator.streamStoredEventsFrom({
+                  threadId: input.threadId,
+                  afterSequence,
+                  eventType: "runtime-request.updated",
+                }),
+                orchestrator.streamStoredEventsFrom({
+                  threadId: input.threadId,
+                  afterSequence,
+                  eventType: "turn-item.updated",
+                }),
+              ),
+            );
+      const wait = changes.pipe(
         Stream.mapError(loadError),
         Stream.filter(
           (stored) =>
-            stored.event.type !== "run.updated" || stored.event.payload.id === selectedRun.id,
+            input.followThread === true ||
+            stored.event.type !== "run.updated" ||
+            stored.event.payload.id === selectedRun?.id,
         ),
         Stream.mapEffect(() =>
-          getProjectThreadRecords(input, ["runs"], { runIds: [selectedRun.id] }).pipe(
+          getProjectThreadRecords(
+            input,
+            fields,
+            input.followThread ? {} : { runIds: [selectedRun!.id] },
+          ).pipe(
             Effect.flatMap((current) => {
-              const run = current.runs.find((candidate) => candidate.id === selectedRun.id);
-              return run === undefined
+              const result = resultFor(current);
+              return result.run === undefined && !input.followThread
                 ? Effect.fail(
                     new ThreadManagementRunNotFoundError({
                       threadId: input.threadId,
-                      runId: selectedRun.id,
+                      runId: selectedRun!.id,
                     }),
                   )
-                : Effect.succeed(run);
+                : Effect.succeed(result);
             }),
           ),
         ),
-        Stream.filter((run) => isTerminalRunStatus(run.status)),
+        Stream.filter((result) => terminalUnseen(result.run) || result.pendingRequests.length > 0),
         Stream.runHead,
         Effect.timeoutOption(Duration.millis(Math.max(1, input.timeoutMs))),
       );
       const waited = Option.flatten(yield* wait);
       if (Option.isSome(waited)) {
-        return { threadId: input.threadId, run: waited.value, timedOut: false };
+        return {
+          threadId: input.threadId,
+          run: waited.value.run ?? null,
+          ...(input.seenRequestIds === undefined
+            ? {}
+            : { pendingRequests: waited.value.pendingRequests }),
+          timedOut: false,
+        };
       }
-      const current = yield* getProjectThreadRecords(input, ["runs"], { runIds: [selectedRun.id] });
-      const run = current.runs.find((candidate) => candidate.id === selectedRun.id);
-      if (run === undefined) {
+      const current = yield* getProjectThreadRecords(
+        input,
+        fields,
+        input.followThread ? {} : { runIds: [selectedRun!.id] },
+      );
+      const { run, pendingRequests: finalQuestions } = resultFor(current);
+      if (run === undefined && !input.followThread) {
         return yield* new ThreadManagementRunNotFoundError({
           threadId: input.threadId,
-          runId: selectedRun.id,
+          runId: selectedRun!.id,
         });
       }
       // The run may have reached a terminal status while the timeout was
       // winning the race; the final projection read decides what actually
       // happened, so only a still-active run counts as timed out.
-      return { threadId: input.threadId, run, timedOut: !isTerminalRunStatus(run.status) };
+      return {
+        threadId: input.threadId,
+        run: run ?? null,
+        ...(input.seenRequestIds === undefined ? {} : { pendingRequests: finalQuestions }),
+        timedOut: !terminalUnseen(run) && finalQuestions.length === 0,
+      };
     });
 
   const settleAfterRun: ThreadManagementServiceShape["settleAfterRun"] = Effect.fn(

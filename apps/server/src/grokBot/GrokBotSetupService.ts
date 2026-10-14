@@ -252,12 +252,10 @@ const make = Effect.gen(function* () {
       return snapshot.view;
     // Native history can be slow. Never hold the verification lock while reading it.
     const conversation = yield* bots.read(saved.status.primaryBot!.id).pipe(Effect.option);
-    if (conversation._tag === "None") return snapshot.view;
-    const authorizationUrl = grokBotSetupAuthorizationUrl(
-      conversation.value.messages,
-      saved.nonce,
-      saved.endpoint,
-    );
+    const authorizationUrl =
+      conversation._tag === "Some"
+        ? grokBotSetupAuthorizationUrl(conversation.value.messages, saved.nonce, saved.endpoint)
+        : null;
     if (!authorizationUrl) {
       const connectors = yield* native
         .readMcp(value.binding, { method: "GetAvailableMcpServers", input: {} })
