@@ -243,10 +243,3 @@ export function isMuseSessionThread(threadId: string, sessionId: string | null):
   const match = /^muse-agent:[0-9a-f]{64}:(.+)$/.exec(threadId);
   return match?.[1] === encodeURIComponent(sessionId);
 }
-
-/** Route search for opening a source-aware agent chat; Grok keeps its `/grok-bots/$botId` route. */
-export function museAgentOpenSearch(environmentId: string | null | undefined): {
-  readonly environmentId?: string;
-} {
-  return environmentId ? { environmentId } : {};
-}

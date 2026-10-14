@@ -3,7 +3,7 @@ import type { MuseAgentTask } from "@t3tools/contracts";
 /** Muse's own schedules, grouped the way the original Muse app lists them. */
 export type MuseRoutineGroupId = "reminders" | "daily" | "repeating" | "heartbeat" | "other";
 
-export const MUSE_ROUTINE_GROUP_ORDER: ReadonlyArray<MuseRoutineGroupId> = [
+const MUSE_ROUTINE_GROUP_ORDER: ReadonlyArray<MuseRoutineGroupId> = [
   "reminders",
   "daily",
   "repeating",
@@ -11,7 +11,7 @@ export const MUSE_ROUTINE_GROUP_ORDER: ReadonlyArray<MuseRoutineGroupId> = [
   "other",
 ];
 
-export const MUSE_ROUTINE_GROUP_LABELS: Readonly<Record<MuseRoutineGroupId, string>> = {
+const MUSE_ROUTINE_GROUP_LABELS: Readonly<Record<MuseRoutineGroupId, string>> = {
   reminders: "Reminders",
   daily: "Daily",
   repeating: "Repeating",

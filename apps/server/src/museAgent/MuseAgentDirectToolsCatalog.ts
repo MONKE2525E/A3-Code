@@ -26,7 +26,7 @@ import * as WorktreeHandlers from "../mcp/toolkits/worktree/handlers.ts";
 import { WorktreeToolkit } from "../mcp/toolkits/worktree/tools.ts";
 
 /** Native Muse shares T3's checked services. Grok's completion/identity tools are not advertised. */
-export const tools = Effect.all([
+const tools = Effect.all([
   toolkitRegistration(AttachmentToolkit, AttachmentHandlers.layer),
   toolkitRegistration(DeviceStandardToolkit, DeviceHandlers.layerStandard),
   toolkitRegistration(DeviceScreenshotToolkit, DeviceHandlers.layerScreenshot),

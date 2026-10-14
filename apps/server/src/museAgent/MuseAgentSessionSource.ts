@@ -41,7 +41,7 @@ export class MuseAgentSessionSource extends Context.Service<
   }
 >()("t3/museAgent/MuseAgentSessionSource") {}
 
-export function museCookieDomain(host: string): boolean {
+function museCookieDomain(host: string): boolean {
   const domain = host.replace(/^\./, "").toLowerCase();
   return domain === "muse.ai" || domain.endsWith(".muse.ai");
 }
@@ -95,7 +95,7 @@ const exists = (file: string) =>
     () => false,
   );
 
-export const makeMuseAgentSessionSourceLayer = (
+const makeMuseAgentSessionSourceLayer = (
   options: {
     readonly homeDir?: string;
     readonly profilePath?: string;

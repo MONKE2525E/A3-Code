@@ -346,7 +346,7 @@ function isGrokBotDriverKind(driver: string): boolean {
  * Native Muse (`muse-agent`) is a personal agent like a Grok Bot, so it is kept out of ordinary
  * coding pickers too. Muse Code (`muse`) is a coding provider and stays listed.
  */
-export function isNativeAgentDriverKind(driver: string): boolean {
+function isNativeAgentDriverKind(driver: string): boolean {
   return isGrokBotDriverKind(driver) || driver === "muse-agent";
 }
 

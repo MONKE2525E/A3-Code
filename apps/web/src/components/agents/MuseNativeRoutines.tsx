@@ -33,7 +33,7 @@ import { formatMuseNextRun } from "./museAgentFeatures.logic";
 import { groupMuseRoutines } from "./museAgentRoutines";
 
 /** Settings anchor for Muse's routines, listed beside T3's scheduled tasks. */
-export const MUSE_ROUTINES_SETTINGS_HASH = "muse-routines";
+const MUSE_ROUTINES_SETTINGS_HASH = "muse-routines";
 
 /**
  * Routines Muse owns and runs itself. They appear beside T3's scheduled tasks as a read-through:

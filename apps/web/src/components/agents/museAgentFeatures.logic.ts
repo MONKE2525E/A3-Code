@@ -6,7 +6,7 @@ import type {
   MuseAgentSkill,
 } from "@t3tools/contracts";
 
-export const MUSE_FEATURE_TABS = [
+const MUSE_FEATURE_TABS = [
   { id: "memory", label: "Memory" },
   { id: "routines", label: "Routines" },
   { id: "connections", label: "Connections" },
@@ -43,13 +43,6 @@ export function resolveMuseTabSupport(
   const entry = inventory?.features.find((feature) => feature.feature === TAB_FEATURE[tab]);
   if (!entry) return "unknown";
   return entry.support === "unavailable" ? "unavailable" : "documented";
-}
-
-/** A short, human reading of the server's schedule key; unknown shapes are shown as given. */
-export function formatMuseSchedule(scheduleKey: string, timezone?: string): string {
-  const key = scheduleKey.trim();
-  if (key.length === 0) return "No schedule";
-  return timezone ? `${key} (${timezone})` : key;
 }
 
 export function formatMuseNextRun(nextRunAtUtc: number | undefined, now: number): string | null {
@@ -175,6 +168,3 @@ export function museMemoryPreview(text: string | undefined, limit = 160): string
 export function museRoutineEditPrompt(title: string): string {
   return `Edit my scheduled task \u201c${title}\u201d:`;
 }
-
-/** Composer seed for creating a routine in the canonical Muse chat. */
-export const MUSE_ROUTINE_CREATE_PROMPT = "Create a scheduled task: ";
