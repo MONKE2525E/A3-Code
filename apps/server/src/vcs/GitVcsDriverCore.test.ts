@@ -3173,6 +3173,33 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect("skips dangling symlinks while allocating a worktree path", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const worktreesDirectory = yield* makeTmpDir();
+        const parent = path.join(worktreesDirectory, path.basename(cwd));
+        yield* fs.makeDirectory(parent);
+        const preferred = path.join(parent, "feature");
+        const missingTarget = path.join(worktreesDirectory, "missing");
+        yield* fs.symlink(missingTarget, preferred);
+        yield* fs.symlink(missingTarget, `${preferred}-2`);
+        assert.equal(yield* fs.exists(preferred), false);
+        const created = yield* driver.createWorktree(
+          { cwd, path: null, refName: initialBranch, newRefName: "feature" },
+          { worktreesDirectory },
+        );
+        assert.equal(created.worktree.path, `${preferred}-3`);
+        assert.equal(created.worktree.refName, "feature");
+        assert.equal(yield* git(created.worktree.path, ["branch", "--show-current"]), "feature");
+        assert.equal(yield* fs.readLink(preferred), missingTarget);
+        assert.equal(yield* fs.readLink(`${preferred}-2`), missingTarget);
+      }),
+    );
+
     it.effect("avoids a directory occupied by a different sanitized branch name", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();

@@ -3408,6 +3408,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     "createWorktree",
   )(function* (input, options) {
     const progress = options?.progress;
+    // An access check misses dangling symlinks. Remember paths Git rejected so
+    // a collision always advances allocation, even when exists() reports false.
+    const collidedPaths = new Set<string>();
     const { worktreePath, targetBranch } = yield* Effect.gen(function* () {
       let targetBranch = input.newRefName ?? input.refName;
       const repoName = path.basename(input.cwd);
@@ -3482,7 +3485,11 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       // Sanitizing slashes can map different branch names onto the same folder.
       if (input.path === null) {
         const preferredPath = worktreePath;
-        for (let suffix = 2; yield* fileSystem.exists(worktreePath); suffix++) {
+        for (
+          let suffix = 2;
+          collidedPaths.has(worktreePath) || (yield* fileSystem.exists(worktreePath));
+          suffix++
+        ) {
           worktreePath = `${preferredPath}-${suffix}`;
         }
       }
@@ -3513,6 +3520,14 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               }
             : {}),
         },
+      ).pipe(
+        Effect.tapError((error) =>
+          input.path === null && error.reason === "path_already_exists"
+            ? Effect.sync(() => {
+                collidedPaths.add(worktreePath);
+              })
+            : Effect.void,
+        ),
       );
 
       return { worktreePath, targetBranch };
