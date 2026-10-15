@@ -14,7 +14,10 @@ const mocks = vi.hoisted(() => ({
     status: string;
     latestTurn: null;
     lastVisitedAt: null;
+    title?: string;
+    pinnedAt?: string;
   }>,
+  pinned: true,
   openPermission: {},
   canOpen: true,
   open: vi.fn(),
@@ -31,7 +34,7 @@ vi.mock("@tanstack/react-router", () => ({
 vi.mock("~/components/ui/sidebar", () => ({
   useSidebar: () => ({ isMobile: false, setOpenMobile: vi.fn() }),
 }));
-vi.mock("~/hooks/useLocalStorage", () => ({ useLocalStorage: () => [true, vi.fn()] }));
+vi.mock("~/hooks/useLocalStorage", () => ({ useLocalStorage: () => [mocks.pinned, vi.fn()] }));
 vi.mock("~/uiStateStore", () => ({ useUiStateStore: () => ({}) }));
 vi.mock("~/state/threads", () => ({
   environmentThreadShells: { environmentThreadsAtom: () => mocks.threads },
@@ -62,12 +65,102 @@ import { MuseAgentSidebarSection } from "./MuseAgentSidebarSection";
 
 beforeEach(() => {
   mocks.threads.length = 0;
+  mocks.pinned = true;
+  mocks.navigate.mockClear();
   vi.stubGlobal("matchMedia", () => ({
     matches: false,
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
   }));
 });
+
+it.each(["success", "retry", "forbidden"])(
+  "opens pinned side chats with native synchronization: %s",
+  async (outcome) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    mocks.pinned = false;
+    mocks.canOpen = outcome !== "forbidden";
+    const threadId = `muse-agent:${"a".repeat(64)}:${encodeURIComponent("side:one")}`;
+    mocks.threads.push({
+      id: threadId,
+      title: "Pinned side chat",
+      pinnedAt: "2026-01-01T00:00:00Z",
+      providerInstanceId: "muse-test",
+      archivedAt: null,
+      updatedAt: "2026-01-01T00:00:00Z",
+      status: "idle",
+      latestTurn: null,
+      lastVisitedAt: null,
+    });
+    let finish: (value: unknown) => void = () => {
+      throw new Error("not started");
+    };
+    mocks.open.mockReset().mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <MuseAgentSidebarSection
+            environmentId={EnvironmentId.make("test-env")}
+            onOpenSettings={vi.fn()}
+          />,
+        ),
+      );
+      const row = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === "Pinned side chat",
+      )!;
+      await act(async () => row.click());
+      expect(mocks.navigate).not.toHaveBeenCalled();
+      if (outcome === "forbidden") {
+        expect(row.disabled).toBe(true);
+        expect(mocks.open).not.toHaveBeenCalled();
+        return;
+      }
+      expect(row.disabled).toBe(true);
+      expect(mocks.open).toHaveBeenCalledWith({
+        environmentId: "test-env",
+        input: { providerInstanceId: "muse-test", sessionId: "side:one" },
+      });
+      if (outcome === "retry") {
+        await act(async () =>
+          finish({ _tag: "Failure", cause: Cause.fail(new Error("Connection unavailable.")) }),
+        );
+        expect(mocks.navigate).not.toHaveBeenCalled();
+        expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+          "Connection unavailable.",
+        );
+        mocks.open.mockResolvedValue({ _tag: "Success", value: { threadId } });
+        const retry = [...container.querySelectorAll("button")].find(
+          (button) => button.textContent === "Retry",
+        )!;
+        await act(async () => retry.click());
+        expect(mocks.open).toHaveBeenLastCalledWith({
+          environmentId: "test-env",
+          input: { providerInstanceId: "muse-test", sessionId: "side:one" },
+        });
+        expect(container.querySelector('[role="alert"]')).toBeNull();
+      } else {
+        await act(async () => finish({ _tag: "Success", value: { threadId } }));
+      }
+      expect(mocks.navigate).toHaveBeenCalledWith({
+        to: "/$environmentId/$threadId",
+        params: { environmentId: "test-env", threadId },
+      });
+      expect(row.disabled).toBe(false);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      mocks.canOpen = true;
+      vi.unstubAllGlobals();
+    }
+  },
+);
 
 it("keeps Activity and Approvals in the Muse flyout instead of the left sidebar", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);

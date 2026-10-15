@@ -4,7 +4,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { type EnvironmentId, ProviderInstanceId, type ThreadId } from "@t3tools/contracts";
+import { type EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { ChevronLeftIcon, ListChecksIcon, ShieldCheckIcon } from "lucide-react";
@@ -42,6 +42,7 @@ import { MuseAgentConversations } from "./MuseAgentConversations";
 import { MuseSubChatConnector } from "./MuseSubChatConnector";
 import { resolveMuseSubChatList, type MuseSubChatEntry } from "./museSubChatList";
 import { useMuseAgentAvatar } from "./useMuseAgentAvatar";
+import { openCachedMuseThread } from "./openCachedMuseThread";
 
 const MUSE_PINNED_STORAGE_KEY = "t3code:muse-agent-pinned";
 
@@ -169,12 +170,14 @@ function MuseAgentRoster({
 
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
+  const [failedSubChat, setFailedSubChat] = useState<MuseSubChatEntry | null>(null);
 
   const open = useCallback(async () => {
     if (opening) return;
     if (isMobile) setOpenMobile(false);
     setOpening(true);
     setOpenError(null);
+    setFailedSubChat(null);
     const cached = threads.find(
       (entry) =>
         entry.providerInstanceId === instanceId &&
@@ -242,7 +245,12 @@ function MuseAgentRoster({
       <p role="alert" className="min-w-0 flex-1 text-xs leading-4.5 text-destructive">
         {openError}
       </p>
-      <Button size="xs" variant="outline" onClick={() => void open()}>
+      <Button
+        size="xs"
+        variant="outline"
+        disabled={!canOpen || opening}
+        onClick={() => void (failedSubChat ? openSubChat(failedSubChat) : open())}
+      >
         Retry
       </Button>
     </div>
@@ -292,12 +300,34 @@ function MuseAgentRoster({
       search: { environmentId },
     });
   };
-  const openSubChat = (entry: MuseSubChatEntry) => {
+  const openSubChat = async (entry: MuseSubChatEntry) => {
+    if (!canOpen || opening) return;
     if (isMobile) setOpenMobile(false);
-    void navigate({
-      to: "/$environmentId/$threadId",
-      params: buildThreadRouteParams(scopeThreadRef(environmentId, entry.id as ThreadId)),
-    });
+    setOpening(true);
+    setOpenError(null);
+    try {
+      await openCachedMuseThread({
+        hit: { environmentId, threadId: entry.id },
+        shells: threads.map((thread) => ({ ...thread, environmentId })),
+        openThread: async (target) => {
+          const result = await openThread(target);
+          if (result._tag === "Success") return result.value;
+          if (isAtomCommandInterrupted(result)) return null;
+          throw squashAtomCommandFailure(result);
+        },
+        navigate: async (target) => {
+          await navigate({
+            to: "/$environmentId/$threadId",
+            params: buildThreadRouteParams(scopeThreadRef(target.environmentId, target.threadId)),
+          });
+        },
+      });
+    } catch (error) {
+      setFailedSubChat(entry);
+      setOpenError(shortError(error, "Could not open Muse. Try again."));
+    } finally {
+      setOpening(false);
+    }
   };
   const avatarNode = (size: "lg" | "tall" | "xl") => (
     <MuseAgentAvatar
@@ -366,14 +396,20 @@ function MuseAgentRoster({
         <MuseSubChatRow
           entry={openEntry}
           labelRef={subChatLabelRef}
-          onOpen={() => openSubChat(openEntry)}
+          disabled={!canOpen || opening}
+          onOpen={() => void openSubChat(openEntry)}
         />
       ) : null}
       {subChats.pinned.length > 0 ? (
         <>
           <p className="pt-1 pl-10.5 text-2xs leading-4 text-sidebar-muted-foreground">Pinned</p>
           {subChats.pinned.map((entry) => (
-            <MuseSubChatRow key={entry.id} entry={entry} onOpen={() => openSubChat(entry)} />
+            <MuseSubChatRow
+              key={entry.id}
+              entry={entry}
+              disabled={!canOpen || opening}
+              onOpen={() => void openSubChat(entry)}
+            />
           ))}
         </>
       ) : null}
@@ -390,16 +426,19 @@ function MuseAgentRoster({
 
 function MuseSubChatRow({
   entry,
+  disabled,
   labelRef,
   onOpen,
 }: {
   readonly entry: MuseSubChatEntry;
+  readonly disabled: boolean;
   readonly labelRef?: RefObject<HTMLSpanElement | null>;
   readonly onOpen: () => void;
 }) {
   return (
     <button
       type="button"
+      disabled={disabled}
       aria-current={entry.active ? "page" : undefined}
       className={cn(
         "relative z-10 flex h-[1.875rem] w-full min-w-0 cursor-pointer items-center rounded-md pr-2 pl-10.5 text-left text-sm text-sidebar-foreground outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",

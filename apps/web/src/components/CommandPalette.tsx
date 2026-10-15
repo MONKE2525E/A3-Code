@@ -1,5 +1,7 @@
 "use client";
 
+import { openCachedMuseThread } from "./agents/openCachedMuseThread";
+
 import { threadPullRequestLinkMode } from "@t3tools/client-runtime/thread-pull-request-compatibility";
 import { settingsSearchResultSearch } from "./grokBot/grokBotPresentation";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
@@ -192,7 +194,6 @@ import {
   buildLinkedThreadActionItems,
   buildGrokBotSearchItems,
   buildMuseAgentSearchItems,
-  openMuseAgentSearchHit,
   buildCommandPaletteRows,
   enumerateCommandPaletteItems,
   findHighlightedCommandPaletteItem,
@@ -865,7 +866,7 @@ function OpenCommandPaletteDialog(props: {
       fallbackIcon: <MuseAgentAvatar name="Muse" size="sm" />,
       canOpen: (environmentId) => museOpenPermissions.get(environmentId) === true,
       run: (hit) =>
-        openMuseAgentSearchHit({
+        openCachedMuseThread({
           hit,
           shells: shellThreads,
           openThread: async (target) => {

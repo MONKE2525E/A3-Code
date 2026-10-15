@@ -1,11 +1,8 @@
+import { openCachedMuseThread } from "./agents/openCachedMuseThread";
 import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import {
-  buildMuseAgentSearchItems,
-  openMuseAgentSearchHit,
-  type MuseAgentSearchHit,
-} from "./CommandPalette.logic";
+import { buildMuseAgentSearchItems, type MuseAgentSearchHit } from "./CommandPalette.logic";
 
 const environmentId = EnvironmentId.make("env-1");
 
@@ -52,7 +49,7 @@ describe("opening Muse search results", () => {
         identity: { environmentId, name: "Local Muse", icon: null },
         fallbackIcon: null,
         canOpen: () => true,
-        run: (hit) => openMuseAgentSearchHit({ hit, shells, openThread, navigate }),
+        run: (hit) => openCachedMuseThread({ hit, shells, openThread, navigate }),
       });
       const opening = item!.run();
       expect(events).toEqual(["open"]);
@@ -74,7 +71,7 @@ describe("opening Muse search results", () => {
     "does not navigate after %s",
     async (outcome) => {
       const navigate = vi.fn(async () => {});
-      const opening = openMuseAgentSearchHit({
+      const opening = openCachedMuseThread({
         hit: { ...hit(side, "match"), environmentId: remoteEnvironmentId },
         shells,
         navigate,
@@ -100,7 +97,7 @@ describe("opening Muse search results", () => {
       const openThread = vi.fn(async () => ({ threadId: main }));
       const navigate = vi.fn(async () => {});
       await expect(
-        openMuseAgentSearchHit({
+        openCachedMuseThread({
           hit: {
             ...hit(threadId, "match"),
             environmentId: threadId === main ? environmentId : remoteEnvironmentId,

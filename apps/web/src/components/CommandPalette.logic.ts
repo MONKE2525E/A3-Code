@@ -5,9 +5,6 @@ import {
   type FilesystemBrowseEntry,
   type GrokBot,
   type KeybindingCommand,
-  type MuseAgentOpenThreadInput,
-  type ProviderInstanceId,
-  type ThreadId,
   THREAD_JUMP_KEYBINDING_COMMANDS,
 } from "@t3tools/contracts";
 import { filterFilesystemBrowseEntries } from "@t3tools/client-runtime/state/filesystem";
@@ -19,7 +16,6 @@ import { getThreadSortTimestamp, sortThreads } from "../lib/threadSort";
 import { normalizeSearchText } from "../lib/utils";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { type Project, type SidebarThreadSummary, type Thread } from "../types";
-import { isMuseSessionThread, museSessionForThread } from "./agents/aiAgents";
 
 export const RECENT_THREAD_LIMIT = 12;
 export const ITEM_ICON_CLASS = "size-4 text-icon-muted";
@@ -88,47 +84,6 @@ export interface MuseAgentSearchHit {
   readonly threadId: string;
   readonly source: "user" | "assistant";
   readonly snippet: string;
-}
-
-/** Reattach the selected account's live Muse conversation before navigating to its cached shell. */
-export async function openMuseAgentSearchHit(input: {
-  readonly hit: MuseAgentSearchHit;
-  readonly shells: ReadonlyArray<{
-    readonly environmentId: EnvironmentId;
-    readonly id: string;
-    readonly providerInstanceId: ProviderInstanceId;
-  }>;
-  readonly openThread: (target: {
-    readonly environmentId: EnvironmentId;
-    readonly input: MuseAgentOpenThreadInput;
-  }) => Promise<{ readonly threadId: ThreadId } | null>;
-  readonly navigate: (target: {
-    readonly environmentId: EnvironmentId;
-    readonly threadId: ThreadId;
-  }) => Promise<void>;
-}): Promise<void> {
-  const { hit } = input;
-  const shell = input.shells.find(
-    (thread) => thread.environmentId === hit.environmentId && thread.id === hit.threadId,
-  );
-  const sessionId = museSessionForThread(hit.threadId);
-  if (!shell || !isMuseSessionThread(hit.threadId, sessionId ?? null)) {
-    throw new Error("This Muse conversation is unavailable. Refresh search and try again.");
-  }
-  const opened = await input.openThread({
-    environmentId: hit.environmentId,
-    input: {
-      providerInstanceId: shell.providerInstanceId,
-      ...(sessionId === undefined ? {} : { sessionId }),
-    },
-  });
-  if (opened === null) return;
-  if (opened.threadId !== hit.threadId) {
-    throw new Error(
-      "This conversation belongs to a different Muse account. Reconnect that account to open it.",
-    );
-  }
-  await input.navigate({ environmentId: hit.environmentId, threadId: opened.threadId });
 }
 
 /** Each Muse conversation appears once per environment in global search. */
