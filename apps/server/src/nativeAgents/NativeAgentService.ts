@@ -549,8 +549,13 @@ const make = Effect.gen(function* () {
         }
         yield* check;
         yield* observe(threadId, selection.instanceId).pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("Failed to attach native Muse observation", { threadId, cause }),
+          Effect.mapError(
+            () =>
+              new NativeAgentError({
+                reason: "provider_unavailable",
+                detail:
+                  "Could not connect to this Muse conversation. Wait for any active Muse turn to finish, then try again.",
+              }),
           ),
         );
         yield* check;

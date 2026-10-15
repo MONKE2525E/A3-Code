@@ -109,6 +109,7 @@ const fixture = (
       rotateOnHistoryPage: false,
       historyCursors: [] as Array<number | undefined>,
       watches: 0,
+      watchFailure: null as "busy" | "unsupported" | null,
       accountReads: 0,
       writes: 0,
       refreshes: 0,
@@ -254,9 +255,11 @@ const fixture = (
           };
         }),
       watch: () =>
-        Effect.sync(() => {
+        Effect.suspend(() => {
           state.watches++;
-          return { events: Stream.never, close: Effect.void };
+          return state.watchFailure === null
+            ? Effect.succeed({ events: Stream.never, close: Effect.void })
+            : Effect.fail(new Native.MuseAgentRuntimeError({ kind: state.watchFailure }));
         }),
       send: () => Effect.die("Viewing a native agent must not send a message."),
       pendingDeliveries: () => Effect.sync(() => state.pending),
@@ -657,6 +660,44 @@ it.effect(
         ProviderSessionId.make(`provider-session:muse-agent-observe:${opened.threadId}`),
       );
       yield* h.service.open(reference);
+      assert.equal(h.state.watches, 2);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect.each([undefined, "side-one"])(
+  "surfaces observer attach failure for %s and allows a later canonical reopen",
+  (sessionId) =>
+    Effect.gen(function* () {
+      const h = yield* fixture();
+      const target = { ...reference, ...(sessionId === undefined ? {} : { sessionId }) };
+      h.state.watchFailure = "busy";
+      const failure = yield* Effect.flip(h.service.open(target));
+      assert.equal(failure.reason, "provider_unavailable");
+      assert.match(failure.message, /active Muse turn.*try again/);
+      assert.equal(h.state.watches, 1);
+      assert.equal(h.state.reads, 0);
+      assert.deepEqual((yield* h.search.search({ query: "quokka-ledger" })).matches, []);
+      const shells = (yield* h.orchestrator.getShellSnapshot()).threads;
+      assert.equal(shells.length, 1);
+      const threadId = shells[0]!.id;
+      assert.equal(
+        Option.isNone(
+          yield* h.sessions.get(
+            ProviderSessionId.make(`provider-session:muse-agent-observe:${threadId}`),
+          ),
+        ),
+        true,
+      );
+      h.state.watchFailure = null;
+      const opened = yield* h.service.open(target);
+      assert.equal(opened.threadId, threadId);
+      yield* h.orchestrator
+        .streamStoredEventsFrom({ threadId, eventType: "message.updated" })
+        .pipe(Stream.take(1), Stream.runDrain);
+      assert.equal(h.state.watches, 2);
+      assert.equal(h.state.reads, 1);
+      assert.equal((yield* h.orchestrator.getThreadProjection(threadId)).runs.length, 0);
+      assert.deepEqual(yield* h.service.open(target), opened);
       assert.equal(h.state.watches, 2);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
