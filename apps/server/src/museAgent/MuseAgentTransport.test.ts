@@ -827,7 +827,12 @@ it.effect("preserves the native status field without leaking error details", () 
   return Effect.gen(function* () {
     const transport = yield* Transport.MuseAgentTransport;
     const binding = yield* transport.connect;
-    const error = yield* transport.request(binding, "connectors.get", {}).pipe(Effect.flip);
-    assert.deepStrictEqual(error.cause, { status: 403 });
+    const cause = yield* transport.request(binding, "connectors.get", {}).pipe(
+      Effect.match({
+        onFailure: (error) => error.cause,
+        onSuccess: () => null,
+      }),
+    );
+    assert.deepStrictEqual(cause, { status: 403 });
   }).pipe(Effect.provide(f.layer), Effect.scoped);
 });
