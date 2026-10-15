@@ -243,6 +243,7 @@ it.effect("does not return arbitrary native error strings or invalid HTTP status
   f.failRequest({
     code: "private payload with spaces",
     httpStatus: 900,
+    status: 900,
     message: "private native detail",
     token: "private",
   });
@@ -818,4 +819,15 @@ it.effect("uses the signed-in T3 browser and retires only its transport page", (
     assert.equal(f.closed(), false);
     assert.equal(f.pageClosed(), true);
   });
+});
+
+it.effect("preserves the native status field without leaking error details", () => {
+  const f = fixture();
+  f.failRequest(Object.assign(new Error("synthetic-private-detail"), { status: 403 }));
+  return Effect.gen(function* () {
+    const transport = yield* Transport.MuseAgentTransport;
+    const binding = yield* transport.connect;
+    const error = yield* transport.request(binding, "connectors.get", {}).pipe(Effect.flip);
+    assert.deepStrictEqual(error.cause, { status: 403 });
+  }).pipe(Effect.provide(f.layer), Effect.scoped);
 });

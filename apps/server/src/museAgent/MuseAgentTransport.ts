@@ -388,19 +388,29 @@ const requestPageBridge = (page: Page, input: unknown) =>
       } catch (cause) {
         const code =
           typeof cause === "object" && cause !== null && "code" in cause ? cause.code : undefined;
-        const status =
+        const httpStatus =
           typeof cause === "object" && cause !== null && "httpStatus" in cause
             ? cause.httpStatus
+            : undefined;
+        const status =
+          typeof cause === "object" && cause !== null && "status" in cause
+            ? cause.status
             : undefined;
         return {
           ok: false as const,
           error: {
             ...(typeof code === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(code) ? { code } : {}),
+            ...(typeof httpStatus === "number" &&
+            Number.isInteger(httpStatus) &&
+            httpStatus >= 100 &&
+            httpStatus <= 599
+              ? { httpStatus }
+              : {}),
             ...(typeof status === "number" &&
             Number.isInteger(status) &&
             status >= 100 &&
             status <= 599
-              ? { httpStatus: status }
+              ? { status }
               : {}),
           },
         };
