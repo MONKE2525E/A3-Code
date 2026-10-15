@@ -173,6 +173,20 @@ export const museAgentComputerStreamCommand =
 export const museAgentOpenThread = createEnvironmentRpcCommand(connectionAtomRuntime, {
   label: "environment-data:muse-agent:open-thread",
   tag: WS_METHODS.museAgentsOpenThread,
+  onSuccess: (target, registry, result) =>
+    Effect.sync(() => {
+      refreshMuseAgent(registry, target.environmentId);
+      registry.refresh(
+        museAgentFeatureReadQuery({
+          environmentId: target.environmentId,
+          input: {
+            operation: "history_page",
+            providerInstanceId: target.input.providerInstanceId,
+            threadId: result.threadId,
+          },
+        }),
+      );
+    }),
   concurrency: {
     mode: "serial",
     key: (target) => `${target.environmentId}:muse`,
