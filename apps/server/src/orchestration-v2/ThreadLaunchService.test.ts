@@ -1803,12 +1803,18 @@ it.effect("a retry reuses a recorded worktree without undoing its branch rename"
   }).pipe(Effect.provide(harness.layer));
 });
 
-it.effect("removes a worktree that failed before the thread recorded it", () => {
+it.effect("retries a partial checkout with the same requested branch", () => {
+  let attempts = 0;
   const harness = makeHarness({
-    // A checkout that dies after claiming its directory.
-    createWorktree: (_input, options) =>
+    createWorktree: (input, options) =>
       (options?.progress?.onWorktreeClaimed?.("/repo-worktrees/partial") ?? Effect.void).pipe(
-        Effect.andThen(Effect.fail(new Error("checkout failed") as never)),
+        Effect.andThen(() =>
+          ++attempts === 1
+            ? Effect.fail(new Error("checkout failed") as never)
+            : Effect.succeed({
+                worktree: { path: "/repo-worktrees/partial", refName: input.newRefName! },
+              }),
+        ),
       ),
   });
   return Effect.gen(function* () {
@@ -1819,21 +1825,95 @@ it.effect("removes a worktree that failed before the thread recorded it", () => 
         command: "command:launch:partial-worktree",
         thread: "thread:launch:partial-worktree",
         message: "Partial checkout",
-        workspace: { type: "worktree", baseRef: "main" },
+        workspace: { type: "worktree", baseRef: "main", branch: "feature" },
       }),
     );
-    yield* waitUntil(() =>
-      threads
-        .getThreadProjection(launched.threadId)
-        .pipe(Effect.map((projection) => projection.runs[0]?.status === "failed")),
+    yield* threads.streamStoredEventsFrom({ threadId: launched.threadId }).pipe(
+      Stream.filter(
+        (stored) => stored.event.type === "run.updated" && stored.event.payload.status === "failed",
+      ),
+      Stream.runHead,
     );
-    const projection = yield* threads.getThreadProjection(launched.threadId);
-    // Unrecorded, so a retry would create a second checkout beside it.
-    assert.equal(projection.thread.worktreePath, null);
+    const failed = yield* threads.getThreadProjection(launched.threadId);
+    assert.equal(failed.thread.worktreePath, null);
     assert.deepEqual(
       harness.removeWorktree.mock.calls.map(([input]) => input.path),
       ["/repo-worktrees/partial"],
     );
+    yield* launches.retryPreparation({
+      commandId: CommandId.make("command:launch:partial-worktree:retry"),
+      threadId: launched.threadId,
+      runId: failed.runs[0]!.id,
+    });
+    yield* threads.streamStoredEventsFrom({ threadId: launched.threadId }).pipe(
+      Stream.filter(
+        (stored) =>
+          stored.event.type === "run.updated" && stored.event.payload.status === "starting",
+      ),
+      Stream.runHead,
+    );
+    const retried = yield* threads.getThreadProjection(launched.threadId);
+    assert.equal(retried.thread.branch, "feature");
+    assert.equal(retried.thread.worktreePath, "/repo-worktrees/partial");
+    assert.deepEqual(
+      harness.createWorktree.mock.calls.map(([input]) => input.newRefName),
+      ["feature", "feature"],
+    );
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("records the allocated branch for clients and reuses it on repeated Retry", () => {
+  let failures = 1;
+  const harness = makeHarness({
+    createWorktree: () =>
+      Effect.succeed({ worktree: { path: "/repo-worktrees/feature-3", refName: "feature-3" } }),
+    runSetup: () =>
+      failures-- > 0
+        ? Effect.fail(new Error("setup failed") as never)
+        : Effect.succeed({ status: "no-script" as const }),
+  });
+  return Effect.gen(function* () {
+    const launches = yield* ThreadLaunch.ThreadLaunchService;
+    const threads = yield* ThreadManagement.ThreadManagementService;
+    const tracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
+    const launched = yield* launches.launch(
+      launchInput({
+        command: "command:launch:allocated",
+        thread: "thread:launch:allocated",
+        message: "Existing branch",
+        workspace: { type: "worktree", baseRef: "main", branch: "feature" },
+      }),
+    );
+    yield* threads.streamStoredEventsFrom({ threadId: launched.threadId }).pipe(
+      Stream.filter(
+        (stored) => stored.event.type === "run.updated" && stored.event.payload.status === "failed",
+      ),
+      Stream.runHead,
+    );
+    const failed = yield* threads.getThreadProjection(launched.threadId);
+    assert.equal(failed.thread.branch, "feature-3");
+    assert.equal(failed.thread.worktreePath, "/repo-worktrees/feature-3");
+    assert.equal((yield* tracker.get(launched.threadId))?.branch, "feature-3");
+    const retry = {
+      commandId: CommandId.make("command:launch:allocated:retry"),
+      threadId: launched.threadId,
+      runId: failed.runs[0]!.id,
+    };
+    yield* launches.retryPreparation(retry);
+    yield* threads.streamStoredEventsFrom({ threadId: launched.threadId }).pipe(
+      Stream.filter(
+        (stored) =>
+          stored.event.type === "run.updated" && stored.event.payload.status === "starting",
+      ),
+      Stream.runHead,
+    );
+    yield* launches.retryPreparation(retry);
+    const retried = yield* threads.getThreadProjection(launched.threadId);
+    assert.equal(retried.thread.branch, "feature-3");
+    assert.equal(retried.thread.worktreePath, "/repo-worktrees/feature-3");
+    assert.equal(harness.createWorktree.mock.calls.length, 1);
+    assert.equal(harness.removeWorktree.mock.calls.length, 0);
+    assert.equal(harness.renameBranch.mock.calls.length, 0);
   }).pipe(Effect.provide(harness.layer));
 });
 

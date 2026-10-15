@@ -1151,7 +1151,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    it.effect("appends the reason tag to a caller-supplied detail", () =>
+    it.effect("classifies a branch checked out in another worktree", () =>
       Effect.gen(function* () {
         const parent = yield* makeTmpDir();
         const pathService = yield* Path.Path;
@@ -1169,15 +1169,14 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         ]);
 
         const error = yield* driver
-          .createWorktree({
+          .execute({
+            operation: "GitVcsDriver.test.worktreeAdd",
             cwd,
-            refName: "taken-branch",
-            path: pathService.join(parent, "second"),
+            args: ["worktree", "add", pathService.join(parent, "second"), "taken-branch"],
           })
           .pipe(Effect.flip);
 
-        assert.equal(error.detail, "git worktree add failed");
-        assert.include(error.message, "git worktree add failed (branch_checked_out_in_worktree)");
+        assert.include(error.message, "(branch_checked_out_in_worktree)");
       }),
     );
 
@@ -2902,6 +2901,241 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
   });
 
   describe("worktree operations", () => {
+    it.effect("reattaches an unused branch at the requested base after a partial failure", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const path = yield* Path.Path;
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const fs = yield* FileSystem.FileSystem;
+        const worktreePath = path.join(yield* makeTmpDir(), "retry");
+        const input = {
+          cwd,
+          path: worktreePath,
+          refName: initialBranch,
+          newRefName: "feature/retry",
+          baseRefName: initialBranch,
+        };
+        // Checkout succeeds, but the later base-ref config write fails. The
+        // provisioning flow removes the claimed directory and leaves the branch.
+        yield* fs.writeFileString(path.join(cwd, ".git", "config.lock"), "");
+        const claimed = yield* Ref.make<string | null>(null);
+        yield* driver
+          .createWorktree(input, {
+            progress: { onWorktreeClaimed: (value) => Ref.set(claimed, value) },
+          })
+          .pipe(Effect.flip);
+        assert.equal(yield* Ref.get(claimed), worktreePath);
+        yield* fs.remove(path.join(cwd, ".git", "config.lock"));
+        yield* driver.removeWorktree({ cwd, path: worktreePath, force: true });
+        const before = yield* git(cwd, ["rev-parse", "feature/retry"]);
+        const retried = yield* driver.createWorktree(input);
+        assert.equal(retried.worktree.refName, "feature/retry");
+        assert.equal(yield* git(worktreePath, ["rev-parse", "HEAD"]), before);
+      }),
+    );
+
+    it.effect("preserves divergent commits and allocates the next unused branch", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const path = yield* Path.Path;
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* git(cwd, ["checkout", "-b", "feature"]);
+        yield* git(cwd, ["commit", "--allow-empty", "-m", "keep this commit"]);
+        const before = yield* git(cwd, ["rev-parse", "HEAD"]);
+        yield* git(cwd, ["branch", "feature-2"]);
+        yield* git(cwd, ["checkout", initialBranch]);
+        const created = yield* driver.createWorktree({
+          cwd,
+          path: path.join(yield* makeTmpDir(), "unique"),
+          refName: initialBranch,
+          newRefName: "feature",
+          baseRefName: initialBranch,
+        });
+        assert.equal(created.worktree.refName, "feature-3");
+        assert.equal(yield* git(cwd, ["rev-parse", "feature"]), before);
+        assert.equal(yield* git(cwd, ["rev-parse", "feature-2"]), before);
+        assert.equal(
+          yield* git(created.worktree.path, ["rev-parse", "HEAD"]),
+          yield* git(cwd, ["rev-parse", initialBranch]),
+        );
+        assert.equal(yield* git(cwd, ["config", "branch.feature-3.gh-merge-base"]), initialBranch);
+      }),
+    );
+
+    it.effect.each(["feature", "refs/heads/feature"])(
+      "checks out an explicitly reused branch with its commits intact (%s)",
+      (refName) =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const path = yield* Path.Path;
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          yield* git(cwd, ["checkout", "-b", "feature"]);
+          yield* git(cwd, ["commit", "--allow-empty", "-m", "existing work"]);
+          const before = yield* git(cwd, ["rev-parse", "HEAD"]);
+          yield* git(cwd, ["checkout", initialBranch]);
+          const created = yield* driver.createWorktree({
+            cwd,
+            path: path.join(yield* makeTmpDir(), "reuse"),
+            refName,
+          });
+          assert.equal(created.worktree.refName, "feature");
+          assert.equal(yield* git(created.worktree.path, ["rev-parse", "HEAD"]), before);
+        }),
+    );
+
+    it.effect.each([true, false])(
+      "allocates a new branch when the requested branch is checked out (new branch: %s)",
+      (newBranch) =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const path = yield* Path.Path;
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          const directory = yield* makeTmpDir();
+          const livePath = path.join(directory, "live");
+          yield* git(cwd, ["worktree", "add", "-b", "feature", livePath, initialBranch]);
+          yield* writeTextFile(livePath, "uncommitted.txt", "keep me");
+          const created = yield* driver.createWorktree({
+            cwd,
+            path: path.join(directory, "second"),
+            refName: newBranch ? initialBranch : "feature",
+            ...(newBranch ? { newRefName: "feature" } : {}),
+          });
+          assert.equal(created.worktree.refName, "feature-2");
+          assert.equal(yield* git(livePath, ["branch", "--show-current"]), "feature");
+          assert.equal(
+            yield* (yield* FileSystem.FileSystem).readFileString(
+              path.join(livePath, "uncommitted.txt"),
+            ),
+            "keep me",
+          );
+        }),
+    );
+
+    it.effect("prunes a stale registration before reusing its branch and path", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const path = yield* Path.Path;
+        const fs = yield* FileSystem.FileSystem;
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const worktreePath = path.join(yield* makeTmpDir(), "stale");
+        yield* git(cwd, ["worktree", "add", "-b", "feature", worktreePath, initialBranch]);
+        yield* fs.remove(worktreePath, { recursive: true });
+        const created = yield* driver.createWorktree({
+          cwd,
+          path: worktreePath,
+          refName: initialBranch,
+          newRefName: "feature",
+        });
+        assert.equal(created.worktree.refName, "feature");
+        assert.equal(created.worktree.path, worktreePath);
+        assert.notInclude(yield* git(cwd, ["worktree", "list", "--porcelain"]), "prunable");
+      }),
+    );
+
+    it.effect("keeps a locked missing worktree reserved", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const path = yield* Path.Path;
+        const fs = yield* FileSystem.FileSystem;
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const worktreePath = path.join(yield* makeTmpDir(), "locked");
+        yield* git(cwd, ["worktree", "add", "-b", "feature", worktreePath, initialBranch]);
+        yield* git(cwd, ["worktree", "lock", worktreePath]);
+        yield* fs.remove(worktreePath, { recursive: true });
+        const created = yield* driver.createWorktree({
+          cwd,
+          path: path.join(yield* makeTmpDir(), "other"),
+          refName: initialBranch,
+          newRefName: "feature",
+        });
+        assert.equal(created.worktree.refName, "feature-2");
+        assert.include(yield* git(cwd, ["worktree", "list", "--porcelain"]), "locked");
+      }),
+    );
+
+    it.effect("allocates separate branches and paths for concurrent launches", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const worktreesDirectory = yield* makeTmpDir();
+        const results = yield* Effect.all(
+          [
+            driver.createWorktree(
+              { cwd, path: null, refName: initialBranch, newRefName: "feature" },
+              { worktreesDirectory },
+            ),
+            driver.createWorktree(
+              { cwd, path: null, refName: initialBranch, newRefName: "feature" },
+              { worktreesDirectory },
+            ),
+          ],
+          { concurrency: 2 },
+        );
+        assert.deepEqual(results.map((result) => result.worktree.refName).sort(), [
+          "feature",
+          "feature-2",
+        ]);
+        assert.notEqual(results[0].worktree.path, results[1].worktree.path);
+        for (const result of results) {
+          assert.equal(
+            yield* git(result.worktree.path, ["branch", "--show-current"]),
+            result.worktree.refName,
+          );
+        }
+      }),
+    );
+
+    it.effect("avoids a directory occupied by a different sanitized branch name", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const worktreesDirectory = yield* makeTmpDir();
+        const first = yield* driver.createWorktree(
+          { cwd, path: null, refName: initialBranch, newRefName: "feature/slash" },
+          { worktreesDirectory },
+        );
+        const second = yield* driver.createWorktree(
+          { cwd, path: null, refName: initialBranch, newRefName: "feature-slash" },
+          { worktreesDirectory },
+        );
+        assert.equal(second.worktree.refName, "feature-slash");
+        assert.equal(second.worktree.path, `${first.worktree.path}-2`);
+        assert.equal(
+          yield* git(first.worktree.path, ["branch", "--show-current"]),
+          "feature/slash",
+        );
+      }),
+    );
+
+    it.effect("reuses a branch at a commit-search base", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const path = yield* Path.Path;
+        yield* git(cwd, ["branch", "feature"]);
+        const created = yield* driver.createWorktree({
+          cwd,
+          path: path.join(yield* makeTmpDir(), "search"),
+          refName: ":/initial commit",
+          newRefName: "feature",
+        });
+        assert.equal(created.worktree.refName, "feature");
+        assert.equal(
+          yield* git(created.worktree.path, ["rev-parse", "HEAD"]),
+          yield* git(cwd, ["rev-parse", "HEAD"]),
+        );
+      }),
+    );
+
     it.effect("uses parallel checkout without skipping filters or hooks", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();

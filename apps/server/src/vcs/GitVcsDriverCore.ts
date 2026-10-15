@@ -3404,55 +3404,131 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const createWorktree: GitVcsDriver.GitVcsDriver["Service"]["createWorktree"] = Effect.fn(
     "createWorktree",
   )(function* (input, options) {
-    const targetBranch = input.newRefName ?? input.refName;
-    const sanitizedBranch = targetBranch.replace(/\//g, "-");
-    const repoName = path.basename(input.cwd);
-    let worktreePath = input.path;
-    if (worktreePath == null) {
-      const parentDir = resolveWorktreesDirectory(
-        options?.worktreesDirectory ?? "",
-        worktreesDir,
-        path,
-        yield* HostProcess.HomeDirectory,
-      );
-      if (parentDir === null) {
-        return yield* new GitCommandError({
-          operation: "GitVcsDriver.createWorktree",
-          command: "git worktree add",
-          cwd: input.cwd,
-          detail: `The worktree location "${options?.worktreesDirectory}" must be an absolute folder on this machine, not a drive root. Change it in Settings → Storage.`,
-        });
-      }
-      worktreePath = path.join(parentDir, repoName, sanitizedBranch);
-    }
-    const args = input.newRefName
-      ? ["worktree", "add", "-b", input.newRefName, worktreePath, input.refName]
-      : ["worktree", "add", worktreePath, input.refName];
     const progress = options?.progress;
-    const onCheckoutProgress = progress?.onCheckoutProgress;
-
-    const checkoutWorkers = (yield* readConfigValue(input.cwd, "checkout.workers")) ?? "0";
-    yield* executeGit(
-      "GitVcsDriver.createWorktree",
-      input.cwd,
-      ["-c", `checkout.workers=${checkoutWorkers}`, ...args],
+    const { worktreePath, targetBranch } = yield* Effect.gen(function* () {
+      let targetBranch = input.newRefName ?? input.refName.replace(/^refs\/heads\//, "");
+      const repoName = path.basename(input.cwd);
+      // Missing directories can leave branch reservations behind after a crash.
+      // Locked worktrees are deliberately retained by Git.
+      yield* runGit("GitVcsDriver.createWorktree.prune", input.cwd, [
+        "worktree",
+        "prune",
+        "--expire",
+        "now",
+      ]);
+      const checkedOutBranches = parseWorktreeBranchPaths(
+        yield* runGitStdout("GitVcsDriver.createWorktree.list", input.cwd, [
+          "worktree",
+          "list",
+          "--porcelain",
+          "-z",
+        ]),
+      );
+      let createBranch = input.newRefName !== undefined;
       {
-        fallbackErrorDetail: "git worktree add failed",
-        timeoutMs: WORKTREE_ADD_TIMEOUT_MS,
-        ...(onCheckoutProgress
-          ? {
-              // Git only prints checkout progress when stderr is a tty or the
-              // delay elapsed. GIT_PROGRESS_DELAY=0 forces it through the pipe.
-              env: { GIT_PROGRESS_DELAY: "0", LC_ALL: "C" },
-              progress: {
-                onStderrLine: (line) => {
-                  const parsed = parseGitCheckoutProgressLine(line);
-                  return parsed ? onCheckoutProgress(parsed) : Effect.void;
+        const requestedBranch = targetBranch;
+        const baseCommit = yield* runGitStdout("GitVcsDriver.createWorktree.base", input.cwd, [
+          "rev-parse",
+          "--verify",
+          input.refName.startsWith(":")
+            ? input.refName
+            : `${input.refName === "-" ? "@{-1}" : input.refName}^{commit}`,
+        ]);
+        for (let suffix = 1; ; suffix++) {
+          targetBranch = suffix === 1 ? requestedBranch : `${requestedBranch}-${suffix}`;
+          const existing = yield* executeGit(
+            "GitVcsDriver.createWorktree.branch",
+            input.cwd,
+            ["rev-parse", "--verify", `refs/heads/${targetBranch}^{commit}`],
+            { allowNonZeroExit: true },
+          );
+          // A new-branch request can only reuse an untouched branch at the base.
+          // An explicit checkout (no newRefName) preserves the branch's commits.
+          if (checkedOutBranches.has(targetBranch)) continue;
+          if (
+            (input.newRefName !== undefined || suffix > 1) &&
+            existing.exitCode === 0 &&
+            existing.stdout.trim() !== baseCommit.trim()
+          )
+            continue;
+          createBranch = existing.exitCode !== 0 && (input.newRefName !== undefined || suffix > 1);
+          break;
+        }
+      }
+      const sanitizedBranch = targetBranch.replace(/\//g, "-");
+      let worktreePath = input.path;
+      if (worktreePath == null) {
+        const parentDir = resolveWorktreesDirectory(
+          options?.worktreesDirectory ?? "",
+          worktreesDir,
+          path,
+          yield* HostProcess.HomeDirectory,
+        );
+        if (parentDir === null) {
+          return yield* new GitCommandError({
+            operation: "GitVcsDriver.createWorktree",
+            command: "git worktree add",
+            cwd: input.cwd,
+            detail: `The worktree location "${options?.worktreesDirectory}" must be an absolute folder on this machine, not a drive root. Change it in Settings → Storage.`,
+          });
+        }
+        worktreePath = path.join(parentDir, repoName, sanitizedBranch);
+      }
+      // Sanitizing slashes can map different branch names onto the same folder.
+      if (input.path === null) {
+        const preferredPath = worktreePath;
+        for (let suffix = 2; yield* fileSystem.exists(worktreePath); suffix++) {
+          worktreePath = `${preferredPath}-${suffix}`;
+        }
+      }
+      const args = createBranch
+        ? ["worktree", "add", "-b", targetBranch, worktreePath, input.refName]
+        : ["worktree", "add", worktreePath, targetBranch];
+      const onCheckoutProgress = progress?.onCheckoutProgress;
+
+      const checkoutWorkers = (yield* readConfigValue(input.cwd, "checkout.workers")) ?? "0";
+      yield* executeGit(
+        "GitVcsDriver.createWorktree",
+        input.cwd,
+        ["-c", `checkout.workers=${checkoutWorkers}`, ...args],
+        {
+          fallbackErrorDetail: "git worktree add failed",
+          timeoutMs: WORKTREE_ADD_TIMEOUT_MS,
+          ...(onCheckoutProgress
+            ? {
+                // Git only prints checkout progress when stderr is a tty or the
+                // delay elapsed. GIT_PROGRESS_DELAY=0 forces it through the pipe.
+                env: { GIT_PROGRESS_DELAY: "0", LC_ALL: "C" },
+                progress: {
+                  onStderrLine: (line) => {
+                    const parsed = parseGitCheckoutProgressLine(line);
+                    return parsed ? onCheckoutProgress(parsed) : Effect.void;
+                  },
                 },
-              },
-            }
-          : {}),
-      },
+              }
+            : {}),
+        },
+      );
+
+      return { worktreePath, targetBranch };
+    }).pipe(
+      Effect.catchTags({
+        PlatformError: (cause) =>
+          new GitCommandError({
+            operation: "GitVcsDriver.createWorktree",
+            command: "git worktree add",
+            cwd: input.cwd,
+            detail: "Failed to inspect the worktree location.",
+            cause,
+          }),
+      }),
+      Effect.retry({
+        times: 3,
+        while: (error) =>
+          error.reason === "branch_already_exists" ||
+          error.reason === "branch_checked_out_in_worktree" ||
+          (input.path === null && error.reason === "path_already_exists"),
+      }),
     );
 
     if (progress?.onWorktreeClaimed) {
@@ -3540,7 +3616,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       const baseBranch = parsedBaseRef?.branchName ?? input.baseRefName;
       yield* runGit("GitVcsDriver.createWorktree.configureBaseRef", input.cwd, [
         "config",
-        `branch.${input.newRefName}.gh-merge-base`,
+        `branch.${targetBranch}.gh-merge-base`,
         baseBranch,
       ]);
     }
