@@ -144,17 +144,17 @@ function RemoteImage({
 }) {
   // A failed load is remembered per URL, so a refreshed listing with a new URL tries again.
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
-  const [cached, setCached] = useState<{ source: string; blobUrl: string } | null>(null);
+  const [cached, setCached] = useState<{ source: string; blobUrl: string | null } | null>(null);
   const [loadedUrl, setLoadedUrl] = useState<string | null>(null);
-  const source = cached?.source === url ? cached.blobUrl : url;
+  const source = cached?.source === url ? (cached.blobUrl ?? url) : null;
   useEffect(() => {
     if (!url) return;
     let cancelled = false;
     let blobUrl: string | undefined;
     void loadMarketplaceIcon(url).then((blob) => {
-      if (cancelled || !blob) return;
-      blobUrl = URL.createObjectURL(blob);
-      setCached({ source: url, blobUrl });
+      if (cancelled) return;
+      if (blob) blobUrl = URL.createObjectURL(blob);
+      setCached({ source: url, blobUrl: blobUrl ?? null });
       setFailedUrl(null);
     });
     return () => {
@@ -167,7 +167,7 @@ function RemoteImage({
     const timer = window.setTimeout(() => setFailedUrl(url), 10000);
     return () => window.clearTimeout(timer);
   }, [url, source, loadedUrl]);
-  const showImage = url !== null && url !== failedUrl;
+  const showImage = source !== null && url !== failedUrl;
   return (
     <span
       className={cn(
