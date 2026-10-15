@@ -150,3 +150,12 @@ describe("thread undo notice", () => {
     expect(undoLatestThreadAction()).toBe(false);
   });
 });
+
+it("does not offer Undo or retain a claim for an archive requiring native restoration", () => {
+  const { options } = setup();
+  const claim = ThreadUndo.begin("archive", "env/muse");
+  showThreadUndoNotice({ ...options, action: "Archived", undo: null, claim });
+  expect(useThreadUndoNotice.getState().notice).toBeNull();
+  expect(undoLatestThreadAction()).toBe(false);
+  expect(claim.isCurrent()).toBe(false);
+});

@@ -10,7 +10,7 @@ import * as ThreadUndo from "./threadUndo";
 
 type UndoOptions = {
   action: "Settled" | "Snoozed" | "Unpinned" | "Archived" | "Discarded";
-  undo: () => Promise<AtomCommandResult<unknown, unknown>>;
+  undo: (() => Promise<AtomCommandResult<unknown, unknown>>) | null;
   failureTitle: string;
   claim: ReturnType<typeof ThreadUndo.begin>;
   /** Runs once the action can no longer be undone. */
@@ -71,6 +71,7 @@ function refreshNotice() {
               );
             };
             try {
+              if (!undo) return;
               const result = await undo();
               if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
                 reportFailure(squashAtomCommandFailure(result));
@@ -98,6 +99,11 @@ export function undoLatestThreadAction(): boolean {
 /** Shows one compact confirmation for the currently undoable thread actions. */
 export function showThreadUndoNotice(options: UndoOptions) {
   if (!options.claim.isCurrent()) return;
+  if (options.undo === null) {
+    options.claim.finish();
+    options.commit?.();
+    return;
+  }
   liveUndos.push(options);
   refreshNotice();
   clearTimeout(expiry);

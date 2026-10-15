@@ -244,7 +244,8 @@ function MuseConversationItem({
     if (result._tag === "Success") {
       // Restored native conversations reappear in the active list; opening them restores the T3 thread.
       if (!archived && threadRef) {
-        const local = await archiveThread(threadRef);
+        // Restore Muse through Archived conversations before reopening its T3 thread.
+        const local = await archiveThread(threadRef, { undo: false });
         if (local._tag === "Failure") {
           const recovery = await update({
             environmentId,

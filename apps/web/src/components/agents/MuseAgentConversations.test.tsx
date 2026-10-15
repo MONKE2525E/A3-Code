@@ -308,7 +308,7 @@ it.each([true, false])(
       await act(async () =>
         item("Side chat").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })),
       );
-      expect(mocks.archive).toHaveBeenCalledWith({ environmentId, threadId: id });
+      expect(mocks.archive).toHaveBeenCalledWith({ environmentId, threadId: id }, { undo: false });
       expect(mocks.update).toHaveBeenLastCalledWith({
         environmentId,
         input: {
