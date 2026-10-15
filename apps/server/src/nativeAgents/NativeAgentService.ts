@@ -1090,30 +1090,38 @@ const make = Effect.gen(function* () {
         const { title } = yield* features
           .renameSession(binding, input.sessionId, input.title)
           .pipe(Effect.mapError(featureFailure));
-        if ((yield* selected(selection.instanceId)).binding !== binding)
-          return yield* new NativeAgentError({ reason: "account_changed" });
-        const identity = yield* canonicalIdentity(selection);
-        const threadId = ThreadId.make(museThreadIdForSession(identity, input.sessionId));
-        const shell = yield* projections
-          .getThreadShell(threadId)
-          .pipe(Effect.mapError(failure("storage_failed")));
-        if (
-          shell &&
-          shell.deletedAt === null &&
-          shell.providerInstanceId === selection.instanceId &&
-          shell.modelSelection.instanceId === selection.instanceId &&
-          shell.modelSelection.model === "muse"
-        ) {
-          const nonce = yield* crypto.randomUUIDv4.pipe(Effect.mapError(failure("storage_failed")));
-          yield* orchestrator
-            .dispatch({
-              type: "thread.metadata.update",
-              commandId: CommandId.make(`muse-agent:rename:${nonce}`),
-              threadId,
-              title,
-            })
+        // Muse has committed the rename. Report a partial success if local synchronization fails,
+        // so callers refresh native data and can retry the same title without claiming it was lost.
+        const synchronized = yield* Effect.gen(function* () {
+          if ((yield* selected(selection.instanceId)).binding !== binding)
+            return yield* new NativeAgentError({ reason: "account_changed" });
+          const identity = yield* canonicalIdentity(selection);
+          const threadId = ThreadId.make(museThreadIdForSession(identity, input.sessionId));
+          const shell = yield* projections
+            .getThreadShell(threadId)
             .pipe(Effect.mapError(failure("storage_failed")));
-        }
+          if (
+            shell &&
+            shell.deletedAt === null &&
+            shell.providerInstanceId === selection.instanceId &&
+            shell.modelSelection.instanceId === selection.instanceId &&
+            shell.modelSelection.model === "muse"
+          ) {
+            const nonce = yield* crypto.randomUUIDv4.pipe(
+              Effect.mapError(failure("storage_failed")),
+            );
+            yield* orchestrator
+              .dispatch({
+                type: "thread.metadata.update",
+                commandId: CommandId.make(`muse-agent:rename:${nonce}`),
+                threadId,
+                title,
+              })
+              .pipe(Effect.mapError(failure("storage_failed")));
+          }
+        }).pipe(Effect.exit);
+        if (synchronized._tag === "Failure")
+          return { updated: true as const, title, titleSyncPending: true as const };
         return { updated: true as const, title };
       }
     }

@@ -283,7 +283,7 @@ function MuseConversationItem({
   const rename = async () => {
     const title = draft.trim();
     setRenaming(false);
-    if (title.length === 0 || title === label) return;
+    if (title.length === 0) return;
     const result = await update({
       environmentId,
       input: {
@@ -293,7 +293,16 @@ function MuseConversationItem({
         title,
       },
     });
-    if (result._tag !== "Success" && !isAtomCommandInterrupted(result)) {
+    if (result._tag === "Success" && result.value.titleSyncPending) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Conversation renamed in Muse",
+          description:
+            "T3 could not sync its title. Reconnect Muse if needed, then rename again to retry.",
+        }),
+      );
+    } else if (result._tag !== "Success" && !isAtomCommandInterrupted(result)) {
       toastManager.add(
         stackedThreadToast({
           type: "error",

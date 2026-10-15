@@ -270,6 +270,7 @@ export const NativeAgentFeatureUpdateResult = Schema.Struct({
   historyPage: Schema.optionalKey(NativeAgentHistoryPage),
   computerState: Schema.optionalKey(Computer.MuseAgentComputerState),
   title: Schema.optionalKey(Schema.String),
+  titleSyncPending: Schema.optionalKey(Schema.Literal(true)),
   authorizationUrl: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(8192))),
 });
 

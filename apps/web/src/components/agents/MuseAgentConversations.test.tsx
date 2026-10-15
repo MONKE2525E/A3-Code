@@ -332,3 +332,60 @@ it.each([true, false])(
     }
   },
 );
+
+it("reports partial rename success and lets the same native title be retried", async () => {
+  mocks.context.mockResolvedValue("rename");
+  mocks.update.mockResolvedValue({
+    _tag: "Success",
+    value: { updated: true, title: "Side chat", titleSyncPending: true },
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <Menu defaultOpen>
+          <MenuTrigger>Conversations</MenuTrigger>
+          <MenuPopup>
+            <MuseAgentConversations
+              environmentId={environmentId}
+              providerInstanceId={providerInstanceId}
+              threads={[]}
+            />
+          </MenuPopup>
+        </Menu>,
+      ),
+    );
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await act(async () =>
+        item("Side chat").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })),
+      );
+      const form = document
+        .querySelector('input[aria-label="Conversation title"]')!
+        .closest("form")!;
+      await act(async () =>
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+      expect(mocks.update).toHaveBeenCalledTimes(attempt + 1);
+      expect(mocks.update).toHaveBeenLastCalledWith({
+        environmentId,
+        input: {
+          operation: "session_rename",
+          providerInstanceId,
+          sessionId: "side-chat",
+          title: "Side chat",
+        },
+      });
+      expect(mocks.toast).toHaveBeenLastCalledWith({
+        type: "warning",
+        title: "Conversation renamed in Muse",
+        description:
+          "T3 could not sync its title. Reconnect Muse if needed, then rename again to retry.",
+      });
+    }
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

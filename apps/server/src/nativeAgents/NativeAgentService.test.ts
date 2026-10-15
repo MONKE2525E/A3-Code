@@ -143,6 +143,9 @@ const fixture = (
       closeAllowed: true,
       rotateAfterClose: false,
       pretendTerminalShell: false,
+      failRenameSync: false,
+      rotateOnRename: false,
+      nativeTitle: "Research",
     };
     const native = makeNative({
       status: Effect.sync(() => ({
@@ -343,7 +346,11 @@ const fixture = (
           Layer.provide(
             Layer.mock(Features.MuseAgentFeatureService)({
               renameSession: (_binding, _sessionId, title) =>
-                Effect.succeed({ title: title.trim() }),
+                Effect.sync(() => {
+                  state.nativeTitle = title.trim();
+                  if (state.rotateOnRename) state.binding = "b".repeat(64);
+                  return { title: state.nativeTitle };
+                }),
               tasks: (account) =>
                 Effect.sync(() => {
                   state.featureCalls.push(account);
@@ -483,7 +490,10 @@ const fixture = (
             Layer.succeed(Projections.ProjectionStoreV2, {
               ...projections,
               getThreadShell: (threadId) =>
-                projections.getThreadShell(threadId).pipe(
+                (state.failRenameSync
+                  ? Effect.fail(new Projections.ProjectionStoreReadError({ threadId }))
+                  : projections.getThreadShell(threadId)
+                ).pipe(
                   Effect.map((thread) =>
                     thread && state.pretendTerminalShell
                       ? {
@@ -1785,4 +1795,34 @@ it.effect("synchronizes an opened side conversation title after a native rename"
     const shell = yield* h.projections.getThreadShell(opened.threadId);
     assert.equal(shell?.title, "Renamed research");
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect.each(["projection", "account"] as const)(
+  "reports a committed native rename as partial success after %s sync failure and allows retry",
+  (failure) =>
+    Effect.gen(function* () {
+      const h = yield* fixture();
+      const opened = yield* h.service.open({ ...reference, sessionId: "side-one" });
+      const input = {
+        providerInstanceId: instanceId,
+        operation: "session_rename",
+        sessionId: "side-one",
+        title: "Renamed research",
+      } as const;
+      h.state.failRenameSync = failure === "projection";
+      h.state.rotateOnRename = failure === "account";
+      const result = yield* h.service.featureUpdate(input);
+      assert.deepStrictEqual(result, { updated: true, title: input.title, titleSyncPending: true });
+      assert.strictEqual(h.state.nativeTitle, input.title);
+      assert.notEqual((yield* h.projections.getThreadShell(opened.threadId))?.title, input.title);
+      h.state.failRenameSync = false;
+      h.state.rotateOnRename = false;
+      h.state.binding = binding;
+      const retried = yield* h.service.featureUpdate(input);
+      assert.deepStrictEqual(retried, { updated: true, title: input.title });
+      assert.strictEqual(
+        (yield* h.projections.getThreadShell(opened.threadId))?.title,
+        input.title,
+      );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
