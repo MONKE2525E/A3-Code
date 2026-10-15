@@ -3453,6 +3453,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           // A new-branch request can only reuse an untouched branch at the base.
           // An explicit checkout (no newRefName) preserves the branch's commits.
           if (checkedOutBranches.has(targetBranch)) continue;
+          // Only the requested name may be reused; suffixes must be new branches.
+          if (suffix > 1 && existing.exitCode === 0) continue;
           if (existing.exitCode === 0 && existing.stdout.trim() !== baseCommit.trim()) continue;
           createBranch = existing.exitCode !== 0;
           break;

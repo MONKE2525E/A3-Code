@@ -2998,6 +2998,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           const livePath = path.join(directory, "live");
           yield* git(cwd, ["worktree", "add", "-b", "feature", livePath, initialBranch]);
           yield* writeTextFile(livePath, "uncommitted.txt", "keep me");
+          if (newBranch) yield* git(cwd, ["branch", "feature-2"]);
           const request = driver.createWorktree({
             cwd,
             path: path.join(directory, "second"),
@@ -3005,7 +3006,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             ...(newBranch ? { newRefName: "feature" } : {}),
           });
           if (newBranch) {
-            assert.equal((yield* request).worktree.refName, "feature-2");
+            assert.equal((yield* request).worktree.refName, "feature-3");
           } else {
             const error = yield* request.pipe(Effect.flip);
             assert.equal(error.reason, "branch_checked_out_in_worktree");
