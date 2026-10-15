@@ -2972,7 +2972,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           const { initialBranch } = yield* initRepoWithCommit(cwd);
           const path = yield* Path.Path;
           const driver = yield* GitVcsDriver.GitVcsDriver;
-          yield* git(cwd, ["checkout", "-b", "feature"]);
+          yield* git(cwd, ["checkout", "-b", refName]);
           yield* git(cwd, ["commit", "--allow-empty", "-m", "existing work"]);
           const before = yield* git(cwd, ["rev-parse", "HEAD"]);
           yield* git(cwd, ["checkout", initialBranch]);
@@ -2981,7 +2981,11 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             path: path.join(yield* makeTmpDir(), "reuse"),
             refName,
           });
-          assert.equal(created.worktree.refName, "feature");
+          assert.equal(created.worktree.refName, refName);
+          assert.equal(
+            yield* git(created.worktree.path, ["symbolic-ref", "--short", "HEAD"]),
+            refName,
+          );
           assert.equal(yield* git(created.worktree.path, ["rev-parse", "HEAD"]), before);
         }),
     );

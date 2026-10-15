@@ -3409,7 +3409,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   )(function* (input, options) {
     const progress = options?.progress;
     const { worktreePath, targetBranch } = yield* Effect.gen(function* () {
-      let targetBranch = input.newRefName ?? input.refName.replace(/^refs\/heads\//, "");
+      let targetBranch = input.newRefName ?? input.refName;
       const repoName = path.basename(input.cwd);
       // Honor Git's expiry so a temporarily disconnected drive is not pruned.
       // Recent missing checkouts and locked worktrees keep their branches reserved.
