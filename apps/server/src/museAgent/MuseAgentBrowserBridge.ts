@@ -177,7 +177,7 @@ export const museAgentBrowserBridge = String.raw`(() => {
       computerStreams.set(id,current);
       try {
         const state = await rpc.sendRequest('browser_task.get',{task_id:taskId},{expectedGatewayTargetKey:JSON.stringify([rpc.gatewayUrl,rpc.vmName??null])});
-        if (connection(check(authority)) !== connectionId || state.session_id !== sessionId || state.presented_task_id !== taskId || state.lease?.control_owner !== 'user' || state.lease.task_id !== taskId || state.lease.takeover_id !== takeoverId || !(state.lease.control_expires_at_ms > Date.now())) throw Error('computer_lease_changed');
+        if (current.closed || connection(check(authority)) !== connectionId || state.session_id !== sessionId || state.presented_task_id !== taskId || state.lease?.control_owner !== 'user' || state.lease.task_id !== taskId || state.lease.takeover_id !== takeoverId || !(state.lease.control_expires_at_ms > Date.now())) throw Error('computer_lease_changed');
         current.native = window.__t3MuseNativeComputerStream({gatewayUrl:rpc.gatewayUrl,taskId,vmName:rpc.vmName??undefined});
         const socket = await current.native.connect(current.abort.signal); current.socket = socket;
         if (current.closed || connection(check(authority)) !== connectionId) throw Error('computer_stream_scope_changed');

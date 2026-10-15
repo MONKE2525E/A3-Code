@@ -963,6 +963,40 @@ describe("native encrypted computer streams", () => {
     expect(f.computerConnections).toEqual([]);
     expect(f.calls).toEqual([]);
   });
+  it("does not construct a native stream after its pending lease check was closed", async () => {
+    const f = fixture();
+    let resolveState!: (value: Params) => void;
+    f.send.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveState = resolve;
+        }),
+    );
+    const connectionId = f.bridge.connectionId({ authority: f.authority });
+    const input = {
+      authority: f.authority,
+      id: "stream",
+      connectionId,
+      sessionId: "worker",
+      taskId: "task",
+      takeoverId: "takeover",
+    };
+    const pending = f.bridge.openComputerStream(input);
+    f.bridge.closeComputerStream(input);
+    resolveState({
+      session_id: "worker",
+      presented_task_id: "task",
+      lease: {
+        control_owner: "user",
+        task_id: "task",
+        takeover_id: "takeover",
+        control_expires_at_ms: 4102444800000,
+      },
+    });
+    await expect(pending).rejects.toThrow();
+    expect(f.computerConnections).toEqual([]);
+    expect(f.computerEvents.map((event) => event.type)).toEqual(["close"]);
+  });
   it("retires the stream when task presentation or takeover authority changes before input", async () => {
     const f = fixture(),
       input = await open(f);
