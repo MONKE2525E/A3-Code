@@ -220,11 +220,25 @@ const make = Effect.gen(function* () {
     readonly context: MuseAgentDeliveryContext | undefined;
     readonly completed: Deferred.Deferred<void>;
   }>();
-  let connectedBinding: string | undefined;
-  const accountBinding = transport.connect.pipe(
-    Effect.tap((binding) =>
+  let connected: { binding: string; fingerprint: string } | undefined;
+  const sessionSnapshot = source.read.pipe(
+    Effect.mapError(
+      (cause) =>
+        new Transport.MuseAgentTransportError({ kind: "unavailable", stage: "session", cause }),
+    ),
+  );
+  const accountBinding = Effect.gen(function* () {
+    const before = yield* sessionSnapshot;
+    const binding = yield* transport.connect;
+    const after = yield* sessionSnapshot;
+    if (before.fingerprint !== after.fingerprint)
+      return yield* new MuseAgentRuntimeError({ kind: "account_changed" });
+    connected = { binding, fingerprint: after.fingerprint };
+    return binding;
+  }).pipe(
+    Effect.tapError(() =>
       Effect.sync(() => {
-        connectedBinding = binding;
+        connected = undefined;
       }),
     ),
   );
@@ -261,23 +275,35 @@ const make = Effect.gen(function* () {
     accountBinding,
     sessions,
     resolveSession,
-    status: source.inspect.pipe(
-      Effect.map((info) => ({
+    status: Effect.gen(function* () {
+      const info = yield* source.inspect;
+      const verified = connected;
+      if (verified) {
+        const current = info.sessionPresent ? yield* Effect.option(sessionSnapshot) : Option.none();
+        if (Option.isNone(current) || current.value.fingerprint !== verified.fingerprint) {
+          if (connected === verified) connected = undefined;
+        }
+      }
+      return {
         ...info,
-        ready: connectedBinding !== undefined && info.sessionPresent,
-        message: connectedBinding
+        ready: connected !== undefined && info.sessionPresent,
+        message: connected
           ? "Muse is connected."
           : info.sessionPresent
             ? "Muse session detected. Connect Muse to verify its native account."
-            : "Open Muse for Linux and sign in to detect your session.",
-        ...(connectedBinding ? { accountBinding: connectedBinding } : {}),
-      })),
-      Effect.orElseSucceed(() => ({
-        installed: false,
-        sessionPresent: false,
-        ready: false,
-        message: "The local Muse session could not be inspected.",
-      })),
+            : "Sign in to Muse in Settings → Providers.",
+        ...(connected ? { accountBinding: connected.binding } : {}),
+      };
+    }).pipe(
+      Effect.orElseSucceed(() => {
+        connected = undefined;
+        return {
+          installed: false,
+          sessionPresent: false,
+          ready: false,
+          message: "The local Muse session could not be inspected.",
+        };
+      }),
     ),
     setup: Effect.gen(function* () {
       const binding = yield* accountBinding;

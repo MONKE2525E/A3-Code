@@ -51,6 +51,9 @@ const fixture = () => {
   const delivery = Delivery.makeMuseAgentDeliveryStore(db);
   const calls: { method: string; params: Record<string, unknown> }[] = [];
   let authority = binding;
+  let fingerprint = "session-a";
+  let unreadable = false;
+  let rotateDuringConnect = false;
   let failSend = false;
   let stageHook: Effect.Effect<void, Transport.MuseAgentTransportError> = Effect.void;
   let admissionHook: Effect.Effect<void, Transport.MuseAgentTransportError> = Effect.void;
@@ -70,7 +73,10 @@ const fixture = () => {
       Effect.sync(() => {
         localReleases.push(input.deliveryKey);
       }),
-    connect: Effect.sync(() => authority),
+    connect: Effect.sync(() => {
+      if (rotateDuringConnect) fingerprint = "session-b";
+      return authority;
+    }),
     request: (_, method, params) =>
       Effect.gen(function* () {
         calls.push({ method, params });
@@ -137,11 +143,12 @@ const fixture = () => {
       inspections++;
       return { installed: true, sessionPresent: true };
     }),
-    read: Effect.fail(
-      new Source.MuseAgentSessionSourceError({
-        stage: "read",
-        cause: new Error("unused synthetic source"),
-      }),
+    read: Effect.suspend(() =>
+      unreadable
+        ? Effect.fail(
+            new Source.MuseAgentSessionSourceError({ stage: "read", cause: "synthetic failure" }),
+          )
+        : Effect.succeed({ profilePath: "/synthetic", cookies: [], fingerprint }),
     ),
   });
   const layer = Native.layer.pipe(
@@ -178,7 +185,14 @@ const fixture = () => {
       watch = next;
     },
     close: () => db.close(),
+    setUnreadable: () => {
+      unreadable = true;
+    },
+    rotateDuringConnect: () => {
+      rotateDuringConnect = true;
+    },
     switchAccount: () => {
+      fingerprint = "session-b";
       authority = "b".repeat(64);
     },
     setFailSend: () => {
@@ -918,3 +932,36 @@ it.effect("reads received sandbox files through the same bounded account-bound r
     }).pipe(Effect.provide(f.layer)),
   ),
 );
+
+it.effect(
+  "invalidates connected readiness on session rotation without exposing the fingerprint",
+  () => {
+    const h = fixture();
+    return Effect.gen(function* () {
+      const native = yield* Native.MuseAgentNativeRuntimeService;
+      yield* native.accountBinding;
+      assert.strictEqual((yield* native.status).ready, true);
+      h.switchAccount();
+      const changed = yield* native.status;
+      assert.strictEqual(changed.sessionPresent, true);
+      assert.strictEqual(changed.ready, false);
+      assert.strictEqual("accountBinding" in changed, false);
+      assert.strictEqual("fingerprint" in changed, false);
+      yield* native.accountBinding;
+      assert.strictEqual((yield* native.status).accountBinding, "b".repeat(64));
+      h.setUnreadable();
+      assert.strictEqual((yield* native.status).ready, false);
+    }).pipe(Effect.provide(h.layer), Effect.ensuring(Effect.sync(h.close)), Effect.scoped);
+  },
+);
+
+it.effect("does not cache readiness if the session rotates during connection", () => {
+  const h = fixture();
+  return Effect.gen(function* () {
+    const native = yield* Native.MuseAgentNativeRuntimeService;
+    h.rotateDuringConnect();
+    const error = yield* native.accountBinding.pipe(Effect.flip);
+    assert.strictEqual(error._tag, "MuseAgentRuntimeError");
+    assert.strictEqual((yield* native.status).ready, false);
+  }).pipe(Effect.provide(h.layer), Effect.ensuring(Effect.sync(h.close)), Effect.scoped);
+});
