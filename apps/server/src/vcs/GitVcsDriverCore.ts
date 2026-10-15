@@ -3411,7 +3411,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     // An access check misses dangling symlinks. Remember paths Git rejected so
     // a collision always advances allocation, even when exists() reports false.
     const collidedPaths = new Set<string>();
-    const createdBranches = new Set<string>();
+    const createdBranches = new Map<string, string>();
     const { worktreePath, targetBranch, createdBranch } = yield* Effect.gen(function* () {
       let targetBranch = input.newRefName ?? input.refName;
       const repoName = path.basename(input.cwd);
@@ -3435,11 +3435,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         true,
       );
       let createBranch = false;
+      let baseCommit: string | undefined;
       // An explicit checkout must keep its branch (for example, recovery of a
       // missing thread worktree). Only new-branch requests allocate alternatives.
       if (input.newRefName !== undefined) {
         const requestedBranch = targetBranch;
-        const baseCommit = yield* runGitStdout("GitVcsDriver.createWorktree.base", input.cwd, [
+        baseCommit = yield* runGitStdout("GitVcsDriver.createWorktree.base", input.cwd, [
           "rev-parse",
           "--verify",
           input.refName.startsWith(":")
@@ -3496,7 +3497,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         }
       }
       const args = createBranch
-        ? ["worktree", "add", "-b", targetBranch, worktreePath, input.refName]
+        ? ["worktree", "add", "-b", targetBranch, worktreePath, baseCommit!.trim()]
         : ["worktree", "add", worktreePath, targetBranch];
       const onCheckoutProgress = progress?.onCheckoutProgress;
 
@@ -3528,7 +3529,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
             ? Effect.sync(() => {
                 collidedPaths.add(worktreePath);
                 // With -b, Git creates the ref before rejecting an occupied path.
-                if (createBranch) createdBranches.add(targetBranch);
+                if (createBranch) createdBranches.set(targetBranch, baseCommit!.trim());
               })
             : Effect.void,
         ),
@@ -3537,7 +3538,10 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       return {
         worktreePath,
         targetBranch,
-        createdBranch: createBranch || createdBranches.has(targetBranch),
+        createdBranch:
+          createBranch || createdBranches.has(targetBranch)
+            ? { commitSha: createdBranches.get(targetBranch) ?? baseCommit!.trim() }
+            : undefined,
       };
     }).pipe(
       Effect.catchTags({
@@ -3658,7 +3662,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       }
 
       return {
-        createdBranch,
+        ...(createdBranch === undefined ? {} : { createdBranch }),
         worktree: {
           path: worktreePath,
           refName: targetBranch,
@@ -3668,11 +3672,15 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       Effect.onError(() =>
         // The caller has no ownership metadata until this method succeeds.
         // Undo only clean checkouts and branches this call created; Git keeps
-        // dirty files and unmerged commits if hooks or another actor added work.
+        // dirty files and commits if hooks or another actor added work.
         removeWorktree({ cwd: input.cwd, path: worktreePath, force: false }).pipe(
           Effect.andThen(() =>
             createdBranch
-              ? deleteLocalBranch({ cwd: input.cwd, refName: targetBranch, force: false })
+              ? deleteLocalBranch({
+                  cwd: input.cwd,
+                  refName: targetBranch,
+                  expectedCommitSha: createdBranch.commitSha,
+                })
               : Effect.void,
           ),
           Effect.catch(() => Effect.logWarning("Failed to roll back incomplete worktree creation")),
@@ -3983,6 +3991,36 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const deleteLocalBranch: GitVcsDriver.GitVcsDriver["Service"]["deleteLocalBranch"] = Effect.fn(
     "deleteLocalBranch",
   )(function* (input) {
+    if (input.expectedCommitSha !== undefined) {
+      const checkedOut = parseWorktreeBranchPaths(
+        yield* runGitStdout("GitVcsDriver.deleteLocalBranch.list", input.cwd, [
+          "worktree",
+          "list",
+          "--porcelain",
+          "-z",
+        ]),
+        true,
+      );
+      if (checkedOut.has(input.refName)) {
+        return yield* new GitCommandError({
+          operation: "GitVcsDriver.deleteLocalBranch",
+          command: "git update-ref",
+          cwd: input.cwd,
+          detail: "The branch is still checked out in a worktree.",
+          reason: "branch_checked_out_in_worktree",
+        });
+      }
+      // Unlike branch -d, this does not depend on the caller's current HEAD.
+      // Git compares the original tip under the ref lock, preserving later commits.
+      yield* executeGit("GitVcsDriver.deleteLocalBranch", input.cwd, [
+        "update-ref",
+        "--no-deref",
+        "-d",
+        "refs/heads/" + input.refName,
+        input.expectedCommitSha,
+      ]);
+      return;
+    }
     yield* executeGit(
       "GitVcsDriver.deleteLocalBranch",
       input.cwd,

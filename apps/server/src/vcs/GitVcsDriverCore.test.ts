@@ -2931,92 +2931,106 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         const before = yield* git(cwd, ["rev-parse", "feature/retry"]);
         const retried = yield* driver.createWorktree(input);
         assert.equal(retried.worktree.refName, "feature/retry");
-        assert.equal(retried.createdBranch, false);
+        assert.equal(retried.createdBranch, undefined);
         assert.equal(yield* git(worktreePath, ["rev-parse", "HEAD"]), before);
       }),
     );
 
-    it.effect.each(["new", "divergent", "occupied", "reuse", "committed", "dirty"] as const)(
-      "rolls back post-checkout failures without losing existing work (%s)",
-      (mode) =>
-        Effect.gen(function* () {
-          const cwd = yield* makeTmpDir();
-          const { initialBranch } = yield* initRepoWithCommit(cwd);
-          const driver = yield* GitVcsDriver.GitVcsDriver;
-          const fs = yield* FileSystem.FileSystem;
-          const path = yield* Path.Path;
-          if (mode === "divergent") {
-            yield* git(cwd, ["checkout", "-b", "feature"]);
-            yield* git(cwd, ["commit", "--allow-empty", "-m", "existing work"]);
-            yield* git(cwd, ["checkout", initialBranch]);
-          } else if (mode === "occupied") {
-            yield* driver.createWorktree({
-              cwd,
-              path: path.join(yield* makeTmpDir(), "occupied"),
-              refName: initialBranch,
-              newRefName: "feature",
-            });
-          } else if (mode === "reuse") yield* git(cwd, ["branch", "feature"]);
-          const existingCommit =
-            mode === "new" || mode === "committed" || mode === "dirty"
-              ? null
-              : yield* git(cwd, ["rev-parse", "feature"]);
-          if (mode === "committed" || mode === "dirty") {
-            yield* writeTextFile(
-              cwd,
-              ".git/hooks/post-checkout",
-              mode === "committed"
-                ? '#!/bin/sh\ngit -c core.hooksPath=/dev/null commit --allow-empty -m "hook work"\n'
-                : '#!/bin/sh\necho "keep me" > untracked-work\n',
-            );
-            yield* fs.chmod(path.join(cwd, ".git/hooks/post-checkout"), 0o755);
-          }
-          const worktreePath = path.join(yield* makeTmpDir(), "retry");
-          const input = {
+    it.effect.each([
+      "new",
+      "divergent",
+      "occupied",
+      "reuse",
+      "committed",
+      "dirty",
+      "unmerged-base",
+    ] as const)("rolls back post-checkout failures without losing existing work (%s)", (mode) =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        if (mode === "divergent") {
+          yield* git(cwd, ["checkout", "-b", "feature"]);
+          yield* git(cwd, ["commit", "--allow-empty", "-m", "existing work"]);
+          yield* git(cwd, ["checkout", initialBranch]);
+        } else if (mode === "occupied") {
+          yield* driver.createWorktree({
             cwd,
-            path: worktreePath,
+            path: path.join(yield* makeTmpDir(), "occupied"),
             refName: initialBranch,
             newRefName: "feature",
-            baseRefName: initialBranch,
-          };
-          const selectedBranch =
-            mode === "divergent" || mode === "occupied" ? "feature-2" : "feature";
-          yield* fs.writeFileString(path.join(cwd, ".git", "config.lock"), "");
-          for (let attempt = 0; attempt < 2; attempt++) {
-            const error = yield* driver.createWorktree(input).pipe(Effect.flip);
-            assert.equal(error.operation, "GitVcsDriver.createWorktree.configureBaseRef");
-            if (mode === "committed" || mode === "dirty") break;
-            assert.equal(yield* fs.exists(worktreePath), false);
-            assert.equal(
-              yield* git(cwd, ["branch", "--list", selectedBranch]),
-              mode === "reuse" ? "feature" : "",
-            );
-            if (existingCommit !== null)
-              assert.equal(yield* git(cwd, ["rev-parse", "feature"]), existingCommit);
-          }
-          yield* fs.remove(path.join(cwd, ".git", "config.lock"));
-          if (mode === "committed") {
-            assert.notEqual(
-              yield* git(cwd, ["rev-parse", "feature"]),
-              yield* git(cwd, ["rev-parse", initialBranch]),
-            );
-          } else if (mode === "dirty") {
-            assert.equal(
-              yield* fs.readFileString(path.join(worktreePath, "untracked-work")),
-              "keep me\n",
-            );
-            assert.equal(yield* git(worktreePath, ["branch", "--show-current"]), "feature");
-          } else {
-            const retried = yield* driver.createWorktree(input);
-            assert.equal(retried.worktree.refName, selectedBranch);
-            assert.equal(retried.createdBranch, mode !== "reuse");
-            assert.equal(yield* git(cwd, ["branch", "--list", "feature-3"]), "");
-          }
-        }),
+          });
+        } else if (mode === "reuse") yield* git(cwd, ["branch", "feature"]);
+        if (mode === "unmerged-base") {
+          yield* git(cwd, ["checkout", "-b", "ahead-base"]);
+          yield* git(cwd, ["commit", "--allow-empty", "-m", "base ahead of checkout"]);
+          yield* git(cwd, ["checkout", initialBranch]);
+          yield* git(cwd, ["branch", "feature"]);
+        }
+        const existingCommit =
+          mode === "new" || mode === "committed" || mode === "dirty"
+            ? null
+            : yield* git(cwd, ["rev-parse", "feature"]);
+        if (mode === "committed" || mode === "dirty") {
+          yield* writeTextFile(
+            cwd,
+            ".git/hooks/post-checkout",
+            mode === "committed"
+              ? '#!/bin/sh\ngit -c core.hooksPath=/dev/null commit --allow-empty -m "hook work"\n'
+              : '#!/bin/sh\necho "keep me" > untracked-work\n',
+          );
+          yield* fs.chmod(path.join(cwd, ".git/hooks/post-checkout"), 0o755);
+        }
+        const worktreePath = path.join(yield* makeTmpDir(), "retry");
+        const input = {
+          cwd,
+          path: worktreePath,
+          refName: mode === "unmerged-base" ? "ahead-base" : initialBranch,
+          newRefName: "feature",
+          baseRefName: initialBranch,
+        };
+        const selectedBranch =
+          mode === "divergent" || mode === "occupied" || mode === "unmerged-base"
+            ? "feature-2"
+            : "feature";
+        yield* fs.writeFileString(path.join(cwd, ".git", "config.lock"), "");
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const error = yield* driver.createWorktree(input).pipe(Effect.flip);
+          assert.equal(error.operation, "GitVcsDriver.createWorktree.configureBaseRef");
+          if (mode === "committed" || mode === "dirty") break;
+          assert.equal(yield* fs.exists(worktreePath), false);
+          assert.equal(
+            yield* git(cwd, ["branch", "--list", selectedBranch]),
+            mode === "reuse" ? "feature" : "",
+          );
+          if (existingCommit !== null)
+            assert.equal(yield* git(cwd, ["rev-parse", "feature"]), existingCommit);
+        }
+        yield* fs.remove(path.join(cwd, ".git", "config.lock"));
+        if (mode === "committed") {
+          assert.notEqual(
+            yield* git(cwd, ["rev-parse", "feature"]),
+            yield* git(cwd, ["rev-parse", initialBranch]),
+          );
+        } else if (mode === "dirty") {
+          assert.equal(
+            yield* fs.readFileString(path.join(worktreePath, "untracked-work")),
+            "keep me\n",
+          );
+          assert.equal(yield* git(worktreePath, ["branch", "--show-current"]), "feature");
+        } else {
+          const retried = yield* driver.createWorktree(input);
+          assert.equal(retried.worktree.refName, selectedBranch);
+          assert.equal(retried.createdBranch !== undefined, mode !== "reuse");
+          assert.equal(yield* git(cwd, ["branch", "--list", "feature-3"]), "");
+        }
+      }),
     );
 
-    it.effect.each([false, true])(
-      "reports new branch ownership and protects unmerged commits during rollback (%s)",
+    it.effect.each([false, true, "merged"] as const)(
+      "reports new branch ownership and protects later commits during rollback (%s)",
       (withNewCommits) =>
         Effect.gen(function* () {
           const cwd = yield* makeTmpDir();
@@ -3029,7 +3043,10 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             refName: initialBranch,
             newRefName: "feature/rollback",
           });
-          assert.equal(created.createdBranch, true);
+          if (created.createdBranch === undefined) throw new Error("Expected branch ownership");
+          assert.deepEqual(created.createdBranch, {
+            commitSha: yield* git(cwd, ["rev-parse", initialBranch]),
+          });
           if (withNewCommits)
             yield* git(created.worktree.path, [
               "commit",
@@ -3038,11 +3055,21 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
               "preserve new work",
             ]);
           const before = yield* git(created.worktree.path, ["rev-parse", "HEAD"]);
+          if (withNewCommits === "merged")
+            yield* git(cwd, ["merge", "--ff-only", "feature/rollback"]);
+          const checkedOutDeletion = yield* driver
+            .deleteLocalBranch({
+              cwd,
+              refName: created.worktree.refName,
+              expectedCommitSha: created.createdBranch.commitSha,
+            })
+            .pipe(Effect.flip);
+          assert.equal(checkedOutDeletion.reason, "branch_checked_out_in_worktree");
           yield* driver.removeWorktree({ cwd, path: created.worktree.path, force: true });
           const removeBranch = driver.deleteLocalBranch({
             cwd,
             refName: created.worktree.refName,
-            force: false,
+            expectedCommitSha: created.createdBranch.commitSha,
           });
           if (withNewCommits) {
             yield* removeBranch.pipe(Effect.flip);
@@ -3331,7 +3358,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           );
           assert.equal(created.worktree.path, `${preferred}-3`);
           assert.equal(created.worktree.refName, selectedBranch);
-          assert.equal(created.createdBranch, mode !== "reuse");
+          assert.equal(created.createdBranch !== undefined, mode !== "reuse");
           assert.equal(
             yield* git(created.worktree.path, ["branch", "--show-current"]),
             selectedBranch,
@@ -3341,7 +3368,11 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           // add created it before failing on a path collision.
           yield* driver.removeWorktree({ cwd, path: created.worktree.path, force: true });
           if (created.createdBranch) {
-            yield* driver.deleteLocalBranch({ cwd, refName: selectedBranch, force: false });
+            yield* driver.deleteLocalBranch({
+              cwd,
+              refName: selectedBranch,
+              expectedCommitSha: created.createdBranch.commitSha,
+            });
             assert.equal(yield* git(cwd, ["branch", "--list", selectedBranch]), "");
           } else {
             assert.equal(

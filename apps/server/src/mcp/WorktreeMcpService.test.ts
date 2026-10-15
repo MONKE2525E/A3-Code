@@ -217,9 +217,9 @@ const makeHarness = (options: HarnessOptions = {}) => {
         : (options.createWorktreeGate ?? Effect.void).pipe(
             Effect.andThen(
               Effect.succeed({
-                ...(options.createdBranch === null
+                ...(options.createdBranch === null || options.createdBranch === false
                   ? {}
-                  : { createdBranch: options.createdBranch ?? true }),
+                  : { createdBranch: { commitSha: "created-tip" } }),
                 worktree: {
                   path:
                     input.path ??
@@ -701,7 +701,7 @@ describe("t3_worktree_handoff", () => {
       expect(harness.deleteLocalBranch).toHaveBeenCalledWith({
         cwd: workspaceRoot,
         refName: "feature/raced",
-        force: false,
+        expectedCommitSha: "created-tip",
       });
       expect(harness.dispatch).not.toHaveBeenCalled();
     });
@@ -810,7 +810,7 @@ describe("t3_worktree_handoff", () => {
       expect(harness.deleteLocalBranch).toHaveBeenCalledWith({
         cwd: workspaceRoot,
         refName: "feature-2",
-        force: false,
+        expectedCommitSha: "created-tip",
       });
     });
   });
@@ -823,7 +823,7 @@ describe("t3_worktree_handoff", () => {
       expect(harness.deleteLocalBranch).toHaveBeenCalledWith({
         cwd: workspaceRoot,
         refName: "feature/keep-new-commits",
-        force: false,
+        expectedCommitSha: "created-tip",
       });
     });
   });

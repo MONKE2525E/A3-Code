@@ -254,15 +254,15 @@ const make = Effect.gen(function* () {
           });
 
         // Preserve reused branches. Only discard a branch created by this call,
-        // without force so a hook or concurrent user cannot lose unmerged commits.
+        // only while its original tip is unchanged, preserving hook or concurrent commits.
         const removeCreatedWorktree = Effect.suspend(() =>
           gitWorkflow.removeWorktree({ cwd: projectCwd, path: worktreePath, force: true }).pipe(
             Effect.andThen(() =>
-              worktree.createdBranch === true
+              worktree.createdBranch !== undefined
                 ? gitWorkflow.deleteLocalBranch({
                     cwd: projectCwd,
                     refName: worktree.worktree.refName,
-                    force: false,
+                    expectedCommitSha: worktree.createdBranch.commitSha,
                   })
                 : Effect.void,
             ),
