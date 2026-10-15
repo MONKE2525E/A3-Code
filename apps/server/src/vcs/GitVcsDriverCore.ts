@@ -3565,7 +3565,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         },
       ).pipe(
         Effect.tapError((error) =>
-          input.path === null && error.reason === "path_already_exists"
+          error.reason === "path_already_exists"
             ? Effect.sync(() => {
                 collidedPaths.add(worktreePath);
                 // With -b, Git creates the ref before rejecting an occupied path.
@@ -3632,6 +3632,13 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           (input.path === null && error.reason === "path_already_exists"),
       }),
       (effect) => withWorktreeAllocationLock(input.cwd, effect),
+      Effect.onError(() =>
+        Effect.forEach(createdBranches, ([refName, expectedCommitSha]) =>
+          deleteLocalBranch({ cwd: input.cwd, refName, expectedCommitSha }).pipe(
+            Effect.ignoreCause({ log: true }),
+          ),
+        ).pipe(Effect.asVoid),
+      ),
     );
 
     return yield* Effect.gen(function* () {

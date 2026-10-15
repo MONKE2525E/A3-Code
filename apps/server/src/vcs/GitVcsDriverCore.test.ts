@@ -3509,6 +3509,49 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         }),
     );
 
+    it.effect.each(["directory", "dangling symlink"] as const)(
+      "cleans up owned branches after an explicit path collision with a %s",
+      (kind) =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          yield* git(cwd, ["checkout", "-b", "feature"]);
+          yield* git(cwd, ["commit", "--allow-empty", "-m", "existing work"]);
+          const existing = yield* git(cwd, ["rev-parse", "HEAD"]);
+          yield* git(cwd, ["checkout", initialBranch]);
+          const parent = yield* makeTmpDir();
+          const destination = path.join(parent, "occupied");
+          if (kind === "directory") {
+            yield* fs.makeDirectory(destination);
+            yield* fs.writeFileString(path.join(destination, "keep.txt"), "keep this file");
+          } else yield* fs.symlink(path.join(parent, "missing"), destination);
+          const input = { cwd, path: destination, refName: initialBranch, newRefName: "feature" };
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const failure = yield* driver.createWorktree(input).pipe(Effect.flip);
+            assert.equal(failure.reason, "path_already_exists");
+            assert.equal(yield* git(cwd, ["branch", "--list", "feature-2", "feature-3"]), "");
+            assert.equal(yield* git(cwd, ["rev-parse", "feature"]), existing);
+            if (kind === "directory")
+              assert.equal(
+                yield* fs.readFileString(path.join(destination, "keep.txt")),
+                "keep this file",
+              );
+            else assert.equal(yield* fs.readLink(destination), path.join(parent, "missing"));
+          }
+          yield* fs.remove(destination, { recursive: true });
+          const created = yield* driver.createWorktree(input);
+          assert.equal(created.worktree.refName, "feature-2");
+          assert.equal(created.worktree.path, destination);
+          assert.equal(
+            yield* git(destination, ["rev-parse", "HEAD"]),
+            yield* git(cwd, ["rev-parse", initialBranch]),
+          );
+        }),
+    );
+
     it.effect.each(["new", "suffix", "reuse"] as const)(
       "retains branch ownership across path collisions (%s)",
       (mode) =>
