@@ -3411,7 +3411,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     // An access check misses dangling symlinks. Remember paths Git rejected so
     // a collision always advances allocation, even when exists() reports false.
     const collidedPaths = new Set<string>();
-    const { worktreePath, targetBranch } = yield* Effect.gen(function* () {
+    const { worktreePath, targetBranch, createdBranch } = yield* Effect.gen(function* () {
       let targetBranch = input.newRefName ?? input.refName;
       const repoName = path.basename(input.cwd);
       // Honor Git's expiry so a temporarily disconnected drive is not pruned.
@@ -3530,7 +3530,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         ),
       );
 
-      return { worktreePath, targetBranch };
+      return { worktreePath, targetBranch, createdBranch: createBranch };
     }).pipe(
       Effect.catchTags({
         PlatformError: (cause) =>
@@ -3644,6 +3644,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     }
 
     return {
+      createdBranch,
       worktree: {
         path: worktreePath,
         refName: targetBranch,

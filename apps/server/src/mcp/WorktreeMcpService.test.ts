@@ -104,6 +104,8 @@ interface HarnessOptions {
   readonly projectMissing?: boolean;
   readonly projectReadFails?: boolean;
   readonly allocatedBranch?: string;
+  readonly createdBranch?: boolean | null;
+  readonly deleteLocalBranchFails?: boolean;
   readonly pathSemantics?: "win32" | "posix";
   readonly createWorktreeFails?: boolean;
   readonly fetchRemoteFails?: boolean;
@@ -195,7 +197,11 @@ const makeHarness = (options: HarnessOptions = {}) => {
       ? (Effect.fail("simulated worktree removal failure") as never)
       : Effect.void,
   );
-  const deleteLocalBranch = vi.fn(() => Effect.void);
+  const deleteLocalBranch = vi.fn((_: unknown) =>
+    options.deleteLocalBranchFails
+      ? (Effect.fail("branch has unmerged commits") as never)
+      : Effect.void,
+  );
   const fetchRemote = vi.fn((_: unknown) =>
     options.fetchRemoteFails ? (Effect.fail("simulated fetch failure") as never) : Effect.void,
   );
@@ -211,6 +217,9 @@ const makeHarness = (options: HarnessOptions = {}) => {
         : (options.createWorktreeGate ?? Effect.void).pipe(
             Effect.andThen(
               Effect.succeed({
+                ...(options.createdBranch === null
+                  ? {}
+                  : { createdBranch: options.createdBranch ?? true }),
                 worktree: {
                   path:
                     input.path ??
@@ -689,7 +698,11 @@ describe("t3_worktree_handoff", () => {
         path: "/worktrees/project/feature/raced",
         force: true,
       });
-      expect(harness.deleteLocalBranch).not.toHaveBeenCalled();
+      expect(harness.deleteLocalBranch).toHaveBeenCalledWith({
+        cwd: workspaceRoot,
+        refName: "feature/raced",
+        force: false,
+      });
       expect(harness.dispatch).not.toHaveBeenCalled();
     });
   });
@@ -771,13 +784,47 @@ describe("t3_worktree_handoff", () => {
     });
   });
 
-  it.effect("preserves the branch when a failed binding rolls back the worktree", () => {
-    const harness = makeHarness({ dispatchFails: true });
+  it.effect.each([false, null])(
+    "preserves reused or legacy branches when binding fails (%s)",
+    (createdBranch) => {
+      const harness = makeHarness({ dispatchFails: true, createdBranch });
+      return Effect.gen(function* () {
+        const exit = yield* Effect.exit(runHandoff(harness, { branch: "feature/keep-commits" }));
+        expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "operation_failed" });
+        expect(harness.removeWorktree).toHaveBeenCalledTimes(1);
+        expect(harness.deleteLocalBranch).not.toHaveBeenCalled();
+      });
+    },
+  );
+
+  it.effect("cleans up the allocated suffix branch when binding fails", () => {
+    const harness = makeHarness({ dispatchFails: true, allocatedBranch: "feature-2" });
     return Effect.gen(function* () {
-      const exit = yield* Effect.exit(runHandoff(harness, { branch: "feature/keep-commits" }));
+      const exit = yield* Effect.exit(runHandoff(harness, { branch: "feature" }));
       expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "operation_failed" });
-      expect(harness.removeWorktree).toHaveBeenCalledTimes(1);
-      expect(harness.deleteLocalBranch).not.toHaveBeenCalled();
+      expect(harness.removeWorktree).toHaveBeenCalledWith({
+        cwd: workspaceRoot,
+        path: "/worktrees/project/feature-2",
+        force: true,
+      });
+      expect(harness.deleteLocalBranch).toHaveBeenCalledWith({
+        cwd: workspaceRoot,
+        refName: "feature-2",
+        force: false,
+      });
+    });
+  });
+
+  it.effect("keeps the original failure when a new branch cannot be safely deleted", () => {
+    const harness = makeHarness({ dispatchFails: true, deleteLocalBranchFails: true });
+    return Effect.gen(function* () {
+      const exit = yield* Effect.exit(runHandoff(harness, { branch: "feature/keep-new-commits" }));
+      expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "operation_failed" });
+      expect(harness.deleteLocalBranch).toHaveBeenCalledWith({
+        cwd: workspaceRoot,
+        refName: "feature/keep-new-commits",
+        force: false,
+      });
     });
   });
 

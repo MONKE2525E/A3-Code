@@ -2931,8 +2931,54 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         const before = yield* git(cwd, ["rev-parse", "feature/retry"]);
         const retried = yield* driver.createWorktree(input);
         assert.equal(retried.worktree.refName, "feature/retry");
+        assert.equal(retried.createdBranch, false);
         assert.equal(yield* git(worktreePath, ["rev-parse", "HEAD"]), before);
       }),
+    );
+
+    it.effect.each([false, true])(
+      "reports new branch ownership and protects unmerged commits during rollback (%s)",
+      (withNewCommits) =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const path = yield* Path.Path;
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          const created = yield* driver.createWorktree({
+            cwd,
+            path: path.join(yield* makeTmpDir(), "rollback"),
+            refName: initialBranch,
+            newRefName: "feature/rollback",
+          });
+          assert.equal(created.createdBranch, true);
+          if (withNewCommits)
+            yield* git(created.worktree.path, [
+              "commit",
+              "--allow-empty",
+              "-m",
+              "preserve new work",
+            ]);
+          const before = yield* git(created.worktree.path, ["rev-parse", "HEAD"]);
+          yield* driver.removeWorktree({ cwd, path: created.worktree.path, force: true });
+          const removeBranch = driver.deleteLocalBranch({
+            cwd,
+            refName: created.worktree.refName,
+            force: false,
+          });
+          if (withNewCommits) {
+            yield* removeBranch.pipe(Effect.flip);
+            assert.equal(yield* git(cwd, ["rev-parse", "feature/rollback"]), before);
+          } else {
+            yield* removeBranch;
+            const result = yield* driver.execute({
+              operation: "test.rollbackBranch",
+              cwd,
+              args: ["show-ref", "--verify", "refs/heads/feature/rollback"],
+              allowNonZeroExit: true,
+            });
+            assert.notEqual(result.exitCode, 0);
+          }
+        }),
     );
 
     it.effect("preserves divergent commits and allocates the next unused branch", () =>

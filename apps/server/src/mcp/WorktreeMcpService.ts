@@ -253,10 +253,20 @@ const make = Effect.gen(function* () {
             }).pipe(Effect.as({ status: "failed", detail } as const));
           });
 
-        // The driver may have reused an existing branch. Roll back only the
-        // directory we created; preserving the branch also lets a retry reuse it.
+        // Preserve reused branches. Only discard a branch created by this call,
+        // without force so a hook or concurrent user cannot lose unmerged commits.
         const removeCreatedWorktree = Effect.suspend(() =>
-          gitWorkflow.removeWorktree({ cwd: projectCwd, path: worktreePath, force: true }),
+          gitWorkflow.removeWorktree({ cwd: projectCwd, path: worktreePath, force: true }).pipe(
+            Effect.andThen(() =>
+              worktree.createdBranch === true
+                ? gitWorkflow.deleteLocalBranch({
+                    cwd: projectCwd,
+                    refName: worktree.worktree.refName,
+                    force: false,
+                  })
+                : Effect.void,
+            ),
+          ),
         ).pipe(Effect.ignoreCause({ log: true }));
 
         const recheckAndBind = Effect.gen(function* () {
