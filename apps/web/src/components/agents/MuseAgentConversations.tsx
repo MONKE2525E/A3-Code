@@ -23,7 +23,13 @@ import {
   DialogTitle,
 } from "~/components/ui/dialog";
 import { Input } from "~/components/ui/input";
-import { MenuItem, MenuSeparator } from "~/components/ui/menu";
+import {
+  MenuItem,
+  MenuSeparator,
+  MenuSub,
+  MenuSubPopup,
+  MenuSubTrigger,
+} from "~/components/ui/menu";
 import { useSidebar } from "~/components/ui/sidebar";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { useThreadActions } from "~/hooks/useThreadActions";
@@ -46,7 +52,7 @@ import {
 
 /**
  * Muse's side chats, listed in the row's menu below its pin and edit actions. Main chat is the row
- * itself, so an empty or still-loading list adds nothing. Each chat opens as its own thread.
+ * itself. Archived chats remain reachable through the submenu. Each chat opens as its own thread.
  */
 export function MuseAgentConversations({
   environmentId,
@@ -77,7 +83,6 @@ export function MuseAgentConversations({
       </>
     );
   }
-  if (conversations.length === 0) return null;
   return (
     <>
       <MenuSeparator />
@@ -90,8 +95,54 @@ export function MuseAgentConversations({
           threads={threads}
         />
       ))}
+      <MenuSub>
+        <MenuSubTrigger>Archived conversations</MenuSubTrigger>
+        <MenuSubPopup>
+          <MuseArchivedConversations
+            environmentId={environmentId}
+            providerInstanceId={providerInstanceId}
+            threads={threads}
+          />
+        </MenuSubPopup>
+      </MenuSub>
     </>
   );
+}
+
+function MuseArchivedConversations(props: {
+  readonly environmentId: EnvironmentId;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly threads: ReadonlyArray<OrchestrationV2ThreadShell>;
+}) {
+  const read = useEnvironmentQuery(
+    museAgentFeatureReadQuery({
+      environmentId: props.environmentId,
+      input: {
+        operation: "sessions",
+        providerInstanceId: props.providerInstanceId,
+        view: "archived",
+      },
+    }),
+  );
+  const sessions =
+    read.data?.operation === "sessions"
+      ? read.data.data.filter((session) => session.isThread && !session.isPrimary)
+      : [];
+  if (read.error !== null)
+    return (
+      <MenuItem onClick={() => read.refresh()}>
+        Couldn't load archived conversations. Retry
+      </MenuItem>
+    );
+  if (sessions.length === 0)
+    return (
+      <MenuItem disabled>
+        {read.isPending ? "Loading conversations…" : "No archived conversations"}
+      </MenuItem>
+    );
+  return sessions.map((session) => (
+    <MuseConversationItem key={session.sessionId} {...props} session={session} archived />
+  ));
 }
 
 function MuseConversationItem({
@@ -99,9 +150,11 @@ function MuseConversationItem({
   providerInstanceId,
   session,
   threads,
+  archived = false,
 }: {
   readonly environmentId: EnvironmentId;
   readonly providerInstanceId: ProviderInstanceId;
+  readonly archived?: boolean;
   readonly session: MuseAgentFeatureSession;
   readonly threads: ReadonlyArray<OrchestrationV2ThreadShell>;
 }) {
@@ -110,6 +163,7 @@ function MuseConversationItem({
   const openThread = useAtomCommand(museAgentOpenThread, { reportFailure: false });
   const update = useAtomCommand(museAgentFeatureUpdate, { reportFailure: false });
   const { archiveThread, pinThread, unpinThread } = useThreadActions();
+  const canOpen = useAtomValue(museAgentOpenThread.permissionAtom(environmentId));
   const canWrite = useAtomValue(museAgentFeatureUpdate.permissionAtom(environmentId));
   const [busy, setBusy] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -175,7 +229,7 @@ function MuseConversationItem({
     });
   };
 
-  const archive = async () => {
+  const setArchived = async () => {
     if (busy) return;
     setBusy(true);
     const result = await update({
@@ -184,17 +238,17 @@ function MuseConversationItem({
         operation: "session_archive",
         providerInstanceId,
         sessionId: session.sessionId,
-        archived: true,
+        archived: !archived,
       },
     });
     if (result._tag === "Success") {
-      // Muse archived it, so its T3 thread goes too; the next open restores both.
-      if (threadRef) await archiveThread(threadRef);
+      // Restored native conversations reappear in the active list; opening them restores the T3 thread.
+      if (!archived && threadRef) await archiveThread(threadRef);
     } else if (!isAtomCommandInterrupted(result)) {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Could not archive conversation",
+          title: archived ? "Could not unarchive conversation" : "Could not archive conversation",
           description: String(squashAtomCommandFailure(result)),
         }),
       );
@@ -250,10 +304,15 @@ function MuseConversationItem({
           {
             id: "pin",
             label: pinned ? "Unpin" : "Pin",
-            disabled: threadRef === null || !canWrite,
+            disabled: archived || threadRef === null || !canWrite,
           },
-          { id: "rename", label: "Rename", disabled: !canWrite },
-          { id: "archive", label: "Archive", disabled: !canWrite || busy, separatorBefore: true },
+          { id: "rename", label: "Rename", disabled: archived || !canWrite },
+          {
+            id: "archive",
+            label: archived ? "Unarchive" : "Archive",
+            disabled: !canWrite || busy,
+            separatorBefore: true,
+          },
         ],
         position,
       ),
@@ -268,7 +327,7 @@ function MuseConversationItem({
         setRenaming(true);
         return;
       case "archive":
-        void archive();
+        void setArchived();
         return;
     }
   };
@@ -276,14 +335,14 @@ function MuseConversationItem({
   return (
     <>
       <MenuItem
-        disabled={busy}
-        onClick={() => void open()}
+        disabled={busy || (archived ? !canWrite : !canOpen)}
+        onClick={() => void (archived ? setArchived() : open())}
         onContextMenu={(event) => {
           event.preventDefault();
           void showContextMenu({ x: event.clientX, y: event.clientY });
         }}
       >
-        <span className="min-w-0 flex-1 truncate">{label}</span>
+        <span className="min-w-0 flex-1 truncate">{archived ? `Unarchive ${label}` : label}</span>
         {statusDot ? (
           <>
             <span
