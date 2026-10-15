@@ -22,7 +22,8 @@ const fixture = (
   respond?: (
     method: string,
     params: Record<string, unknown>,
-  ) => Effect.Effect<unknown, Transport.MuseAgentTransportError>,
+  ) => Effect.Effect<unknown, Transport.MuseAgentTransportError> | undefined,
+  selectedConnector = connector,
 ) => {
   let current = binding;
   const calls: { method: string; params: Record<string, unknown>; write: boolean }[] = [];
@@ -35,7 +36,7 @@ const fixture = (
         return (
           respond?.(method, params) ??
           Effect.succeed(
-            method === "connectors.list" ? { connectors: [connector] } : responses[method],
+            method === "connectors.list" ? { connectors: [selectedConnector] } : responses[method],
           )
         );
       }),
@@ -486,5 +487,77 @@ it.effect("submits native consent without a secret", () => {
       params: { provider: "calendar" },
       write: true,
     });
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect(
+  "uses Meta Business native connect and falls back only on its definite missing-ACL rejection",
+  () => {
+    const native = { ...connector, id: "meta_business" };
+    const f = fixture(
+      { "connectors.connect_info": { action: { type: "consent_only" } } },
+      (method) =>
+        method === "connectors.connect"
+          ? Effect.fail(
+              new Transport.MuseAgentTransportError({
+                kind: "uncertain",
+                cause: { missingEndpointAcl: true },
+              }),
+            )
+          : undefined,
+      native,
+    );
+    return Effect.gen(function* () {
+      const service = yield* Service.MuseAgentConnectorService;
+      yield* service.authenticate(binding, "meta_business", "consent_only");
+      expect(f.calls.filter((call) => call.write).map((call) => call.method)).toEqual([
+        "connectors.connect",
+        "consent_auth.callback",
+      ]);
+    }).pipe(Effect.provide(f.layer));
+  },
+);
+
+it.effect("validates Meta Business native success without sending a second consent request", () => {
+  const f = fixture(
+    {
+      "connectors.connect_info": { action: { type: "consent_only" } },
+      "connectors.connect": { ok: true, connected: true, id: "meta_business" },
+    },
+    undefined,
+    { ...connector, id: "meta_business" },
+  );
+  return Effect.gen(function* () {
+    const service = yield* Service.MuseAgentConnectorService;
+    yield* service.authenticate(binding, "meta_business", "consent_only");
+    expect(f.calls.filter((call) => call.write).map((call) => call.method)).toEqual([
+      "connectors.connect",
+    ]);
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("does not retry Meta Business consent after a refusal", () => {
+  const f = fixture(
+    { "connectors.connect_info": { action: { type: "consent_only" } } },
+    (method) =>
+      method === "connectors.connect"
+        ? Effect.fail(
+            new Transport.MuseAgentTransportError({
+              kind: "uncertain",
+              cause: { status: 403 },
+            }),
+          )
+        : undefined,
+    { ...connector, id: "meta_business" },
+  );
+  return Effect.gen(function* () {
+    const service = yield* Service.MuseAgentConnectorService;
+    expect(
+      (yield* service.authenticate(binding, "meta_business", "consent_only").pipe(Effect.flip))
+        .code,
+    ).toBe("refused");
+    expect(f.calls.filter((call) => call.write).map((call) => call.method)).toEqual([
+      "connectors.connect",
+    ]);
   }).pipe(Effect.provide(f.layer));
 });

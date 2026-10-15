@@ -49,6 +49,12 @@ const NativeError = Schema.Struct({
   status: Schema.optionalKey(Schema.Int),
 });
 const isNativeError = Schema.is(NativeError);
+const isMissingEndpointAcl = Schema.is(Schema.Struct({ missingEndpointAcl: Schema.Literal(true) }));
+const MetaBusinessConnected = Schema.Struct({
+  ok: Schema.Literal(true),
+  connected: Schema.Literal(true),
+  id: Schema.Literal("meta_business"),
+});
 // eslint-disable-next-line no-control-regex -- URL parsing otherwise normalizes unexpected control characters away.
 const UrlControlCharacters = /[\u0000-\u0020\u007f]/;
 
@@ -232,6 +238,27 @@ const make = Effect.gen(function* () {
         (authType === "api_key" && (!secret || Buffer.byteLength(secret, "utf8") > 65536))
       )
         return yield* new MuseAgentFeatureError({ feature: "connectors", code: "invalid_request" });
+      if (connectorId === "meta_business" && authType === "consent_only") {
+        yield* transport.request(binding, "connectors.connect", { id: connectorId }, true).pipe(
+          Effect.map((value) => ({ kind: "connected" as const, value })),
+          Effect.catchIf(
+            (error) => isMissingEndpointAcl(error.cause),
+            () =>
+              request(binding, "consent_auth.callback", { provider: connectorId }, true).pipe(
+                Effect.as({ kind: "fallback" as const }),
+              ),
+          ),
+          Effect.mapError((error) =>
+            error._tag === "MuseAgentTransportError" ? failure(error) : error,
+          ),
+          Effect.flatMap((result) =>
+            result.kind === "fallback"
+              ? Effect.void
+              : decode(MetaBusinessConnected, result.value, true).pipe(Effect.asVoid),
+          ),
+        );
+        return;
+      }
       yield* request(
         binding,
         authType === "api_key" ? "api_key_auth.callback" : "consent_auth.callback",

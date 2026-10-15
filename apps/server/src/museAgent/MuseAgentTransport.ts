@@ -399,6 +399,14 @@ const requestPageBridge = (page: Page, input: unknown) =>
         return {
           ok: false as const,
           error: {
+            ...(typeof cause === "object" &&
+            cause !== null &&
+            "kind" in cause &&
+            cause.kind === "jarvis_rejection" &&
+            "message" in cause &&
+            cause.message === "matched route missing from endpoint ACL"
+              ? { missingEndpointAcl: true as const }
+              : {}),
             ...(typeof code === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(code) ? { code } : {}),
             ...(typeof httpStatus === "number" &&
             Number.isInteger(httpStatus) &&

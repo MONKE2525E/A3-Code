@@ -836,3 +836,23 @@ it.effect("preserves the native status field without leaking error details", () 
     assert.deepStrictEqual(cause, { status: 403 });
   }).pipe(Effect.provide(f.layer), Effect.scoped);
 });
+
+it.effect("reduces the native missing-endpoint rejection to a fixed safe classifier", () => {
+  const f = fixture();
+  f.failRequest(
+    Object.assign(new Error("matched route missing from endpoint ACL"), {
+      kind: "jarvis_rejection",
+    }),
+  );
+  return Effect.gen(function* () {
+    const transport = yield* Transport.MuseAgentTransport;
+    const binding = yield* transport.connect;
+    const cause = yield* transport.request(binding, "connectors.connect", {}).pipe(
+      Effect.match({
+        onFailure: (error) => error.cause,
+        onSuccess: () => null,
+      }),
+    );
+    assert.deepStrictEqual(cause, { missingEndpointAcl: true });
+  }).pipe(Effect.provide(f.layer), Effect.scoped);
+});
