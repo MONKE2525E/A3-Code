@@ -96,6 +96,8 @@ const fixture = (
 ) =>
   Effect.gen(function* () {
     const dictationStarted = yield* Deferred.make<void>();
+    const archiveWritten = yield* Deferred.make<void>();
+    const archiveContinue = yield* Deferred.make<void>();
     const state = {
       binding,
       avatarImagePath: "workspace/avatars/synthetic/image.png",
@@ -138,6 +140,13 @@ const fixture = (
       featureCalls: [] as string[],
       primarySessionId: "primary",
       archiveCalls: [] as Array<{ binding: string; sessionId: string; archived: boolean }>,
+      nativeArchived: false,
+      failArchiveSync: false,
+      archiveSyncFailed: false,
+      failArchiveRecovery: false,
+      pauseArchive: false,
+      archiveWritten,
+      archiveContinue,
       reconciled: [] as ProviderInstanceConfigMap[],
       snapshots: [snapshot()],
       pending: [] as MuseAgentPendingDelivery[],
@@ -187,7 +196,13 @@ const fixture = (
             is_primary: true,
             is_thread: false,
           },
-          { session_id: "side-one", status: "idle", is_primary: false, is_thread: true },
+          {
+            session_id: "side-one",
+            status: "idle",
+            is_primary: false,
+            is_thread: true,
+            archived: state.nativeArchived,
+          },
           {
             session_id: "readonly-side",
             status: "idle",
@@ -368,8 +383,19 @@ const fixture = (
           Layer.provide(
             Layer.mock(Features.MuseAgentFeatureService)({
               setSessionArchived: (binding, sessionId, archived) =>
-                Effect.sync(() => {
+                Effect.gen(function* () {
                   state.archiveCalls.push({ binding, sessionId, archived });
+                  if (!archived && state.failArchiveRecovery)
+                    return yield* new Features.MuseAgentFeatureError({
+                      feature: "sessions",
+                      code: "unavailable",
+                    });
+                  state.nativeArchived = archived;
+                  state.archiveSyncFailed = archived && state.failArchiveSync;
+                  if (archived && state.pauseArchive) {
+                    yield* Deferred.succeed(archiveWritten, undefined);
+                    yield* Deferred.await(archiveContinue);
+                  }
                 }),
               renameSession: (_binding, _sessionId, title) =>
                 Effect.sync(() => {
@@ -516,7 +542,7 @@ const fixture = (
             Layer.succeed(Projections.ProjectionStoreV2, {
               ...projections,
               getThreadShell: (threadId) =>
-                (state.failRenameSync
+                (state.failRenameSync || state.archiveSyncFailed
                   ? Effect.fail(new Projections.ProjectionStoreReadError({ threadId }))
                   : projections.getThreadShell(threadId)
                 ).pipe(
@@ -1889,6 +1915,79 @@ it.effect.each(["projection", "account"] as const)(
         input.title,
       );
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect("pairs direct native archives and restores with the canonical T3 shell", () =>
+  Effect.gen(function* () {
+    const h = yield* fixture();
+    const opened = yield* h.service.open({ ...reference, sessionId: "side-one" });
+    for (const archived of [true, true, false, false]) {
+      yield* h.service.featureUpdate({
+        providerInstanceId: instanceId,
+        operation: "session_archive",
+        sessionId: "side-one",
+        archived,
+      });
+      assert.equal(h.state.nativeArchived, archived);
+      assert.equal(
+        (yield* h.projections.getThreadShell(opened.threadId))?.archivedAt !== null,
+        archived,
+      );
+    }
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect.each([false, true])(
+  "recovers a failed local archive or reports failed recovery: %s",
+  (recoveryFails) =>
+    Effect.gen(function* () {
+      const h = yield* fixture();
+      const opened = yield* h.service.open({ ...reference, sessionId: "side-one" });
+      h.state.failArchiveSync = true;
+      h.state.failArchiveRecovery = recoveryFails;
+      const request = {
+        providerInstanceId: instanceId,
+        operation: "session_archive",
+        sessionId: "side-one",
+        archived: true,
+      } as const;
+      const error = yield* Effect.flip(h.service.featureUpdate(request));
+      assert.equal(error.reason, "storage_failed");
+      assert.match(
+        error.message,
+        recoveryFails ? /or restore Muse/ : /restored the previous archive state/,
+      );
+      assert.equal(h.state.nativeArchived, recoveryFails);
+      assert.equal((yield* h.projections.getThreadShell(opened.threadId))?.archivedAt, null);
+      h.state.failArchiveSync = false;
+      h.state.archiveSyncFailed = false;
+      h.state.failArchiveRecovery = false;
+      yield* h.service.featureUpdate(request);
+      assert.equal(h.state.nativeArchived, true);
+      assert.notEqual((yield* h.projections.getThreadShell(opened.threadId))?.archivedAt, null);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect("finishes paired archive synchronization when the requesting fiber is interrupted", () =>
+  Effect.gen(function* () {
+    const h = yield* fixture();
+    const opened = yield* h.service.open({ ...reference, sessionId: "side-one" });
+    h.state.pauseArchive = true;
+    const pending = yield* h.service
+      .featureUpdate({
+        providerInstanceId: instanceId,
+        operation: "session_archive",
+        sessionId: "side-one",
+        archived: true,
+      })
+      .pipe(Effect.forkChild);
+    yield* Deferred.await(h.state.archiveWritten);
+    const interrupted = yield* Fiber.interrupt(pending).pipe(Effect.forkChild);
+    yield* Deferred.succeed(h.state.archiveContinue, undefined);
+    yield* Fiber.join(interrupted);
+    assert.equal(h.state.nativeArchived, true);
+    assert.notEqual((yield* h.projections.getThreadShell(opened.threadId))?.archivedAt, null);
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
 
 it.effect.each(["primary", "native-main-42"])(

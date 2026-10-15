@@ -261,15 +261,12 @@ it("keeps a conversation archived when the native restore fails", async () => {
 });
 
 it.each([true, false])(
-  "recovers or reports a partial native archive when the T3 step fails (recovery=%s)",
+  "reports a paired server archive failure without a second client mutation (recovery=%s)",
   async (recovered) => {
-    const fail = { _tag: "Failure", cause: Cause.fail(new Error("T3 archive failed")) };
-    mocks.archive.mockResolvedValue(fail);
-    mocks.update.mockImplementation(async ({ input }: { input: { archived: boolean } }) => {
-      if (!input.archived && !recovered) return fail;
-      mocks.archived = input.archived;
-      return { _tag: "Success", value: undefined };
-    });
+    const message = recovered
+      ? "Muse restored the previous archive state."
+      : "Muse could not restore the previous archive state.";
+    mocks.update.mockResolvedValue({ _tag: "Failure", cause: Cause.fail(new Error(message)) });
     const base = makeThreadProjectionFixture().thread;
     const id = ThreadId.make(`muse-agent:${"a".repeat(64)}:side-chat`);
     const shell: OrchestrationV2ThreadShell = {
@@ -308,23 +305,21 @@ it.each([true, false])(
       await act(async () =>
         item("Side chat").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })),
       );
-      expect(mocks.archive).toHaveBeenCalledWith({ environmentId, threadId: id }, { undo: false });
+      expect(mocks.archive).not.toHaveBeenCalled();
+      expect(mocks.update).toHaveBeenCalledTimes(1);
       expect(mocks.update).toHaveBeenLastCalledWith({
         environmentId,
         input: {
           operation: "session_archive",
           providerInstanceId,
           sessionId: "side-chat",
-          archived: false,
+          archived: true,
         },
       });
-      expect(mocks.archived).toBe(!recovered);
       expect(mocks.toast).toHaveBeenLastCalledWith({
         type: "error",
-        title: "Conversation archive incomplete",
-        description: recovered
-          ? "Muse restored the conversation because T3 could not archive its thread. Try again."
-          : "Muse archived the conversation, but T3 could not archive its thread. Use Archived conversations to restore it.",
+        title: "Could not archive conversation",
+        description: "Error: " + message,
       });
     } finally {
       await act(async () => root.unmount());

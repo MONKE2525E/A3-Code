@@ -1087,21 +1087,78 @@ const make = Effect.gen(function* () {
         yield* features.deleteTask(binding, input.jobId).pipe(Effect.mapError(featureFailure));
         break;
       case "session_archive": {
-        if (input.archived) {
-          const sessions = yield* native.sessions(binding).pipe(Effect.mapError(nativeFailure));
-          const session = sessions.find((entry) => entry.session_id === input.sessionId);
-          if (!session || session.is_primary)
-            return yield* new NativeAgentError({
-              reason: "thread_changed",
-              detail: session?.is_primary
-                ? "Muse's main conversation cannot be archived."
-                : "The Muse conversation could not be found. Refresh and try again.",
-            });
-        }
-        yield* features
-          .setSessionArchived(binding, input.sessionId, input.archived)
-          .pipe(Effect.mapError(featureFailure));
-        break;
+        return yield* lock.withPermits(1)(
+          Effect.gen(function* () {
+            const sessions = yield* native.sessions(binding).pipe(Effect.mapError(nativeFailure));
+            const session = sessions.find((entry) => entry.session_id === input.sessionId);
+            if (input.archived && (!session || session.is_primary))
+              return yield* new NativeAgentError({
+                reason: "thread_changed",
+                detail: session?.is_primary
+                  ? "Muse's main conversation cannot be archived."
+                  : "The Muse conversation could not be found. Refresh and try again.",
+              });
+            const identity = yield* canonicalIdentity(selection);
+            const threadId = ThreadId.make(
+              museThreadIdForSession(identity, session?.is_primary ? undefined : input.sessionId),
+            );
+            const before = yield* projections
+              .getThreadShell(threadId)
+              .pipe(Effect.mapError(failure("storage_failed")));
+            const assertOwned = (shell: typeof before) =>
+              shell === null ||
+              (shell.deletedAt === null &&
+                shell.providerInstanceId === selection.instanceId &&
+                shell.modelSelection.instanceId === selection.instanceId &&
+                shell.modelSelection.model === "muse");
+            if (!assertOwned(before))
+              return yield* new NativeAgentError({ reason: "thread_changed" });
+            if ((yield* selected(selection.instanceId)).binding !== binding)
+              return yield* new NativeAgentError({ reason: "account_changed" });
+            const priorArchived =
+              session?.archived ?? (before === null ? !input.archived : before.archivedAt !== null);
+            // Once native state changes, finish or compensate even if the requesting client leaves.
+            return yield* Effect.gen(function* () {
+              yield* features
+                .setSessionArchived(binding, input.sessionId, input.archived)
+                .pipe(Effect.mapError(featureFailure));
+              const synchronized = yield* Effect.gen(function* () {
+                if ((yield* selected(selection.instanceId)).binding !== binding)
+                  return yield* new NativeAgentError({ reason: "account_changed" });
+                const shell = yield* projections
+                  .getThreadShell(threadId)
+                  .pipe(Effect.mapError(failure("storage_failed")));
+                if (!assertOwned(shell))
+                  return yield* new NativeAgentError({ reason: "thread_changed" });
+                if (shell !== null && (shell.archivedAt !== null) !== input.archived) {
+                  const nonce = yield* crypto.randomUUIDv4.pipe(
+                    Effect.mapError(failure("storage_failed")),
+                  );
+                  yield* orchestrator
+                    .dispatch({
+                      type: input.archived ? "thread.archive" : "thread.unarchive",
+                      commandId: CommandId.make(`muse-agent:archive:${nonce}`),
+                      threadId,
+                    })
+                    .pipe(Effect.mapError(failure("storage_failed")));
+                }
+              }).pipe(Effect.exit);
+              if (synchronized._tag === "Failure") {
+                const recovered = yield* features
+                  .setSessionArchived(binding, input.sessionId, priorArchived)
+                  .pipe(Effect.exit);
+                return yield* new NativeAgentError({
+                  reason: "storage_failed",
+                  detail:
+                    recovered._tag === "Success"
+                      ? "Muse restored the previous archive state because T3 could not update its thread. Try again."
+                      : "Muse's archive state changed, but T3 could not update its thread or restore Muse. Refresh and retry the archive action to synchronize them.",
+                });
+              }
+              return { updated: true as const };
+            }).pipe(Effect.uninterruptible);
+          }),
+        );
       }
       case "session_rename": {
         const { title } = yield* features

@@ -162,7 +162,7 @@ function MuseConversationItem({
   const { isMobile, setOpenMobile } = useSidebar();
   const openThread = useAtomCommand(museAgentOpenThread, { reportFailure: false });
   const update = useAtomCommand(museAgentFeatureUpdate, { reportFailure: false });
-  const { archiveThread, pinThread, unpinThread } = useThreadActions();
+  const { pinThread, unpinThread } = useThreadActions();
   const canOpen = useAtomValue(museAgentOpenThread.permissionAtom(environmentId));
   const canWrite = useAtomValue(museAgentFeatureUpdate.permissionAtom(environmentId));
   const [busy, setBusy] = useState(false);
@@ -241,34 +241,7 @@ function MuseConversationItem({
         archived: !archived,
       },
     });
-    if (result._tag === "Success") {
-      // Restored native conversations reappear in the active list; opening them restores the T3 thread.
-      if (!archived && threadRef) {
-        // Restore Muse through Archived conversations before reopening its T3 thread.
-        const local = await archiveThread(threadRef, { undo: false });
-        if (local._tag === "Failure") {
-          const recovery = await update({
-            environmentId,
-            input: {
-              operation: "session_archive",
-              providerInstanceId,
-              sessionId: session.sessionId,
-              archived: false,
-            },
-          });
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Conversation archive incomplete",
-              description:
-                recovery._tag === "Success"
-                  ? "Muse restored the conversation because T3 could not archive its thread. Try again."
-                  : "Muse archived the conversation, but T3 could not archive its thread. Use Archived conversations to restore it.",
-            }),
-          );
-        }
-      }
-    } else if (!isAtomCommandInterrupted(result)) {
+    if (result._tag !== "Success" && !isAtomCommandInterrupted(result)) {
       toastManager.add(
         stackedThreadToast({
           type: "error",
