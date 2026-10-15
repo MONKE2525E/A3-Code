@@ -243,3 +243,14 @@ export function isMuseSessionThread(threadId: string, sessionId: string | null):
   const match = /^muse-agent:[0-9a-f]{64}:(.+)$/.exec(threadId);
   return match?.[1] === encodeURIComponent(sessionId);
 }
+
+/** The native side-chat session encoded in a canonical T3 thread id. */
+export function museSessionForThread(threadId: string | undefined): string | undefined {
+  const session = /^muse-agent:[0-9a-f]{64}:([^:]+)$/.exec(threadId ?? "")?.[1];
+  if (session === undefined) return undefined;
+  try {
+    return decodeURIComponent(session);
+  } catch {
+    return undefined;
+  }
+}

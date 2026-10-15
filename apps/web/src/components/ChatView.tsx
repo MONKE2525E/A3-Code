@@ -11230,6 +11230,7 @@ export default function ChatView(props: ChatViewProps) {
       <MuseAgentFeaturesPanel
         key={activeThread.environmentId}
         environmentId={activeThread.environmentId}
+        threadId={activeThread.id}
         onClose={() => {
           if (activeThreadRef === null) return;
           useRightPanelStore.getState().toggle(activeThreadRef, "muse-features");

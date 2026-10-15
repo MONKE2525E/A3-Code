@@ -6,6 +6,7 @@ import type { AgentUnreadThreadShell } from "./agentStatusDot";
 import {
   findCachedMuseAgentThread,
   isMuseSessionThread,
+  museSessionForThread,
   museAvatarStateForStatus,
   pickMuseAvatarVideo,
   resolveMuseAgentNotice,
@@ -13,6 +14,14 @@ import {
   resolveMuseAgentStatusDot,
   resolveMuseAvatarPlayback,
 } from "./aiAgents";
+
+it("selects delivery recovery for the open native side chat and defaults Main chat to primary", () => {
+  const identity = "a".repeat(64);
+  expect(museSessionForThread(`muse-agent:${identity}:side%3Achat%2F1`)).toBe("side:chat/1");
+  expect(museSessionForThread(`muse-agent:${identity}`)).toBeUndefined();
+  expect(museSessionForThread(undefined)).toBeUndefined();
+  expect(museSessionForThread(`muse-agent:${identity}:%broken`)).toBeUndefined();
+});
 
 describe("resolveMuseAgentNotice", () => {
   it("is ready only when the server says ready", () => {

@@ -38,16 +38,22 @@ const BLOCKED_COPY: Record<BlockedReason, string> = {
 export function MuseAgentDeliveryRecovery({
   environmentId,
   providerInstanceId,
+  sessionId,
   canWrite,
 }: {
   readonly environmentId: EnvironmentId;
   readonly providerInstanceId: ProviderInstanceId;
+  readonly sessionId?: string | undefined;
   readonly canWrite: boolean;
 }) {
   const read = useEnvironmentQuery(
     museAgentFeatureReadQuery({
       environmentId,
-      input: { operation: "pending_deliveries", providerInstanceId },
+      input: {
+        operation: "pending_deliveries",
+        providerInstanceId,
+        ...(sessionId === undefined ? {} : { sessionId }),
+      },
     }),
   );
   const update = useAtomCommand(museAgentFeatureUpdate, { reportFailure: false });

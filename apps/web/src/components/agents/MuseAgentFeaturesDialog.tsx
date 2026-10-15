@@ -72,6 +72,7 @@ import ChatMarkdown from "~/components/ChatMarkdown";
 import { MuseAgentAvatar } from "./MuseAgentAvatar";
 import { useMuseAgentAvatar } from "./useMuseAgentAvatar";
 import { MuseAgentDeliveryRecovery } from "./MuseAgentDeliveryRecovery";
+import { museSessionForThread } from "./aiAgents";
 import { MuseAgentComputerSection } from "./MuseAgentComputerSection";
 import { MuseAgentConnectionsSection } from "./MuseAgentConnectionsSection";
 import { MuseAgentDictationSection } from "./MuseAgentDictationSection";
@@ -429,8 +430,9 @@ type MuseLeave =
 function MuseAgentFeaturesBody({
   environmentId,
   providerInstanceId,
+  threadId,
   onClose,
-}: Target & { readonly onClose: () => void }) {
+}: Target & { readonly threadId?: string; readonly onClose: () => void }) {
   const [detail, setDetail] = useState<MuseDetail | null>(null);
   const canWrite = useAtomValue(museAgentFeatureUpdate.permissionAtom(environmentId));
   const inventory = useFeatureRead(environmentId, { operation: "inventory", providerInstanceId });
@@ -515,6 +517,12 @@ function MuseAgentFeaturesBody({
   } else {
     body = (
       <div className="flex flex-col gap-6 px-5 pb-6">
+        <MuseAgentDeliveryRecovery
+          key={threadId ?? "primary"}
+          {...target}
+          sessionId={museSessionForThread(threadId)}
+          canWrite={canWrite}
+        />
         {panelSupport("profile") === "unavailable" ? (
           unavailable
         ) : (
@@ -653,9 +661,11 @@ function BackToProfile({ onBack }: { readonly onBack: () => void }) {
 /** The thread's right panel surface for Muse: nothing until Muse is connected. */
 export function MuseAgentFeaturesPanel({
   environmentId,
+  threadId,
   onClose,
 }: {
   readonly environmentId: EnvironmentId;
+  readonly threadId: string;
   readonly onClose: () => void;
 }) {
   const canRead = useEnvironmentScope(environmentId, AuthOrchestrationReadScope);
@@ -667,6 +677,7 @@ export function MuseAgentFeaturesPanel({
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <MuseAgentFeaturesBody
         environmentId={environmentId}
+        threadId={threadId}
         providerInstanceId={status.provider.instanceId}
         onClose={onClose}
       />
