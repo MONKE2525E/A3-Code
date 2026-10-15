@@ -591,3 +591,27 @@ it.effect(
       }),
     ),
 );
+
+it.effect("allows owned Muse sign-in cleanup after all environment grants are revoked", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const registry = yield* setup;
+      const cleanup = createCommandPermissions(runtime, WS_METHODS.museAgentsCloseSignIn);
+      const signIn = createCommandPermissions(runtime, WS_METHODS.museAgentsSignIn);
+      registry.set(
+        sessions(env),
+        AsyncResult.success({
+          ...grant(false),
+          scopes: [],
+          permissions: [],
+        }),
+      );
+      expect(registry.get(cleanup.permissionAtom(env))).toBe(true);
+      yield* cleanup.authorize(registry, env, { threadId: "owned-private-page" });
+      expect(registry.get(signIn.permissionAtom(env))).toBe(false);
+      expect((yield* signIn.authorize(registry, env, {}).pipe(Effect.flip))._tag).toBe(
+        "EnvironmentAuthorizationError",
+      );
+    }),
+  ),
+);

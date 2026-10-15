@@ -44,6 +44,8 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
  */
 export const RPC_REQUIRED_SCOPES = {
   ...CLIENT_GUARDED_RPC_SCOPES,
+  // Cleanup is authorized by the authenticated session's private-page ownership in closeMuse.
+  [WS_METHODS.museAgentsCloseSignIn]: null,
   [WS_METHODS.museAgentsStatus]: AuthOrchestrationReadScope,
   [WS_METHODS.museAgentsFeatureRead]: AuthOrchestrationReadScope,
   [WS_METHODS.museAgentsProfile]: AuthOrchestrationReadScope,
@@ -234,9 +236,9 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.subscribeServerLifecycle]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeAuthAccess]: AuthAccessReadScope,
   [WS_METHODS.subscribeBackgroundPolicy]: AuthOrchestrationReadScope,
-} as const satisfies Readonly<Record<WsRpcMethod, AuthEnvironmentScope>>;
+} as const satisfies Readonly<Record<WsRpcMethod, AuthEnvironmentScope | null>>;
 
-export function requiredScopeForRpcMethod(method: string): AuthEnvironmentScope {
+export function requiredScopeForRpcMethod(method: string): AuthEnvironmentScope | null {
   if (!Object.hasOwn(RPC_REQUIRED_SCOPES, method)) {
     throw new Error(`RPC method ${method} has no declared authorization scope.`);
   }
@@ -293,7 +295,8 @@ const requiredScopesForRpcCall = (
   }
   const guarded = clientRpcRequiredScopes(method, payload);
   if (guarded.length > 0) return guarded;
-  return [requiredScopeForRpcMethod(method)];
+  const requiredScope = requiredScopeForRpcMethod(method);
+  return requiredScope === null ? [] : [requiredScope];
 };
 
 /** Authorizes every RPC on one connection against that connection's session scopes. */

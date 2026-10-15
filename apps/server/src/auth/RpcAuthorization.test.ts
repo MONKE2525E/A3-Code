@@ -732,3 +732,46 @@ it.effect(
       expect(handled).toBe(configuration.length + 1);
     }).pipe(Effect.scoped),
 );
+
+it.effect(
+  "allows private sign-in cleanup without environment grants but refuses a new sign-in",
+  () =>
+    Effect.gen(function* () {
+      const group = WsRpcGroup.omit(
+        ...[...WsRpcGroup.requests.keys()].filter(
+          (
+            tag,
+          ): tag is Exclude<
+            keyof typeof RPC_REQUIRED_SCOPES,
+            typeof WS_METHODS.museAgentsCloseSignIn | typeof WS_METHODS.museAgentsSignIn
+          > => tag !== WS_METHODS.museAgentsCloseSignIn && tag !== WS_METHODS.museAgentsSignIn,
+        ),
+      );
+      const closed: string[] = [];
+      let opened = false;
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.museAgentsCloseSignIn, ({ threadId }) =>
+              Effect.sync(() => {
+                closed.push(threadId);
+              }),
+            ),
+            group.toLayerHandler(WS_METHODS.museAgentsSignIn, () =>
+              Effect.sync(() => {
+                opened = true;
+                return { threadId: "new-page", tabId: "new-tab" };
+              }),
+            ),
+            RpcAuthorization.layer([]),
+          ),
+        ),
+      );
+      yield* client[WS_METHODS.museAgentsCloseSignIn]({ threadId: "owned-page" });
+      expect(closed).toEqual(["owned-page"]);
+      expect(yield* client[WS_METHODS.museAgentsSignIn]({}).pipe(Effect.flip)).toMatchObject({
+        requiredPermission: AuthSettingsWriteScope,
+      });
+      expect(opened).toBe(false);
+    }).pipe(Effect.scoped),
+);
