@@ -177,7 +177,8 @@ export function makeMuseAgentProjection(input: {
   const firstCanonicalSeq = new Map<string, number>();
   const latestStreamSeq = new Map<string, number>();
   const finalized = new Set<string>();
-  const seenDeltas = new Set<string>();
+  // One watermark per event kind/message, independent of the number of streamed chunks.
+  const latestEventSeq = new Map<string, number>();
   const buffered: MuseAgentNativeEvent[] = [];
   let active:
     | {
@@ -579,10 +580,6 @@ export function makeMuseAgentProjection(input: {
     if (role === "user" && ownedUserIds.has(nativeId)) return [];
     const seq = frame.meta?.seq ?? payload.seq;
     if (seq === undefined || !Number.isSafeInteger(seq) || seq < 0) return [];
-    const key = `${frame.event}:${nativeId}:${seq}`;
-    if (seenDeltas.has(key)) return [];
-    seenDeltas.add(key);
-    if (seenDeltas.size > 32768) throw new Error("muse_replay_limit");
     const existing = messages.get(nativeId);
     if (captured && existing?.runId != null && existing.runId !== captured.context.runId) return [];
     if (active?.terminal && existing?.runId === active.turn.runId && !presentation) return [];
@@ -599,6 +596,9 @@ export function makeMuseAgentProjection(input: {
     if (orderChanged) firstCanonicalSeq.set(nativeId, seq);
     if (seq < previousSeq)
       return orderChanged && existing?.runId === null ? messageEvents(nativeId, existing) : [];
+    const eventKey = `${frame.event}:${nativeId}`;
+    if (seq <= (latestEventSeq.get(eventKey) ?? -1)) return [];
+    latestEventSeq.set(eventKey, seq);
     if (streamEvent && !presentation && (finalized.has(nativeId) || (managed && active?.terminal)))
       return [];
     if (streamEvent) latestStreamSeq.set(nativeId, seq);

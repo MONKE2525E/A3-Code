@@ -742,3 +742,36 @@ it("preserves literal brackets from the canonical transcript after streaming", (
   );
   assert.strictEqual(projection.snapshot()[0]?.text, literal);
 });
+
+it.effect(
+  "streams beyond the old replay limit, rejects duplicate chunks, and retains its terminal event",
+  () =>
+    Effect.gen(function* () {
+      const turn = yield* makeTurn;
+      const projection = makeMuseAgentProjection({
+        binding,
+        sessionId: "primary",
+        threadId,
+        providerInstanceId: instanceId,
+      });
+      projection.begin(turn);
+      projection.admit(receipt);
+      for (let seq = 1; seq <= 32770; seq++) {
+        projection.project(frame("delta.text_append", seq, { text: "x" }));
+      }
+      assert.strictEqual(projection.snapshot()[0]?.text.length, 32770);
+      assert.deepStrictEqual(
+        projection.project(frame("delta.text_append", 32770, { text: "x" })),
+        [],
+      );
+      assert.deepStrictEqual(projection.project(frame("delta.text_append", 1, { text: "x" })), []);
+      assert.strictEqual(projection.snapshot()[0]?.text.length, 32770);
+      const terminal = projection.project(frame("delta.message_done", 32771));
+      assert.strictEqual(projection.snapshot()[0]?.streaming, false);
+      assert.ok(terminal.some((event) => event.type === "turn_item.updated"));
+      const completed = projection.project(
+        frame("delta.turn_done", 32772, { status: "completed" }),
+      );
+      assert.strictEqual(completed.filter((event) => event.type === "turn.terminal").length, 1);
+    }),
+);
