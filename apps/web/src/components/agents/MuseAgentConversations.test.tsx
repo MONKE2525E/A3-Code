@@ -1,5 +1,10 @@
 // @vitest-environment jsdom
-import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProviderInstanceId,
+  ThreadId,
+  type OrchestrationV2ThreadShell,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -15,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
   toast: vi.fn(),
   context: vi.fn(),
+  archive: vi.fn(),
 }));
 vi.mock("@effect/atom-react", () => ({
   useAtomValue: (atom: unknown) =>
@@ -29,7 +35,11 @@ vi.mock("~/components/ui/toast", () => ({
   stackedThreadToast: (value: unknown) => value,
 }));
 vi.mock("~/hooks/useThreadActions", () => ({
-  useThreadActions: () => ({ archiveThread: vi.fn(), pinThread: vi.fn(), unpinThread: vi.fn() }),
+  useThreadActions: () => ({
+    archiveThread: mocks.archive,
+    pinThread: vi.fn(),
+    unpinThread: vi.fn(),
+  }),
 }));
 vi.mock("~/localApi", () => ({ readLocalApi: () => ({ contextMenu: { show: mocks.context } }) }));
 vi.mock("~/uiStateStore", () => ({ useUiStateStore: () => undefined }));
@@ -66,6 +76,7 @@ vi.mock("~/state/use-atom-command", () => ({
     command.permissionAtom() === mocks.writePermission ? mocks.update : mocks.open,
 }));
 import { Menu, MenuPopup, MenuTrigger } from "~/components/ui/menu";
+import { makeThreadProjectionFixture } from "~/test-fixtures";
 import { MuseAgentConversations } from "./MuseAgentConversations";
 const environmentId = EnvironmentId.make("test-env");
 const providerInstanceId = ProviderInstanceId.make("muse-test");
@@ -248,3 +259,76 @@ it("keeps a conversation archived when the native restore fails", async () => {
     container.remove();
   }
 });
+
+it.each([true, false])(
+  "recovers or reports a partial native archive when the T3 step fails (recovery=%s)",
+  async (recovered) => {
+    const fail = { _tag: "Failure", cause: Cause.fail(new Error("T3 archive failed")) };
+    mocks.archive.mockResolvedValue(fail);
+    mocks.update.mockImplementation(async ({ input }: { input: { archived: boolean } }) => {
+      if (!input.archived && !recovered) return fail;
+      mocks.archived = input.archived;
+      return { _tag: "Success", value: undefined };
+    });
+    const base = makeThreadProjectionFixture().thread;
+    const id = ThreadId.make(`muse-agent:${"a".repeat(64)}:side-chat`);
+    const shell: OrchestrationV2ThreadShell = {
+      ...base,
+      id,
+      providerInstanceId,
+      modelSelection: { instanceId: providerInstanceId, model: "muse" },
+      latestRunId: null,
+      activeRunId: null,
+      status: "idle",
+      pendingRuntimeRequest: null,
+      latestVisibleMessage: null,
+      latestUserMessageAt: null,
+      hasActionableProposedPlan: false,
+      itemCount: 0,
+      visibleItemCount: 0,
+    };
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <Menu defaultOpen>
+            <MenuTrigger>Conversations</MenuTrigger>
+            <MenuPopup>
+              <MuseAgentConversations
+                environmentId={environmentId}
+                providerInstanceId={providerInstanceId}
+                threads={[shell]}
+              />
+            </MenuPopup>
+          </Menu>,
+        ),
+      );
+      await act(async () =>
+        item("Side chat").dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })),
+      );
+      expect(mocks.archive).toHaveBeenCalledWith({ environmentId, threadId: id });
+      expect(mocks.update).toHaveBeenLastCalledWith({
+        environmentId,
+        input: {
+          operation: "session_archive",
+          providerInstanceId,
+          sessionId: "side-chat",
+          archived: false,
+        },
+      });
+      expect(mocks.archived).toBe(!recovered);
+      expect(mocks.toast).toHaveBeenLastCalledWith({
+        type: "error",
+        title: "Conversation archive incomplete",
+        description: recovered
+          ? "Muse restored the conversation because T3 could not archive its thread. Try again."
+          : "Muse archived the conversation, but T3 could not archive its thread. Use Archived conversations to restore it.",
+      });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  },
+);

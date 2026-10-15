@@ -243,7 +243,30 @@ function MuseConversationItem({
     });
     if (result._tag === "Success") {
       // Restored native conversations reappear in the active list; opening them restores the T3 thread.
-      if (!archived && threadRef) await archiveThread(threadRef);
+      if (!archived && threadRef) {
+        const local = await archiveThread(threadRef);
+        if (local._tag === "Failure") {
+          const recovery = await update({
+            environmentId,
+            input: {
+              operation: "session_archive",
+              providerInstanceId,
+              sessionId: session.sessionId,
+              archived: false,
+            },
+          });
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Conversation archive incomplete",
+              description:
+                recovery._tag === "Success"
+                  ? "Muse restored the conversation because T3 could not archive its thread. Try again."
+                  : "Muse archived the conversation, but T3 could not archive its thread. Use Archived conversations to restore it.",
+            }),
+          );
+        }
+      }
     } else if (!isAtomCommandInterrupted(result)) {
       toastManager.add(
         stackedThreadToast({
