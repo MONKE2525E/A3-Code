@@ -3,6 +3,7 @@ import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import { AVAILABLE_CONNECTION_STATE, type PreparedConnection } from "../connection/model.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
@@ -48,11 +49,10 @@ const grant = (allowed: boolean): AuthSessionState => ({
   scopes: allowed ? [AuthOrchestrationOperateScope] : [],
   permissions: allowed ? [AuthOrchestrationOperateScope] : [],
 });
-const runtime = Atom.runtime(
-  Layer.succeed(EnvironmentRegistry, {
-    run: (_id: EnvironmentId, effect: Effect.Effect<unknown>) => effect,
-  } as unknown as EnvironmentRegistry["Service"]),
-);
+const environmentLayer = Layer.succeed(EnvironmentRegistry, {
+  run: (_id: EnvironmentId, effect: Effect.Effect<unknown>) => effect,
+} as unknown as EnvironmentRegistry["Service"]);
+const runtime = Atom.runtime(environmentLayer);
 const permissions = createCommandPermissions(runtime, WS_METHODS.scheduledTasksDelete);
 const setup = Effect.gen(function* () {
   const registry = AtomRegistry.make();
@@ -485,4 +485,109 @@ it.effect("separates Muse account settings from conversation operations per dest
       }
     }),
   ),
+);
+
+it.effect(
+  "checks and executes binary Muse commands with their transport inputs and operate grant",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const { createMuseAgentDictationCommand, MuseAgentDictationClient } = yield* Effect.promise(
+          () => import("./museAgentDictationHttp.ts"),
+        );
+        const { createMuseAgentComputerStreamCommand, MuseAgentComputerStreamClient } =
+          yield* Effect.promise(() => import("./museAgentComputerStream.ts"));
+        const { PrimaryConnectionTarget } = yield* Effect.promise(
+          () => import("../connection/model.ts"),
+        );
+        const target = new PrimaryConnectionTarget({
+          environmentId: env,
+          label: "Test",
+          httpBaseUrl: "http://localhost:1234",
+          wsBaseUrl: "ws://localhost:1234",
+        });
+        const prepared = yield* SubscriptionRef.make<Option.Option<PreparedConnection>>(
+          Option.some({
+            environmentId: env,
+            label: "Test",
+            target,
+            httpBaseUrl: target.httpBaseUrl,
+            socketUrl: target.wsBaseUrl,
+            httpAuthorization: null,
+          }),
+        );
+        let uploads = 0;
+        let streams = 0;
+        const state = yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE);
+        const session = yield* SubscriptionRef.make(Option.none<RpcSession>());
+        const httpRuntime = Atom.runtime(
+          Layer.mergeAll(
+            environmentLayer,
+            Layer.succeed(EnvironmentSupervisor, {
+              target,
+              state,
+              session,
+              prepared,
+              connect: Effect.void,
+              disconnect: Effect.void,
+              retryNow: Effect.void,
+            }),
+            Layer.succeed(MuseAgentDictationClient, {
+              transcribe: () =>
+                Effect.sync(() => {
+                  uploads++;
+                  return { text: "Transcript" };
+                }),
+            }),
+            Layer.succeed(MuseAgentComputerStreamClient, {
+              prepare: () =>
+                Effect.sync(() => {
+                  streams++;
+                  return { socketUrl: "ws://localhost:1234/computer" };
+                }),
+            }),
+          ),
+        );
+        const dictation = createMuseAgentDictationCommand(httpRuntime);
+        const computer = createMuseAgentComputerStreamCommand(httpRuntime);
+        const audio = {
+          providerInstanceId: ProviderInstanceId.make("muse-test"),
+          pcm: new Uint8Array([0, 0]),
+        };
+        const viewer = {
+          providerInstanceId: audio.providerInstanceId,
+          sessionId: "primary",
+          taskId: "task",
+          takeoverId: "lease",
+        };
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        expect(registry.get(dictation.permissionAtom(env, audio))).toBe(true);
+        expect(registry.get(computer.permissionAtom(env, viewer))).toBe(true);
+        expect(
+          yield* Effect.promise(() =>
+            dictation.run(registry, { environmentId: env, input: audio }),
+          ),
+        ).toMatchObject({ _tag: "Success", value: { text: "Transcript" } });
+        expect(
+          yield* Effect.promise(() =>
+            computer.run(registry, { environmentId: env, input: viewer }),
+          ),
+        ).toMatchObject({ _tag: "Success", value: { socketUrl: "ws://localhost:1234/computer" } });
+        expect([uploads, streams]).toEqual([1, 1]);
+        registry.set(sessions(env), AsyncResult.success(grant(false)));
+        expect(registry.get(dictation.permissionAtom(env, audio))).toBe(false);
+        expect(
+          yield* Effect.promise(() =>
+            dictation.run(registry, { environmentId: env, input: audio }),
+          ),
+        ).toMatchObject({ _tag: "Failure" });
+        expect(
+          yield* Effect.promise(() =>
+            computer.run(registry, { environmentId: env, input: viewer }),
+          ),
+        ).toMatchObject({ _tag: "Failure" });
+        expect([uploads, streams]).toEqual([1, 1]);
+      }),
+    ),
 );

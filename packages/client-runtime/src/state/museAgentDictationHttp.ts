@@ -95,7 +95,8 @@ export const layer = Layer.effect(
 export function createMuseAgentDictationCommand<R, ER>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | MuseAgentDictationClient | R, ER>,
 ) {
-  const permissions = createCommandPermissions(runtime, WS_METHODS.museAgentsFeatureUpdate);
+  // These binary HTTP payloads use the fixed Muse chat operate policy, not feature operations.
+  const permissions = createCommandPermissions(runtime, WS_METHODS.museAgentsOpenThread);
   const command = createEnvironmentCommand(runtime, {
     label: "environment-command:muse-agent:dictation",
     execute: (input: MuseAgentDictationInput, registry, environmentId) =>
