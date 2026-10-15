@@ -439,6 +439,7 @@ export const ChatHeader = memo(function ChatHeader({
               <MuseAgentThreadHeading
                 environmentId={activeThreadEnvironmentId}
                 threadId={activeThreadId}
+                providerInstanceId={activeThreadProviderInstanceId}
                 fallbackTitle={activeThreadTitle}
               />
             </h2>
@@ -483,8 +484,10 @@ export const ChatHeader = memo(function ChatHeader({
       </WorkspaceBreadcrumb>
       {isMuseAgentThread && isServerThread ? (
         <MuseAgentHistoryPagination
+          key={`${activeThreadEnvironmentId}:${activeThreadId}:${activeThreadProviderInstanceId}`}
           environmentId={activeThreadEnvironmentId}
           threadId={activeThreadId}
+          providerInstanceId={activeThreadProviderInstanceId}
         />
       ) : null}
       {isMuseAgentThread ? (

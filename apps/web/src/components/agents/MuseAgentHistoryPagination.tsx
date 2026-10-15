@@ -3,7 +3,12 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { AuthOrchestrationReadScope, type EnvironmentId, type ThreadId } from "@t3tools/contracts";
+import {
+  AuthOrchestrationReadScope,
+  type EnvironmentId,
+  type ThreadId,
+  type ProviderInstanceId,
+} from "@t3tools/contracts";
 import { HistoryIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -29,15 +34,20 @@ import { useAtomCommand } from "~/state/use-atom-command";
 export function MuseAgentHistoryPagination({
   environmentId,
   threadId,
+  providerInstanceId: threadProviderInstanceId,
 }: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
+  readonly providerInstanceId: ProviderInstanceId | undefined;
 }) {
   const canRead = useEnvironmentScope(environmentId, AuthOrchestrationReadScope);
   const status = useEnvironmentQuery(
     canRead ? museAgentStatusQuery({ environmentId, input: {} }) : null,
   ).data;
-  const providerInstanceId = status?.ready ? (status.provider?.instanceId ?? null) : null;
+  const providerInstanceId =
+    status?.ready && status.provider?.instanceId === threadProviderInstanceId
+      ? (threadProviderInstanceId ?? null)
+      : null;
   const inspect = useEnvironmentQuery(
     canRead && providerInstanceId !== null
       ? museAgentFeatureReadQuery({
@@ -59,7 +69,7 @@ export function MuseAgentHistoryPagination({
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   // A failed import belongs to the thread it was started on.
-  useEffect(() => setFailed(false), [environmentId, threadId]);
+  useEffect(() => setFailed(false), [environmentId, threadId, providerInstanceId]);
 
   if (!canRead || providerInstanceId === null) return null;
   const page = inspect.data?.operation === "history_page" ? inspect.data.data : null;

@@ -466,7 +466,9 @@ function MuseAgentFeaturesBody({
   const inventory = useFeatureRead(environmentId, { operation: "inventory", providerInstanceId });
   const inventoryData = inventory.data?.operation === "inventory" ? inventory.data.data : null;
   const target = { environmentId, providerInstanceId };
-  const profileQuery = useEnvironmentQuery(museAgentProfileQuery({ environmentId, input: {} }));
+  const profileQuery = useEnvironmentQuery(
+    museAgentProfileQuery({ environmentId, input: { providerInstanceId } }),
+  );
   const avatar = useMuseAgentAvatar(environmentId, profileQuery.data);
   const agentName = profileQuery.data?.name?.trim() || "Muse";
   // A successful hand-off to chat already delivered the transcript, so it closes without the guard.
