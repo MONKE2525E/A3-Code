@@ -113,7 +113,7 @@ export function findCachedMuseAgentThread<T extends MuseThreadCandidate>(
   let best: T | null = null;
   for (const thread of threads) {
     if (
-      !thread.id.startsWith("muse-agent:") ||
+      !isMuseSessionThread(thread.id, null) ||
       thread.providerInstanceId !== instanceId ||
       (thread.archivedAt ?? null) !== null
     ) {

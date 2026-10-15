@@ -60,6 +60,19 @@ describe("resolveMuseAgentNotice", () => {
 });
 
 describe("findCachedMuseAgentThread", () => {
+  it("keeps Main chat selected when a newer side chat has activity", () => {
+    const main = `muse-agent:${"a".repeat(64)}`;
+    const base = { providerInstanceId: "i1", archivedAt: null };
+    expect(
+      findCachedMuseAgentThread(
+        [
+          { ...base, id: main, updatedAt: "2026-01-01T00:00:00Z" },
+          { ...base, id: `${main}:side-chat`, updatedAt: "2026-02-01T00:00:00Z" },
+        ],
+        "i1",
+      )?.id,
+    ).toBe(main);
+  });
   const thread = (
     id: string,
     instance: string,
@@ -83,19 +96,25 @@ describe("findCachedMuseAgentThread", () => {
 
   it("picks the most recently updated live thread", () => {
     const threads = [
-      thread("muse-agent:old", "i1", null, "2026-01-01T00:00:00Z"),
-      thread("muse-agent:new", "i1", null, "2026-02-01T00:00:00Z"),
+      thread(`muse-agent:${"a".repeat(64)}`, "i1", null, "2026-01-01T00:00:00Z"),
+      thread(`muse-agent:${"b".repeat(64)}`, "i1", null, "2026-02-01T00:00:00Z"),
     ];
-    expect(findCachedMuseAgentThread(threads, "i1")?.id).toBe("muse-agent:new");
+    expect(findCachedMuseAgentThread(threads, "i1")?.id).toBe(`muse-agent:${"b".repeat(64)}`);
   });
 
   it("preserves the caller's thread type and compares DateTime-like timestamps", () => {
     const at = (epochMilliseconds: number) => ({ epochMilliseconds });
     const base = { providerInstanceId: "i1", archivedAt: null };
     const threads = [
-      { ...base, id: "muse-agent:a", updatedAt: at(1), runtime: "x" },
-      { ...base, id: "muse-agent:b", updatedAt: at(9), runtime: "y" },
-      { ...base, id: "muse-agent:c", archivedAt: at(5), updatedAt: at(99), runtime: "z" },
+      { ...base, id: `muse-agent:${"a".repeat(64)}`, updatedAt: at(1), runtime: "x" },
+      { ...base, id: `muse-agent:${"b".repeat(64)}`, updatedAt: at(9), runtime: "y" },
+      {
+        ...base,
+        id: `muse-agent:${"c".repeat(64)}`,
+        archivedAt: at(5),
+        updatedAt: at(99),
+        runtime: "z",
+      },
     ];
     expect(findCachedMuseAgentThread(threads, "i1")?.runtime).toBe("y");
   });
