@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { ThreadId } from "@t3tools/contracts";
+import { useRightPanelStore, selectThreadRightPanelState } from "~/rightPanelStore";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -8,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   connected: "muse-current",
   settings: true,
   operate: true,
+  blockNavigation: (() => false) as () => boolean | Promise<boolean>,
   read: vi.fn(),
   update: vi.fn(),
 }));
@@ -15,7 +19,21 @@ vi.mock("@effect/atom-react", () => ({
   useAtomValue: (permission: unknown) =>
     permission === "settings" ? mocks.settings : mocks.operate,
 }));
-vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
+vi.mock("@tanstack/react-router", () => ({
+  useNavigate: () => vi.fn(),
+  useBlocker: (options: {
+    shouldBlockFn: (route: {
+      current: { pathname: string };
+      next: { pathname: string };
+    }) => boolean | Promise<boolean>;
+  }) => {
+    mocks.blockNavigation = () =>
+      options.shouldBlockFn({
+        current: { pathname: "/thread-a" },
+        next: { pathname: "/thread-b" },
+      });
+  },
+}));
 vi.mock("~/state/session", () => ({ useEnvironmentScope: () => true }));
 vi.mock("~/state/museAgent", () => ({
   museAgentFeatureReadQuery: (query: unknown) => {
@@ -63,9 +81,16 @@ vi.mock("./MuseAgentDeliveryRecovery", () => ({ MuseAgentDeliveryRecovery: () =>
 vi.mock("./MuseAgentDictationSection", () => ({
   MuseAgentDictationSection: ({
     onActiveChange,
+    chat,
   }: {
     onActiveChange: (active: boolean) => void;
-  }) => <button onClick={() => onActiveChange(true)}>Start recording</button>,
+    chat: { start: (prompt: string) => Promise<void> };
+  }) => (
+    <>
+      <button onClick={() => onActiveChange(true)}>Start recording</button>
+      <button onClick={() => void chat.start("Transcript")}>Add transcript</button>
+    </>
+  ),
 }));
 vi.mock("~/components/ChatMarkdown", () => ({ default: () => null }));
 
@@ -264,4 +289,105 @@ it("keeps the profile read-only without settings permission while conversation o
     ),
   );
   expect(editor.readOnly).toBe(false);
+});
+
+const panelRef = scopeThreadRef(environmentId, ThreadId.make("guarded-thread"));
+function PanelHost() {
+  const state = useRightPanelStore((store) =>
+    selectThreadRightPanelState(store.byThreadKey, panelRef),
+  );
+  return state.isOpen && state.activeSurfaceId === "muse-features" ? (
+    <MuseAgentFeaturesPanel
+      environmentId={environmentId}
+      providerInstanceId={providerInstanceId}
+      threadId={panelRef.threadId}
+      onClose={() => useRightPanelStore.getState().close(panelRef)}
+    />
+  ) : (
+    <div>Other surface</div>
+  );
+}
+async function openDirtyPanel() {
+  useRightPanelStore.setState({ byThreadKey: {} });
+  useRightPanelStore.getState().open(panelRef, "muse-features");
+  await act(async () => root.render(<PanelHost />));
+  const editor = container.querySelector<HTMLTextAreaElement>(
+    'textarea[aria-label="Muse Identity"]',
+  )!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
+      editor,
+      "Panel draft",
+    );
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  return editor;
+}
+it.each(["switch", "close-tab", "header-toggle", "hide"])(
+  "guards an unsaved right-panel draft on %s",
+  async (action) => {
+    const editor = await openDirtyPanel();
+    const leave = () => {
+      const store = useRightPanelStore.getState();
+      if (action === "switch") store.open(panelRef, "files");
+      else if (action === "close-tab") store.closeSurface(panelRef, "muse-features");
+      else if (action === "header-toggle") store.toggle(panelRef, "muse-features");
+      else store.close(panelRef);
+    };
+    await act(async () => leave());
+    expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain(
+      "Discard unsaved changes?",
+    );
+    await click("Keep editing");
+    expect(editor.isConnected).toBe(true);
+    expect(editor.value).toBe("Panel draft");
+    await act(async () => leave());
+    await click("Discard changes");
+    expect(editor.isConnected).toBe(false);
+    expect(container.textContent).toBe("Other surface");
+  },
+);
+it("blocks thread navigation until a dirty right-panel draft is discarded", async () => {
+  const editor = await openDirtyPanel();
+  let first!: boolean | Promise<boolean>;
+  await act(async () => {
+    first = mocks.blockNavigation();
+  });
+  await click("Keep editing");
+  expect(await first).toBe(true);
+  expect(editor.value).toBe("Panel draft");
+  let second!: boolean | Promise<boolean>;
+  await act(async () => {
+    second = mocks.blockNavigation();
+  });
+  await click("Discard changes");
+  expect(await second).toBe(false);
+});
+it("guards right-panel dictation on tab switches", async () => {
+  useRightPanelStore.setState({ byThreadKey: {} });
+  useRightPanelStore.getState().open(panelRef, "muse-features");
+  await act(async () => root.render(<PanelHost />));
+  await click("DictationSpeak to Muse");
+  await click("Start recording");
+  await act(async () => useRightPanelStore.getState().open(panelRef, "files"));
+  expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain(
+    "Discard dictation?",
+  );
+  await click("Keep editing");
+  expect(button("Start recording").isConnected).toBe(true);
+  await act(async () => useRightPanelStore.getState().open(panelRef, "files"));
+  await click("Discard dictation");
+  expect(container.textContent).toBe("Other surface");
+});
+
+it("closes without a discard prompt after handing dictation to the chat draft", async () => {
+  useRightPanelStore.setState({ byThreadKey: {} });
+  useRightPanelStore.getState().open(panelRef, "muse-features");
+  mocks.update.mockResolvedValue({ _tag: "Success", value: { threadId: panelRef.threadId } });
+  await act(async () => root.render(<PanelHost />));
+  await click("DictationSpeak to Muse");
+  await click("Start recording");
+  await click("Add transcript");
+  expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+  expect(container.textContent).toBe("Other surface");
 });

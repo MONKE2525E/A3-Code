@@ -7,12 +7,13 @@ import {
 import {
   AuthOrchestrationReadScope,
   type EnvironmentId,
+  ThreadId,
   type MuseAgentFeatureSession,
   type NativeAgentFeatureReadInput,
   ProviderInstanceId as ProviderInstanceIdSchema,
   type ProviderInstanceId,
 } from "@t3tools/contracts";
-import { useNavigate } from "@tanstack/react-router";
+import { useBlocker, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   ChevronRightIcon,
@@ -28,6 +29,7 @@ import {
 import {
   useCallback,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -70,6 +72,7 @@ import {
   museAgentStatusQuery,
 } from "~/state/museAgent";
 import { useComposerDraftStore } from "~/composerDraftStore";
+import { registerRightPanelLeaveGuard } from "~/rightPanelStore";
 import { cn } from "~/lib/utils";
 import { buildThreadRouteParams } from "~/threadRoutes";
 import { useEnvironmentQuery } from "~/state/query";
@@ -428,7 +431,14 @@ const MUSE_ABILITIES: ReadonlyArray<{
   { id: "dictation", label: "Dictation", description: "Speak to Muse" },
 ];
 
+type MuseLeaveHandle = {
+  requestClose: () => void;
+  requestAction: (apply: () => void, cancel?: () => void) => void;
+  isDirty: () => boolean;
+};
+
 type MuseLeave =
+  | { readonly kind: "action"; readonly apply: () => void; readonly cancel?: () => void }
   | { readonly kind: "close" }
   | { readonly kind: "go"; readonly detail: MuseDetail | null };
 
@@ -446,7 +456,7 @@ function MuseAgentFeaturesBody({
 }: Target & {
   readonly threadId?: string;
   readonly onClose: () => void;
-  readonly closeRef?: Ref<{ requestClose: () => void }>;
+  readonly closeRef?: Ref<MuseLeaveHandle>;
 }) {
   const [detail, setDetail] = useState<MuseDetail | null>(null);
   const canWrite = useAtomValue(museAgentFeatureUpdate.permissionAtom(environmentId));
@@ -461,9 +471,15 @@ function MuseAgentFeaturesBody({
   const agentName = profileQuery.data?.name?.trim() || "Muse";
   // A successful hand-off to chat already delivered the transcript, so it closes without the guard.
   const [dictationActive, setDictationActive] = useState(false);
+  const handingOffToChat = useRef(false);
   const dictationChat = useOpenMuseChatWithDraft(target, () => {
     setDictationActive(false);
-    onClose();
+    handingOffToChat.current = true;
+    try {
+      onClose();
+    } finally {
+      handingOffToChat.current = false;
+    }
   });
   const profileOperations =
     inventoryData !== null
@@ -478,7 +494,8 @@ function MuseAgentFeaturesBody({
       onClose();
       return;
     }
-    setDetail(leave.detail);
+    if (leave.kind === "action") leave.apply();
+    else setDetail(leave.detail);
   };
   const requestLeave = (leave: MuseLeave) => {
     if (profileDirty || dictationActive) {
@@ -487,7 +504,22 @@ function MuseAgentFeaturesBody({
     }
     applyLeave(leave);
   };
-  useImperativeHandle(closeRef, () => ({ requestClose: () => requestLeave({ kind: "close" }) }));
+  useImperativeHandle(closeRef, () => ({
+    requestClose: () => requestLeave({ kind: "close" }),
+    requestAction: (apply, cancel) =>
+      requestLeave({ kind: "action", apply, ...(cancel ? { cancel } : {}) }),
+    isDirty: () => !handingOffToChat.current && (profileDirty || dictationActive),
+  }));
+  useLayoutEffect(
+    () => () => {
+      if (pendingLeave?.kind === "action") pendingLeave.cancel?.();
+    },
+    [pendingLeave],
+  );
+  const cancelLeave = () => {
+    if (pendingLeave?.kind === "action") pendingLeave.cancel?.();
+    setPendingLeave(null);
+  };
   const confirmLeave = () => {
     const leave = pendingLeave;
     setPendingLeave(null);
@@ -647,7 +679,7 @@ function MuseAgentFeaturesBody({
       </div>
       <AlertDialog
         open={pendingLeave !== null}
-        onOpenChange={(next) => (next ? null : setPendingLeave(null))}
+        onOpenChange={(next) => (next ? null : cancelLeave())}
       >
         <AlertDialogPopup>
           <AlertDialogHeader>
@@ -696,6 +728,33 @@ export function MuseAgentFeaturesPanel({
   readonly threadId: string;
   readonly onClose: () => void;
 }) {
+  const closeRef = useRef<MuseLeaveHandle>(null);
+  useLayoutEffect(
+    () =>
+      registerRightPanelLeaveGuard(
+        scopeThreadRef(environmentId, ThreadId.make(threadId)),
+        "muse-features",
+        (proceed) => closeRef.current?.requestAction(proceed),
+        () => closeRef.current?.isDirty() ?? false,
+      ),
+    [environmentId, threadId],
+  );
+  useBlocker({
+    shouldBlockFn: ({ current, next }) =>
+      current.pathname === next.pathname
+        ? false
+        : new Promise<boolean>((resolve) => {
+            if (!closeRef.current) {
+              resolve(false);
+              return;
+            }
+            closeRef.current.requestAction(
+              () => resolve(false),
+              () => resolve(true),
+            );
+          }),
+    enableBeforeUnload: () => closeRef.current?.isDirty() ?? false,
+  });
   const canRead = useEnvironmentScope(environmentId, AuthOrchestrationReadScope);
   const status = useEnvironmentQuery(
     canRead ? museAgentStatusQuery({ environmentId, input: {} }) : null,
@@ -705,6 +764,7 @@ export function MuseAgentFeaturesPanel({
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <MuseAgentFeaturesBody
         key={`${environmentId}:${providerInstanceId}:${threadId}`}
+        closeRef={closeRef}
         environmentId={environmentId}
         threadId={threadId}
         providerInstanceId={providerInstanceId}
@@ -824,7 +884,7 @@ export function MuseAgentFeaturesButton({
   readonly size?: "sm" | "touch-sm";
 }) {
   const [open, setOpen] = useState(false);
-  const closeRef = useRef<{ requestClose: () => void }>(null);
+  const closeRef = useRef<MuseLeaveHandle>(null);
   // Every feature read needs orchestration read access, so without it neither the button nor
   // its queries exist.
   const canRead = useEnvironmentScope(environmentId, AuthOrchestrationReadScope);
