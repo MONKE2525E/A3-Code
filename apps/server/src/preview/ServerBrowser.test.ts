@@ -28,6 +28,7 @@ import * as Broker from "../mcp/PreviewAutomationBroker.ts";
 import * as DesktopChannel from "./DesktopBrowserChannel.ts";
 import * as Manager from "./Manager.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
+import * as IntegrationBrowser from "./IntegrationBrowser.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 
 // Keep the manager, broker, ownership, refs, and viewer paths real; replace Chromium I/O only.
@@ -1599,4 +1600,118 @@ it.live("agents cannot open the private integration profile by id, alias or defa
       expect(contextRequests).toEqual([]);
     }),
   ).pipe(Effect.provide(layer)),
+);
+
+it.live(
+  "keeps sign-in pages out of public listings and restricts streams and files to their creator",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const browser = yield* ServerBrowser.ServerBrowser;
+        const integration = yield* IntegrationBrowser.IntegrationBrowser;
+        const broker = yield* Broker.PreviewAutomationBroker;
+        const focus = vi.spyOn(broker, "focusHost");
+        yield* Effect.addFinalizer(() => Effect.sync(() => focus.mockRestore()));
+        const publicManager = yield* Manager.PreviewManager;
+        const events = yield* publicManager.subscribeEvents;
+        const signIn = yield* integration.openMuse("creator-session");
+        expect(
+          (yield* publicManager.list({ threadId: ThreadId.make(signIn.threadId) })).sessions,
+        ).toEqual([]);
+        expect(
+          (yield* publicManager.list({
+            threadId: ThreadId.make(IntegrationBrowser.MUSE_AUTH_THREAD),
+          })).sessions,
+        ).toEqual([]);
+        expect(yield* PubSub.takeUpTo(events, 100)).toEqual([]);
+        expect(yield* integration.openMuse("creator-session")).toEqual(signIn);
+        for (const authSessionId of [undefined, "other-read-session", "other-operate-session"]) {
+          const input = {
+            ...viewerInput(signIn.tabId, true),
+            threadId: signIn.threadId,
+            ...(authSessionId === undefined ? {} : { authSessionId }),
+          };
+          expect((yield* browser.attachViewer(input).pipe(Effect.flip))._tag).toBe(
+            "ServerBrowserTabNotFoundError",
+          );
+          expect(yield* browser.openDownload({ ...input, downloadId: "anything" })).toEqual(
+            Option.none(),
+          );
+          expect(
+            yield* browser.answerFileChooser({ ...input, chooserId: "anything", files: [] }),
+          ).toBe(false);
+        }
+        const viewer = yield* browser.attachViewer({
+          ...viewerInput(signIn.tabId, true),
+          threadId: signIn.threadId,
+          authSessionId: "creator-session",
+        });
+        expect((yield* Queue.take(viewer.output))._tag).toBe("control");
+        yield* viewer.input({ type: "takeControl" });
+        const page = contexts[0]!.page;
+        const setFiles = vi.fn(async (_files: unknown) => {});
+        page.emit("filechooser", {
+          isMultiple: () => false,
+          element: () => ({ getAttribute: async () => ".txt" }),
+          setFiles,
+        });
+        let picker = yield* Queue.take(viewer.output);
+        while (picker._tag !== "fileChooser") picker = yield* Queue.take(viewer.output);
+        const upload = { ...signIn, chooserId: picker.id, files: [] };
+        expect(
+          yield* browser.answerFileChooser({ ...upload, authSessionId: "other-operate-session" }),
+        ).toBe(false);
+        expect(setFiles).not.toHaveBeenCalled();
+        expect(
+          yield* browser.answerFileChooser({ ...upload, authSessionId: "creator-session" }),
+        ).toBe(true);
+        const saved = yield* Queue.unbounded<string>();
+        const written = Promise.withResolvers<void>();
+        page.emit("download", {
+          failure: async () => null,
+          saveAs: (path: string) => {
+            Queue.offerUnsafe(saved, path);
+            return written.promise;
+          },
+          suggestedFilename: () => "synthetic-private.txt",
+          url: () => "https://muse.ai/synthetic-download",
+        });
+        const fs = yield* FileSystem.FileSystem;
+        yield* fs.writeFileString(yield* Queue.take(saved), "synthetic-private-file");
+        written.resolve();
+        let download = yield* Queue.take(viewer.output);
+        while (download._tag !== "download") download = yield* Queue.take(viewer.output);
+        const request = { ...signIn, downloadId: download.id };
+        expect(
+          yield* browser.openDownload({ ...request, authSessionId: "other-read-session" }),
+        ).toEqual(Option.none());
+        expect(
+          Option.isSome(
+            yield* browser.openDownload({ ...request, authSessionId: "creator-session" }),
+          ),
+        ).toBe(true);
+        const another = yield* integration.openMuse("another-creator");
+        expect(another.threadId).not.toBe(signIn.threadId);
+        expect(
+          (yield* browser
+            .attachViewer({
+              ...viewerInput(another.tabId, true),
+              threadId: another.threadId,
+              authSessionId: "creator-session",
+            })
+            .pipe(Effect.flip))._tag,
+        ).toBe("ServerBrowserTabNotFoundError");
+        expect(
+          (yield* browser.clearProfile(IntegrationBrowser.MUSE_AUTH_PROFILE).pipe(Effect.flip))
+            ._tag,
+        ).toBe("PreviewClearProfileError");
+        expect(yield* PubSub.takeUpTo(events, 100)).toEqual([]);
+        expect(focus).toHaveBeenCalled();
+        expect(
+          focus.mock.calls
+            .flatMap(([report]) => report.liveTabs ?? [])
+            .some((tab) => IntegrationBrowser.isIntegrationAuthThread(tab.threadId)),
+        ).toBe(false);
+      }),
+    ).pipe(Effect.provide(layer)),
 );

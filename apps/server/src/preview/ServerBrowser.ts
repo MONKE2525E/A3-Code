@@ -216,6 +216,7 @@ export class ServerBrowser extends Context.Service<
   {
     readonly attachViewer: (input: {
       readonly threadId: string;
+      readonly authSessionId?: string;
       readonly tabId: string;
       readonly maxWidth: number;
       readonly maxHeight: number;
@@ -232,6 +233,7 @@ export class ServerBrowser extends Context.Service<
      */
     readonly answerFileChooser: (input: {
       readonly threadId: string;
+      readonly authSessionId?: string;
       readonly tabId: string;
       readonly chooserId: string;
       readonly files: ReadonlyArray<{
@@ -243,6 +245,7 @@ export class ServerBrowser extends Context.Service<
     /** A finished download of a live tab, for the authenticated download route. */
     readonly openDownload: (input: {
       readonly threadId: string;
+      readonly authSessionId?: string;
       readonly tabId: string;
       readonly downloadId: string;
     }) => Effect.Effect<Option.Option<{ readonly path: string; readonly fileName: string }>>;
@@ -481,6 +484,13 @@ const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const host = { platform: yield* HostProcess.Platform, arch: yield* HostProcess.Architecture };
   const manager = yield* PreviewManager.PreviewManager;
+  const privateManager = yield* PreviewManager.makeWithOptions({ privateSessions: true });
+  const signInThreads = new Map<string, string>();
+  const managerFor = (threadId: string) =>
+    IntegrationBrowser.isIntegrationAuthThread(threadId) ? privateManager : manager;
+  const mayAccess = (threadId: string, authSessionId: string | undefined) =>
+    !IntegrationBrowser.isIntegrationAuthThread(threadId) ||
+    (authSessionId !== undefined && signInThreads.get(authSessionId) === threadId);
   const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const previewBrowser = yield* PreviewBrowser.PreviewBrowser;
@@ -567,7 +577,7 @@ const make = Effect.gen(function* () {
         const index = history?.currentIndex ?? 0;
         const count = history?.entries.length ?? 0;
         runFork(
-          manager
+          managerFor(tab.threadId)
             .reportStatus({
               threadId: tab.threadId,
               tabId: tab.tabId,
@@ -602,11 +612,13 @@ const make = Effect.gen(function* () {
             environmentId,
             connectionId,
             focused: true,
-            liveTabs: [...tabs.values()].map((tab) => ({
-              threadId: tab.threadId,
-              tabId: tab.tabId,
-              visible: tab.viewers.size > 0,
-            })),
+            liveTabs: [...tabs.values()]
+              .filter((tab) => !IntegrationBrowser.isIntegrationAuthThread(tab.threadId))
+              .map((tab) => ({
+                threadId: tab.threadId,
+                tabId: tab.tabId,
+                visible: tab.viewers.size > 0,
+              })),
           }),
         ),
       ),
@@ -704,7 +716,11 @@ const make = Effect.gen(function* () {
     void NodeFSP.rm(downloadDir(tab), { recursive: true, force: true }).catch(constVoid);
     reportLiveTabs();
     if (closeSession) {
-      runFork(manager.close({ threadId: tab.threadId, tabId: tab.tabId }).pipe(Effect.ignore));
+      runFork(
+        managerFor(tab.threadId)
+          .close({ threadId: tab.threadId, tabId: tab.tabId })
+          .pipe(Effect.ignore),
+      );
     }
   };
 
@@ -1117,10 +1133,13 @@ const make = Effect.gen(function* () {
   };
 
   const answerFileChooser: ServerBrowser["Service"]["answerFileChooser"] = (input) =>
-    Effect.promise(() => setChooserFiles(input).catch(() => false));
+    mayAccess(input.threadId, input.authSessionId)
+      ? Effect.promise(() => setChooserFiles(input).catch(() => false))
+      : Effect.succeed(false);
 
   const openDownload: ServerBrowser["Service"]["openDownload"] = (input) =>
     Effect.sync(() => {
+      if (!mayAccess(input.threadId, input.authSessionId)) return Option.none();
       const download = tabs
         .get(tabKey(input.threadId, input.tabId))
         ?.downloads.find((candidate) => candidate.id === input.downloadId);
@@ -1159,7 +1178,7 @@ const make = Effect.gen(function* () {
       (viewer) => viewer.id === opener.control.controller,
     );
     await Effect.runPromise(
-      manager.open({
+      managerFor(opener.threadId).open({
         threadId: opener.threadId,
         ...(/^https?:/i.test(url) ? { url } : {}),
         runtime: "server",
@@ -1214,7 +1233,7 @@ const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const existing = tabs.get(tabKey(threadId, tabId));
       if (existing) return existing;
-      const { sessions } = yield* manager.list({ threadId: ThreadId.make(threadId) });
+      const { sessions } = yield* managerFor(threadId).list({ threadId: ThreadId.make(threadId) });
       const snapshot = sessions.find(
         (session) => session.tabId === tabId && session.runtime === "server",
       );
@@ -1852,7 +1871,9 @@ const make = Effect.gen(function* () {
       if (tab.control.controller !== null)
         throw new BrowserControlInterrupted("A human controls this tab.", "humanControl");
       void tab.control.close().catch(constVoid);
-      await Effect.runPromise(manager.close({ threadId: tab.threadId, tabId: tab.tabId }));
+      await Effect.runPromise(
+        managerFor(tab.threadId).close({ threadId: tab.threadId, tabId: tab.tabId }),
+      );
       dropTab(tab, false);
       return {};
     }
@@ -1916,7 +1937,11 @@ const make = Effect.gen(function* () {
       case "resize": {
         const setting = resolvePreviewViewport(input as PreviewAutomationResizeInput);
         await Effect.runPromise(
-          manager.resize({ threadId: tab.threadId, tabId: tab.tabId, viewport: setting }),
+          managerFor(tab.threadId).resize({
+            threadId: tab.threadId,
+            tabId: tab.tabId,
+            viewport: setting,
+          }),
         );
         await applySetting(tab, setting);
         return {
@@ -1928,7 +1953,11 @@ const make = Effect.gen(function* () {
       case "setColorScheme": {
         const { colorScheme } = input as PreviewAutomationSetColorSchemeInput;
         const snapshot = await Effect.runPromise(
-          manager.adjust({ threadId: tab.threadId, tabId: tab.tabId, colorScheme }),
+          managerFor(tab.threadId).adjust({
+            threadId: tab.threadId,
+            tabId: tab.tabId,
+            colorScheme,
+          }),
         );
         await applyRendering(tab, snapshot);
         return { tabId: tab.tabId, colorScheme };
@@ -2161,7 +2190,11 @@ const make = Effect.gen(function* () {
       case "viewport": {
         const setting = decodeViewportSetting(message.setting);
         await Effect.runPromise(
-          manager.resize({ threadId: tab.threadId, tabId: tab.tabId, viewport: setting }),
+          managerFor(tab.threadId).resize({
+            threadId: tab.threadId,
+            tabId: tab.tabId,
+            viewport: setting,
+          }),
         );
         await applySetting(tab, setting);
         return;
@@ -2200,6 +2233,11 @@ const make = Effect.gen(function* () {
 
   const attachViewer: ServerBrowser["Service"]["attachViewer"] = (input) =>
     Effect.gen(function* () {
+      if (!mayAccess(input.threadId, input.authSessionId))
+        return yield* new ServerBrowserTabNotFoundError({
+          threadId: input.threadId,
+          tabId: input.tabId,
+        });
       const tab = yield* findTab(input.threadId, input.tabId);
       const output = yield* Queue.make<ServerBrowserViewerOutput>({
         capacity: VIEWER_OUTPUT_LIMIT,
@@ -2407,6 +2445,7 @@ const make = Effect.gen(function* () {
     });
 
   yield* manager.events.pipe(Stream.runForEach(mirrorManagerEvent), Effect.forkScoped);
+  yield* privateManager.events.pipe(Stream.runForEach(mirrorManagerEvent), Effect.forkScoped);
   // Whoever runs the server learns the fix before anyone opens a tab.
   if (
     !PreviewBrowserHost.sandboxDisabled(yield* HostProcess.Environment) &&
@@ -2488,7 +2527,11 @@ const make = Effect.gen(function* () {
 
   const clearProfile = (profileId: string) =>
     Effect.tryPromise({
-      try: () => contexts.clearProfile(profileId),
+      try: () => {
+        if (profileId === IntegrationBrowser.MUSE_AUTH_PROFILE)
+          throw new Error("Sign-in profiles are private.");
+        return contexts.clearProfile(profileId);
+      },
       catch: (cause) => new PreviewClearProfileError({ profileId, cause }),
     });
 
@@ -2506,30 +2549,37 @@ const make = Effect.gen(function* () {
           (await contexts.contextFor(IntegrationBrowser.MUSE_AUTH_PROFILE)).newPage(),
         catch: (cause) => new IntegrationBrowser.IntegrationBrowserError({ cause }),
       }),
-      openMuse: Effect.gen(function* () {
-        const threadId = ThreadId.make(IntegrationBrowser.MUSE_AUTH_THREAD);
-        const { sessions } = yield* manager.list({ threadId });
-        const snapshot =
-          sessions.find((session) => session.profileId === IntegrationBrowser.MUSE_AUTH_PROFILE) ??
-          (yield* manager.open({
-            threadId,
-            profileId: IntegrationBrowser.MUSE_AUTH_PROFILE,
-            url: "https://muse.ai/",
-            runtime: "server",
-            reveal: false,
-          }));
-        yield* Effect.tryPromise({
-          try: () => ensureTab(snapshot),
-          catch: (cause) => new IntegrationBrowser.IntegrationBrowserError({ cause }),
-        });
-        return { threadId: snapshot.threadId, tabId: snapshot.tabId };
-      }).pipe(
-        Effect.mapError((cause) =>
-          isIntegrationBrowserError(cause)
-            ? cause
-            : new IntegrationBrowser.IntegrationBrowserError({ cause }),
+      openMuse: (authSessionId) =>
+        Effect.gen(function* () {
+          const threadId = ThreadId.make(
+            signInThreads.get(authSessionId) ??
+              `${IntegrationBrowser.MUSE_AUTH_THREAD}:${NodeCrypto.randomUUID()}`,
+          );
+          signInThreads.set(authSessionId, threadId);
+          const { sessions } = yield* privateManager.list({ threadId });
+          const snapshot =
+            sessions.find(
+              (session) => session.profileId === IntegrationBrowser.MUSE_AUTH_PROFILE,
+            ) ??
+            (yield* privateManager.open({
+              threadId,
+              profileId: IntegrationBrowser.MUSE_AUTH_PROFILE,
+              url: "https://muse.ai/",
+              runtime: "server",
+              reveal: false,
+            }));
+          yield* Effect.tryPromise({
+            try: () => ensureTab(snapshot),
+            catch: (cause) => new IntegrationBrowser.IntegrationBrowserError({ cause }),
+          });
+          return { threadId: snapshot.threadId, tabId: snapshot.tabId };
+        }).pipe(
+          Effect.mapError((cause) =>
+            isIntegrationBrowserError(cause)
+              ? cause
+              : new IntegrationBrowser.IntegrationBrowserError({ cause }),
+          ),
         ),
-      ),
       museCookies: Effect.tryPromise({
         try: async () => {
           const directory = NodePath.join(

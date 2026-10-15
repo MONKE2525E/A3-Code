@@ -560,7 +560,6 @@ const MainWsRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.museAgentsFeatureUpdate,
   WS_METHODS.museAgentsStatus,
   WS_METHODS.museAgentsSetup,
-  WS_METHODS.museAgentsSignIn,
   WS_METHODS.museAgentsProfile,
   WS_METHODS.museAgentsOpenThread,
   WS_METHODS.nativeAgentsOpenThread,
@@ -611,22 +610,6 @@ const MainWsRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.grokBotsImportMarketplaceTemplate,
 );
 const layerGrokExtensionsRpc = Layer.mergeAll(
-  ServerWsRpcGroup.toLayerHandler(
-    WS_METHODS.museAgentsSignIn,
-    Effect.map(
-      IntegrationBrowser.IntegrationBrowser,
-      (browser) => () =>
-        browser.openMuse.pipe(
-          Effect.mapError(
-            () =>
-              new NativeAgentError({
-                reason: "provider_unavailable",
-                detail: "The Muse sign-in browser could not be opened.",
-              }),
-          ),
-        ),
-    ),
-  ),
   ServerWsRpcGroup.toLayerHandler(
     WS_METHODS.museAgentsFeatureRead,
     Effect.map(
@@ -1695,6 +1678,7 @@ const layerWsRpc = (
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
       const terminalManager = yield* TerminalManager.TerminalManager;
       const previewManager = yield* PreviewManager.PreviewManager;
+      const integrationBrowser = yield* IntegrationBrowser.IntegrationBrowser;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const modelManifest = yield* ModelManifest.ModelManifest;
@@ -3335,6 +3319,16 @@ const layerWsRpc = (
             Effect.acquireRelease(
               terminalManager.subscribeMetadata((event) => Queue.offer(queue, event)),
               (unsubscribe) => Effect.sync(unsubscribe),
+            ),
+          ),
+        [WS_METHODS.museAgentsSignIn]: () =>
+          integrationBrowser.openMuse(currentSessionId).pipe(
+            Effect.mapError(
+              () =>
+                new NativeAgentError({
+                  reason: "provider_unavailable",
+                  detail: "The Muse sign-in browser could not be opened.",
+                }),
             ),
           ),
         [WS_METHODS.previewOpen]: (input) => previewManager.open(input),

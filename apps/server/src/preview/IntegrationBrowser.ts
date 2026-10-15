@@ -5,6 +5,8 @@ import * as Schema from "effect/Schema";
 
 export const MUSE_AUTH_PROFILE = "integration-muse-auth";
 export const MUSE_AUTH_THREAD = "integration-auth:muse";
+export const isIntegrationAuthThread = (threadId: string) =>
+  threadId.startsWith("integration-auth:");
 
 export class IntegrationBrowserError extends Schema.TaggedError<IntegrationBrowserError>()(
   "IntegrationBrowserError",
@@ -19,7 +21,9 @@ export class IntegrationBrowserError extends Schema.TaggedError<IntegrationBrows
 export class IntegrationBrowser extends Context.Service<
   IntegrationBrowser,
   {
-    readonly openMuse: Effect.Effect<
+    readonly openMuse: (
+      authSessionId: string,
+    ) => Effect.Effect<
       { readonly threadId: string; readonly tabId: string },
       IntegrationBrowserError
     >;
