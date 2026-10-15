@@ -5,7 +5,7 @@ import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as Fiber from "effect/Fiber";
 import * as Exit from "effect/Exit";
-import { RunId, RunAttemptId, NodeId, ProviderTurnId } from "@t3tools/contracts";
+import { ThreadId, RunId, RunAttemptId, NodeId, ProviderTurnId } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 // @effect-diagnostics nodeBuiltinImport:off -- A private native attachment fixture proves bytes precede published metadata.
 import * as NodeCrypto from "node:crypto";
@@ -966,5 +966,55 @@ it.effect("sends Monke context without changing visible prompts or attachment-on
         assert.deepStrictEqual(turn.message.attachments, [attachment]);
       }),
     ),
+  ),
+);
+
+it.effect("rejects noncanonical and foreign account thread IDs before native session lookup", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const resolves: Array<string | undefined> = [];
+      const native = makeNative({
+        resolveSession: (_binding, sessionId) =>
+          Effect.sync(() => {
+            resolves.push(sessionId);
+            return {
+              session_id: sessionId ?? "primary",
+              is_primary: sessionId === undefined,
+              is_thread: sessionId !== undefined,
+              status: "idle",
+            };
+          }),
+      });
+      const adapter = yield* createMuseAgentAdapterV2(options).pipe(
+        Effect.provideService(Native.MuseAgentNativeRuntimeService, native),
+        Effect.provideService(ProviderHost.ProviderHost, host),
+        Effect.provideService(
+          ToolsPort.MuseAgentDirectToolsPort,
+          ToolsPort.MuseAgentDirectToolsPort.of({
+            install: () =>
+              Effect.fail(new NativeAgentDirectToolsError({ code: "already_installed" })),
+            start: () => Effect.die("No tools may start for a rejected thread"),
+          }),
+        ),
+      );
+      for (const id of [
+        "generated-thread",
+        `muse-agent:${"b".repeat(64)}`,
+        `${threadId}:%ZZ`,
+        `${threadId}:side%2fone`,
+      ]) {
+        const error = yield* adapter
+          .openSession({ ...sessionInput, threadId: ThreadId.make(id) })
+          .pipe(Effect.flip);
+        assert.equal(error._tag, "ProviderAdapterOpenSessionError");
+      }
+      assert.deepEqual(resolves, []);
+      yield* adapter.openSession(sessionInput);
+      yield* adapter.openSession({
+        ...sessionInput,
+        threadId: ThreadId.make(`${threadId}:session%3A42%2Fx`),
+      });
+      assert.deepEqual(resolves, [undefined, "session:42/x"]);
+    }),
   ),
 );

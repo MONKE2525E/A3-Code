@@ -19,7 +19,9 @@ import { MUSE_AGENT_DRIVER_KIND } from "./MuseAgentAdapterV2Projection.ts";
 
 export const binding = "a".repeat(64);
 export const instanceId = ProviderInstanceId.make("muse-native-test");
-export const threadId = ThreadId.make("muse-thread-test");
+export const threadId = ThreadId.make(
+  "muse-agent:e95e6ca23067134c5f3a6110b701f50bb658347838651b8a2954ba1fc3dcabd8",
+);
 export const providerSessionId = ProviderSessionId.make("muse-session-test");
 export const host = ProviderHost.ProviderHost.of({
   paths: {

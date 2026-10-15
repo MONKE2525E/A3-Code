@@ -1,3 +1,13 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- The service and adapter share deterministic SHA-256 thread identity without I/O.
+import * as NodeCrypto from "node:crypto";
+
+/** Account and provider instance jointly own the canonical Muse thread namespace. */
+export function museThreadIdentity(binding: string, instanceId: string): string {
+  return NodeCrypto.createHash("sha256")
+    .update(JSON.stringify([binding, instanceId, "muse"]))
+    .digest("hex");
+}
+
 /**
  * Muse threads are keyed by the account's canonical identity. Main chat is that identity alone; each
  * side chat appends its native session id, percent-encoded so the id never contains a colon.

@@ -34,7 +34,11 @@ import * as Muse from "../museAgent/MuseAgentNativeRuntimeService.ts";
 import * as MuseTransport from "../museAgent/MuseAgentTransport.ts";
 import * as CredentialInbox from "../museAgent/MuseAgentCredentialInbox.ts";
 import * as Features from "../museAgent/MuseAgentFeatureService.ts";
-import { museIdentityOfThread, museThreadIdForSession } from "../museAgent/MuseAgentThreadIds.ts";
+import {
+  museIdentityOfThread,
+  museThreadIdentity,
+  museThreadIdForSession,
+} from "../museAgent/MuseAgentThreadIds.ts";
 import * as Connectors from "../museAgent/MuseAgentConnectorService.ts";
 import * as Computer from "../museAgent/MuseAgentComputerService.ts";
 import * as Dictation from "../museAgent/MuseAgentDictation.ts";
@@ -163,17 +167,10 @@ const make = Effect.gen(function* () {
     return { binding, instanceId: ProviderInstanceId.make(entry[0]) };
   });
   const canonicalIdentity = (selection: { binding: string; instanceId: ProviderInstanceId }) =>
-    crypto
-      .digest(
-        "SHA-256",
-        new TextEncoder().encode(encodeIdentity([selection.binding, selection.instanceId, "muse"])),
-      )
-      .pipe(
-        Effect.map((digest) =>
-          Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join(""),
-        ),
-        Effect.mapError(failure("storage_failed")),
-      );
+    Effect.try({
+      try: () => museThreadIdentity(selection.binding, selection.instanceId),
+      catch: failure("storage_failed"),
+    });
   const terminalStatuses = new Set(["completed", "failed", "cancelled", "interrupted"]);
   const assessDelivery = Effect.fnUntraced(function* (
     selection: { binding: string; instanceId: ProviderInstanceId },
