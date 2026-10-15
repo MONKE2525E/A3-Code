@@ -5,6 +5,9 @@ import {
   type FilesystemBrowseEntry,
   type GrokBot,
   type KeybindingCommand,
+  type MuseAgentOpenThreadInput,
+  type ProviderInstanceId,
+  type ThreadId,
   THREAD_JUMP_KEYBINDING_COMMANDS,
 } from "@t3tools/contracts";
 import { filterFilesystemBrowseEntries } from "@t3tools/client-runtime/state/filesystem";
@@ -16,6 +19,7 @@ import { getThreadSortTimestamp, sortThreads } from "../lib/threadSort";
 import { normalizeSearchText } from "../lib/utils";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { type Project, type SidebarThreadSummary, type Thread } from "../types";
+import { isMuseSessionThread, museSessionForThread } from "./agents/aiAgents";
 
 export const RECENT_THREAD_LIMIT = 12;
 export const ITEM_ICON_CLASS = "size-4 text-icon-muted";
@@ -86,7 +90,48 @@ export interface MuseAgentSearchHit {
   readonly snippet: string;
 }
 
-/** Muse's single conversation appears once per environment and opens as its ordinary thread. */
+/** Reattach the selected account's live Muse conversation before navigating to its cached shell. */
+export async function openMuseAgentSearchHit(input: {
+  readonly hit: MuseAgentSearchHit;
+  readonly shells: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly id: string;
+    readonly providerInstanceId: ProviderInstanceId;
+  }>;
+  readonly openThread: (target: {
+    readonly environmentId: EnvironmentId;
+    readonly input: MuseAgentOpenThreadInput;
+  }) => Promise<{ readonly threadId: ThreadId } | null>;
+  readonly navigate: (target: {
+    readonly environmentId: EnvironmentId;
+    readonly threadId: ThreadId;
+  }) => Promise<void>;
+}): Promise<void> {
+  const { hit } = input;
+  const shell = input.shells.find(
+    (thread) => thread.environmentId === hit.environmentId && thread.id === hit.threadId,
+  );
+  const sessionId = museSessionForThread(hit.threadId);
+  if (!shell || !isMuseSessionThread(hit.threadId, sessionId ?? null)) {
+    throw new Error("This Muse conversation is unavailable. Refresh search and try again.");
+  }
+  const opened = await input.openThread({
+    environmentId: hit.environmentId,
+    input: {
+      providerInstanceId: shell.providerInstanceId,
+      ...(sessionId === undefined ? {} : { sessionId }),
+    },
+  });
+  if (opened === null) return;
+  if (opened.threadId !== hit.threadId) {
+    throw new Error(
+      "This conversation belongs to a different Muse account. Reconnect that account to open it.",
+    );
+  }
+  await input.navigate({ environmentId: hit.environmentId, threadId: opened.threadId });
+}
+
+/** Each Muse conversation appears once per environment in global search. */
 export function buildMuseAgentSearchItems(input: {
   readonly hits: ReadonlyArray<MuseAgentSearchHit>;
   readonly query: string;
@@ -96,6 +141,7 @@ export function buildMuseAgentSearchItems(input: {
     readonly icon: ReactNode;
   };
   readonly fallbackIcon: ReactNode;
+  readonly canOpen: (environmentId: EnvironmentId) => boolean;
   readonly run: (hit: MuseAgentSearchHit) => Promise<void>;
 }): CommandPaletteActionItem[] {
   const seen = new Set<string>();
@@ -111,6 +157,7 @@ export function buildMuseAgentSearchItems(input: {
       value: `muse-agent:${key}`,
       title: name,
       description: "Muse conversation",
+      disabled: !input.canOpen(hit.environmentId),
       searchTerms: [input.query, name, hit.snippet],
       threadContentMatch: { source: hit.source, snippet: hit.snippet, query: input.query },
       icon: known ? input.identity.icon : input.fallbackIcon,

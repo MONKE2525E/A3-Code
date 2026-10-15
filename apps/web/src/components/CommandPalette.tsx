@@ -96,6 +96,7 @@ import {
 } from "react";
 import type { LegendListRef } from "@legendapp/list/react";
 import { useAtomValue } from "@effect/atom-react";
+import { Atom } from "effect/reactivity";
 
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
@@ -137,7 +138,7 @@ import {
 } from "../state/entities";
 import { useThreadSearch } from "../state/queries";
 import { grokBotsListQuery } from "../state/grokBots";
-import { museAgentProfileQuery } from "../state/museAgent";
+import { museAgentOpenThread, museAgentProfileQuery } from "../state/museAgent";
 import { MuseAgentAvatar } from "./agents/MuseAgentAvatar";
 import { useMuseAgentAvatar } from "./agents/useMuseAgentAvatar";
 import { GrokBotAvatar } from "./grokBot/GrokBotAvatar";
@@ -191,6 +192,7 @@ import {
   buildLinkedThreadActionItems,
   buildGrokBotSearchItems,
   buildMuseAgentSearchItems,
+  openMuseAgentSearchHit,
   buildCommandPaletteRows,
   enumerateCommandPaletteItems,
   findHighlightedCommandPaletteItem,
@@ -660,6 +662,7 @@ function OpenCommandPaletteDialog(props: {
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
+  const openMuseThread = useAtomCommand(museAgentOpenThread, { reportFailure: false });
   const { environments } = useEnvironments();
   const desktopLocalBootstraps = useDesktopLocalBootstraps();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -778,6 +781,21 @@ function OpenCommandPaletteDialog(props: {
     [environments],
   );
   const threadSearchQuery = currentView === null && !isActionsOnly ? deferredQuery : "";
+  const museOpenPermissions = useAtomValue(
+    useMemo(
+      () =>
+        Atom.make(
+          (get) =>
+            new Map(
+              environmentIds.map(
+                (environmentId) =>
+                  [environmentId, get(museAgentOpenThread.permissionAtom(environmentId))] as const,
+              ),
+            ),
+        ),
+      [environmentIds],
+    ),
+  );
   const threadSearch = useThreadSearch(environmentIds, threadSearchQuery);
   const threadContentMatchByKey = useMemo(
     () =>
@@ -845,14 +863,24 @@ function OpenCommandPaletteDialog(props: {
       query: threadSearch.query,
       identity: { environmentId: rosterEnvironmentId, name: museName, icon: museIcon },
       fallbackIcon: <MuseAgentAvatar name="Muse" size="sm" />,
-      run: async (hit) => {
-        await navigate({
-          to: "/$environmentId/$threadId",
-          params: buildThreadRouteParams(
-            scopeThreadRef(hit.environmentId, hit.threadId as ThreadId),
-          ),
-        });
-      },
+      canOpen: (environmentId) => museOpenPermissions.get(environmentId) === true,
+      run: (hit) =>
+        openMuseAgentSearchHit({
+          hit,
+          shells: shellThreads,
+          openThread: async (target) => {
+            const result = await openMuseThread(target);
+            if (result._tag === "Success") return result.value;
+            if (isAtomCommandInterrupted(result)) return null;
+            throw squashAtomCommandFailure(result);
+          },
+          navigate: async (target) => {
+            await navigate({
+              to: "/$environmentId/$threadId",
+              params: buildThreadRouteParams(scopeThreadRef(target.environmentId, target.threadId)),
+            });
+          },
+        }),
     });
     return [...museItems, ...grokItems];
   }, [
@@ -860,6 +888,8 @@ function OpenCommandPaletteDialog(props: {
     museProfile.data,
     museAvatar.imageUrl,
     navigate,
+    openMuseThread,
+    museOpenPermissions,
     rosterEnvironmentId,
     shellThreads,
     threadSearch.matches,
