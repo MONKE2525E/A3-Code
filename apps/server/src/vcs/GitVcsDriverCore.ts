@@ -3411,6 +3411,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     // An access check misses dangling symlinks. Remember paths Git rejected so
     // a collision always advances allocation, even when exists() reports false.
     const collidedPaths = new Set<string>();
+    const createdBranches = new Set<string>();
     const { worktreePath, targetBranch, createdBranch } = yield* Effect.gen(function* () {
       let targetBranch = input.newRefName ?? input.refName;
       const repoName = path.basename(input.cwd);
@@ -3456,8 +3457,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           // A new-branch request can only reuse an untouched branch at the base.
           // An explicit checkout (no newRefName) preserves the branch's commits.
           if (checkedOutBranches.has(targetBranch)) continue;
-          // Only the requested name may be reused; suffixes must be new branches.
-          if (suffix > 1 && existing.exitCode === 0) continue;
+          // A prior attempt may have created this suffix before its path failed.
+          // Never adopt a suffix that was present before this call.
+          if (suffix > 1 && existing.exitCode === 0 && !createdBranches.has(targetBranch)) continue;
           if (existing.exitCode === 0 && existing.stdout.trim() !== baseCommit.trim()) continue;
           createBranch = existing.exitCode !== 0;
           break;
@@ -3525,12 +3527,18 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           input.path === null && error.reason === "path_already_exists"
             ? Effect.sync(() => {
                 collidedPaths.add(worktreePath);
+                // With -b, Git creates the ref before rejecting an occupied path.
+                if (createBranch) createdBranches.add(targetBranch);
               })
             : Effect.void,
         ),
       );
 
-      return { worktreePath, targetBranch, createdBranch: createBranch };
+      return {
+        worktreePath,
+        targetBranch,
+        createdBranch: createBranch || createdBranches.has(targetBranch),
+      };
     }).pipe(
       Effect.catchTags({
         PlatformError: (cause) =>

@@ -3219,31 +3219,60 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    it.effect("skips dangling symlinks while allocating a worktree path", () =>
-      Effect.gen(function* () {
-        const cwd = yield* makeTmpDir();
-        const { initialBranch } = yield* initRepoWithCommit(cwd);
-        const driver = yield* GitVcsDriver.GitVcsDriver;
-        const fs = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const worktreesDirectory = yield* makeTmpDir();
-        const parent = path.join(worktreesDirectory, path.basename(cwd));
-        yield* fs.makeDirectory(parent);
-        const preferred = path.join(parent, "feature");
-        const missingTarget = path.join(worktreesDirectory, "missing");
-        yield* fs.symlink(missingTarget, preferred);
-        yield* fs.symlink(missingTarget, `${preferred}-2`);
-        assert.equal(yield* fs.exists(preferred), false);
-        const created = yield* driver.createWorktree(
-          { cwd, path: null, refName: initialBranch, newRefName: "feature" },
-          { worktreesDirectory },
-        );
-        assert.equal(created.worktree.path, `${preferred}-3`);
-        assert.equal(created.worktree.refName, "feature");
-        assert.equal(yield* git(created.worktree.path, ["branch", "--show-current"]), "feature");
-        assert.equal(yield* fs.readLink(preferred), missingTarget);
-        assert.equal(yield* fs.readLink(`${preferred}-2`), missingTarget);
-      }),
+    it.effect.each(["new", "suffix", "reuse"] as const)(
+      "retains branch ownership across path collisions (%s)",
+      (mode) =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const worktreesDirectory = yield* makeTmpDir();
+          const parent = path.join(worktreesDirectory, path.basename(cwd));
+          yield* fs.makeDirectory(parent);
+          if (mode === "suffix") {
+            yield* driver.createWorktree({
+              cwd,
+              path: path.join(yield* makeTmpDir(), "occupied"),
+              refName: initialBranch,
+              newRefName: "feature",
+            });
+          }
+          if (mode === "reuse") yield* git(cwd, ["branch", "feature"]);
+          const selectedBranch = mode === "suffix" ? "feature-2" : "feature";
+          const preferred = path.join(parent, selectedBranch);
+          const missingTarget = path.join(worktreesDirectory, "missing");
+          yield* fs.symlink(missingTarget, preferred);
+          yield* fs.symlink(missingTarget, `${preferred}-2`);
+          assert.equal(yield* fs.exists(preferred), false);
+          const created = yield* driver.createWorktree(
+            { cwd, path: null, refName: initialBranch, newRefName: "feature" },
+            { worktreesDirectory },
+          );
+          assert.equal(created.worktree.path, `${preferred}-3`);
+          assert.equal(created.worktree.refName, selectedBranch);
+          assert.equal(created.createdBranch, mode !== "reuse");
+          assert.equal(
+            yield* git(created.worktree.path, ["branch", "--show-current"]),
+            selectedBranch,
+          );
+          assert.equal(yield* git(cwd, ["branch", "--list", "feature-3"]), "");
+          // The handoff can safely discard this branch even though an earlier
+          // add created it before failing on a path collision.
+          yield* driver.removeWorktree({ cwd, path: created.worktree.path, force: true });
+          if (created.createdBranch) {
+            yield* driver.deleteLocalBranch({ cwd, refName: selectedBranch, force: false });
+            assert.equal(yield* git(cwd, ["branch", "--list", selectedBranch]), "");
+          } else {
+            assert.equal(
+              yield* git(cwd, ["rev-parse", selectedBranch]),
+              yield* git(cwd, ["rev-parse", initialBranch]),
+            );
+          }
+          assert.equal(yield* fs.readLink(preferred), missingTarget);
+          assert.equal(yield* fs.readLink(`${preferred}-2`), missingTarget);
+        }),
     );
 
     it.effect("avoids a directory occupied by a different sanitized branch name", () =>

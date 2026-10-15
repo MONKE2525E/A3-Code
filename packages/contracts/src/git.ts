@@ -300,7 +300,7 @@ export type VcsListRefsResult = typeof VcsListRefsResult.Type;
 
 export const VcsCreateWorktreeResult = Schema.Struct({
   worktree: VcsWorktree,
-  /** True only when the successful add created this branch; omission preserves legacy branches. */
+  /** True only when this call created the selected branch; omission preserves legacy branches. */
   createdBranch: Schema.optional(Schema.Boolean),
 });
 export type VcsCreateWorktreeResult = typeof VcsCreateWorktreeResult.Type;
