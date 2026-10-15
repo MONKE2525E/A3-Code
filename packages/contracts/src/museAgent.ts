@@ -7,6 +7,7 @@ import { ThreadId } from "./baseSchemas.ts";
 export const MuseAgentProviderSettings = Schema.Struct({
   accountBinding: Schema.NullOr(Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/))).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
+    Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
   ),
 });
 export type MuseAgentProviderSettings = typeof MuseAgentProviderSettings.Type;

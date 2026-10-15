@@ -12192,6 +12192,13 @@ export default function ChatView(props: ChatViewProps) {
           onAddPullRequests={addPullRequestsSurface}
           onAddComputer={() => useRightPanelStore.getState().open(activeThreadRef, "grok-computer")}
           computerAvailable={isGrokBotThread}
+          onAddMuseFeatures={
+            isMuseAgentThread
+              ? () => {
+                  useRightPanelStore.getState().open(activeThreadRef, "muse-features");
+                }
+              : undefined
+          }
           nativeAgentThread={isMuseAgentThread}
           onAddDevice={addDeviceSurface}
           browserAvailable={canOperatePreview && browserAvailable}
@@ -12256,6 +12263,13 @@ export default function ChatView(props: ChatViewProps) {
               useRightPanelStore.getState().open(activeThreadRef, "grok-computer")
             }
             computerAvailable={isGrokBotThread}
+            onAddMuseFeatures={
+              isMuseAgentThread
+                ? () => {
+                    useRightPanelStore.getState().open(activeThreadRef, "muse-features");
+                  }
+                : undefined
+            }
             nativeAgentThread={isMuseAgentThread}
             onAddDevice={addDeviceSurface}
             browserAvailable={canOperatePreview && browserAvailable}

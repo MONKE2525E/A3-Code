@@ -219,3 +219,18 @@ describe("right panel new-tab shortcut", () => {
     expect(document.querySelector('[role="menu"]:not([data-closed])')).toBeNull();
   });
 });
+
+it("opens Muse from the native agent surface launcher with its keyboard shortcut", async () => {
+  const openMuse = vi.fn();
+  await renderPanel({ nativeAgentThread: true, onAddMuseFeatures: openMuse });
+  expect(
+    [...container.querySelectorAll("button")].some((button) =>
+      button.textContent?.includes("Muse"),
+    ),
+  ).toBe(true);
+  await press("u");
+  expect(openMuse).toHaveBeenCalledOnce();
+  await renderPanel({ nativeAgentThread: true });
+  await press("u");
+  expect(openMuse).toHaveBeenCalledOnce();
+});

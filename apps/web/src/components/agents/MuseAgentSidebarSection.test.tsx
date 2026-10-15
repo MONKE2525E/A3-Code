@@ -44,7 +44,7 @@ vi.mock("./useMuseAgentAvatar", () => ({
 vi.mock("./MuseAgentConversations", () => ({ MuseAgentConversations: () => null }));
 import { MuseAgentSidebarSection } from "./MuseAgentSidebarSection";
 
-it("keeps Activity and Approvals navigable when Muse uses a pinned tile", async () => {
+it("keeps Activity and Approvals in the Muse flyout instead of the left sidebar", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("matchMedia", () => ({
     matches: false,
@@ -65,7 +65,14 @@ it("keeps Activity and Approvals navigable when Muse uses a pinned tile", async 
       ["Activity", "activity"],
       ["Approvals", "approvals"],
     ]) {
-      const button = [...container.querySelectorAll("button")].find((x) => x.textContent === label);
+      expect([...container.querySelectorAll("button")].some((x) => x.textContent === label)).toBe(
+        false,
+      );
+      const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="Edit Muse"]')!;
+      await act(async () => trigger.click());
+      const button = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+        (x) => x.textContent === label,
+      );
       expect(button).toBeDefined();
       await act(async () => button!.click());
       expect(mocks.navigate).toHaveBeenLastCalledWith({

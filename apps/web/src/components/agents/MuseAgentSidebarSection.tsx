@@ -6,10 +6,11 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import { type EnvironmentId, ProviderInstanceId, type ThreadId } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
+import { useNavigate, useParams } from "@tanstack/react-router";
 import { ChevronLeftIcon, ListChecksIcon, ShieldCheckIcon } from "lucide-react";
-import { useCallback, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useCallback, useMemo, useRef, useState, type RefObject } from "react";
 
+import { MenuItem } from "~/components/ui/menu";
 import { Button } from "~/components/ui/button";
 import { useSidebar } from "~/components/ui/sidebar";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
@@ -255,11 +256,21 @@ function MuseAgentRoster({
       onTogglePin={() => setPinned(!pinned)}
       onEdit={onOpenSettings}
       footer={
-        <MuseAgentConversations
-          environmentId={environmentId}
-          providerInstanceId={ProviderInstanceId.make(instanceId)}
-          threads={threads}
-        />
+        <>
+          <MenuItem onClick={() => openMuseSection("activity")}>
+            <ListChecksIcon />
+            Activity
+          </MenuItem>
+          <MenuItem onClick={() => openMuseSection("approvals")}>
+            <ShieldCheckIcon />
+            Approvals
+          </MenuItem>
+          <MuseAgentConversations
+            environmentId={environmentId}
+            providerInstanceId={ProviderInstanceId.make(instanceId)}
+            threads={threads}
+          />
+        </>
       }
     />
   );
@@ -272,7 +283,6 @@ function MuseAgentRoster({
   const subChatLabelRef = useRef<HTMLSpanElement | null>(null);
   const openEntry = subChats.open;
   const inSideChat = routeEnvironmentId === environmentId && openEntry !== null;
-  const pathname = useLocation({ select: (location) => location.pathname });
   const openMuseSection = (section: "activity" | "approvals") => {
     if (isMobile) setOpenMobile(false);
     void navigate({
@@ -298,22 +308,6 @@ function MuseAgentRoster({
     />
   );
 
-  const sectionLinks = (
-    <>
-      <MuseSectionRow
-        label="Activity"
-        icon={<ListChecksIcon />}
-        active={pathname === "/muse/activity"}
-        onOpen={() => openMuseSection("activity")}
-      />
-      <MuseSectionRow
-        label="Approvals"
-        icon={<ShieldCheckIcon />}
-        active={pathname === "/muse/approvals"}
-        onOpen={() => openMuseSection("approvals")}
-      />
-    </>
-  );
   if (pinned) {
     return (
       <div className="flex flex-col gap-px">
@@ -329,7 +323,6 @@ function MuseAgentRoster({
             />
           </li>
         </ul>
-        {sectionLinks}
       </div>
     );
   }
@@ -380,7 +373,6 @@ function MuseAgentRoster({
           ))}
         </>
       ) : null}
-      {sectionLinks}
       {inSideChat ? (
         <MuseSubChatConnector
           containerRef={rosterRef}
@@ -389,36 +381,6 @@ function MuseAgentRoster({
         />
       ) : null}
     </div>
-  );
-}
-
-/** A dedicated Muse page in the sidebar: each one opens its own route, not a tab in a shared panel. */
-function MuseSectionRow({
-  label,
-  icon,
-  active,
-  onOpen,
-}: {
-  readonly label: string;
-  readonly icon: ReactNode;
-  readonly active: boolean;
-  readonly onOpen: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      aria-current={active ? "page" : undefined}
-      className={cn(
-        "relative z-10 flex h-[1.875rem] w-full min-w-0 cursor-pointer items-center gap-2 rounded-md pr-2 pl-10.5 text-left text-sm text-sidebar-foreground outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-        active ? "bg-sidebar-row-active" : "hover:bg-sidebar-row-hover",
-      )}
-      onClick={onOpen}
-    >
-      <span className="flex size-3.5 shrink-0 items-center justify-center text-sidebar-muted-foreground [&>svg]:size-3.5">
-        {icon}
-      </span>
-      <span className="min-w-0 truncate">{label}</span>
-    </button>
   );
 }
 

@@ -1324,7 +1324,7 @@ export function ProviderInstanceCard({
         <MuseFeaturesSettingsSection environmentId={environmentId} instanceId={instanceId} />
       ) : null}
 
-      {driverOption !== undefined ? (
+      {driverOption !== undefined && instance.driver !== MUSE_AGENT_DRIVER ? (
         <SettingsSection title="Models">
           <div className="px-3 py-3 sm:px-4">
             <p className="mb-3 text-xs text-muted-foreground">

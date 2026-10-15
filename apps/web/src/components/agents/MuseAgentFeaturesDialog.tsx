@@ -405,13 +405,15 @@ function ActivitySection({ environmentId, providerInstanceId }: Target) {
 
 /** What the Profile page shows instead of its main view: an ability, or Muse's computer from the gear. */
 type MuseAbility = Extract<MuseFeatureTabId, "memory" | "connections" | "skills" | "dictation">;
-type MuseDetail = MuseAbility | "computer";
+type MuseDetail = MuseAbility | "computer" | "activity" | "approvals";
 
 const MUSE_ABILITIES: ReadonlyArray<{
-  readonly id: MuseAbility;
+  readonly id: Exclude<MuseDetail, "computer">;
   readonly label: string;
   readonly description: string;
 }> = [
+  { id: "activity", label: "Activity", description: "Tasks and routines" },
+  { id: "approvals", label: "Approvals", description: "Review Muse approvals" },
   { id: "memory", label: "Memory", description: "Search what Muse remembers" },
   { id: "connections", label: "Connections", description: "Accounts Muse can reach" },
   { id: "skills", label: "Skills", description: "What Muse can do" },
@@ -490,6 +492,13 @@ function MuseAgentFeaturesBody({
       <div className="flex flex-col gap-4 px-5 pb-6">
         <BackToProfile onBack={() => requestLeave({ kind: "go", detail: null })} />
         <MuseAgentComputerSection {...target} canWrite={canWrite} />
+      </div>
+    );
+  } else if (detail === "activity" || detail === "approvals") {
+    body = (
+      <div className="flex flex-col gap-4 px-5 pb-6">
+        <BackToProfile onBack={() => requestLeave({ kind: "go", detail: null })} />
+        {detail === "activity" ? <ActivitySection {...target} /> : <MuseApprovalsSection />}
       </div>
     );
   } else if (detail !== null) {
@@ -704,10 +713,7 @@ function MuseApprovalsSection() {
   );
 }
 
-/**
- * Activity and Approvals each open as their own page from the sidebar, rather than as tabs in one
- * panel. Profile keeps the features panel.
- */
+/** Standalone routes for Activity and Approvals opened from the Muse flyout. */
 export function MuseAgentSectionPage({
   environmentId,
   providerInstanceId,

@@ -8,6 +8,11 @@ import {
 } from "./ProviderSettingsForm";
 
 describe("ProviderSettingsForm helpers", () => {
+  it("keeps Muse account binding out of editable settings", () => {
+    const muse = providerClients.get(ProviderDriverKind.make("muse-agent"));
+    expect(muse).toBeDefined();
+    expect(deriveProviderSettingsFields(muse!)).toEqual([]);
+  });
   it("derives visible provider config fields from the client definition schema", () => {
     const codex = providerClients.get(ProviderDriverKind.make("codex"));
 

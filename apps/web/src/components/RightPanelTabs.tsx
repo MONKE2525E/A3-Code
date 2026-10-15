@@ -28,6 +28,7 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   Smartphone,
   Monitor,
+  Sparkles,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -143,6 +144,7 @@ interface RightPanelTabsProps {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
+  onAddMuseFeatures?: (() => void) | undefined;
   onAddComputer?: (() => void) | undefined;
   computerAvailable?: boolean | undefined;
   nativeAgentThread?: boolean | undefined;
@@ -353,6 +355,7 @@ function RightPanelEmptyState(props: {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
+  onAddMuseFeatures?: (() => void) | undefined;
   onAddComputer?: (() => void) | undefined;
   computerAvailable?: boolean | undefined;
   nativeAgentThread?: boolean | undefined;
@@ -369,6 +372,19 @@ function RightPanelEmptyState(props: {
   const [highlight, setHighlight] = useState(-1);
 
   const actions = [
+    ...(props.onAddMuseFeatures
+      ? [
+          {
+            label: "Muse",
+            icon: Sparkles,
+            shortcut: "U",
+            available: true,
+            disabledReason: "",
+            onClick: props.onAddMuseFeatures,
+          },
+        ]
+      : []),
+
     ...(props.computerAvailable && props.onAddComputer
       ? [
           {
@@ -973,6 +989,19 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
   }, []);
 
   const addSurfaceActions = [
+    ...(props.onAddMuseFeatures
+      ? [
+          {
+            label: "Muse",
+            icon: Sparkles,
+            shortcut: "U",
+            available: true,
+            disabledReason: "",
+            onClick: props.onAddMuseFeatures,
+          },
+        ]
+      : []),
+
     ...(props.computerAvailable && props.onAddComputer
       ? [
           {
@@ -1532,6 +1561,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddFiles={props.onAddFiles}
             onAddPullRequest={props.onAddPullRequest}
             onAddPullRequests={props.onAddPullRequests}
+            onAddMuseFeatures={props.onAddMuseFeatures}
             onAddComputer={props.onAddComputer}
             computerAvailable={props.computerAvailable}
             nativeAgentThread={props.nativeAgentThread}
