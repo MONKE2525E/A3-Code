@@ -47,6 +47,8 @@ import * as ServerConfig from "../config.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const gitProcesses = Semaphore.makeUnsafe(8);
+// Shared by driver instances: linked worktrees all mutate the same branch refs.
+const worktreeAllocationLocks = new Map<string, { mutex: Semaphore.Semaphore; users: number }>();
 // `git worktree add` checks out the full tree, so on large repositories it can
 // take well beyond the default 30s (e.g. a 375k-file repo takes ~40s on an idle
 // machine). Give it generous headroom while still bounding a genuinely hung git.
@@ -1206,6 +1208,43 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         timeoutMs: 5_000,
       },
     ).pipe(Effect.map((result) => result.exitCode === 0));
+
+  const withWorktreeAllocationLock = <A, E, R>(cwd: string, effect: Effect.Effect<A, E, R>) =>
+    Effect.gen(function* () {
+      const commonDir = (yield* runGitStdout("GitVcsDriver.worktreeLock", cwd, [
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+      ])).trim();
+      const key = yield* fileSystem.realPath(commonDir).pipe(
+        Effect.mapError(
+          (cause) =>
+            new GitCommandError({
+              operation: "GitVcsDriver.worktreeLock",
+              command: "git rev-parse",
+              cwd,
+              detail: "Failed to resolve the shared Git directory.",
+              cause,
+            }),
+        ),
+      );
+      return yield* Effect.acquireUseRelease(
+        Effect.sync(() => {
+          let entry = worktreeAllocationLocks.get(key);
+          if (entry === undefined) {
+            entry = { mutex: Semaphore.makeUnsafe(1), users: 0 };
+            worktreeAllocationLocks.set(key, entry);
+          }
+          entry.users++;
+          return entry;
+        }),
+        (entry) => entry.mutex.withPermit(effect),
+        (entry) =>
+          Effect.sync(() => {
+            if (--entry.users === 0) worktreeAllocationLocks.delete(key);
+          }),
+      );
+    });
 
   const resolveAvailableBranchName = Effect.fn("resolveAvailableBranchName")(function* (
     cwd: string,
@@ -3563,6 +3602,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               error.reason === "branch_checked_out_in_worktree")) ||
           (input.path === null && error.reason === "path_already_exists"),
       }),
+      (effect) => withWorktreeAllocationLock(input.cwd, effect),
     );
 
     return yield* Effect.gen(function* () {
@@ -3990,70 +4030,90 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
 
   const deleteLocalBranch: GitVcsDriver.GitVcsDriver["Service"]["deleteLocalBranch"] = Effect.fn(
     "deleteLocalBranch",
-  )(function* (input) {
-    if (input.expectedCommitSha !== undefined) {
-      const checkedOut = parseWorktreeBranchPaths(
-        yield* runGitStdout("GitVcsDriver.deleteLocalBranch.list", input.cwd, [
-          "worktree",
-          "list",
-          "--porcelain",
-          "-z",
-        ]),
-        true,
-      );
-      if (checkedOut.has(input.refName)) {
-        return yield* new GitCommandError({
-          operation: "GitVcsDriver.deleteLocalBranch",
-          command: "git update-ref",
-          cwd: input.cwd,
-          detail: "The branch is still checked out in a worktree.",
-          reason: "branch_checked_out_in_worktree",
-        });
+  )(
+    function* (input) {
+      if (input.expectedCommitSha !== undefined) {
+        const checkedOut = parseWorktreeBranchPaths(
+          yield* runGitStdout("GitVcsDriver.deleteLocalBranch.list", input.cwd, [
+            "worktree",
+            "list",
+            "--porcelain",
+            "-z",
+          ]),
+          true,
+        );
+        if (checkedOut.has(input.refName)) {
+          return yield* new GitCommandError({
+            operation: "GitVcsDriver.deleteLocalBranch",
+            command: "git update-ref",
+            cwd: input.cwd,
+            detail: "The branch is still checked out in a worktree.",
+            reason: "branch_checked_out_in_worktree",
+          });
+        }
+        // Unlike branch -d, this does not depend on the caller's current HEAD.
+        // Git compares the original tip under the ref lock, preserving later commits.
+        yield* executeGit("GitVcsDriver.deleteLocalBranch", input.cwd, [
+          "update-ref",
+          "--no-deref",
+          "-d",
+          "refs/heads/" + input.refName,
+          input.expectedCommitSha,
+        ]);
+        const config = yield* executeGitWithStableDiagnostics(
+          "GitVcsDriver.deleteLocalBranch.config",
+          input.cwd,
+          ["config", "--local", "--remove-section", `branch.${input.refName}`],
+          { allowNonZeroExit: true },
+        );
+        if (config.exitCode !== 0 && !config.stderr.startsWith("fatal: no such section:")) {
+          return yield* new GitCommandError({
+            operation: "GitVcsDriver.deleteLocalBranch.config",
+            command: "git config --remove-section",
+            cwd: input.cwd,
+            detail: "Failed to remove the deleted branch configuration.",
+          });
+        }
+        return;
       }
-      // Unlike branch -d, this does not depend on the caller's current HEAD.
-      // Git compares the original tip under the ref lock, preserving later commits.
-      yield* executeGit("GitVcsDriver.deleteLocalBranch", input.cwd, [
-        "update-ref",
-        "--no-deref",
-        "-d",
-        "refs/heads/" + input.refName,
-        input.expectedCommitSha,
-      ]);
-      return;
-    }
-    yield* executeGit(
-      "GitVcsDriver.deleteLocalBranch",
-      input.cwd,
-      ["branch", input.force === true ? "-D" : "-d", "--", input.refName],
-      {
-        timeoutMs: 10_000,
-        fallbackErrorDetail: "git branch delete failed",
-      },
-    );
-  });
+      yield* executeGit(
+        "GitVcsDriver.deleteLocalBranch",
+        input.cwd,
+        ["branch", input.force === true ? "-D" : "-d", "--", input.refName],
+        {
+          timeoutMs: 10_000,
+          fallbackErrorDetail: "git branch delete failed",
+        },
+      );
+    },
+    (effect, input) => withWorktreeAllocationLock(input.cwd, effect),
+  );
 
   const renameBranch: GitVcsDriver.GitVcsDriver["Service"]["renameBranch"] = Effect.fn(
     "renameBranch",
-  )(function* (input) {
-    if (input.oldBranch === input.newBranch) {
-      return { branch: input.newBranch };
-    }
-    const targetBranch = input.exactName
-      ? input.newBranch
-      : yield* resolveAvailableBranchName(input.cwd, input.newBranch);
+  )(
+    function* (input) {
+      if (input.oldBranch === input.newBranch) {
+        return { branch: input.newBranch };
+      }
+      const targetBranch = input.exactName
+        ? input.newBranch
+        : yield* resolveAvailableBranchName(input.cwd, input.newBranch);
 
-    yield* executeGit(
-      "GitVcsDriver.renameBranch",
-      input.cwd,
-      ["branch", "-m", "--", input.oldBranch, targetBranch],
-      {
-        timeoutMs: 10_000,
-        fallbackErrorDetail: "git branch rename failed",
-      },
-    );
+      yield* executeGit(
+        "GitVcsDriver.renameBranch",
+        input.cwd,
+        ["branch", "-m", "--", input.oldBranch, targetBranch],
+        {
+          timeoutMs: 10_000,
+          fallbackErrorDetail: "git branch rename failed",
+        },
+      );
 
-    return { branch: targetBranch };
-  });
+      return { branch: targetBranch };
+    },
+    (effect, input) => withWorktreeAllocationLock(input.cwd, effect),
+  );
 
   const switchRef: GitVcsDriver.GitVcsDriver["Service"]["switchRef"] = Effect.fn("switchRef")(
     function* (input) {
@@ -4136,14 +4196,18 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
 
       return { refName };
     },
+    (effect, input) => withWorktreeAllocationLock(input.cwd, effect),
   );
 
   const createRef: GitVcsDriver.GitVcsDriver["Service"]["createRef"] = Effect.fn("createRef")(
     function* (input) {
-      yield* executeGit("GitVcsDriver.createRef", input.cwd, ["branch", input.refName], {
-        timeoutMs: 10_000,
-        fallbackErrorDetail: "git branch create failed",
-      });
+      yield* withWorktreeAllocationLock(
+        input.cwd,
+        executeGit("GitVcsDriver.createRef", input.cwd, ["branch", input.refName], {
+          timeoutMs: 10_000,
+          fallbackErrorDetail: "git branch create failed",
+        }),
+      );
       if (input.switchRef) {
         yield* switchRef({ cwd: input.cwd, refName: input.refName });
       }

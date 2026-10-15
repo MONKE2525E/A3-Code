@@ -3042,6 +3042,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             path: path.join(yield* makeTmpDir(), "rollback"),
             refName: initialBranch,
             newRefName: "feature/rollback",
+            baseRefName: initialBranch,
           });
           if (created.createdBranch === undefined) throw new Error("Expected branch ownership");
           assert.deepEqual(created.createdBranch, {
@@ -3074,8 +3075,19 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           if (withNewCommits) {
             yield* removeBranch.pipe(Effect.flip);
             assert.equal(yield* git(cwd, ["rev-parse", "feature/rollback"]), before);
+            assert.equal(
+              yield* git(cwd, ["config", "branch.feature/rollback.gh-merge-base"]),
+              initialBranch,
+            );
           } else {
             yield* removeBranch;
+            const config = yield* driver.execute({
+              operation: "test.rollbackConfig",
+              cwd,
+              args: ["config", "--get", "branch.feature/rollback.gh-merge-base"],
+              allowNonZeroExit: true,
+            });
+            assert.equal(config.exitCode, 1);
             const result = yield* driver.execute({
               operation: "test.rollbackBranch",
               cwd,
@@ -3323,6 +3335,120 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         assert.equal(created.worktree.refName, "feature");
         assert.equal(yield* git(created.worktree.path, ["branch", "--show-current"]), "feature");
       }),
+    );
+
+    it.effect(
+      "serializes rollback and recreation across driver instances and linked worktrees",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const path = yield* Path.Path;
+          const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+          const deleteEntered = yield* Deferred.make<void>();
+          const allowDelete = yield* Deferred.make<void>();
+          const configEntered = yield* Deferred.make<void>();
+          const allowConfig = yield* Deferred.make<void>();
+          const lookupFinished = yield* Deferred.make<void>();
+          const addEntered = yield* Deferred.make<void>();
+          const ownerSpawner = ChildProcessSpawner.make((command) =>
+            Effect.gen(function* () {
+              if (ChildProcess.isStandardCommand(command)) {
+                if (command.args.includes("update-ref") && command.args.includes("--no-deref")) {
+                  yield* Deferred.succeed(deleteEntered, undefined);
+                  yield* Deferred.await(allowDelete);
+                }
+                if (command.args.includes("--remove-section")) {
+                  yield* Deferred.succeed(configEntered, undefined);
+                  yield* Deferred.await(allowConfig);
+                }
+              }
+              return yield* delegate.spawn(command);
+            }),
+          );
+          const peerSpawner = ChildProcessSpawner.make((command) =>
+            Effect.gen(function* () {
+              if (ChildProcess.isStandardCommand(command) && command.args.includes("add"))
+                yield* Deferred.succeed(addEntered, undefined);
+              const handle = yield* delegate.spawn(command);
+              return ChildProcess.isStandardCommand(command) &&
+                command.args.includes("--git-common-dir")
+                ? ChildProcessSpawner.makeHandle({
+                    ...handle,
+                    exitCode: handle.exitCode.pipe(
+                      Effect.tap(() => Deferred.succeed(lookupFinished, undefined)),
+                    ),
+                  })
+                : handle;
+            }),
+          );
+          const owner = yield* makeGitVcsDriverCore().pipe(
+            Effect.provide(layerServerConfig),
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, ownerSpawner),
+          );
+          const peerDriver = yield* makeGitVcsDriverCore().pipe(
+            Effect.provide(layerServerConfig),
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, peerSpawner),
+          );
+          const peer = yield* owner.createWorktree({
+            cwd,
+            path: path.join(yield* makeTmpDir(), "peer"),
+            refName: initialBranch,
+            newRefName: "peer",
+          });
+          const old = yield* owner.createWorktree({
+            cwd,
+            path: path.join(yield* makeTmpDir(), "old"),
+            refName: initialBranch,
+            newRefName: "feature",
+            baseRefName: "old-base",
+          });
+          yield* owner.removeWorktree({ cwd, path: old.worktree.path, force: false });
+          const deleting = yield* owner
+            .deleteLocalBranch({
+              cwd,
+              refName: "feature",
+              expectedCommitSha: old.createdBranch!.commitSha,
+            })
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(deleteEntered);
+          const creating = yield* peerDriver
+            .createWorktree({
+              cwd: peer.worktree.path,
+              path: path.join(yield* makeTmpDir(), "new"),
+              refName: initialBranch,
+              newRefName: "feature",
+            })
+            .pipe(Effect.forkScoped);
+          yield* Deferred.await(lookupFinished);
+          yield* Deferred.succeed(allowDelete, undefined);
+          yield* Deferred.await(configEntered);
+          // Another repository can finish while this repository's cleanup is held.
+          const independent = yield* makeTmpDir();
+          const independentBase = yield* initRepoWithCommit(independent);
+          yield* owner.createWorktree({
+            cwd: independent,
+            path: path.join(yield* makeTmpDir(), "independent"),
+            refName: independentBase.initialBranch,
+            newRefName: "independent",
+          });
+          assert.isFalse(yield* Deferred.isDone(addEntered));
+          yield* Deferred.succeed(allowConfig, undefined);
+          yield* Fiber.join(deleting);
+          const fresh = yield* Fiber.join(creating);
+          assert.equal(fresh.worktree.refName, "feature");
+          assert.equal(
+            yield* git(fresh.worktree.path, ["rev-parse", "HEAD"]),
+            yield* git(cwd, ["rev-parse", initialBranch]),
+          );
+          const staleConfig = yield* owner.execute({
+            cwd,
+            operation: "test.recreatedConfig",
+            args: ["config", "--get", "branch.feature.gh-merge-base"],
+            allowNonZeroExit: true,
+          });
+          assert.equal(staleConfig.exitCode, 1);
+        }),
     );
 
     it.effect.each(["new", "suffix", "reuse"] as const)(
