@@ -12,7 +12,7 @@ Choose **Settings → Providers → Add provider → Muse**, then **Sign in to M
 
 Muse Code, the coding provider, is separate and unchanged.
 
-Open **Muse features** from the chat header or provider settings to search memories, inspect routines, manage conversations, and see connections, skills, and computer status. **Create routine** and **Edit** prepare a message in Muse's chat; review it before sending.
+Open **Muse features** from the chat header or provider settings to search memories and see connections, skills, and computer status. Manage side conversations from Muse's sidebar menu. View and delete Muse routines in **Settings → Scheduled Tasks**. To create or edit a routine, ask Muse in chat.
 
 The profile editor updates Muse's Identity, Personality, and Memory files. Changes require **Save**. If a file changed elsewhere, reload it before saving again.
 
