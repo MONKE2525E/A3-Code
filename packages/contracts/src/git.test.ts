@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 
 import {
   VcsCreateWorktreeInput,
+  VcsCreateWorktreeResult,
   GitPreparePullRequestThreadInput,
   GitPreparePullRequestThreadResult,
   GitRunStackedActionResult,
@@ -11,6 +12,7 @@ import {
 } from "./git.ts";
 
 const decodeCreateWorktreeInput = Schema.decodeUnknownSync(VcsCreateWorktreeInput);
+const decodeCreateWorktreeResult = Schema.decodeUnknownSync(VcsCreateWorktreeResult);
 const decodePreparePullRequestThreadInput = Schema.decodeUnknownSync(
   GitPreparePullRequestThreadInput,
 );
@@ -43,6 +45,20 @@ describe("VcsCreateWorktreeInput", () => {
     });
 
     expect(parsed.baseRefName).toBe("origin/main");
+  });
+});
+
+describe("VcsCreateWorktreeResult", () => {
+  it("retains the original tip for safe rollback and accepts legacy results", () => {
+    const worktree = { path: "/tmp/worktree", refName: "feature-2" };
+    expect(decodeCreateWorktreeResult({ worktree }).createdBranch).toBeUndefined();
+    expect(
+      decodeCreateWorktreeResult({
+        worktree,
+        createdBranch: { commitSha: "original-tip" },
+      }).createdBranch,
+    ).toEqual({ commitSha: "original-tip" });
+    expect(() => decodeCreateWorktreeResult({ worktree, createdBranch: true })).toThrow();
   });
 });
 

@@ -183,6 +183,8 @@ export interface GitCommitOptions {
 export interface GitDeleteLocalBranchInput {
   readonly cwd: string;
   readonly refName: string;
+  /** Rollback only: atomically delete an unchanged, no longer checked-out branch. */
+  readonly expectedCommitSha?: string;
   readonly force?: boolean;
 }
 

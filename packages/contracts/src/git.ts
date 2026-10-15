@@ -300,6 +300,8 @@ export type VcsListRefsResult = typeof VcsListRefsResult.Type;
 
 export const VcsCreateWorktreeResult = Schema.Struct({
   worktree: VcsWorktree,
+  /** Original tip of a branch created by this call; absent for reused or legacy results. */
+  createdBranch: Schema.optional(Schema.Struct({ commitSha: Schema.String })),
 });
 export type VcsCreateWorktreeResult = typeof VcsCreateWorktreeResult.Type;
 
