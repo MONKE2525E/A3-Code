@@ -10,6 +10,7 @@ import {
 import type { GrokBotProviderSettings } from "@t3tools/contracts/grokBotProvider";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import { isTransientStartCause } from "@t3tools/provider-core/server/failure";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import type { ProviderDriverCreateInput } from "@t3tools/provider-core/server/driver";
 import * as Clock from "effect/Clock";
@@ -1338,6 +1339,13 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
               const attachmentsDir =
                 request.message.attachments.length === 0 ? undefined : host?.paths.attachmentsDir;
               yield* managed.send(turn, attachmentsDir).pipe(
+                // Nothing was delivered, so no answer can be pending. The run redelivers this
+                // message later; the idle watchdog must not fail it while it waits.
+                Effect.tapError((error) =>
+                  isTransientStartCause(error)
+                    ? Effect.sync(() => watchdog.forget(identity.messageId))
+                    : Effect.void,
+                ),
                 Effect.catchIf(
                   (error) =>
                     error._tag === "GrokBotNativeRuntimeError" && error.kind === "uncertain",

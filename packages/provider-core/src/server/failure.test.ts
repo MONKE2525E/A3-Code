@@ -17,6 +17,7 @@ import {
   MAX_PROVIDER_FAILURE_CODE_LENGTH,
   MAX_PROVIDER_FAILURE_MESSAGE_LENGTH,
   ContextHandoffBudgetError,
+  isTransientStartCause,
 } from "./failure.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -207,3 +208,54 @@ it.effect("keys terminal failure items by provider turn across retries and fallb
     assert.equal(firstAttempt.ordinal, 101);
   }).pipe(Effect.provide(IdAllocator.layer)),
 );
+
+it("names the Grok Bot stage that failed to start a turn and marks transient ones retryable", () => {
+  const start = (cause: unknown) =>
+    new ProviderAdapter.ProviderAdapterTurnStartError({
+      driver: ProviderDriverKind.make("grok-bot"),
+      threadId: ThreadId.make("thread:bot"),
+      providerThreadId: ProviderThreadId.make("provider-thread:bot"),
+      runId: RunId.make("run:bot"),
+      cause,
+    });
+  const transient = makeProviderFailure({
+    cause: start({
+      _tag: "GrokBotNativeAttachmentError",
+      reason: "upload_failed",
+      transient: true,
+      message: "Uploading the attachment to the Grok Bot timed out or lost its connection.",
+    }),
+    class: "provider_error",
+  });
+  assert.equal(
+    transient.message,
+    "Uploading the attachment to the Grok Bot timed out or lost its connection.",
+  );
+  assert.equal(transient.retryable, true);
+  assert.equal(
+    isTransientStartCause(start({ _tag: "GrokBotNativeAttachmentError", transient: true })),
+    true,
+  );
+
+  const final = makeProviderFailure({
+    cause: start({
+      _tag: "GrokBotBindingError",
+      reason: "Link this isolated environment to T3 Connect before starting a bot run.",
+      message: "Link this isolated environment to T3 Connect before starting a bot run.",
+    }),
+    class: "provider_error",
+  });
+  assert.equal(
+    final.message,
+    "Link this isolated environment to T3 Connect before starting a bot run.",
+  );
+  assert.equal(final.retryable, null);
+  assert.equal(
+    isTransientStartCause(start({ _tag: "GrokBotNativeAttachmentError", reason: "missing" })),
+    false,
+  );
+  assert.include(
+    makeProviderFailure({ cause: start("opaque") }).message,
+    "could not start this turn",
+  );
+});
