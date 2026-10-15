@@ -518,7 +518,7 @@ const make = Effect.gen(function* () {
             return yield* new NativeAgentError({ reason: "account_changed" });
         });
         if (!previous) {
-          const { projectId } = yield* folders.ensureScratchProject.pipe(
+          const { projectId } = yield* folders.ensureNativeAgentProject.pipe(
             Effect.mapError(failure("scratch_unavailable")),
           );
           const assistant = yield* profile(selection.instanceId);

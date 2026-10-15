@@ -475,7 +475,7 @@ const fixture = (
           Layer.provide(
             Layer.mock(Folders.ManagedProjectFolders)({
               namedProjectsRoot: cwd,
-              ensureScratchProject: Effect.succeed({ projectId }),
+              ensureNativeAgentProject: Effect.succeed({ projectId }),
             }),
           ),
           Layer.provide(Layer.succeed(Orchestrator.OrchestratorV2, orchestrator)),
