@@ -372,6 +372,42 @@ const callPageBridge = (
 const pageAuthority = (page: Page) =>
   page.evaluate(() => (globalThis as MuseAgentPageGlobal).__t3Muse?.authority() ?? null);
 
+// Playwright serializes thrown Errors without native code/status properties. Return
+// only the bounded fields feature services classify, never native error text or payloads.
+const requestPageBridge = (page: Page, input: unknown) =>
+  page
+    .evaluate(async (input) => {
+      try {
+        return {
+          ok: true as const,
+          value: await (globalThis as MuseAgentPageGlobal).__t3Muse!.request(input),
+        };
+      } catch (cause) {
+        const code =
+          typeof cause === "object" && cause !== null && "code" in cause ? cause.code : undefined;
+        const status =
+          typeof cause === "object" && cause !== null && "httpStatus" in cause
+            ? cause.httpStatus
+            : undefined;
+        return {
+          ok: false as const,
+          error: {
+            ...(typeof code === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(code) ? { code } : {}),
+            ...(typeof status === "number" &&
+            Number.isInteger(status) &&
+            status >= 100 &&
+            status <= 599
+              ? { httpStatus: status }
+              : {}),
+          },
+        };
+      }
+    }, input)
+    .then((result) => {
+      if (!result.ok) throw result.error;
+      return result.value;
+    });
+
 export const makeMuseAgentTransportLayer = (
   options: { readonly executablePath?: string; readonly profileRoot?: string } = {},
 ) =>
@@ -646,7 +682,7 @@ export const makeMuseAgentTransportLayer = (
             Effect.flatMap((current) =>
               Effect.tryPromise({
                 try: () =>
-                  callPageBridge(current.page, "request", {
+                  requestPageBridge(current.page, {
                     authority: current.authority,
                     method,
                     params,

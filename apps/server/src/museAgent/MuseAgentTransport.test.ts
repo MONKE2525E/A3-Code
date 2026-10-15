@@ -13,6 +13,8 @@ import * as Schema from "effect/Schema";
 import { chromium, type BrowserContext, type Route } from "playwright-core";
 import * as Transport from "./MuseAgentTransport.ts";
 import * as Source from "./MuseAgentSessionSource.ts";
+import * as Features from "./MuseAgentFeatureService.ts";
+import * as NodeCryptoPlatform from "@effect/platform-node/NodeCrypto";
 
 vi.mock("playwright-core", () => ({
   chromium: { launchPersistentContext: vi.fn(), executablePath: () => process.execPath },
@@ -36,6 +38,7 @@ const fixture = () => {
   let pageAuthority: string | null = "synthetic-authority";
   let disconnectObserved = false;
   let recoveryFails = false;
+  let requestFailure: unknown;
   const bridge = {
     authority: () => pageAuthority,
     observeDisconnect: async (input: unknown) => {
@@ -66,7 +69,10 @@ const fixture = () => {
         async (input: unknown) => {
           calls.push({ method, input });
           if (method === "register") return performRegistration();
-          if (method === "request") return { nativeResult: true };
+          if (method === "request") {
+            if (requestFailure) throw requestFailure;
+            return { nativeResult: true };
+          }
           if (method === "connectionId") return "generation-1";
           if (method === "readComputerPreview") return computerPreview;
           if (method === "unregister") return performUnregistration();
@@ -127,6 +133,9 @@ const fixture = () => {
     setAuthority: (value: string | null) => {
       pageAuthority = value;
     },
+    failRequest: (failure: unknown) => {
+      requestFailure = failure;
+    },
     failRecovery: () => {
       recoveryFails = true;
     },
@@ -162,6 +171,86 @@ const registration: Transport.MuseAgentToolRegistration = {
       options: { expectedConnectionId: "generation-1" },
     }),
 };
+
+it.effect(
+  "preserves safe native error codes across the page boundary for feature classification",
+  () => {
+    const f = fixture();
+    f.failRequest(
+      Object.assign(new Error("private native detail"), {
+        code: "method_not_found",
+        httpStatus: 501,
+      }),
+    );
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const transport = yield* Transport.MuseAgentTransport;
+        const binding = yield* transport.connect;
+        const cause = yield* transport.request(binding, "connectors.accounts", {}).pipe(
+          Effect.match({
+            onFailure: (error) => error.cause,
+            onSuccess: () => "unexpected_success",
+          }),
+        );
+        assert.deepStrictEqual(cause, { code: "method_not_found", httpStatus: 501 });
+      }),
+    ).pipe(Effect.provide(f.layer));
+  },
+);
+
+it.effect(
+  "reports an unsupported native feature through the real transport and feature service",
+  () => {
+    const f = fixture();
+    f.failRequest(
+      Object.assign(new Error("private native detail"), {
+        code: "method_not_found",
+        httpStatus: 501,
+      }),
+    );
+    return Effect.gen(function* () {
+      const transport = yield* Transport.MuseAgentTransport;
+      const binding = yield* transport.connect;
+      const features = yield* Features.MuseAgentFeatureService;
+      const error = yield* features.tasks(binding).pipe(Effect.flip);
+      assert.strictEqual(error.code, "unavailable");
+      assert.strictEqual(
+        error.message,
+        "This Muse feature is unavailable in the verified native protocol or on this account.",
+      );
+    }).pipe(
+      Effect.provide(
+        Features.layer.pipe(Layer.provideMerge(f.layer), Layer.provide(NodeCryptoPlatform.layer)),
+      ),
+    );
+  },
+);
+
+it.effect("does not return arbitrary native error strings or invalid HTTP statuses", () => {
+  const f = fixture();
+  f.failRequest({
+    code: "private payload with spaces",
+    httpStatus: 900,
+    message: "private native detail",
+    token: "private",
+  });
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const transport = yield* Transport.MuseAgentTransport;
+      const binding = yield* transport.connect;
+      const result = yield* transport.request(binding, "tasks.list", {}).pipe(
+        Effect.match({
+          onFailure: (error) => ({ cause: error.cause, message: error.message }),
+          onSuccess: () => "unexpected_success",
+        }),
+      );
+      assert.deepStrictEqual(result, {
+        cause: {},
+        message: "The authenticated Muse connection is unavailable.",
+      });
+    }),
+  ).pipe(Effect.provide(f.layer));
+});
 
 it.effect(
   "keeps the warm browser alive and delegates a transient readiness gap to bridge recovery",
