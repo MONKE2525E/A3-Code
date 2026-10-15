@@ -173,6 +173,8 @@ function MuseAgentRoster({
   const open = useCallback(async () => {
     if (opening) return;
     if (isMobile) setOpenMobile(false);
+    setOpening(true);
+    setOpenError(null);
     const cached = threads.find(
       (entry) =>
         entry.providerInstanceId === instanceId &&
@@ -190,6 +192,7 @@ function MuseAgentRoster({
         environmentId,
         input: { providerInstanceId: ProviderInstanceId.make(instanceId) },
       });
+      setOpening(false);
       if (validated._tag !== "Success" && !isAtomCommandInterrupted(validated)) {
         setOpenError(
           shortError(squashAtomCommandFailure(validated), "Could not open Muse. Try again."),
@@ -198,8 +201,6 @@ function MuseAgentRoster({
       return;
     }
     // Without a cached chat, the guarded open is the only way in: it creates the thread.
-    setOpening(true);
-    setOpenError(null);
     const result = await openThread({
       environmentId,
       input: { providerInstanceId: ProviderInstanceId.make(instanceId) },
@@ -314,6 +315,8 @@ function MuseAgentRoster({
         <ul className="grid grid-cols-[repeat(auto-fit,minmax(80px,1fr))] gap-x-1 gap-y-3 py-1.5">
           <li>
             <AgentPinnedTile
+              disabled={!canOpen}
+              pending={opening}
               name={name}
               avatar={avatarNode("xl")}
               selected={selected}

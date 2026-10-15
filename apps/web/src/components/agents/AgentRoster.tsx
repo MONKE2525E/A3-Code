@@ -98,6 +98,8 @@ export function AgentPinnedTile(props: {
   readonly statusDot: AgentStatusDot | null;
   readonly statusText?: string | null | undefined;
   readonly menu?: ReactNode;
+  readonly disabled?: boolean;
+  readonly pending?: boolean;
   readonly onOpen: () => void;
 }) {
   return (
@@ -109,8 +111,10 @@ export function AgentPinnedTile(props: {
     >
       <button
         type="button"
+        disabled={props.disabled || props.pending}
+        aria-busy={props.pending || undefined}
         aria-current={props.selected ? "page" : undefined}
-        className="flex w-full min-w-0 cursor-pointer flex-col items-center gap-1.5 rounded-md px-2 pt-1.5 pb-1 text-center outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        className="flex w-full min-w-0 cursor-pointer flex-col items-center gap-1.5 rounded-md px-2 pt-1.5 pb-1 text-center outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
         onClick={props.onOpen}
       >
         {props.avatar}
