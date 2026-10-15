@@ -298,20 +298,39 @@ function MuseAgentRoster({
     />
   );
 
+  const sectionLinks = (
+    <>
+      <MuseSectionRow
+        label="Activity"
+        icon={<ListChecksIcon />}
+        active={pathname === "/muse/activity"}
+        onOpen={() => openMuseSection("activity")}
+      />
+      <MuseSectionRow
+        label="Approvals"
+        icon={<ShieldCheckIcon />}
+        active={pathname === "/muse/approvals"}
+        onOpen={() => openMuseSection("approvals")}
+      />
+    </>
+  );
   if (pinned) {
     return (
-      <ul className="grid grid-cols-[repeat(auto-fit,minmax(80px,1fr))] gap-x-1 gap-y-3 py-1.5">
-        <li>
-          <AgentPinnedTile
-            name={name}
-            avatar={avatarNode("xl")}
-            selected={selected}
-            statusDot={statusDot}
-            menu={menu("tile")}
-            onOpen={() => void open()}
-          />
-        </li>
-      </ul>
+      <div className="flex flex-col gap-px">
+        <ul className="grid grid-cols-[repeat(auto-fit,minmax(80px,1fr))] gap-x-1 gap-y-3 py-1.5">
+          <li>
+            <AgentPinnedTile
+              name={name}
+              avatar={avatarNode("xl")}
+              selected={selected}
+              statusDot={statusDot}
+              menu={menu("tile")}
+              onOpen={() => void open()}
+            />
+          </li>
+        </ul>
+        {sectionLinks}
+      </div>
     );
   }
   return (
@@ -361,18 +380,7 @@ function MuseAgentRoster({
           ))}
         </>
       ) : null}
-      <MuseSectionRow
-        label="Activity"
-        icon={<ListChecksIcon />}
-        active={pathname === "/muse/activity"}
-        onOpen={() => openMuseSection("activity")}
-      />
-      <MuseSectionRow
-        label="Approvals"
-        icon={<ShieldCheckIcon />}
-        active={pathname === "/muse/approvals"}
-        onOpen={() => openMuseSection("approvals")}
-      />
+      {sectionLinks}
       {inSideChat ? (
         <MuseSubChatConnector
           containerRef={rosterRef}

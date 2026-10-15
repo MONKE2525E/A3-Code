@@ -1,0 +1,82 @@
+// @vitest-environment jsdom
+import { EnvironmentId } from "@t3tools/contracts";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+import { expect, it, vi } from "vite-plus/test";
+const mocks = vi.hoisted(() => ({ navigate: vi.fn(), threads: [] }));
+vi.mock("@effect/atom-react", () => ({
+  useAtomValue: (atom: unknown) => (atom === mocks.threads ? [] : true),
+}));
+vi.mock("@tanstack/react-router", () => ({
+  useNavigate: () => mocks.navigate,
+  useLocation: () => "/muse/activity",
+  useParams: () => null,
+}));
+vi.mock("~/components/ui/sidebar", () => ({
+  useSidebar: () => ({ isMobile: false, setOpenMobile: vi.fn() }),
+}));
+vi.mock("~/hooks/useLocalStorage", () => ({ useLocalStorage: () => [true, vi.fn()] }));
+vi.mock("~/uiStateStore", () => ({ useUiStateStore: () => ({}) }));
+vi.mock("~/state/threads", () => ({
+  environmentThreadShells: { environmentThreadsAtom: () => mocks.threads },
+}));
+vi.mock("~/state/museAgent", () => ({
+  museAgentStatusQuery: () => ({}),
+  museAgentProfileQuery: () => ({}),
+  museAgentSetup: { permissionAtom: () => ({}) },
+  museAgentOpenThread: { permissionAtom: () => ({}) },
+}));
+vi.mock("~/state/query", () => ({
+  useEnvironmentQuery: () => ({
+    data: {
+      installed: true,
+      ready: true,
+      sessionPresent: true,
+      provider: { instanceId: "muse-test" },
+      name: "Muse",
+    },
+  }),
+}));
+vi.mock("~/state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
+vi.mock("./useMuseAgentAvatar", () => ({
+  useMuseAgentAvatar: () => ({ imageUrl: null, videoUrl: null }),
+}));
+vi.mock("./MuseAgentConversations", () => ({ MuseAgentConversations: () => null }));
+import { MuseAgentSidebarSection } from "./MuseAgentSidebarSection";
+
+it("keeps Activity and Approvals navigable when Muse uses a pinned tile", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("matchMedia", () => ({
+    matches: false,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  }));
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const environmentId = EnvironmentId.make("test-env");
+  try {
+    await act(async () =>
+      root.render(
+        <MuseAgentSidebarSection environmentId={environmentId} onOpenSettings={vi.fn()} />,
+      ),
+    );
+    for (const [label, section] of [
+      ["Activity", "activity"],
+      ["Approvals", "approvals"],
+    ]) {
+      const button = [...container.querySelectorAll("button")].find((x) => x.textContent === label);
+      expect(button).toBeDefined();
+      await act(async () => button!.click());
+      expect(mocks.navigate).toHaveBeenLastCalledWith({
+        to: "/muse/$section",
+        params: { section },
+        search: { environmentId },
+      });
+    }
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+  }
+});
