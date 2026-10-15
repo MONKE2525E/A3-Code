@@ -229,7 +229,9 @@ function ConnectorCredentialForm({
   readonly onConnected: () => void;
 }) {
   const secret = useRef<HTMLInputElement>(null);
-  const canWrite = useAtomValue(museAgentFeatureUpdate.permissionAtom(target.environmentId));
+  const canWrite = useAtomValue(
+    museAgentFeatureUpdate.permissionAtom(target.environmentId, { operation: "connector_auth" }),
+  );
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const update = useAtomCommand(museAgentFeatureUpdate, {

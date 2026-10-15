@@ -435,3 +435,54 @@ it.effect("requires settings, read and preview operation grants together for Mus
     }),
   ),
 );
+
+it.effect("separates Muse account settings from conversation operations per destination", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const registry = yield* setup;
+      const command = createCommandPermissions(runtime, WS_METHODS.museAgentsFeatureUpdate);
+      const operate = grant(true);
+      const settings = {
+        ...grant(false),
+        scopes: [AuthSettingsWriteScope],
+        permissions: [AuthSettingsWriteScope],
+      };
+      registry.set(sessions(env), AsyncResult.success(operate));
+      registry.set(sessions(other), AsyncResult.success(settings));
+      for (const operation of [
+        "connector_auth",
+        "connector_link",
+        "connector_scope_link",
+        "connector_disconnect",
+        "connector_unlink",
+        "profile_save",
+        "profile_set_theme",
+      ]) {
+        const input = { operation };
+        expect(registry.get(command.permissionAtom(env, input))).toBe(false);
+        expect((yield* command.authorize(registry, env, input).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+        expect(registry.get(command.permissionAtom(other, input))).toBe(true);
+        yield* command.authorize(registry, other, input);
+      }
+      for (const operation of [
+        "credential_submit",
+        "history_page",
+        "computer_action",
+        "delivery_release",
+        "task_delete",
+        "session_rename",
+        "session_archive",
+      ]) {
+        const input = { operation };
+        expect(registry.get(command.permissionAtom(env, input))).toBe(true);
+        yield* command.authorize(registry, env, input);
+        expect(registry.get(command.permissionAtom(other, input))).toBe(false);
+        expect((yield* command.authorize(registry, other, input).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+      }
+    }),
+  ),
+);

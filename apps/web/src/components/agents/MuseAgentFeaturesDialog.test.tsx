@@ -4,8 +4,17 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 
-const mocks = vi.hoisted(() => ({ connected: "muse-current", read: vi.fn(), update: vi.fn() }));
-vi.mock("@effect/atom-react", () => ({ useAtomValue: () => true }));
+const mocks = vi.hoisted(() => ({
+  connected: "muse-current",
+  settings: true,
+  operate: true,
+  read: vi.fn(),
+  update: vi.fn(),
+}));
+vi.mock("@effect/atom-react", () => ({
+  useAtomValue: (permission: unknown) =>
+    permission === "settings" ? mocks.settings : mocks.operate,
+}));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
 vi.mock("~/state/session", () => ({ useEnvironmentScope: () => true }));
 vi.mock("~/state/museAgent", () => ({
@@ -15,7 +24,10 @@ vi.mock("~/state/museAgent", () => ({
   },
   museAgentStatusQuery: () => "status",
   museAgentProfileQuery: () => "profile",
-  museAgentFeatureUpdate: { permissionAtom: () => true },
+  museAgentFeatureUpdate: {
+    permissionAtom: (_environment: unknown, input?: { operation: string }) =>
+      input?.operation === "profile_save" ? "settings" : "operate",
+  },
   museAgentOpenThread: { permissionAtom: () => true },
   refreshMuseAgent: vi.fn(),
 }));
@@ -82,6 +94,8 @@ beforeEach(() => {
     removeEventListener: vi.fn(),
   }));
   mocks.connected = "muse-current";
+  mocks.settings = true;
+  mocks.operate = true;
   mocks.read.mockClear();
   container = document.createElement("div");
   document.body.append(container);
@@ -217,4 +231,37 @@ it("does not mount feature reads or the header toggle for another provider's his
   );
   expect(container.textContent).toBe("");
   expect(mocks.read).not.toHaveBeenCalled();
+});
+
+it("keeps the profile read-only without settings permission while conversation operation remains granted", async () => {
+  mocks.settings = false;
+  await act(async () =>
+    root.render(
+      <MuseAgentFeaturesPanel
+        environmentId={environmentId}
+        providerInstanceId={providerInstanceId}
+        threadId="current-thread"
+        onClose={vi.fn()}
+      />,
+    ),
+  );
+  const editor = container.querySelector<HTMLTextAreaElement>(
+    'textarea[aria-label="Muse Identity"]',
+  )!;
+  expect(editor.value).toBe("Original");
+  expect(editor.readOnly).toBe(true);
+  expect(button("Save").disabled).toBe(true);
+  mocks.settings = true;
+  mocks.operate = false;
+  await act(async () =>
+    root.render(
+      <MuseAgentFeaturesPanel
+        environmentId={environmentId}
+        providerInstanceId={providerInstanceId}
+        threadId="current-thread"
+        onClose={vi.fn()}
+      />,
+    ),
+  );
+  expect(editor.readOnly).toBe(false);
 });

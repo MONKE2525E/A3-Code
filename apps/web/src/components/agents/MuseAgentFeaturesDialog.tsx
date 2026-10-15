@@ -450,6 +450,9 @@ function MuseAgentFeaturesBody({
 }) {
   const [detail, setDetail] = useState<MuseDetail | null>(null);
   const canWrite = useAtomValue(museAgentFeatureUpdate.permissionAtom(environmentId));
+  const canConfigure = useAtomValue(
+    museAgentFeatureUpdate.permissionAtom(environmentId, { operation: "profile_save" }),
+  );
   const inventory = useFeatureRead(environmentId, { operation: "inventory", providerInstanceId });
   const inventoryData = inventory.data?.operation === "inventory" ? inventory.data.data : null;
   const target = { environmentId, providerInstanceId };
@@ -524,7 +527,7 @@ function MuseAgentFeaturesBody({
         ) : detail === "memory" ? (
           <MemorySection {...target} />
         ) : detail === "connections" ? (
-          <MuseAgentConnectionsSection {...target} canWrite={canWrite} />
+          <MuseAgentConnectionsSection {...target} canWrite={canConfigure} />
         ) : detail === "skills" ? (
           <MuseAgentSkillsSection {...target} />
         ) : (
@@ -552,7 +555,7 @@ function MuseAgentFeaturesBody({
           <MuseAgentProfileSection
             {...target}
             operations={profileOperations}
-            canWrite={canWrite}
+            canWrite={canConfigure}
             onDirtyChange={setProfileDirty}
           />
         )}

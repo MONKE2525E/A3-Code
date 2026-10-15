@@ -640,3 +640,95 @@ it.effect("requires all preview permissions at the server sign-in boundary", () 
     expect(handled).toBe(1);
   }).pipe(Effect.scoped),
 );
+
+it.effect(
+  "rejects Muse account updates from conversation-only clients before the handler runs",
+  () =>
+    Effect.gen(function* () {
+      const group = WsRpcGroup.omit(
+        ...[...WsRpcGroup.requests.keys()].filter(
+          (
+            tag,
+          ): tag is Exclude<
+            keyof typeof RPC_REQUIRED_SCOPES,
+            typeof WS_METHODS.museAgentsFeatureUpdate
+          > => tag !== WS_METHODS.museAgentsFeatureUpdate,
+        ),
+      );
+      let handled = 0;
+      const makeClient = (
+        scopes: ReadonlyArray<import("@t3tools/contracts").AuthEnvironmentScope>,
+      ) =>
+        RpcTest.makeClient(group).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              group.toLayerHandler(WS_METHODS.museAgentsFeatureUpdate, () =>
+                Effect.sync(() => {
+                  handled++;
+                  return { updated: true as const };
+                }),
+              ),
+              RpcAuthorization.layer(scopes),
+            ),
+          ),
+        );
+      const conversationClient = yield* makeClient([AuthOrchestrationOperateScope]);
+      const settingsClient = yield* makeClient([AuthSettingsWriteScope]);
+      const providerInstanceId = ProviderInstanceId.make("muse-test");
+      const configuration = [
+        {
+          operation: "connector_auth",
+          providerInstanceId,
+          connectorId: "test",
+          authType: "consent_only",
+        },
+        { operation: "connector_link", providerInstanceId, connectorId: "test" },
+        {
+          operation: "connector_scope_link",
+          providerInstanceId,
+          connectorId: "test",
+          method: "read",
+        },
+        { operation: "connector_disconnect", providerInstanceId, connectorId: "test" },
+        {
+          operation: "connector_unlink",
+          providerInstanceId,
+          connectorId: "test",
+          accountId: "test",
+        },
+        {
+          operation: "profile_save",
+          providerInstanceId,
+          document: "identity",
+          content: "Draft",
+          expectedRevision: "a".repeat(64),
+        },
+        { operation: "profile_set_theme", providerInstanceId, themeId: "test" },
+      ] as const;
+      for (const input of configuration) {
+        expect(
+          yield* conversationClient[WS_METHODS.museAgentsFeatureUpdate](input).pipe(Effect.flip),
+        ).toMatchObject({ requiredPermission: AuthSettingsWriteScope });
+      }
+      expect(handled).toBe(0);
+      for (const input of configuration) {
+        expect(yield* settingsClient[WS_METHODS.museAgentsFeatureUpdate](input)).toEqual({
+          updated: true,
+        });
+      }
+      expect(handled).toBe(configuration.length);
+      const archive = {
+        operation: "session_archive",
+        providerInstanceId,
+        sessionId: "side",
+        archived: true,
+      } as const;
+      expect(
+        yield* settingsClient[WS_METHODS.museAgentsFeatureUpdate](archive).pipe(Effect.flip),
+      ).toMatchObject({ requiredPermission: AuthOrchestrationOperateScope });
+      expect(yield* conversationClient[WS_METHODS.museAgentsFeatureUpdate](archive)).toEqual({
+        updated: true,
+      });
+      expect(handled).toBe(configuration.length + 1);
+    }).pipe(Effect.scoped),
+);
