@@ -342,6 +342,8 @@ const fixture = (
           ),
           Layer.provide(
             Layer.mock(Features.MuseAgentFeatureService)({
+              renameSession: (_binding, _sessionId, title) =>
+                Effect.succeed({ title: title.trim() }),
               tasks: (account) =>
                 Effect.sync(() => {
                   state.featureCalls.push(account);
@@ -1765,4 +1767,22 @@ it.effect(
       assert.equal(h.state.credentialCalls.length, 1);
       assert.equal(h.state.reads, 0);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect("synchronizes an opened side conversation title after a native rename", () =>
+  Effect.gen(function* () {
+    const h = yield* fixture();
+    const opened = yield* h.service.open({
+      ...reference,
+      sessionId: "side-one",
+    });
+    yield* h.service.featureUpdate({
+      providerInstanceId: instanceId,
+      operation: "session_rename",
+      sessionId: "side-one",
+      title: "Renamed research",
+    });
+    const shell = yield* h.projections.getThreadShell(opened.threadId);
+    assert.equal(shell?.title, "Renamed research");
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
