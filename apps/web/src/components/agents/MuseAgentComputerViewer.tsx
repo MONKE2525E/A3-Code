@@ -103,6 +103,14 @@ export function MuseAgentComputerViewer({
   const [receiptId, setReceiptId] = useState<string | null>(null);
   // The confirmed lease this viewer took; release is sent once, for exactly this lease and target.
   const [held, setHeld] = useState<string | null>(null);
+  // Heartbeat receipts can precede task refreshes; stale reads must not shorten a renewed lease.
+  const [renewedLease, setRenewedLease] = useState<Lease | null>(null);
+  const effectiveExpiresAtMs =
+    renewedLease?.takeoverId === held && held !== null
+      ? renewedLease.controlExpiresAtMs === null || leaseExpiresAtMs === null
+        ? null
+        : Math.max(leaseExpiresAtMs, renewedLease.controlExpiresAtMs)
+      : leaseExpiresAtMs;
   // Set from the receipt, before confirmation, so unmount or timeout releases exactly that lease.
   const heldRef = useRef<HeldLease | null>(null);
   const updateRef = useRef(update);
@@ -141,6 +149,7 @@ export function MuseAgentComputerViewer({
       heldRef.current = null;
       if (release && lease !== null) sendRelease(lease);
       setHeld(null);
+      setRenewedLease(null);
       setReceiptId(null);
       setWantsView(false);
       setPhase("idle");
@@ -276,13 +285,13 @@ export function MuseAgentComputerViewer({
   }, [receiptId, held, endView]);
 
   useEffect(() => {
-    if (leaseExpiresAtMs === null || held === null) return;
+    if (effectiveExpiresAtMs === null || held === null) return;
     const timer = window.setTimeout(
       () => endView("Control expired. Take control again to reconnect."),
-      Math.max(0, leaseExpiresAtMs - Date.now()),
+      Math.max(0, effectiveExpiresAtMs - Date.now()),
     );
     return () => window.clearTimeout(timer);
-  }, [leaseExpiresAtMs, held, endView]);
+  }, [effectiveExpiresAtMs, held, endView]);
 
   // Heartbeat runs only while this viewer holds the lease it took and is connected.
   useEffect(() => {
@@ -299,7 +308,26 @@ export function MuseAgentComputerViewer({
           command: { action: "heartbeat", takeoverId: held },
         },
       });
-      if (stopped || result._tag !== "Failure" || isAtomCommandInterrupted(result)) return;
+      if (stopped) return;
+      if (result._tag === "Success") {
+        const renewed = result.value.computerState?.lease;
+        if (
+          renewed?.controlOwner === "user" &&
+          renewed.takeoverId === held &&
+          renewed.taskId === taskId
+        ) {
+          setRenewedLease((previous) =>
+            previous?.takeoverId === held &&
+            (previous.controlExpiresAtMs === null ||
+              (renewed.controlExpiresAtMs !== null &&
+                previous.controlExpiresAtMs > renewed.controlExpiresAtMs))
+              ? previous
+              : renewed,
+          );
+        }
+        return;
+      }
+      if (isAtomCommandInterrupted(result)) return;
       endView("Lost contact with Muse's computer. Take control again to reconnect.");
     }, HEARTBEAT_MS);
     return () => {
