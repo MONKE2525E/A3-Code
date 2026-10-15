@@ -85,7 +85,9 @@ function MarketplaceBody({ environmentId }: { readonly environmentId: Environmen
 
 function MuseMarketplace({ environmentId }: { readonly environmentId: EnvironmentId }) {
   const status = useEnvironmentQuery(museAgentStatusQuery({ environmentId, input: {} }));
-  const canWrite = useAtomValue(museAgentFeatureUpdate.permissionAtom(environmentId));
+  const canWrite = useAtomValue(
+    museAgentFeatureUpdate.permissionAtom(environmentId, { operation: "connector_auth" }),
+  );
   const provider = status.data?.ready ? status.data.provider : null;
   return (
     <SettingsSection title="Muse marketplace">
