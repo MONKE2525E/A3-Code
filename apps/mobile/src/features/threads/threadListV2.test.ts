@@ -62,28 +62,47 @@ const linkedPullRequest = {
   url: "https://github.com/pingdotgg/t3code/pull/42",
 };
 
-describe("Grok Bot work threads stay out of thread lists", () => {
-  const threads = [
-    makeThread({ id: ThreadId.make("ordinary"), title: "Ordinary" }),
-    makeThread({ id: ThreadId.make("grok-bot:9f2c"), title: "Bot work" }),
-  ];
+describe.each(["grok-bot", "muse-agent"])(
+  "%s backing threads stay out of thread lists",
+  (source) => {
+    const threads = [
+      makeThread({ id: ThreadId.make("ordinary"), title: "Ordinary" }),
+      makeThread({ id: ThreadId.make(`${source}:9f2c`), title: "Native work" }),
+      makeThread({
+        id: ThreadId.make(`${source}:pinned`),
+        title: "Pinned native work",
+        pinnedAt: NOW,
+      }),
+      makeThread({
+        id: ThreadId.make(`${source}:settled`),
+        title: "Settled native work",
+        settledOverride: "settled",
+      }),
+      makeThread({
+        id: ThreadId.make(`${source}:snoozed`),
+        title: "Snoozed native work",
+        snoozedUntil: "2026-06-03T00:00:00.000Z",
+      }),
+    ];
 
-  it("omits them from the list layout and the reorderable active section", () => {
-    expect(
-      buildThreadListV2Items({
-        threads,
-        environmentId: null,
-        searchQuery: "",
-        now: NOW,
-      }).items.map((item) => item.thread.id),
-    ).toEqual(["ordinary"]);
-    expect(
-      getThreadListV2OrderedSection({ threads, section: "active", now: NOW }).map(
-        (thread) => thread.id,
-      ),
-    ).toEqual(["ordinary"]);
-  });
-});
+    it("omits them from the list layout and the reorderable active section", () => {
+      expect(
+        buildThreadListV2Items({
+          threads,
+          environmentId: null,
+          searchQuery: "",
+          now: NOW,
+        }).items.map((item) => item.thread.id),
+      ).toEqual(["ordinary"]);
+      expect(getThreadListV2OrderedSection({ threads, section: "pinned", now: NOW })).toEqual([]);
+      expect(
+        getThreadListV2OrderedSection({ threads, section: "active", now: NOW }).map(
+          (thread) => thread.id,
+        ),
+      ).toEqual(["ordinary"]);
+    });
+  },
+);
 
 describe("resolveThreadListV2SnoozeMenuSelection", () => {
   it("accepts a displayed evening preset while its wake time is still future", () => {

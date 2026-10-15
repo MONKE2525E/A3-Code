@@ -11,7 +11,7 @@ import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled"
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { resolveThreadProviderStack } from "@t3tools/client-runtime/state/models";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
-import { isGrokBotBackingThread } from "@t3tools/client-runtime/state/grok-bot-threads";
+import { isNativeAgentBackingThread } from "@t3tools/contracts";
 import {
   createInboxReturnTracker,
   isThreadWorking,
@@ -244,7 +244,7 @@ export function getThreadListV2OrderedSection(input: {
     if (
       thread.archivedAt !== null ||
       thread.lineage.relationshipToParent === "subagent" ||
-      isGrokBotBackingThread(thread)
+      isNativeAgentBackingThread(thread)
     )
       return false;
     if (
@@ -716,7 +716,7 @@ export function buildThreadListV2Items(input: {
     if (
       thread.archivedAt !== null ||
       thread.lineage.relationshipToParent === "subagent" ||
-      isGrokBotBackingThread(thread)
+      isNativeAgentBackingThread(thread)
     )
       continue;
     // The server stamps settledOverride for the tail.
