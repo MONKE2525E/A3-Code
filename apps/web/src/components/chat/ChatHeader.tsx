@@ -4,6 +4,7 @@ import {
   type GrokBot,
   nativeAgentSourceForThread,
   type ThreadId,
+  type ProviderInstanceId,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
@@ -51,6 +52,7 @@ import { useClientSettings } from "../../hooks/useSettings";
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
   activeThreadId: ThreadId;
+  activeThreadProviderInstanceId?: ProviderInstanceId;
   activeThreadTitle: string;
   /** Drafts have no server thread yet, so the title carries no action menu. */
   isServerThread: boolean;
@@ -92,6 +94,7 @@ const TITLE_MENU_OPEN_DELAY_MS = 500;
 export const ChatHeader = memo(function ChatHeader({
   activeThreadEnvironmentId,
   activeThreadId,
+  activeThreadProviderInstanceId,
   activeThreadTitle,
   isServerThread,
   activeProject,
@@ -488,6 +491,7 @@ export const ChatHeader = memo(function ChatHeader({
         onToggleMuseFeatures ? (
           <MuseAgentHeaderFeatures
             environmentId={activeThreadEnvironmentId}
+            providerInstanceId={activeThreadProviderInstanceId}
             pressed={museFeaturesOpen}
             onToggle={onToggleMuseFeatures}
           />

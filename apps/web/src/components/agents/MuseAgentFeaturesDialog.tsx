@@ -25,7 +25,15 @@ import {
   SparklesIcon,
   ZapIcon,
 } from "lucide-react";
-import { useCallback, useMemo, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type Ref,
+} from "react";
 
 import {
   AlertDialog,
@@ -434,7 +442,12 @@ function MuseAgentFeaturesBody({
   providerInstanceId,
   threadId,
   onClose,
-}: Target & { readonly threadId?: string; readonly onClose: () => void }) {
+  closeRef,
+}: Target & {
+  readonly threadId?: string;
+  readonly onClose: () => void;
+  readonly closeRef?: Ref<{ requestClose: () => void }>;
+}) {
   const [detail, setDetail] = useState<MuseDetail | null>(null);
   const canWrite = useAtomValue(museAgentFeatureUpdate.permissionAtom(environmentId));
   const inventory = useFeatureRead(environmentId, { operation: "inventory", providerInstanceId });
@@ -471,6 +484,7 @@ function MuseAgentFeaturesBody({
     }
     applyLeave(leave);
   };
+  useImperativeHandle(closeRef, () => ({ requestClose: () => requestLeave({ kind: "close" }) }));
   const confirmLeave = () => {
     const leave = pendingLeave;
     setPendingLeave(null);
@@ -671,9 +685,11 @@ function BackToProfile({ onBack }: { readonly onBack: () => void }) {
 export function MuseAgentFeaturesPanel({
   environmentId,
   threadId,
+  providerInstanceId,
   onClose,
 }: {
   readonly environmentId: EnvironmentId;
+  readonly providerInstanceId: ProviderInstanceId;
   readonly threadId: string;
   readonly onClose: () => void;
 }) {
@@ -681,13 +697,14 @@ export function MuseAgentFeaturesPanel({
   const status = useEnvironmentQuery(
     canRead ? museAgentStatusQuery({ environmentId, input: {} }) : null,
   ).data;
-  if (!canRead || !status?.ready || !status.provider) return null;
+  if (!canRead || !status?.ready || status.provider?.instanceId !== providerInstanceId) return null;
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <MuseAgentFeaturesBody
+        key={`${environmentId}:${providerInstanceId}:${threadId}`}
         environmentId={environmentId}
         threadId={threadId}
-        providerInstanceId={status.provider.instanceId}
+        providerInstanceId={providerInstanceId}
         onClose={onClose}
       />
     </div>
@@ -752,10 +769,12 @@ export function MuseAgentSectionPage({
 /** Header toggle for the thread's Muse features surface, mirroring the Grok Bot Computer toggle. */
 export function MuseAgentHeaderFeatures({
   environmentId,
+  providerInstanceId,
   pressed,
   onToggle,
 }: {
   readonly environmentId: EnvironmentId;
+  readonly providerInstanceId: ProviderInstanceId | undefined;
   readonly pressed: boolean;
   readonly onToggle: () => void;
 }) {
@@ -763,7 +782,13 @@ export function MuseAgentHeaderFeatures({
   const status = useEnvironmentQuery(
     canRead ? museAgentStatusQuery({ environmentId, input: {} }) : null,
   ).data;
-  if (!canRead || !status?.ready || !status.provider) return null;
+  if (
+    !canRead ||
+    !status?.ready ||
+    !providerInstanceId ||
+    status.provider?.instanceId !== providerInstanceId
+  )
+    return null;
   return (
     <Tooltip>
       <TooltipTrigger
@@ -796,6 +821,7 @@ export function MuseAgentFeaturesButton({
   readonly size?: "sm" | "touch-sm";
 }) {
   const [open, setOpen] = useState(false);
+  const closeRef = useRef<{ requestClose: () => void }>(null);
   // Every feature read needs orchestration read access, so without it neither the button nor
   // its queries exist.
   const canRead = useEnvironmentScope(environmentId, AuthOrchestrationReadScope);
@@ -805,7 +831,13 @@ export function MuseAgentFeaturesButton({
       <Button size={size} variant={variant} onClick={() => setOpen(true)}>
         <SparklesIcon /> Muse features
       </Button>
-      <Sheet open={open} onOpenChange={setOpen}>
+      <Sheet
+        open={open}
+        onOpenChange={(next) => {
+          if (next) setOpen(true);
+          else closeRef.current?.requestClose();
+        }}
+      >
         <SheetPopup side="right" className="flex w-full max-w-md flex-col">
           <SheetTitle className="sr-only">Muse features</SheetTitle>
           <SheetDescription className="sr-only">
@@ -813,6 +845,8 @@ export function MuseAgentFeaturesButton({
           </SheetDescription>
           {open ? (
             <MuseAgentFeaturesBody
+              key={`${environmentId}:${providerInstanceId}`}
+              closeRef={closeRef}
               environmentId={environmentId}
               providerInstanceId={providerInstanceId}
               onClose={() => setOpen(false)}

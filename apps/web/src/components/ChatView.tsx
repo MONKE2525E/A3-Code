@@ -11232,6 +11232,7 @@ export default function ChatView(props: ChatViewProps) {
         key={activeThread.environmentId}
         environmentId={activeThread.environmentId}
         threadId={activeThread.id}
+        providerInstanceId={activeThread.modelSelection.instanceId}
         onClose={() => {
           if (activeThreadRef === null) return;
           useRightPanelStore.getState().toggle(activeThreadRef, "muse-features");
@@ -11493,6 +11494,7 @@ export default function ChatView(props: ChatViewProps) {
           <ChatHeader
             activeThreadEnvironmentId={activeThread.environmentId}
             activeThreadId={activeThread.id}
+            activeThreadProviderInstanceId={activeThread.modelSelection.instanceId}
             isServerThread={isServerThread}
             activeThreadTitle={activeThread.title}
             activeProject={activeProject ?? null}
