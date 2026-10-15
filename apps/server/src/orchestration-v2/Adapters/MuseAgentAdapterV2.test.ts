@@ -5,7 +5,15 @@ import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as Fiber from "effect/Fiber";
 import * as Exit from "effect/Exit";
-import { ThreadId, RunId, RunAttemptId, NodeId, ProviderTurnId } from "@t3tools/contracts";
+import {
+  ThreadId,
+  RunId,
+  RunAttemptId,
+  NodeId,
+  ProviderTurnId,
+  DEFAULT_SERVER_SETTINGS,
+  ServerSettingsError,
+} from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 // @effect-diagnostics nodeBuiltinImport:off -- A private native attachment fixture proves bytes precede published metadata.
 import * as NodeCrypto from "node:crypto";
@@ -42,6 +50,81 @@ const sessionInput = {
   runtimePolicy: policy,
 };
 const isPromptNotSubmittedError = Schema.is(ProviderPromptNotSubmittedError);
+
+it.effect.each([
+  { global: true, browser: false, device: false, fail: false },
+  { global: false, browser: true, device: false, fail: false },
+  { global: true, browser: false, device: true, fail: false },
+  { global: false, browser: true, device: true, fail: false },
+  { global: true, browser: false, device: false, fail: true },
+])("limits Muse tool grants to effective project access: %o", (scenario) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const turn = yield* makeTurn;
+      let settingsReads = 0;
+      let grant: ToolsPort.MuseDirectToolTurnOptions | undefined;
+      const settings = {
+        ...DEFAULT_SERVER_SETTINGS,
+        enableAgentBrowserAccess: scenario.global,
+        enableAgentDeviceAccess: scenario.global,
+        projectSettingsOverrides: {
+          [turn.appThread.projectId]: {
+            enableAgentBrowserAccess: scenario.browser,
+            enableAgentDeviceAccess: scenario.device,
+          },
+          other: {
+            enableAgentBrowserAccess: !scenario.browser,
+            enableAgentDeviceAccess: !scenario.device,
+          },
+        },
+      };
+      const adapter = yield* createMuseAgentAdapterV2(options).pipe(
+        Effect.provideService(Native.MuseAgentNativeRuntimeService, makeNative()),
+        Effect.provideService(ProviderHost.ProviderHost, {
+          ...host,
+          settings: {
+            ...host.settings,
+            get: Effect.suspend(() => {
+              settingsReads++;
+              return scenario.fail
+                ? Effect.fail(
+                    new ServerSettingsError({ settingsPath: "fixture", operation: "read-file" }),
+                  )
+                : Effect.succeed(settings);
+            }),
+          },
+        }),
+        Effect.provideService(
+          ToolsPort.MuseAgentDirectToolsPort,
+          ToolsPort.MuseAgentDirectToolsPort.of({
+            install: () => Effect.succeed({ uninstall: Effect.void }),
+            start: (input) =>
+              Effect.sync(() => {
+                grant = input;
+                return { revoke: Effect.void, close: Effect.void };
+              }),
+          }),
+        ),
+      );
+      const runtime = yield* adapter.openSession(sessionInput);
+      assert.strictEqual(settingsReads, 0);
+      yield* runtime.startTurn(turn);
+      assert.strictEqual(settingsReads, 1);
+      assert.isDefined(grant);
+      assert.strictEqual(grant!.browserToolsAvailable, scenario.browser);
+      assert.deepStrictEqual(
+        [...grant!.capabilities].sort(),
+        [
+          "orchestration",
+          "worktree",
+          "pull-requests",
+          ...(scenario.browser ? ["preview"] : []),
+          ...(scenario.device ? ["device"] : []),
+        ].sort(),
+      );
+    }),
+  ),
+);
 
 it.effect(
   "loads older canonical pages through one watcher, deduplicates rows and fences stale cursors",

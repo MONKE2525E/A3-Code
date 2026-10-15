@@ -24,8 +24,8 @@ export interface MuseDirectToolTurnOptions {
   readonly accountBinding: string;
   readonly nativeSessionId: string;
   readonly connectionId?: string;
-  readonly browserToolsAvailable?: boolean;
-  readonly capabilities?: ReadonlySet<McpCapability>;
+  readonly browserToolsAvailable: boolean;
+  readonly capabilities: ReadonlySet<McpCapability>;
   /** Checks the captured account, native session and exact active attempt in host-owned state. */
   readonly isCurrent: Effect.Effect<boolean>;
   /** A host callback adapter registers definitions only. Registry credentials never reach it. */

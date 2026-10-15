@@ -18,6 +18,8 @@ import type { Done } from "effect/Cause";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import type { McpCapability } from "../../mcp/McpInvocationContext.ts";
 import { museAgentHistoryPage } from "../../museAgent/MuseAgentHistoryPage.ts";
 import * as Native from "../../museAgent/MuseAgentNativeRuntimeService.ts";
 import * as Transport from "../../museAgent/MuseAgentTransport.ts";
@@ -589,6 +591,23 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
               });
               if (projection.isTerminal()) return;
               if (!toolLifetime) {
+                const access = yield* host.settings.get.pipe(
+                  Effect.map(
+                    (all) => resolveProjectSettings(all, request.appThread.projectId).settings,
+                  ),
+                  Effect.map((effective) => ({
+                    browser: effective.enableAgentBrowserAccess,
+                    device: effective.enableAgentDeviceAccess,
+                  })),
+                  Effect.orElseSucceed(() => ({ browser: false, device: false })),
+                );
+                const toolCapabilities = new Set<McpCapability>([
+                  "orchestration",
+                  "worktree",
+                  "pull-requests",
+                ]);
+                if (access.browser) toolCapabilities.add("preview");
+                if (access.device) toolCapabilities.add("device");
                 const connectionId = yield* native.connectionId(binding);
                 const toolScope = yield* Scope.make();
                 const clientId = NodeCrypto.randomUUID();
@@ -607,6 +626,8 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
                     accountBinding: binding,
                     nativeSessionId: session.session_id,
                     connectionId,
+                    browserToolsAvailable: access.browser,
+                    capabilities: toolCapabilities,
                     isCurrent: Effect.gen(function* () {
                       if (
                         toolLifetime !== pendingLifetime ||

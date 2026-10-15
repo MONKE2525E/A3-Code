@@ -47,9 +47,7 @@ export const installLayer = Layer.effectDiscard(
       const options = {
         ...inputOptions,
         remoteRun: { ...inputOptions.remoteRun },
-        ...(inputOptions.capabilities === undefined
-          ? {}
-          : { capabilities: new Set(inputOptions.capabilities) }),
+        capabilities: new Set(inputOptions.capabilities),
       };
       if (!active)
         return yield* new NativeTools.NativeAgentDirectToolsError({ code: "not_installed" });
@@ -94,14 +92,8 @@ export const installLayer = Layer.effectDiscard(
             threadId: options.threadId,
             providerInstanceId: options.providerInstanceId,
             remoteRun: { ...options.remoteRun },
-            ...(options.browserToolsAvailable === undefined
-              ? {}
-              : {
-                  browserToolsAvailable: options.browserToolsAvailable,
-                }),
-            ...(options.capabilities === undefined
-              ? {}
-              : { capabilities: new Set(options.capabilities) }),
+            browserToolsAvailable: options.browserToolsAvailable,
+            capabilities: new Set(options.capabilities),
           }),
           (credential) => registry.revokeProviderSession(credential.config.providerSessionId),
         );

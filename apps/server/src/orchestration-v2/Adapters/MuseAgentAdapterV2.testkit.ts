@@ -1,5 +1,6 @@
 import {
   MessageId,
+  DEFAULT_SERVER_SETTINGS,
   NodeId,
   ProjectId,
   ProviderInstanceId,
@@ -32,7 +33,7 @@ export const host = ProviderHost.ProviderHost.of({
     attachmentsDir: "/synthetic/attachments",
   },
   settings: {
-    get: Effect.die("unused synthetic settings"),
+    get: Effect.succeed(DEFAULT_SERVER_SETTINGS),
     withSnapshot: () => Effect.die("unused synthetic settings"),
     changes: Stream.empty,
     subscribe: Effect.succeed(Stream.empty),

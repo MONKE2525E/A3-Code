@@ -111,6 +111,8 @@ const makeFixture = (wait = Effect.void) =>
       Layer.provide(registryLayer),
     );
     const options: Port.MuseDirectToolTurnOptions = {
+      browserToolsAvailable: true,
+      capabilities: new Set(["orchestration", "worktree", "pull-requests", "preview"]),
       threadId,
       providerInstanceId,
       remoteRun: { runId, attemptId },
@@ -193,6 +195,27 @@ it.effect("the early port fails explicitly before installation and refuses repla
       expect((yield* Effect.flip(port.start(f.options))).code).toBe("not_installed");
     }).pipe(Effect.provide(Port.layer));
   }).pipe(Effect.scoped),
+);
+
+it.effect.each([false, true])(
+  "forwards explicit browser authority to the registry: %s",
+  (browser) =>
+    Effect.gen(function* () {
+      const f = yield* makeFixture();
+      yield* Effect.gen(function* () {
+        const port = yield* Port.MuseAgentDirectToolsPort;
+        const turn = yield* port.start({
+          ...f.options,
+          browserToolsAvailable: browser,
+          capabilities: new Set(browser ? ["preview"] : []),
+        });
+        const scope = yield* f.resolve();
+        expect(scope?.capabilities.has("preview")).toBe(browser);
+        expect(scope?.capabilities.has("device")).toBe(false);
+        expect((yield* f.invoke()).params.ok).toBe(true);
+        yield* turn.close;
+      }).pipe(Effect.provide(f.layer));
+    }).pipe(Effect.scoped),
 );
 
 it.effect("issues registry authority privately and revokes it with native callbacks on close", () =>
