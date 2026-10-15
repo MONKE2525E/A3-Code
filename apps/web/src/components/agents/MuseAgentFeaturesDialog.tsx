@@ -312,7 +312,7 @@ function useOpenMuseChatWithDraft(
   return { start, canOpen: canOpen && !opening, error };
 }
 
-function SkillsSection({ environmentId, providerInstanceId }: Target) {
+export function MuseAgentSkillsSection({ environmentId, providerInstanceId }: Target) {
   const view = useFeatureRead(environmentId, { operation: "skills", providerInstanceId });
   const skills = view.data?.operation === "skills" ? view.data.data : null;
   const groups = useMemo(() => (skills ? groupMuseSkills(skills) : []), [skills]);
@@ -503,7 +503,7 @@ function MuseAgentFeaturesBody({
         ) : detail === "connections" ? (
           <MuseAgentConnectionsSection {...target} canWrite={canWrite} />
         ) : detail === "skills" ? (
-          <SkillsSection {...target} />
+          <MuseAgentSkillsSection {...target} />
         ) : (
           <MuseAgentDictationSection
             key={`${environmentId}:${providerInstanceId}`}

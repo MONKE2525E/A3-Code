@@ -4,10 +4,8 @@ import { useLocation, useNavigate } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 
-import {
-  AI_AGENTS_SECTION_LABEL,
-  resolveMuseAgentSidebarState,
-} from "~/components/agents/aiAgents";
+import { AI_AGENTS_SECTION_LABEL } from "~/components/agents/aiAgents";
+import { enabledAgentMarketplaces } from "~/components/agents/nativeAgentAvailability";
 import {
   AgentPinnedTile,
   AgentRosterNotice,
@@ -15,7 +13,6 @@ import {
   AgentRowMenu,
 } from "~/components/agents/AgentRoster";
 import { MuseAgentSidebarSection } from "~/components/agents/MuseAgentSidebarSection";
-import { museAgentStatusQuery } from "~/state/museAgent";
 
 import { requestConfirmDialog } from "~/confirmDialog";
 import { Collapsible, CollapsiblePanel } from "~/components/ui/collapsible";
@@ -74,11 +71,13 @@ export function GrokBotSidebarDropdown({
   const environmentId = useSelectedGrokBotEnvironmentId();
   const configs = useAtomValue(environmentServerConfigsAtom);
   const config = environmentId === null ? undefined : configs.get(environmentId);
-  const configured = Object.values(config?.settings.providerInstances ?? {}).some(
-    (instance) => instance.driver === "grok-bot",
-  );
-  return configured ? (
-    <ConfiguredGrokBotSidebarDropdown nativeAgents={nativeAgents} />
+  const available = enabledAgentMarketplaces(config?.settings.providerInstances);
+  if (available.length === 0) return null;
+  return available.includes("grok-bot") ? (
+    <ConfiguredGrokBotSidebarDropdown
+      nativeAgents={nativeAgents}
+      museEnabled={available.includes("muse-agent")}
+    />
   ) : (
     <NativeAgentsOnlySection nativeAgents={nativeAgents} />
   );
@@ -94,13 +93,6 @@ function NativeAgentsOnlySection({ nativeAgents }: { readonly nativeAgents?: Rea
   const [open, setOpen] = useLocalStorage(GROK_BOTS_OPEN_STORAGE_KEY, true, Schema.Boolean);
   const navigate = useNavigate();
   const { isMobile, setOpenMobile } = useSidebar();
-  const muse = useEnvironmentQuery(
-    environmentId === null ? null : museAgentStatusQuery({ environmentId, input: {} }),
-  );
-  const museShown =
-    environmentId !== null &&
-    resolveMuseAgentSidebarState({ status: muse.data, error: muse.error }).kind !== "hidden";
-  if (!museShown && !nativeAgents) return null;
   return (
     <SidebarGroup className="z-[1]">
       <Collapsible open={open} onOpenChange={setOpen}>
@@ -133,7 +125,13 @@ function NativeAgentsOnlySection({ nativeAgents }: { readonly nativeAgents?: Rea
   );
 }
 
-function ConfiguredGrokBotSidebarDropdown({ nativeAgents }: { readonly nativeAgents?: ReactNode }) {
+function ConfiguredGrokBotSidebarDropdown({
+  nativeAgents,
+  museEnabled,
+}: {
+  readonly nativeAgents?: ReactNode;
+  readonly museEnabled: boolean;
+}) {
   const selectedEnvironmentId = useSelectedGrokBotEnvironmentId();
   const connectedEnvironmentIds = useConnectedEnvironmentIds();
   const resolved = resolveGrokBotSelectedEnvironment({
@@ -257,7 +255,7 @@ function ConfiguredGrokBotSidebarDropdown({ nativeAgents }: { readonly nativeAge
         <CollapsiblePanel>
           <div className="mt-0.5">
             {nativeAgents}
-            {environmentId !== null ? (
+            {environmentId !== null && museEnabled ? (
               <MuseAgentSidebarSection
                 environmentId={environmentId}
                 onOpenSettings={() => openSettings()}
