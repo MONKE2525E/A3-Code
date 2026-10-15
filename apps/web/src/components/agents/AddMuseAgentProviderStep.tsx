@@ -41,6 +41,7 @@ export function AddMuseAgentProviderStep({
 }) {
   const status = useEnvironmentQuery(museAgentStatusQuery({ environmentId, input: {} }));
   const canSetup = useAtomValue(museAgentSetup.permissionAtom(environmentId));
+  const canSignIn = useAtomValue(museAgentSignIn.permissionAtom(environmentId));
   const setup = useAtomCommand(museAgentSetup, { reportFailure: false });
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -107,7 +108,7 @@ export function AddMuseAgentProviderStep({
         </p>
       ) : null}
       <div className="flex flex-wrap gap-2">
-        <Button size="sm" disabled={pending || !canSetup} onClick={() => void openSignIn()}>
+        <Button size="sm" disabled={pending || !canSignIn} onClick={() => void openSignIn()}>
           {pending ? "Opening…" : "Sign in to Muse"}
         </Button>
         {canConnect ? (

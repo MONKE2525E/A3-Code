@@ -3,6 +3,8 @@ import { GitPreparePullRequestThreadInput } from "./git.ts";
 import { GrokBotOrchestratorInput } from "./grokBotOrchestrator.ts";
 import {
   AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  AuthPreviewOperateScope,
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
   type AuthEnvironmentScope,
@@ -94,6 +96,8 @@ export function clientRpcRequiredScopes(
   method: string,
   input: unknown,
 ): readonly AuthEnvironmentScope[] {
+  if (method === WS_METHODS.museAgentsSignIn)
+    return [AuthSettingsWriteScope, AuthOrchestrationReadScope, AuthPreviewOperateScope];
   // Status is a read. Only explicit setup changes the environment's provider.
   // An omitted input still asks for write availability on the setup command.
   if (method === WS_METHODS.grokBotsOrchestratorConfig && input !== undefined) {

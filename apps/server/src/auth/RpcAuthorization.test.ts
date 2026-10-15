@@ -600,3 +600,43 @@ describe("persistent bot thread authorization", () => {
     }).pipe(Effect.scoped),
   );
 });
+
+it.effect("requires all preview permissions at the server sign-in boundary", () =>
+  Effect.gen(function* () {
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (
+          tag,
+        ): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof WS_METHODS.museAgentsSignIn> =>
+          tag !== WS_METHODS.museAgentsSignIn,
+      ),
+    );
+    const required = [AuthSettingsWriteScope, AuthOrchestrationReadScope, AuthPreviewOperateScope];
+    let handled = 0;
+    for (const omitted of [...required, null]) {
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.museAgentsSignIn, () =>
+              Effect.sync(() => {
+                handled++;
+                return { threadId: "private-thread", tabId: "private-tab" };
+              }),
+            ),
+            RpcAuthorization.layer(required.filter((scope) => scope !== omitted)),
+          ),
+        ),
+      );
+      if (omitted === null)
+        expect(yield* client[WS_METHODS.museAgentsSignIn]({})).toEqual({
+          threadId: "private-thread",
+          tabId: "private-tab",
+        });
+      else
+        expect(yield* client[WS_METHODS.museAgentsSignIn]({}).pipe(Effect.flip)).toMatchObject({
+          requiredPermission: omitted,
+        });
+    }
+    expect(handled).toBe(1);
+  }).pipe(Effect.scoped),
+);
