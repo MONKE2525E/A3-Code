@@ -951,3 +951,36 @@ it.effect("fences account changes between the theme catalog and mutation", () =>
     expect(f.calls.filter((call) => call.write)).toHaveLength(0);
   }).pipe(Effect.provide(f.layer));
 });
+
+it.effect.each([
+  ["status", 403, "refused"],
+  ["status", 501, "unavailable"],
+  ["httpStatus", 403, "refused"],
+  ["httpStatus", 501, "unavailable"],
+] as const)(
+  "classifies native $0=$1 for both reads and uncertain writes",
+  ([field, status, expected]) => {
+    const f = fixture({});
+    return Effect.gen(function* () {
+      const service = yield* Service.MuseAgentFeatureService;
+      f.fail(
+        new Transport.MuseAgentTransportError({
+          kind: "disconnected",
+          cause: { [field]: status, message: "private-token" },
+        }),
+      );
+      const read = yield* Effect.flip(service.computerStatus(binding));
+      expect(read.code).toBe(expected);
+      f.fail(
+        new Transport.MuseAgentTransportError({
+          kind: "uncertain",
+          cause: { [field]: status, message: "private-token" },
+        }),
+      );
+      const write = yield* Effect.flip(service.deleteTask(binding, "routine"));
+      expect(write.code).toBe(expected);
+      expect(JSON.stringify([read, write])).not.toContain("private-token");
+      expect(f.calls).toHaveLength(2);
+    }).pipe(Effect.provide(f.layer));
+  },
+);

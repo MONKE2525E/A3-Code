@@ -145,6 +145,7 @@ const NativeComputerTask = Schema.Struct({
 const NativeErrorCode = Schema.Struct({
   code: Schema.optionalKey(Schema.String),
   httpStatus: Schema.optionalKey(Schema.Int),
+  status: Schema.optionalKey(Schema.Int),
 });
 const isNativeErrorCode = Schema.is(NativeErrorCode);
 const ProfileDocument = Schema.Literals(["identity", "soul", "memory"]);
@@ -299,9 +300,9 @@ const make = Effect.gen(function* () {
     ) {
       return new MuseAgentFeatureError({ feature, code: "unavailable" });
     }
-    if (native?.httpStatus === 501)
-      return new MuseAgentFeatureError({ feature, code: "unavailable" });
-    if (native?.httpStatus === 403) return new MuseAgentFeatureError({ feature, code: "refused" });
+    const status = native?.httpStatus ?? native?.status;
+    if (status === 501) return new MuseAgentFeatureError({ feature, code: "unavailable" });
+    if (status === 403) return new MuseAgentFeatureError({ feature, code: "refused" });
     const code =
       error.kind === "uncertain"
         ? "write_uncertain"
