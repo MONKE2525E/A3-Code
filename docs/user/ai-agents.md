@@ -14,7 +14,7 @@ Muse Code, the coding provider, is separate and unchanged.
 
 Open **Muse features** from the chat header or provider settings to search memories, inspect routines, manage conversations, and see connections, skills, and computer status. **Create routine** and **Edit** prepare a message in Muse's chat; review it before sending.
 
-The **Profile** tab edits Muse's Identity, Personality, and Memory files and selects its native chat theme. Changes require **Save**. If a file changed elsewhere, reload it before saving again.
+The profile editor updates Muse's Identity, Personality, and Memory files. Changes require **Save**. If a file changed elsewhere, reload it before saving again.
 
 Connection authorization opens in a separate tab. Refresh afterwards to check whether Muse connected it. API keys and consent can be entered directly in T3 Code. Other authentication methods may still require Muse. Credentials requested during a conversation appear in a separate private form; they are sent directly to Muse’s credential store and never added to chat.
 
