@@ -50,8 +50,8 @@ const checkMuseAgentProvider = Effect.fnUntraced(function* (
     continuationGroupKey: `muse-agent/account/${options.config.accountBinding ?? "unbound"}`,
   });
   const snapshot = (message: string, ready = false): ServerProvider =>
-    stamp(
-      buildServerProvider({
+    stamp({
+      ...buildServerProvider({
         presentation,
         enabled: options.enabled,
         checkedAt,
@@ -68,7 +68,8 @@ const checkMuseAgentProvider = Effect.fnUntraced(function* (
           message,
         },
       }),
-    );
+      supportsTextGeneration: false,
+    });
   if (!options.enabled) return snapshot("Muse is disabled.");
   const binding = options.config.accountBinding;
   if (!binding) return snapshot("Connect the native Muse account before enabling this provider.");
