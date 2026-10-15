@@ -663,3 +663,82 @@ it("drops Muse inline markers and keeps the words around them", () => {
   );
   assert.strictEqual(stripMuseInlineMarkers("plain reply"), "plain reply");
 });
+
+it.each(["file", "image", "audio", "video", "document"])(
+  "preserves literal %s bracketed text",
+  (kind) => {
+    for (const text of [
+      `[${kind}:README.md]`,
+      `Use [${kind}:README.md] here.  `,
+      `[${kind}:text/plain README.md]`,
+      `[${kind}:README.md workspace/user/files/readme]`,
+      `Example: [${kind}:text/plain workspace/user/files/readme]`,
+    ])
+      assert.strictEqual(stripMuseInlineMarkers(text), text);
+    assert.strictEqual(
+      stripMuseInlineMarkers(
+        `Caption\n[${kind}:application/octet-stream workspace/user/files/blob]`,
+      ),
+      "Caption",
+    );
+  },
+);
+
+it.each(["message.user", "message.assistant"])(
+  "preserves literal bracketed content in live and imported %s messages",
+  (event) => {
+    const literal = "Explain [file:README.md], [image:example] and [document:notes].";
+    for (const imported of [false, true]) {
+      const projection = makeMuseAgentProjection({
+        binding,
+        sessionId: "primary",
+        threadId,
+        providerInstanceId: instanceId,
+      });
+      const message = imported
+        ? museHistoryFrame(
+            {
+              event_name: event,
+              seq: 1,
+              occurred_at_ms: 1234,
+              message_id: "message-1",
+              display_text: literal,
+              display_text_ready: true,
+              payload: { session_id: "primary" },
+            },
+            "primary",
+          )
+        : frame(event, 1, {
+            message_id: "message-1",
+            display_text: literal,
+            display_text_ready: true,
+          });
+      assert.ok(message);
+      projection.project(message);
+      assert.strictEqual(projection.snapshot()[0]?.text, literal);
+    }
+  },
+);
+
+it("preserves literal brackets from the canonical transcript after streaming", () => {
+  const literal = "Use [file:README.md] in the example.";
+  const projection = makeMuseAgentProjection({
+    binding,
+    sessionId: "primary",
+    threadId,
+    providerInstanceId: instanceId,
+  });
+  projection.project(frame("delta.text_append", 1, { text: literal }));
+  assert.strictEqual(projection.snapshot()[0]?.text, literal);
+  projection.project(
+    frame("message.assistant", 2, {
+      display_text: "Stale caption",
+      transcript: {
+        messages: [
+          { id: "assistant-1", role: "assistant", content: [{ type: "text", text: literal }] },
+        ],
+      },
+    }),
+  );
+  assert.strictEqual(projection.snapshot()[0]?.text, literal);
+});

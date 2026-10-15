@@ -79,13 +79,9 @@ export function museTerminalStatus(status: string | undefined) {
   return null;
 }
 
-/**
- * Muse writes inline markers into its transcript text: its own UI widgets (`[[hatch_widget:…]]`)
- * and attached files (`[image:image/jpeg workspace/…]`). T3 renders neither as text, so the markers
- * are dropped and the words around them stay.
- */
+/** Only standalone native metadata is hidden; bracketed prose and inline examples stay literal. */
 const MUSE_INLINE_MARKER =
-  /\[\[hatch_widget:[^\]]*\]\]|\[(?:image|file|audio|video|document):[^\]]*\]/g;
+  /^[\t ]*(?:\[\[hatch_widget:[^\]\r\n]*\]\]|\[(?:image|file|audio|video|document):[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+[\t ]+workspace\/[^\]\r\n]+\])[\t ]*\r?$/gm;
 export function stripMuseInlineMarkers(text: string): string {
   const stripped = text.replace(MUSE_INLINE_MARKER, "");
   return stripped === text ? text : stripped.trimEnd();
