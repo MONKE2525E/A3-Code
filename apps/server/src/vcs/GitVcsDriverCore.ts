@@ -288,14 +288,17 @@ function paginateBranches(input: {
   };
 }
 
-function parseWorktreeBranchPaths(stdout: string): ReadonlyMap<string, string> {
+function parseWorktreeBranchPaths(
+  stdout: string,
+  includePrunable = false,
+): ReadonlyMap<string, string> {
   const worktreePaths = new Map<string, string>();
   let currentPath: string | null = null;
   let currentBranch: string | null = null;
   let currentPrunable = false;
 
   const flush = () => {
-    if (currentPath !== null && currentBranch !== null && !currentPrunable) {
+    if (currentPath !== null && currentBranch !== null && (includePrunable || !currentPrunable)) {
       worktreePaths.set(currentBranch, currentPath);
     }
     currentPath = null;
@@ -3408,13 +3411,15 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const { worktreePath, targetBranch } = yield* Effect.gen(function* () {
       let targetBranch = input.newRefName ?? input.refName.replace(/^refs\/heads\//, "");
       const repoName = path.basename(input.cwd);
-      // Missing directories can leave branch reservations behind after a crash.
-      // Locked worktrees are deliberately retained by Git.
+      // Honor Git's expiry so a temporarily disconnected drive is not pruned.
+      // Recent missing checkouts and locked worktrees keep their branches reserved.
+      const pruneExpiry =
+        (yield* readConfigValue(input.cwd, "gc.worktreePruneExpire")) ?? "3.months.ago";
       yield* runGit("GitVcsDriver.createWorktree.prune", input.cwd, [
         "worktree",
         "prune",
         "--expire",
-        "now",
+        pruneExpiry,
       ]);
       const checkedOutBranches = parseWorktreeBranchPaths(
         yield* runGitStdout("GitVcsDriver.createWorktree.list", input.cwd, [
@@ -3423,9 +3428,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           "--porcelain",
           "-z",
         ]),
+        true,
       );
-      let createBranch = input.newRefName !== undefined;
-      {
+      let createBranch = false;
+      // An explicit checkout must keep its branch (for example, recovery of a
+      // missing thread worktree). Only new-branch requests allocate alternatives.
+      if (input.newRefName !== undefined) {
         const requestedBranch = targetBranch;
         const baseCommit = yield* runGitStdout("GitVcsDriver.createWorktree.base", input.cwd, [
           "rev-parse",
@@ -3445,13 +3453,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           // A new-branch request can only reuse an untouched branch at the base.
           // An explicit checkout (no newRefName) preserves the branch's commits.
           if (checkedOutBranches.has(targetBranch)) continue;
-          if (
-            (input.newRefName !== undefined || suffix > 1) &&
-            existing.exitCode === 0 &&
-            existing.stdout.trim() !== baseCommit.trim()
-          )
-            continue;
-          createBranch = existing.exitCode !== 0 && (input.newRefName !== undefined || suffix > 1);
+          if (existing.exitCode === 0 && existing.stdout.trim() !== baseCommit.trim()) continue;
+          createBranch = existing.exitCode !== 0;
           break;
         }
       }
@@ -3525,8 +3528,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       Effect.retry({
         times: 3,
         while: (error) =>
-          error.reason === "branch_already_exists" ||
-          error.reason === "branch_checked_out_in_worktree" ||
+          (input.newRefName !== undefined &&
+            (error.reason === "branch_already_exists" ||
+              error.reason === "branch_checked_out_in_worktree")) ||
           (input.path === null && error.reason === "path_already_exists"),
       }),
     );

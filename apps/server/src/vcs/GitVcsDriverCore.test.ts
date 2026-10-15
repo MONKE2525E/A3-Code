@@ -2987,7 +2987,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
     );
 
     it.effect.each([true, false])(
-      "allocates a new branch when the requested branch is checked out (new branch: %s)",
+      "preserves the occupied checkout and only allocates for a new branch (new branch: %s)",
       (newBranch) =>
         Effect.gen(function* () {
           const cwd = yield* makeTmpDir();
@@ -2998,13 +2998,18 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           const livePath = path.join(directory, "live");
           yield* git(cwd, ["worktree", "add", "-b", "feature", livePath, initialBranch]);
           yield* writeTextFile(livePath, "uncommitted.txt", "keep me");
-          const created = yield* driver.createWorktree({
+          const request = driver.createWorktree({
             cwd,
             path: path.join(directory, "second"),
             refName: newBranch ? initialBranch : "feature",
             ...(newBranch ? { newRefName: "feature" } : {}),
           });
-          assert.equal(created.worktree.refName, "feature-2");
+          if (newBranch) {
+            assert.equal((yield* request).worktree.refName, "feature-2");
+          } else {
+            const error = yield* request.pipe(Effect.flip);
+            assert.equal(error.reason, "branch_checked_out_in_worktree");
+          }
           assert.equal(yield* git(livePath, ["branch", "--show-current"]), "feature");
           assert.equal(
             yield* (yield* FileSystem.FileSystem).readFileString(
@@ -3024,7 +3029,15 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         const driver = yield* GitVcsDriver.GitVcsDriver;
         const worktreePath = path.join(yield* makeTmpDir(), "stale");
         yield* git(cwd, ["worktree", "add", "-b", "feature", worktreePath, initialBranch]);
+        const registration = yield* git(worktreePath, ["rev-parse", "--git-path", "gitdir"]);
         yield* fs.remove(worktreePath, { recursive: true });
+        yield* Effect.sync(() => {
+          const directory = path.dirname(registration);
+          for (const entry of NodeFS.readdirSync(directory)) {
+            NodeFS.utimesSync(path.join(directory, entry), 1, 1);
+          }
+          NodeFS.utimesSync(directory, 1, 1);
+        });
         const created = yield* driver.createWorktree({
           cwd,
           path: worktreePath,
@@ -3034,6 +3047,27 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         assert.equal(created.worktree.refName, "feature");
         assert.equal(created.worktree.path, worktreePath);
         assert.notInclude(yield* git(cwd, ["worktree", "list", "--porcelain"]), "prunable");
+      }),
+    );
+
+    it.effect("preserves recent missing registrations in case a drive is disconnected", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const path = yield* Path.Path;
+        const fs = yield* FileSystem.FileSystem;
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const worktreePath = path.join(yield* makeTmpDir(), "unavailable");
+        yield* git(cwd, ["worktree", "add", "-b", "feature", worktreePath, initialBranch]);
+        yield* fs.remove(worktreePath, { recursive: true });
+        const created = yield* driver.createWorktree({
+          cwd,
+          path: path.join(yield* makeTmpDir(), "other"),
+          refName: initialBranch,
+          newRefName: "feature",
+        });
+        assert.equal(created.worktree.refName, "feature-2");
+        assert.include(yield* git(cwd, ["worktree", "list", "--porcelain"]), worktreePath);
       }),
     );
 
