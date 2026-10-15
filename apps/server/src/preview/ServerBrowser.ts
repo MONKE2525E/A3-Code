@@ -81,6 +81,7 @@ import * as PreviewBrowser from "./PreviewBrowser.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import { presentAsChrome, ServerBrowserContexts } from "./ServerBrowserContexts.ts";
 import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
+import * as IntegrationBrowser from "./IntegrationBrowser.ts";
 
 const SERVER_HOST_CLIENT_ID = SERVER_BROWSER_AUTOMATION_CLIENT_ID;
 const RENDER_SCALE = 2;
@@ -125,6 +126,8 @@ const UNATTACHED_FILL_VIEWPORT = { width: 1280, height: 800 } as const;
 const NAVIGATION_TIMEOUT_MS = 15_000;
 const VIEWER_NAVIGATION_OPTIONS = { waitUntil: "commit", timeout: NAVIGATION_TIMEOUT_MS } as const;
 const ACTION_TIMELINE_LIMIT = 50;
+
+const isIntegrationBrowserError = Schema.is(IntegrationBrowser.IntegrationBrowserError);
 
 export class ServerBrowserTabNotFoundError extends Schema.TaggedError<ServerBrowserTabNotFoundError>()(
   "ServerBrowserTabNotFoundError",
@@ -746,7 +749,9 @@ const make = Effect.gen(function* () {
     const adopted = adoptedPages.get(tabKey(snapshot.threadId, snapshot.tabId));
     adoptedPages.delete(tabKey(snapshot.threadId, snapshot.tabId));
     const desktop =
-      adopted === undefined && (await desktopRenders(snapshot))
+      adopted === undefined &&
+      snapshot.profileId !== IntegrationBrowser.MUSE_AUTH_PROFILE &&
+      (await desktopRenders(snapshot))
         ? await connectDesktop(snapshot)
         : null;
     // An agent tab without a profile (no client reported one) keeps throwaway storage.
@@ -1297,13 +1302,28 @@ const make = Effect.gen(function* () {
 
   /** Matches an id, then a case-insensitive name. Omitted means the reported default. */
   const resolveOpenProfile = (requested: string | undefined): string | undefined => {
-    if (requested === undefined) return reportedProfiles?.defaultProfileId;
+    if (requested === IntegrationBrowser.MUSE_AUTH_PROFILE)
+      throw new BrowserControlInterrupted("Sign-in profiles are private to the person signing in.");
+    if (requested === undefined) {
+      const defaultId = reportedProfiles?.defaultProfileId;
+      if (defaultId === IntegrationBrowser.MUSE_AUTH_PROFILE)
+        throw new BrowserControlInterrupted(
+          "Sign-in profiles are private to the person signing in.",
+        );
+      return defaultId;
+    }
     const profiles = reportedProfiles?.profiles ?? BUILT_IN_BROWSER_PROFILES;
     const wanted = requested.toLowerCase();
     const match =
       findBrowserProfile(profiles, requested) ??
       profiles.find((profile) => profile.name.toLowerCase() === wanted);
-    if (match) return match.id;
+    if (match) {
+      if (match.id === IntegrationBrowser.MUSE_AUTH_PROFILE)
+        throw new BrowserControlInterrupted(
+          "Sign-in profiles are private to the person signing in.",
+        );
+      return match.id;
+    }
     throw new ServerBrowserPage.ServerBrowserOperationError(
       "PreviewAutomationUnknownProfileError",
       `No browser profile is named "${requested}". Use one of: ${profiles
@@ -1685,6 +1705,8 @@ const make = Effect.gen(function* () {
   };
 
   const runOperation = async (request: PreviewAutomationRequest): Promise<unknown> => {
+    if (request.threadId.startsWith("integration-auth:"))
+      throw new BrowserControlInterrupted("Sign-in pages are private to the person signing in.");
     const input = request.input;
     switch (request.operation) {
       case "status":
@@ -2470,13 +2492,68 @@ const make = Effect.gen(function* () {
       catch: (cause) => new PreviewClearProfileError({ profileId, cause }),
     });
 
-  return ServerBrowser.of({
+  const service = ServerBrowser.of({
     attachViewer,
     clearProfile,
     reportProfiles,
     openDownload,
     answerFileChooser,
   });
+  return Context.make(ServerBrowser, service).pipe(
+    Context.add(IntegrationBrowser.IntegrationBrowser, {
+      museTransportPage: Effect.tryPromise({
+        try: async () =>
+          (await contexts.contextFor(IntegrationBrowser.MUSE_AUTH_PROFILE)).newPage(),
+        catch: (cause) => new IntegrationBrowser.IntegrationBrowserError({ cause }),
+      }),
+      openMuse: Effect.gen(function* () {
+        const threadId = ThreadId.make(IntegrationBrowser.MUSE_AUTH_THREAD);
+        const { sessions } = yield* manager.list({ threadId });
+        const snapshot =
+          sessions.find((session) => session.profileId === IntegrationBrowser.MUSE_AUTH_PROFILE) ??
+          (yield* manager.open({
+            threadId,
+            profileId: IntegrationBrowser.MUSE_AUTH_PROFILE,
+            url: "https://muse.ai/",
+            runtime: "server",
+            reveal: false,
+          }));
+        yield* Effect.tryPromise({
+          try: () => ensureTab(snapshot),
+          catch: (cause) => new IntegrationBrowser.IntegrationBrowserError({ cause }),
+        });
+        return { threadId: snapshot.threadId, tabId: snapshot.tabId };
+      }).pipe(
+        Effect.mapError((cause) =>
+          isIntegrationBrowserError(cause)
+            ? cause
+            : new IntegrationBrowser.IntegrationBrowserError({ cause }),
+        ),
+      ),
+      museCookies: Effect.tryPromise({
+        try: async () => {
+          const directory = NodePath.join(
+            config.stateDir,
+            "server-browser",
+            "profiles",
+            IntegrationBrowser.MUSE_AUTH_PROFILE,
+          );
+          if (
+            !(await NodeFSP.access(directory).then(
+              () => true,
+              () => false,
+            ))
+          )
+            return [];
+          await NodeFSP.chmod(directory, 0o700);
+          return (await contexts.contextFor(IntegrationBrowser.MUSE_AUTH_PROFILE)).cookies(
+            "https://muse.ai/",
+          );
+        },
+        catch: (cause) => new IntegrationBrowser.IntegrationBrowserError({ cause }),
+      }),
+    }),
+  );
 });
 
-export const layer = Layer.effect(ServerBrowser, make);
+export const layer = Layer.effectContext(make);

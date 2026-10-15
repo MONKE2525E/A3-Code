@@ -1,4 +1,6 @@
 import * as NativeAgentService from "./nativeAgents/NativeAgentService.ts";
+import * as IntegrationBrowser from "./preview/IntegrationBrowser.ts";
+import { NativeAgentError } from "@t3tools/contracts";
 import * as GrokBotComputerService from "./grokBot/GrokBotComputerService.ts";
 import * as GrokBotNetworkService from "./grokBot/GrokBotNetworkService.ts";
 import * as GrokBotSecretService from "./grokBot/GrokBotSecretService.ts";
@@ -558,6 +560,7 @@ const MainWsRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.museAgentsFeatureUpdate,
   WS_METHODS.museAgentsStatus,
   WS_METHODS.museAgentsSetup,
+  WS_METHODS.museAgentsSignIn,
   WS_METHODS.museAgentsProfile,
   WS_METHODS.museAgentsOpenThread,
   WS_METHODS.nativeAgentsOpenThread,
@@ -608,6 +611,22 @@ const MainWsRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.grokBotsImportMarketplaceTemplate,
 );
 const layerGrokExtensionsRpc = Layer.mergeAll(
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.museAgentsSignIn,
+    Effect.map(
+      IntegrationBrowser.IntegrationBrowser,
+      (browser) => () =>
+        browser.openMuse.pipe(
+          Effect.mapError(
+            () =>
+              new NativeAgentError({
+                reason: "provider_unavailable",
+                detail: "The Muse sign-in browser could not be opened.",
+              }),
+          ),
+        ),
+    ),
+  ),
   ServerWsRpcGroup.toLayerHandler(
     WS_METHODS.museAgentsFeatureRead,
     Effect.map(
@@ -3557,6 +3576,7 @@ export const layer = Layer.unwrap(
   Effect.gen(function* () {
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
     const serverBrowser = yield* ServerBrowser.ServerBrowser;
+    const integrationBrowser = yield* IntegrationBrowser.IntegrationBrowser;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const pullRequests = yield* PullRequestService.PullRequestService;
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
@@ -3623,6 +3643,9 @@ export const layer = Layer.unwrap(
               Layer.provide(AgentSessionScanner.layer),
               Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
+              Layer.provide(
+                Layer.succeed(IntegrationBrowser.IntegrationBrowser, integrationBrowser),
+              ),
               // One server-lifetime service means clients share the same PR caches, and a WS
               // mutation invalidates the HTTP diff cache that every client reads from.
               Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),

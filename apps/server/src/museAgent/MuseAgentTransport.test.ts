@@ -10,9 +10,10 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 import * as Schema from "effect/Schema";
-import { chromium, type BrowserContext, type Route } from "playwright-core";
+import { chromium, type BrowserContext, type Route, type Page } from "playwright-core";
 import * as Transport from "./MuseAgentTransport.ts";
 import * as Source from "./MuseAgentSessionSource.ts";
+import * as Integration from "../preview/IntegrationBrowser.ts";
 import * as Features from "./MuseAgentFeatureService.ts";
 import * as NodeCryptoPlatform from "@effect/platform-node/NodeCrypto";
 
@@ -24,7 +25,7 @@ const decodeStreamMetadata = Schema.decodeUnknownEffect(
 );
 const decodeStreamPayload = Schema.decodeUnknownEffect(Schema.Struct({ base64: Schema.String }));
 
-const fixture = () => {
+const fixture = (privateSession = false) => {
   const calls: { method: string; input: unknown }[] = [];
   let performRegistration: () => Promise<unknown> = async () => ({
     accepted: 1,
@@ -89,7 +90,11 @@ const fixture = () => {
     });
     return value;
   };
+  let pageClosed = false;
   const page = {
+    close: async () => {
+      pageClosed = true;
+    },
     route: async (_pattern: string, handler: (route: Route) => Promise<void>) => {
       handleRoute = handler;
     },
@@ -119,6 +124,7 @@ const fixture = () => {
   const source = Source.MuseAgentSessionSource.of({
     inspect: Effect.succeed({ installed: true, sessionPresent: true }),
     read: Effect.sync(() => ({
+      ...(privateSession ? { source: "t3-browser" as const } : {}),
       profilePath: "/synthetic/profile",
       cookies: [],
       fingerprint: sourceFingerprint,
@@ -126,6 +132,11 @@ const fixture = () => {
   });
   const layer = Transport.makeMuseAgentTransportLayer({ executablePath: process.execPath }).pipe(
     Layer.provide(Layer.succeed(Source.MuseAgentSessionSource, source)),
+    Layer.provide(
+      Layer.mock(Integration.IntegrationBrowser)({
+        museTransportPage: Effect.succeed(page as unknown as Page),
+      }),
+    ),
   );
   return {
     layer,
@@ -147,6 +158,7 @@ const fixture = () => {
     routeEvent: (route: Route) => handleRoute!(route),
     profilePath: () => profilePath,
     closed: () => closed,
+    pageClosed: () => pageClosed,
     setRegistration: (callback: () => Promise<unknown>) => {
       performRegistration = callback;
     },
@@ -792,3 +804,18 @@ it.effect(
     ).pipe(Effect.provide(f.layer));
   },
 );
+
+it.effect("uses the signed-in T3 browser and retires only its transport page", () => {
+  const f = fixture(true);
+  return Effect.gen(function* () {
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const transport = yield* Transport.MuseAgentTransport;
+        yield* transport.connect;
+        assert.equal(f.profilePath(), undefined);
+      }).pipe(Effect.provide(f.layer)),
+    );
+    assert.equal(f.closed(), false);
+    assert.equal(f.pageClosed(), true);
+  });
+});

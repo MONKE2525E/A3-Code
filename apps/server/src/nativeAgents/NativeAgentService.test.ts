@@ -40,6 +40,7 @@ import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as Service from "./NativeAgentService.ts";
 import * as Native from "../museAgent/MuseAgentNativeRuntimeService.ts";
 import * as Transport from "../museAgent/MuseAgentTransport.ts";
+import * as CredentialInbox from "../museAgent/MuseAgentCredentialInbox.ts";
 import * as Features from "../museAgent/MuseAgentFeatureService.ts";
 import * as Connectors from "../museAgent/MuseAgentConnectorService.ts";
 import * as Computer from "../museAgent/MuseAgentComputerService.ts";
@@ -98,6 +99,11 @@ const fixture = (
     const state = {
       binding,
       avatarImagePath: "workspace/avatars/synthetic/image.png",
+      credentialCalls: [] as Array<{
+        method: string;
+        params: Record<string, unknown>;
+        write: boolean;
+      }>,
       reads: 0,
       historyPages: false,
       rotateOnHistoryPage: false,
@@ -298,9 +304,13 @@ const fixture = (
       }),
     );
     const settings = Context.get(settingsContext, Settings.ServerSettingsService);
+    const inbox = yield* CredentialInbox.MuseAgentCredentialInbox.pipe(
+      Effect.provide(CredentialInbox.layer),
+    );
     const service = yield* Service.NativeAgentService.pipe(
       Effect.provide(
         Service.layer.pipe(
+          Layer.provide(Layer.succeed(CredentialInbox.MuseAgentCredentialInbox, inbox)),
           Layer.provide(Layer.succeed(Native.MuseAgentNativeRuntimeService, native)),
           Layer.provide(
             Layer.succeed(Settings.ServerSettingsService, {
@@ -317,6 +327,11 @@ const fixture = (
           ),
           Layer.provide(
             Layer.mock(Transport.MuseAgentTransport)({
+              request: (_binding, method, params, write = false) =>
+                Effect.sync(() => {
+                  state.credentialCalls.push({ method, params, write });
+                  return { id: "stored-credential" };
+                }),
               readAvatar: (account, path) =>
                 Effect.sync(() => {
                   assert.equal(account, state.binding);
@@ -501,7 +516,7 @@ const fixture = (
         ),
       ),
     );
-    return { service, state, settings, orchestrator, projections, sessions, search };
+    return { service, state, settings, orchestrator, projections, sessions, search, inbox };
   });
 
 it.effect(
@@ -1700,4 +1715,54 @@ it.effect("opens a side chat as its own thread and keeps Main chat canonical", (
     const shell = yield* h.projections.getThreadShell(side.threadId);
     assert.strictEqual(shell?.title, "Side research");
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect(
+  "stores a prompted credential outside chat, once, after validating field byte limits",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* fixture();
+      h.inbox.observe(binding, {
+        event: "delta.presentation",
+        payload: {
+          session_id: "primary",
+          presentation_id: "vault-prompt",
+          kind: "internal_link_action_card",
+          data: {
+            title: "Sign in",
+            type: "credentials_vault",
+            data: {
+              capture: "sign_in",
+              page_url: "https://example.test/login",
+              capture_authorization: "synthetic-authorization",
+            },
+          },
+        },
+      });
+      const request = {
+        providerInstanceId: instanceId,
+        operation: "credential_submit" as const,
+        sessionId: "primary",
+        requestId: "vault-prompt",
+        username: "synthetic-user",
+        password: "synthetic-password",
+      };
+      yield* Effect.flip(h.service.featureUpdate({ ...request, username: "é".repeat(129) }));
+      assert.equal(h.state.credentialCalls.length, 0);
+      yield* h.service.featureUpdate(request);
+      assert.equal(h.state.credentialCalls.length, 1);
+      assert.deepStrictEqual(h.state.credentialCalls[0]?.params.fields, [
+        { name: "username", value: "synthetic-user", protected: true },
+        { name: "password", value: "synthetic-password", protected: true },
+      ]);
+      assert.equal(h.state.credentialCalls[0]?.method, "credentials.capture");
+      assert.equal(
+        h.state.credentialCalls[0]?.params.capture_authorization,
+        "synthetic-authorization",
+      );
+      assert.equal(h.state.credentialCalls[0]?.params.lifetime, "persist");
+      yield* Effect.flip(h.service.featureUpdate(request));
+      assert.equal(h.state.credentialCalls.length, 1);
+      assert.equal(h.state.reads, 0);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );

@@ -1,4 +1,5 @@
 import * as MuseAgentSessionSource from "./museAgent/MuseAgentSessionSource.ts";
+import * as MuseAgentCredentialInbox from "./museAgent/MuseAgentCredentialInbox.ts";
 import * as MuseAgentTransport from "./museAgent/MuseAgentTransport.ts";
 import * as MuseAgentDeliveryStore from "./museAgent/MuseAgentDeliveryStore.ts";
 import * as MuseAgentNativeRuntimeService from "./museAgent/MuseAgentNativeRuntimeService.ts";
@@ -489,6 +490,13 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
 );
 
 const layerServerEnvironment = ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer));
+const layerSharedServerBrowser = ServerBrowser.layer.pipe(
+  Layer.provide(DesktopBrowserChannel.layer),
+  Layer.provide(PreviewManager.layer),
+  Layer.provide(PreviewBrowser.layer),
+  Layer.provide(PreviewAutomationBroker.layer),
+  Layer.provide(layerServerEnvironment),
+);
 
 const layerAuth = EnvironmentAuth.layer.pipe(
   Layer.provideMerge(layerPersistence),
@@ -693,6 +701,8 @@ const layerMuseAgentNativeRuntime = MuseAgentNativeRuntimeService.layer.pipe(
       Layer.provide(ServerSecretStore.layer),
     ),
   ),
+  Layer.provideMerge(MuseAgentCredentialInbox.layer),
+  Layer.provideMerge(layerSharedServerBrowser),
 );
 const layerGrokBotManagedState = GrokBotManagedStateStore.layer.pipe(
   Layer.provide(layerPersistence),
@@ -914,7 +924,7 @@ const layerMakeRoutes = Layer.mergeAll(
   // after the guide service so it reaches that too.
   Layer.provide(layerPullRequestService),
   // The stream route and the WebSocket RPCs share one browser.
-  Layer.provide(ServerBrowser.layer.pipe(Layer.provide(DesktopBrowserChannel.layer))),
+  Layer.provide(layerSharedServerBrowser),
   // Server browser tabs and HTML render previews install and run the same headless browser.
   Layer.provide(PreviewBrowser.layer),
   Layer.provide(PreviewAutomationBroker.layer),

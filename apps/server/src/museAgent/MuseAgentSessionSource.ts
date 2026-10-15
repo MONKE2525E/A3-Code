@@ -10,20 +10,23 @@ import * as Context from "effect/Context";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import type { Cookie } from "playwright-core";
+import * as IntegrationBrowser from "../preview/IntegrationBrowser.ts";
 
 export class MuseAgentSessionSourceError extends Schema.TaggedError<MuseAgentSessionSourceError>()(
   "MuseAgentSessionSourceError",
   { stage: Schema.Literals(["detect", "read"]), cause: Schema.Defect() },
 ) {
   override get message() {
-    return "The local Muse session could not be read. Open Muse and sign in again.";
+    return "The Muse session could not be read. Sign in again in Settings → Providers.";
   }
 }
 
 export type MuseAgentCookie = Omit<Cookie, "sameSite"> & { readonly sameSite: Cookie["sameSite"] };
 export interface MuseAgentSessionSnapshot {
+  readonly source?: "t3-browser";
   readonly profilePath: string;
   readonly cookies: readonly MuseAgentCookie[];
   /** Private transport fingerprint; do not expose through status, logs, or RPC. */
@@ -95,7 +98,7 @@ const exists = (file: string) =>
     () => false,
   );
 
-const makeMuseAgentSessionSourceLayer = (
+export const makeMuseAgentSessionSourceLayer = (
   options: {
     readonly homeDir?: string;
     readonly profilePath?: string;
@@ -105,6 +108,10 @@ const makeMuseAgentSessionSourceLayer = (
     MuseAgentSessionSource,
     Effect.gen(function* () {
       const home = options.homeDir ?? (yield* HostProcess.HomeDirectory);
+      const browser = yield* Effect.serviceOption(IntegrationBrowser.IntegrationBrowser);
+      const browserCookies = Option.isSome(browser)
+        ? browser.value.museCookies
+        : Effect.succeed([] as readonly Cookie[]);
       const detect = async () => {
         const desktop = NodePath.join(home, ".local/share/applications/io.muse.linux.desktop");
         const contents = await NodeFSP.readFile(desktop, "utf8").catch(() => "");
@@ -125,42 +132,63 @@ const makeMuseAgentSessionSourceLayer = (
       };
       const read = Clock.currentTimeMillis.pipe(
         Effect.flatMap((nowMs) =>
-          Effect.tryPromise({
-            try: async () => {
-              const source = await detect();
-              if (!source.cookiePath || !source.profilePath) throw new Error("missing_session");
-              const cookies = readMuseSessionCookies(source.cookiePath, nowMs);
-              if (!cookies.length) throw new Error("missing_readable_session");
-              const hash = NodeCrypto.createHash("sha256");
-              for (const cookie of [...cookies].sort((a, b) =>
-                `${a.domain}/${a.name}`.localeCompare(`${b.domain}/${b.name}`),
-              )) {
-                for (const field of [cookie.domain, cookie.name, cookie.path, cookie.value])
-                  hash.update(field).update("\0");
-              }
-              const fingerprint = hash.digest("hex");
-              return { profilePath: source.profilePath, cookies, fingerprint };
-            },
-            catch: (cause) => new MuseAgentSessionSourceError({ stage: "read", cause }),
-          }),
+          browserCookies.pipe(
+            Effect.flatMap((browserCookies) =>
+              Effect.tryPromise({
+                try: async () => {
+                  const source = await detect();
+                  const cookies = browserCookies.length
+                    ? [...browserCookies]
+                    : source.cookiePath
+                      ? readMuseSessionCookies(source.cookiePath, nowMs)
+                      : [];
+                  if (!cookies.length) throw new Error("missing_readable_session");
+                  const hash = NodeCrypto.createHash("sha256");
+                  for (const cookie of [...cookies].sort((a, b) =>
+                    `${a.domain}/${a.name}`.localeCompare(`${b.domain}/${b.name}`),
+                  )) {
+                    for (const field of [cookie.domain, cookie.name, cookie.path, cookie.value])
+                      hash.update(field).update("\0");
+                  }
+                  const fingerprint = hash.digest("hex");
+                  return {
+                    ...(browserCookies.length ? { source: "t3-browser" as const } : {}),
+                    profilePath: source.profilePath ?? "",
+                    cookies,
+                    fingerprint,
+                  };
+                },
+                catch: (cause) => new MuseAgentSessionSourceError({ stage: "read", cause }),
+              }),
+            ),
+            Effect.mapError((cause) => new MuseAgentSessionSourceError({ stage: "read", cause })),
+          ),
         ),
       );
       return MuseAgentSessionSource.of({
         read,
         inspect: Clock.currentTimeMillis.pipe(
           Effect.flatMap((nowMs) =>
-            Effect.tryPromise({
-              try: async () => {
-                const source = await detect();
-                return {
-                  installed: source.installed,
-                  sessionPresent:
-                    source.cookiePath !== null &&
-                    readMuseSessionCookies(source.cookiePath, nowMs).length > 0,
-                };
-              },
-              catch: (cause) => new MuseAgentSessionSourceError({ stage: "detect", cause }),
-            }),
+            browserCookies.pipe(
+              Effect.flatMap((browserCookies) =>
+                Effect.tryPromise({
+                  try: async () => {
+                    const source = await detect();
+                    return {
+                      installed: Option.isSome(browser) || source.installed,
+                      sessionPresent:
+                        browserCookies.length > 0 ||
+                        (source.cookiePath !== null &&
+                          readMuseSessionCookies(source.cookiePath, nowMs).length > 0),
+                    };
+                  },
+                  catch: (cause) => new MuseAgentSessionSourceError({ stage: "detect", cause }),
+                }),
+              ),
+              Effect.mapError(
+                (cause) => new MuseAgentSessionSourceError({ stage: "detect", cause }),
+              ),
+            ),
           ),
         ),
       });

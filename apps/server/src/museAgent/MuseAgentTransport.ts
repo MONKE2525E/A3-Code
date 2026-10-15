@@ -9,6 +9,9 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as IntegrationBrowser from "../preview/IntegrationBrowser.ts";
+import * as CredentialInbox from "./MuseAgentCredentialInbox.ts";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -71,7 +74,7 @@ export class MuseAgentTransportError extends Schema.TaggedError<MuseAgentTranspo
         if (this.stage === "cookies")
           return "The server could not import the readonly Muse session into its owned browser.";
         if (this.stage === "navigate") return "The owned browser could not load Muse.";
-        return "Open Muse for Linux and sign in. A compatible headless browser is also required.";
+        return "Sign in to Muse in Settings → Providers. A compatible browser is required on the server.";
     }
   }
 }
@@ -415,6 +418,8 @@ export const makeMuseAgentTransportLayer = (
     MuseAgentTransport,
     Effect.gen(function* () {
       const source = yield* SessionSource.MuseAgentSessionSource;
+      const integrationBrowser = yield* Effect.serviceOption(IntegrationBrowser.IntegrationBrowser);
+      const credentialInbox = yield* Effect.serviceOption(CredentialInbox.MuseAgentCredentialInbox);
       // Playwright exposes a native Promise callback. Capture the application context
       // once for that callback boundary, without a feature-owned managed runtime.
       const callbackContext = yield* Effect.context<never>();
@@ -442,6 +447,7 @@ export const makeMuseAgentTransportLayer = (
         watchedSessionId = undefined;
         registration = undefined;
         authority = undefined;
+        const ownedPage = page;
         page = undefined;
         fingerprint = undefined;
         const ownedContext = browserContext;
@@ -451,6 +457,7 @@ export const makeMuseAgentTransportLayer = (
         // Closing this context stops only the Chromium process Playwright spawned.
         // Preserve the profile if shutdown fails; never remove an in-use profile.
         await ownedContext?.close();
+        if (!ownedContext) await ownedPage?.close().catch(() => {});
         if (profile) await NodeFSP.rm(profile, { recursive: true, force: true });
       };
       yield* Effect.addFinalizer(() => Effect.promise(() => reset()));
@@ -496,19 +503,29 @@ export const makeMuseAgentTransportLayer = (
             executablePath = candidate;
             break;
           }
-        if (!executablePath)
+        if (!executablePath && session.source !== "t3-browser")
           throw new MuseAgentTransportError({ kind: "unavailable", stage: "browser" });
-        ownedProfile = await atStage("browser", () =>
-          NodeFSP.mkdtemp(NodePath.join(options.profileRoot ?? NodeOS.tmpdir(), "t3-muse-agent-")),
-        );
-        // Keep Meta's bootstrap in an ephemeral persistent context. Import cookies
-        // readonly; Chromium never opens the user's Muse or Chrome profile.
-        const context = await atStage("browser", () =>
-          chromium.launchPersistentContext(ownedProfile!, { executablePath, headless: true }),
-        );
-        browserContext = context;
-        await atStage("cookies", () => context.addCookies([...session.cookies]));
-        page = await atStage("browser", () => context.newPage());
+        if (session.source === "t3-browser" && Option.isSome(integrationBrowser)) {
+          page = await atStage("browser", () =>
+            Effect.runPromiseWith(callbackContext)(integrationBrowser.value.museTransportPage),
+          );
+        } else {
+          if (!executablePath)
+            throw new MuseAgentTransportError({ kind: "unavailable", stage: "browser" });
+          ownedProfile = await atStage("browser", () =>
+            NodeFSP.mkdtemp(
+              NodePath.join(options.profileRoot ?? NodeOS.tmpdir(), "t3-muse-agent-"),
+            ),
+          );
+          // Keep Meta's bootstrap in an ephemeral persistent context. Import cookies
+          // readonly; Chromium never opens the user's Muse or Chrome profile.
+          const context = await atStage("browser", () =>
+            chromium.launchPersistentContext(ownedProfile!, { executablePath, headless: true }),
+          );
+          browserContext = context;
+          await atStage("cookies", () => context.addCookies([...session.cookies]));
+          page = await atStage("browser", () => context.newPage());
+        }
         await page.route("**/*", async (route) => {
           let handlingAttempted = false;
           try {
@@ -554,6 +571,8 @@ export const makeMuseAgentTransportLayer = (
           const event = decodeBridgeEvent(raw);
           if (event.authority !== authority) return;
           const { authority: _privateAuthority, ...frame } = event;
+          if (Option.isSome(credentialInbox))
+            credentialInbox.value.observe(hashAuthority(event.authority), frame);
           for (const box of mailboxes) box.offer(frame);
         });
         await page.exposeFunction("__t3MuseInvoke", async (raw: unknown) => {

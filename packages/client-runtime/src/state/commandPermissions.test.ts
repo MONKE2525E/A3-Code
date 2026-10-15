@@ -130,6 +130,7 @@ describe("command permissions", () => {
           );
         }
         for (const method of [
+          WS_METHODS.museAgentsSignIn,
           WS_METHODS.grokBotsSetup,
           WS_METHODS.grokBotsCreate,
           WS_METHODS.grokBotsUpdate,

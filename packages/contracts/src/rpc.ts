@@ -485,6 +485,7 @@ export const WS_METHODS = {
   museAgentsFeatureRead: "museAgents.featureRead",
   museAgentsFeatureUpdate: "museAgents.featureUpdate",
   museAgentsSetup: "museAgents.setup",
+  museAgentsSignIn: "museAgents.signIn",
   museAgentsProfile: "museAgents.profile",
   museAgentsOpenThread: "museAgents.open",
   nativeAgentsOpenThread: "aiAgents.openThread",
@@ -2232,6 +2233,11 @@ export const WsRpcGroup = RpcGroup.make(
     payload: Schema.Struct({}),
     success: MuseAgentConnectionStatus,
     error: NativeAgentError,
+  }),
+  Rpc.make(WS_METHODS.museAgentsSignIn, {
+    payload: Schema.Struct({}),
+    success: Schema.Struct({ threadId: Schema.String, tabId: Schema.String }),
+    error: Schema.Union([NativeAgentError, EnvironmentAuthorizationError]),
   }),
   Rpc.make(WS_METHODS.museAgentsProfile, {
     payload: MuseAgentReadProfileInput,

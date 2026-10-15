@@ -9,12 +9,15 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Deferred from "effect/Deferred";
 import * as Source from "./MuseAgentSessionSource.ts";
 import * as Transport from "./MuseAgentTransport.ts";
 import * as Delivery from "./MuseAgentDeliveryStore.ts";
+import * as CredentialInbox from "./MuseAgentCredentialInbox.ts";
+import { museHistoryFrame } from "../orchestration-v2/Adapters/MuseAgentAdapterV2Projection.ts";
 import type {
   MuseAgentDeliveryContext,
   MuseAgentDeliveryScope,
@@ -210,6 +213,7 @@ const make = Effect.gen(function* () {
   const source = yield* Source.MuseAgentSessionSource;
   const transport = yield* Transport.MuseAgentTransport;
   const deliveries = yield* Delivery.MuseAgentDeliveryStore;
+  const credentialInbox = yield* Effect.serviceOption(CredentialInbox.MuseAgentCredentialInbox);
   const admissions = new Set<{
     readonly binding: string;
     readonly sessionId: string;
@@ -328,6 +332,11 @@ const make = Effect.gen(function* () {
           ...(input.beforeSeq === undefined ? {} : { before_seq: input.beforeSeq }),
         });
         const history = yield* decode(value, History);
+        if (Option.isSome(credentialInbox))
+          for (const raw of history.chat_events) {
+            const frame = museHistoryFrame(raw, input.sessionId);
+            if (frame) credentialInbox.value.observe(input.binding, frame);
+          }
         return { events: history.chat_events, hasMore: history.has_more === true };
       }),
     readAttachment: (input) =>

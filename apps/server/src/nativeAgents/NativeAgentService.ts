@@ -32,6 +32,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as Muse from "../museAgent/MuseAgentNativeRuntimeService.ts";
 import * as MuseTransport from "../museAgent/MuseAgentTransport.ts";
+import * as CredentialInbox from "../museAgent/MuseAgentCredentialInbox.ts";
 import * as Features from "../museAgent/MuseAgentFeatureService.ts";
 import { museIdentityOfThread, museThreadIdForSession } from "../museAgent/MuseAgentThreadIds.ts";
 import * as Connectors from "../museAgent/MuseAgentConnectorService.ts";
@@ -123,6 +124,7 @@ const nativeFailure = (error: Muse.MuseAgentError) =>
 const make = Effect.gen(function* () {
   const native = yield* Muse.MuseAgentNativeRuntimeService;
   const transport = yield* MuseTransport.MuseAgentTransport;
+  const credentialInbox = yield* Effect.serviceOption(CredentialInbox.MuseAgentCredentialInbox);
   const features = yield* Features.MuseAgentFeatureService;
   const connectors = yield* Connectors.MuseAgentConnectorService;
   const computer = yield* Computer.MuseAgentComputerService;
@@ -722,6 +724,20 @@ const make = Effect.gen(function* () {
     const selection = yield* selected(input.providerInstanceId);
     const { binding } = selection;
     switch (input.operation) {
+      case "credential_requests": {
+        const session = yield* native
+          .resolveSession(binding, input.sessionId)
+          .pipe(Effect.mapError(nativeFailure));
+        return {
+          operation: input.operation,
+          data: {
+            sessionId: session.session_id,
+            requests: Option.isSome(credentialInbox)
+              ? credentialInbox.value.pending(binding, session.session_id)
+              : [],
+          },
+        };
+      }
       case "history_page":
         return { operation: input.operation, data: yield* historyPage(selection, input.threadId) };
       case "dictation":
@@ -848,6 +864,88 @@ const make = Effect.gen(function* () {
     const selection = yield* selected(input.providerInstanceId);
     const { binding } = selection;
     switch (input.operation) {
+      case "connector_auth":
+        yield* connectors
+          .authenticate(binding, input.connectorId, input.authType, input.key)
+          .pipe(Effect.mapError(featureFailure));
+        break;
+      case "credential_submit": {
+        if (Option.isNone(credentialInbox))
+          return yield* new NativeAgentError({ reason: "provider_unavailable" });
+        const session = yield* native
+          .resolveSession(binding, input.sessionId)
+          .pipe(Effect.mapError(nativeFailure));
+        const inbox = credentialInbox.value;
+        const pendingRequest = inbox
+          .pending(binding, session.session_id)
+          .find((item) => item.requestId === input.requestId);
+        if (!pendingRequest)
+          return yield* new NativeAgentError({
+            reason: "thread_changed",
+            detail:
+              "This credential request is no longer pending. Refresh Muse before trying again.",
+          });
+        const values =
+          pendingRequest.capture === "verification_code"
+            ? [{ name: "verification_code", value: input.verificationCode, protected: true }]
+            : [
+                { name: "username", value: input.username, protected: true },
+                { name: "password", value: input.password, protected: true },
+              ];
+        if (
+          values.some(
+            (field) =>
+              !field.value ||
+              Buffer.byteLength(field.value, "utf8") > (field.name === "password" ? 1024 : 256),
+          )
+        )
+          return yield* new NativeAgentError({
+            reason: "provider_unavailable",
+            detail: "The credential fields are invalid.",
+          });
+        const target = inbox.take(binding, session.session_id, input.requestId);
+        if (!target) return yield* new NativeAgentError({ reason: "thread_changed" });
+        const result = yield* transport
+          .request(
+            binding,
+            "credentials.capture",
+            {
+              page_url: target.request.pageUrl,
+              idempotency_key: target.idempotencyKey,
+              label: null,
+              fields: values,
+              lifetime: target.request.capture === "verification_code" ? "on_read" : "persist",
+              session_id: session.session_id,
+              ...(target.authorization === undefined
+                ? {}
+                : { capture_authorization: target.authorization }),
+            },
+            true,
+          )
+          .pipe(
+            Effect.mapError(
+              () =>
+                new NativeAgentError({
+                  reason: "provider_unavailable",
+                  detail:
+                    "Muse could not confirm credential storage. The value was not sent again.",
+                }),
+            ),
+          );
+        if (
+          typeof result !== "object" ||
+          result === null ||
+          !("id" in result) ||
+          typeof result.id !== "string" ||
+          !result.id
+        )
+          return yield* new NativeAgentError({
+            reason: "provider_unavailable",
+            detail: "Muse did not confirm credential storage.",
+          });
+        inbox.complete(binding, session.session_id, input.requestId);
+        break;
+      }
       case "history_page":
         return {
           updated: true as const,

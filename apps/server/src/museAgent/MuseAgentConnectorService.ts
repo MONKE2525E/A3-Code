@@ -55,6 +55,12 @@ const UrlControlCharacters = /[\u0000-\u0020\u007f]/;
 export class MuseAgentConnectorService extends Context.Service<
   MuseAgentConnectorService,
   {
+    readonly authenticate: (
+      binding: string,
+      connectorId: string,
+      authType: "api_key" | "consent_only",
+      secret?: string,
+    ) => Effect.Effect<void, MuseAgentFeatureError>;
     readonly get: (
       binding: string,
       connectorId: string,
@@ -215,6 +221,24 @@ const make = Effect.gen(function* () {
     };
   });
   return MuseAgentConnectorService.of({
+    authenticate: Effect.fnUntraced(function* (binding, connectorId, authType, secret) {
+      yield* select(binding, connectorId);
+      const info = yield* decode(
+        Schema.Struct({ action: NativeAction }),
+        yield* request(binding, "connectors.connect_info", { id: connectorId }),
+      );
+      if (
+        info.action.type !== authType ||
+        (authType === "api_key" && (!secret || Buffer.byteLength(secret, "utf8") > 65536))
+      )
+        return yield* new MuseAgentFeatureError({ feature: "connectors", code: "invalid_request" });
+      yield* request(
+        binding,
+        authType === "api_key" ? "api_key_auth.callback" : "consent_auth.callback",
+        { provider: connectorId, ...(authType === "api_key" ? { key: secret } : {}) },
+        true,
+      );
+    }),
     get: Effect.fnUntraced(function* (binding, connectorId, sessionId) {
       yield* select(binding, connectorId, sessionId);
       const native = yield* decode(

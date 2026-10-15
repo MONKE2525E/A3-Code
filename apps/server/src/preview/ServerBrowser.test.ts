@@ -1568,3 +1568,35 @@ it.live("a desktop page that comes back reconnects without waiting for a viewer"
     }),
   ).pipe(Effect.provide(layer)),
 );
+
+it.live("agents cannot open the private integration profile by id, alias or default", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      yield* browser.reportProfiles({
+        profiles: [{ id: "integration-muse-auth", name: "Muse sign-in", kind: "persistent" }],
+        defaultProfileId: "integration-muse-auth",
+      });
+      for (const profileId of [undefined, "integration-muse-auth", "Muse sign-in"]) {
+        const failure = yield* broker
+          .invoke<PreviewAutomationStatus>({
+            scope,
+            operation: "open",
+            input: {
+              reuseExistingTab: false,
+              show: false,
+              ...(profileId === undefined ? {} : { profileId }),
+            },
+          })
+          .pipe(Effect.flip);
+        expect(failure).toMatchObject({
+          _tag: "PreviewAutomationControlInterruptedError",
+          reason: "interrupted",
+        });
+      }
+      expect(contextRequests).toEqual([]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);

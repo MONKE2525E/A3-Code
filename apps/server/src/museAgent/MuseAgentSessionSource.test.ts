@@ -5,6 +5,8 @@ import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import * as NodeSqlite from "node:sqlite";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Integration from "../preview/IntegrationBrowser.ts";
 import * as Source from "./MuseAgentSessionSource.ts";
 
 it.effect(
@@ -47,4 +49,37 @@ it.effect(
         }),
       (directory) => Effect.promise(() => NodeFSP.rm(directory, { recursive: true, force: true })),
     ),
+);
+
+it.effect("uses the private T3 browser session without an installed Muse companion", () =>
+  Effect.gen(function* () {
+    const source = yield* Source.MuseAgentSessionSource;
+    assert.deepStrictEqual(yield* source.inspect, { installed: true, sessionPresent: true });
+    const session = yield* source.read;
+    assert.equal(session.source, "t3-browser");
+    assert.equal(session.profilePath, "");
+    assert.equal(session.cookies[0]?.value, "synthetic-browser-cookie");
+    assert.match(session.fingerprint, /^[a-f0-9]{64}$/);
+  }).pipe(
+    Effect.provide(
+      Source.makeMuseAgentSessionSourceLayer({ homeDir: "/nonexistent-synthetic-muse-home" }).pipe(
+        Layer.provide(
+          Layer.mock(Integration.IntegrationBrowser)({
+            museCookies: Effect.succeed([
+              {
+                name: "session",
+                value: "synthetic-browser-cookie",
+                domain: "muse.ai",
+                path: "/",
+                expires: -1,
+                httpOnly: true,
+                secure: true,
+                sameSite: "Lax",
+              },
+            ]),
+          }),
+        ),
+      ),
+    ),
+  ),
 );

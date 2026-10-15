@@ -20,6 +20,16 @@ export const NativeAgentPendingDelivery = Schema.Struct({
 export type NativeAgentPendingDelivery = typeof NativeAgentPendingDelivery.Type;
 
 const featureReference = { providerInstanceId: ProviderInstanceId };
+export const MuseCredentialRequest = Schema.Struct({
+  requestId: Schema.String,
+  sessionId: Schema.String,
+  title: Schema.String,
+  pageUrl: Schema.String,
+  capture: Schema.Literals(["sign_in", "verification_code"]),
+  usernameLabel: Schema.String,
+  passwordLabel: Schema.String,
+  codeLabel: Schema.String,
+});
 const featureRead = <O extends string>(operation: O) =>
   Schema.Struct({ ...featureReference, operation: Schema.Literal(operation) });
 const NativeAgentHistoryCursor = Schema.Number.check(
@@ -33,6 +43,13 @@ export const NativeAgentHistoryPage = Schema.Struct({
   importedMessages: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
 });
 export const NativeAgentFeatureReadInput = Schema.Union([
+  Schema.Struct({
+    ...featureReference,
+    operation: Schema.Literal("credential_requests"),
+    sessionId: Schema.optionalKey(
+      Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
+    ),
+  }),
   Schema.Struct({
     ...featureReference,
     operation: Schema.Literal("history_page"),
@@ -90,6 +107,13 @@ export const NativeAgentFeatureReadInput = Schema.Union([
   }),
 ]);
 export const NativeAgentFeatureReadResult = Schema.Union([
+  Schema.Struct({
+    operation: Schema.Literal("credential_requests"),
+    data: Schema.Struct({
+      sessionId: Schema.String,
+      requests: Schema.Array(MuseCredentialRequest),
+    }),
+  }),
   Schema.Struct({
     operation: Schema.Literal("history_page"),
     data: NativeAgentHistoryPage,
@@ -151,6 +175,22 @@ export const NativeAgentFeatureReadResult = Schema.Union([
   Schema.Struct({ operation: Schema.Literal("memory_read"), data: Features.MuseAgentMemory }),
 ]);
 export const NativeAgentFeatureUpdateInput = Schema.Union([
+  Schema.Struct({
+    ...featureReference,
+    operation: Schema.Literal("credential_submit"),
+    sessionId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
+    requestId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
+    username: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(256))),
+    password: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(1024))),
+    verificationCode: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(256))),
+  }),
+  Schema.Struct({
+    ...featureReference,
+    operation: Schema.Literal("connector_auth"),
+    connectorId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
+    authType: Schema.Literals(["api_key", "consent_only"]),
+    key: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(65536))),
+  }),
   Schema.Struct({
     ...featureReference,
     operation: Schema.Literal("history_page"),

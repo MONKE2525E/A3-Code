@@ -457,3 +457,34 @@ it.effect("fences a native account replacement before unlink dispatch", () => {
     expect(f.calls.filter((call) => call.write)).toHaveLength(0);
   }).pipe(Effect.provide(f.layer));
 });
+
+it.effect("submits API keys directly to native auth and never accepts a mismatched action", () => {
+  const f = fixture({ "connectors.connect_info": { action: { type: "api_key" } } });
+  return Effect.gen(function* () {
+    const service = yield* Service.MuseAgentConnectorService;
+    yield* service.authenticate(binding, "calendar", "api_key", "synthetic-key");
+    expect(f.calls.at(-1)).toEqual({
+      method: "api_key_auth.callback",
+      params: { provider: "calendar", key: "synthetic-key" },
+      write: true,
+    });
+    const rejected = yield* Effect.result(
+      service.authenticate(binding, "calendar", "consent_only"),
+    );
+    expect(rejected._tag).toBe("Failure");
+    expect(f.calls.filter((call) => call.write)).toHaveLength(1);
+  }).pipe(Effect.provide(f.layer));
+});
+
+it.effect("submits native consent without a secret", () => {
+  const f = fixture({ "connectors.connect_info": { action: { type: "consent_only" } } });
+  return Effect.gen(function* () {
+    const service = yield* Service.MuseAgentConnectorService;
+    yield* service.authenticate(binding, "calendar", "consent_only");
+    expect(f.calls.at(-1)).toEqual({
+      method: "consent_auth.callback",
+      params: { provider: "calendar" },
+      write: true,
+    });
+  }).pipe(Effect.provide(f.layer));
+});
