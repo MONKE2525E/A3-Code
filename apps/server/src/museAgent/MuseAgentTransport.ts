@@ -758,8 +758,10 @@ export const makeMuseAgentTransportLayer = (
             yield* watchPermit
               .withPermits(1)(
                 Effect.gen(function* () {
-                  // The page keeps one subscription. A different session takes it over, and the
-                  // readers of the old session end cleanly instead of failing.
+                  // A turn retains the route until its registration is removed, including
+                  // reconnect recovery after native callbacks have been revoked.
+                  if (registration && registration.input.nativeSessionId !== sessionId)
+                    return yield* new MuseAgentTransportError({ kind: "protocol" });
                   if (watchedSessionId !== sessionId) {
                     for (const previous of mailboxes) previous.supersede();
                     mailboxes.clear();
@@ -957,7 +959,11 @@ export const makeMuseAgentTransportLayer = (
         registerTools: (binding, input) =>
           Effect.gen(function* () {
             const current = yield* verify(binding);
-            if (registration) return yield* new MuseAgentTransportError({ kind: "protocol" });
+            if (
+              registration ||
+              (watchedSessionId !== undefined && watchedSessionId !== input.nativeSessionId)
+            )
+              return yield* new MuseAgentTransportError({ kind: "protocol" });
             const currentRegistration = { binding, input, active: true };
             registration = currentRegistration;
             return yield* Effect.tryPromise({
@@ -980,7 +986,7 @@ export const makeMuseAgentTransportLayer = (
                   : Effect.void,
               ),
             );
-          }),
+          }).pipe(watchPermit.withPermits(1)),
         unregisterTools,
       });
     }),

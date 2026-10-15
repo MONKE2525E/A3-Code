@@ -856,3 +856,81 @@ it.effect("reduces the native missing-endpoint rejection to a fixed safe classif
     assert.deepStrictEqual(cause, { missingEndpointAcl: true });
   }).pipe(Effect.provide(f.layer), Effect.scoped);
 });
+
+it.effect("keeps an owned turn's subscription alive when another conversation is opened", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const transport = yield* Transport.MuseAgentTransport;
+    const binding = yield* transport.connect;
+    const owner = yield* transport.watch(binding, "primary");
+    yield* transport.registerTools(binding, registration);
+    assert.equal((yield* Effect.flip(transport.watch(binding, "side-chat"))).kind, "protocol");
+    assert.equal(f.calls.filter((call) => call.method === "watch").length, 1);
+    yield* Effect.promise(() =>
+      Promise.resolve(
+        f.nativeEvent({
+          authority: "synthetic-authority",
+          event: "message.assistant",
+          payload: {
+            session_id: "primary",
+            message_id: "owned-answer",
+            display_text: "Still running",
+          },
+        }),
+      ),
+    );
+    yield* transport.unregisterTools(binding, registration.clientId);
+    const replacement = yield* transport.watch(binding, "side-chat");
+    const ended = yield* owner.events.pipe(Stream.runCollect);
+    assert.deepEqual(
+      ended.map((event) => event.event),
+      ["message.assistant", "transport.session_superseded"],
+    );
+    yield* replacement.close;
+  }).pipe(Effect.provide(f.layer));
+});
+it.effect("rejects stale turn registration after its subscription was handed off", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const transport = yield* Transport.MuseAgentTransport;
+    const binding = yield* transport.connect;
+    const old = yield* transport.watch(binding, "primary");
+    const replacement = yield* transport.watch(binding, "side-chat");
+    assert.equal(
+      (yield* Effect.flip(transport.registerTools(binding, registration))).kind,
+      "protocol",
+    );
+    assert.equal(f.calls.filter((call) => call.method === "register").length, 0);
+    yield* old.close;
+    yield* replacement.close;
+  }).pipe(Effect.provide(f.layer));
+});
+it.effect("serializes a pending turn registration against subscription takeover", () => {
+  const f = fixture();
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const transport = yield* Transport.MuseAgentTransport;
+      const binding = yield* transport.connect;
+      const owner = yield* transport.watch(binding, "primary");
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<unknown>();
+      f.setRegistration(() => {
+        entered.resolve();
+        return release.promise;
+      });
+      const registering = yield* transport
+        .registerTools(binding, registration)
+        .pipe(Effect.forkScoped);
+      yield* Effect.promise(() => entered.promise);
+      const takeover = yield* transport
+        .watch(binding, "side-chat")
+        .pipe(Effect.flip, Effect.forkScoped);
+      release.resolve({ accepted: 1, connectionId: "generation-1" });
+      assert.equal((yield* Fiber.join(registering)).accepted, 1);
+      assert.equal((yield* Fiber.join(takeover)).kind, "protocol");
+      assert.equal(f.calls.filter((call) => call.method === "watch").length, 1);
+      yield* transport.unregisterTools(binding, registration.clientId);
+      yield* owner.close;
+    }),
+  ).pipe(Effect.provide(f.layer));
+});
