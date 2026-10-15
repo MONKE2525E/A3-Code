@@ -21,7 +21,7 @@ export const GROK_BOT_UPLOAD_RETRIES = 2;
  * offset, and nothing is delivered to the bot until every upload has a receipt. Only
  * attachment failures the native layer marked transient qualify; everything else is final.
  */
-export const grokBotUploadRetrySchedule = Schedule.exponential("500 millis").pipe(
+const grokBotUploadRetrySchedule = Schedule.exponential("500 millis").pipe(
   Schedule.modifyDelay(({ duration }) =>
     Effect.succeed(Duration.min(duration, Duration.seconds(8))),
   ),
