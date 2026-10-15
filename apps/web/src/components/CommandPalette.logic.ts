@@ -90,8 +90,12 @@ export interface MuseAgentSearchHit {
 export function buildMuseAgentSearchItems(input: {
   readonly hits: ReadonlyArray<MuseAgentSearchHit>;
   readonly query: string;
-  readonly name: string;
-  readonly icon: (hit: MuseAgentSearchHit) => ReactNode;
+  readonly identity: {
+    readonly environmentId: EnvironmentId | null;
+    readonly name: string;
+    readonly icon: ReactNode;
+  };
+  readonly fallbackIcon: ReactNode;
   readonly run: (hit: MuseAgentSearchHit) => Promise<void>;
 }): CommandPaletteActionItem[] {
   const seen = new Set<string>();
@@ -100,14 +104,16 @@ export function buildMuseAgentSearchItems(input: {
     const key = `${hit.environmentId}:${hit.threadId}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    const known = hit.environmentId === input.identity.environmentId;
+    const name = known ? input.identity.name : "Muse";
     items.push({
       kind: "action",
       value: `muse-agent:${key}`,
-      title: input.name,
+      title: name,
       description: "Muse conversation",
-      searchTerms: [input.query, input.name, hit.snippet],
+      searchTerms: [input.query, name, hit.snippet],
       threadContentMatch: { source: hit.source, snippet: hit.snippet, query: input.query },
-      icon: input.icon(hit),
+      icon: known ? input.identity.icon : input.fallbackIcon,
       run: () => input.run(hit),
     });
   }

@@ -843,8 +843,8 @@ function OpenCommandPaletteDialog(props: {
           : [],
       ),
       query: threadSearch.query,
-      name: museName,
-      icon: () => museIcon,
+      identity: { environmentId: rosterEnvironmentId, name: museName, icon: museIcon },
+      fallbackIcon: <MuseAgentAvatar name="Muse" size="sm" />,
       run: async (hit) => {
         await navigate({
           to: "/$environmentId/$threadId",

@@ -21,8 +21,8 @@ describe("buildMuseAgentSearchItems", () => {
         hit("muse-agent:b", "other"),
       ],
       query: "plan",
-      name: "Muse",
-      icon: () => null,
+      identity: { environmentId, name: "Muse", icon: null },
+      fallbackIcon: null,
       run: async () => {},
     });
     expect(items.map((item) => item.value)).toEqual([
@@ -42,11 +42,43 @@ describe("buildMuseAgentSearchItems", () => {
     const [item] = buildMuseAgentSearchItems({
       hits: [hit("muse-agent:a", "x")],
       query: "x",
-      name: "Muse",
-      icon: () => null,
+      identity: { environmentId, name: "Muse", icon: null },
+      fallbackIcon: null,
       run,
     });
     await item?.run();
     expect(run).toHaveBeenCalledWith(expect.objectContaining({ threadId: "muse-agent:a" }));
+  });
+});
+
+it("keeps another environment's Muse identity separate from the selected account", async () => {
+  const foreignEnvironment = EnvironmentId.make("env-2");
+  const run = vi.fn(async () => {});
+  const items = buildMuseAgentSearchItems({
+    hits: [
+      hit("muse-agent:a", "local result"),
+      { ...hit("muse-agent:a", "remote result"), environmentId: foreignEnvironment },
+    ],
+    query: "result",
+    identity: { environmentId, name: "Local Muse", icon: "local-avatar" },
+    fallbackIcon: "generic-avatar",
+    run,
+  });
+  expect(
+    items.map((item) => ({ title: item.title, icon: item.icon, searchTerms: item.searchTerms })),
+  ).toEqual([
+    {
+      title: "Local Muse",
+      icon: "local-avatar",
+      searchTerms: ["result", "Local Muse", "local result"],
+    },
+    { title: "Muse", icon: "generic-avatar", searchTerms: ["result", "Muse", "remote result"] },
+  ]);
+  await items[1]?.run();
+  expect(run).toHaveBeenLastCalledWith({
+    environmentId: foreignEnvironment,
+    threadId: "muse-agent:a",
+    source: "assistant",
+    snippet: "remote result",
   });
 });
