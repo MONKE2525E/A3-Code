@@ -1081,11 +1081,23 @@ const make = Effect.gen(function* () {
       case "task_delete":
         yield* features.deleteTask(binding, input.jobId).pipe(Effect.mapError(featureFailure));
         break;
-      case "session_archive":
+      case "session_archive": {
+        if (input.archived) {
+          const sessions = yield* native.sessions(binding).pipe(Effect.mapError(nativeFailure));
+          const session = sessions.find((entry) => entry.session_id === input.sessionId);
+          if (!session || session.is_primary)
+            return yield* new NativeAgentError({
+              reason: "thread_changed",
+              detail: session?.is_primary
+                ? "Muse's main conversation cannot be archived."
+                : "The Muse conversation could not be found. Refresh and try again.",
+            });
+        }
         yield* features
           .setSessionArchived(binding, input.sessionId, input.archived)
           .pipe(Effect.mapError(featureFailure));
         break;
+      }
       case "session_rename": {
         const { title } = yield* features
           .renameSession(binding, input.sessionId, input.title)

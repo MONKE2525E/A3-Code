@@ -135,6 +135,8 @@ const fixture = (
       dictationNever: false,
       dictationStarted,
       featureCalls: [] as string[],
+      primarySessionId: "primary",
+      archiveCalls: [] as Array<{ binding: string; sessionId: string; archived: boolean }>,
       reconciled: [] as ProviderInstanceConfigMap[],
       snapshots: [snapshot()],
       pending: [] as MuseAgentPendingDelivery[],
@@ -176,6 +178,23 @@ const fixture = (
             avatarVideoVariants: { idle: "workspace/avatars/synthetic/idle.mp4" },
           };
         }),
+      sessions: () =>
+        Effect.sync(() => [
+          {
+            session_id: state.primarySessionId,
+            status: "idle",
+            is_primary: true,
+            is_thread: false,
+          },
+          { session_id: "side-one", status: "idle", is_primary: false, is_thread: true },
+          {
+            session_id: "readonly-side",
+            status: "idle",
+            is_primary: false,
+            is_thread: true,
+            can_send_messages: false,
+          },
+        ]),
       resolveSession: (_binding, sessionId) =>
         Effect.suspend(() => {
           if (state.forbidChatResolution)
@@ -345,6 +364,10 @@ const fixture = (
           ),
           Layer.provide(
             Layer.mock(Features.MuseAgentFeatureService)({
+              setSessionArchived: (binding, sessionId, archived) =>
+                Effect.sync(() => {
+                  state.archiveCalls.push({ binding, sessionId, archived });
+                }),
               renameSession: (_binding, _sessionId, title) =>
                 Effect.sync(() => {
                   state.nativeTitle = title.trim();
@@ -1824,5 +1847,58 @@ it.effect.each(["projection", "account"] as const)(
         (yield* h.projections.getThreadShell(opened.threadId))?.title,
         input.title,
       );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect.each(["primary", "native-main-42"])(
+  "refuses to archive primary %s or an unknown Muse session before native mutation",
+  (primaryId) =>
+    Effect.gen(function* () {
+      const h = yield* fixture();
+      h.state.primarySessionId = primaryId;
+      for (const sessionId of [primaryId, "missing"]) {
+        const error = yield* h.service
+          .featureUpdate({
+            providerInstanceId: instanceId,
+            operation: "session_archive",
+            sessionId,
+            archived: true,
+          })
+          .pipe(Effect.flip);
+        assert.strictEqual(error.reason, "thread_changed");
+        if (sessionId === primaryId)
+          assert.strictEqual(error.message, "Muse's main conversation cannot be archived.");
+      }
+      assert.deepStrictEqual(h.state.archiveCalls, []);
+      assert.strictEqual((yield* h.service.status).ready, true);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+it.effect(
+  "allows side chat archives and restoration, including recovery of the primary session",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* fixture();
+      for (const [sessionId, archived] of [
+        ["side-one", true],
+        ["readonly-side", true],
+        ["side-one", false],
+        ["primary", false],
+      ] as const) {
+        assert.deepStrictEqual(
+          yield* h.service.featureUpdate({
+            providerInstanceId: instanceId,
+            operation: "session_archive",
+            sessionId,
+            archived,
+          }),
+          { updated: true },
+        );
+      }
+      assert.deepStrictEqual(h.state.archiveCalls, [
+        { binding, sessionId: "side-one", archived: true },
+        { binding, sessionId: "readonly-side", archived: true },
+        { binding, sessionId: "side-one", archived: false },
+        { binding, sessionId: "primary", archived: false },
+      ]);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
