@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { EnvironmentId } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { beforeEach, expect, it, vi } from "vite-plus/test";
@@ -187,3 +188,57 @@ it.each([false, true])("disables a pinned Muse tile while opening (cached=%s)", 
     vi.unstubAllGlobals();
   }
 });
+
+it.each([false, true])(
+  "shows an open error and Retry beside a pinned tile (cached=%s)",
+  async (cached) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    if (cached)
+      mocks.threads.push({
+        id: `muse-agent:${"a".repeat(64)}`,
+        providerInstanceId: "muse-test",
+        archivedAt: null,
+        updatedAt: "2026-01-01T00:00:00Z",
+        status: "idle",
+        latestTurn: null,
+        lastVisitedAt: null,
+      });
+    mocks.open.mockReset();
+    mocks.open
+      .mockResolvedValueOnce({
+        _tag: "Failure",
+        cause: Cause.fail(new Error("Connection unavailable.")),
+      })
+      .mockResolvedValueOnce({ _tag: "Success", value: { threadId: "native-main" } });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <MuseAgentSidebarSection
+            environmentId={EnvironmentId.make("test-env")}
+            onOpenSettings={vi.fn()}
+          />,
+        ),
+      );
+      const tile = [...container.querySelectorAll("button")].find(
+        (button) => button.querySelector("span.truncate")?.textContent === "Muse",
+      )!;
+      await act(async () => tile.click());
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+        "Connection unavailable.",
+      );
+      const retry = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === "Retry",
+      )!;
+      await act(async () => retry.click());
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(mocks.open).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      vi.unstubAllGlobals();
+    }
+  },
+);

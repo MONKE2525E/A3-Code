@@ -326,6 +326,7 @@ function MuseAgentRoster({
             />
           </li>
         </ul>
+        {errorFooter}
       </div>
     );
   }
