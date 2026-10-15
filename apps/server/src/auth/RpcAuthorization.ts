@@ -44,7 +44,7 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
  */
 export const RPC_REQUIRED_SCOPES = {
   ...CLIENT_GUARDED_RPC_SCOPES,
-  // Cleanup is authorized by the authenticated session's private-page ownership in closeMuse.
+  // Cleanup is authorized by the authenticated session's private-page ownership in its scoped sign-in owner.
   [WS_METHODS.museAgentsCloseSignIn]: null,
   [WS_METHODS.museAgentsStatus]: AuthOrchestrationReadScope,
   [WS_METHODS.museAgentsFeatureRead]: AuthOrchestrationReadScope,

@@ -1616,7 +1616,8 @@ it.live(
         yield* Effect.addFinalizer(() => Effect.sync(() => focus.mockRestore()));
         const publicManager = yield* Manager.PreviewManager;
         const events = yield* publicManager.subscribeEvents;
-        const signIn = yield* integration.openMuse("creator-session");
+        const creator = yield* integration.museSignInOwner("creator-session");
+        const signIn = yield* creator.open;
         expect(
           (yield* publicManager.list({ threadId: ThreadId.make(signIn.threadId) })).sessions,
         ).toEqual([]);
@@ -1626,7 +1627,7 @@ it.live(
           })).sessions,
         ).toEqual([]);
         expect(yield* PubSub.takeUpTo(events, 100)).toEqual([]);
-        expect(yield* integration.openMuse("creator-session")).toEqual(signIn);
+
         for (const authSessionId of [undefined, "other-read-session", "other-operate-session"]) {
           const input = {
             ...viewerInput(signIn.tabId, true),
@@ -1692,7 +1693,8 @@ it.live(
             yield* browser.openDownload({ ...request, authSessionId: "creator-session" }),
           ),
         ).toBe(true);
-        const another = yield* integration.openMuse("another-creator");
+        const anotherOwner = yield* integration.museSignInOwner("another-creator");
+        const another = yield* anotherOwner.open;
         expect(another.threadId).not.toBe(signIn.threadId);
         expect(
           (yield* browser
@@ -1718,18 +1720,20 @@ it.live(
     ).pipe(Effect.provide(layer)),
 );
 
-it.live("retires all private pages for a closed owner and lets that owner start fresh", () =>
+it.live("retires only the requested private page for its connection owner", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const integration = yield* IntegrationBrowser.IntegrationBrowser;
       const browser = yield* ServerBrowser.ServerBrowser;
-      const first = yield* integration.openMuse("owner");
+      const owner = yield* integration.museSignInOwner("owner");
+      const other = yield* integration.museSignInOwner("another-owner");
+      const first = yield* owner.open;
       const page = contexts[0]!.page;
-      yield* integration.closeMuse("another-owner", first.threadId);
+      yield* other.close(first.threadId);
       expect(page.isClosed()).toBe(false);
-      yield* integration.closeMuse("owner", "stale-thread");
+      yield* owner.close("stale-thread");
       expect(page.isClosed()).toBe(false);
-      yield* integration.closeMuse("owner", first.threadId);
+      yield* owner.close(first.threadId);
       expect(page.isClosed()).toBe(true);
       expect(
         (yield* browser
@@ -1740,39 +1744,71 @@ it.live("retires all private pages for a closed owner and lets that owner start 
           })
           .pipe(Effect.flip))._tag,
       ).toBe("ServerBrowserTabNotFoundError");
-      yield* integration.closeMuse("owner", first.threadId);
-      const next = yield* integration.openMuse("owner");
+      yield* owner.close(first.threadId);
+      const next = yield* owner.open;
       expect(next.threadId).not.toBe(first.threadId);
-      yield* integration.closeMuse("owner");
+      yield* owner.close(next.threadId);
       expect(contexts.at(-1)?.page.isClosed()).toBe(true);
     }),
   ).pipe(Effect.provide(layer)),
 );
 
-it.live("keeps a shared session's sign-in page until its last connection scope closes", () =>
+it.live("isolates sign-in dialog lifetimes within one authenticated session", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const integration = yield* IntegrationBrowser.IntegrationBrowser;
-      const firstConnection = yield* Scope.make();
-      const secondConnection = yield* Scope.make();
-      yield* Effect.addFinalizer(() => Scope.close(firstConnection, Exit.succeed(undefined)));
-      yield* Effect.addFinalizer(() => Scope.close(secondConnection, Exit.succeed(undefined)));
-      yield* integration
-        .retainMuseOwner("shared-session")
-        .pipe(Effect.provideService(Scope.Scope, firstConnection));
-      yield* integration
-        .retainMuseOwner("shared-session")
-        .pipe(Effect.provideService(Scope.Scope, secondConnection));
-      const signIn = yield* integration.openMuse("shared-session");
-      const page = contexts[0]!.page;
-      yield* Scope.close(firstConnection, Exit.succeed(undefined));
-      expect(page.isClosed()).toBe(false);
-      expect(yield* integration.openMuse("shared-session")).toEqual(signIn);
-      yield* Scope.close(secondConnection, Exit.succeed(undefined));
-      expect(page.isClosed()).toBe(true);
-      const fresh = yield* integration.openMuse("shared-session");
-      expect(fresh.threadId).not.toBe(signIn.threadId);
-      yield* integration.closeMuse("shared-session");
+      const owner = yield* integration.museSignInOwner("shared-session");
+      const first = yield* owner.open;
+      const second = yield* owner.open;
+      expect(second.threadId).not.toBe(first.threadId);
+      const [firstPage, secondPage] = contexts.map((c) => c.page);
+      yield* owner.close(first.threadId);
+      expect(firstPage!.isClosed()).toBe(true);
+      expect(secondPage!.isClosed()).toBe(false);
+      yield* owner.close(first.threadId);
+      expect(secondPage!.isClosed()).toBe(false);
+      yield* owner.close(second.threadId);
+      expect(secondPage!.isClosed()).toBe(true);
     }),
   ).pipe(Effect.provide(layer)),
+);
+
+it.live(
+  "disconnect retires only that connection's dialogs for a shared authenticated session",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const integration = yield* IntegrationBrowser.IntegrationBrowser;
+        const firstConnection = yield* Scope.make();
+        const secondConnection = yield* Scope.make();
+        yield* Effect.addFinalizer(() => Scope.close(firstConnection, Exit.succeed(undefined)));
+        yield* Effect.addFinalizer(() => Scope.close(secondConnection, Exit.succeed(undefined)));
+        const first = yield* integration
+          .museSignInOwner("shared-session")
+          .pipe(Effect.provideService(Scope.Scope, firstConnection));
+        const second = yield* integration
+          .museSignInOwner("shared-session")
+          .pipe(Effect.provideService(Scope.Scope, secondConnection));
+        const firstDialog = yield* first.open;
+        const secondDialog = yield* second.open;
+        const firstPage = contexts[0]!.page;
+        const secondPage = contexts[1]!.page;
+        // Even the same authenticated session cannot release a different connection's consumer.
+        yield* first.close(secondDialog.threadId);
+        expect(secondPage.isClosed()).toBe(false);
+        yield* first.close(firstDialog.threadId);
+        expect(firstPage.isClosed()).toBe(true);
+        expect(secondPage.isClosed()).toBe(false);
+        yield* first.open;
+        yield* first.open;
+        const remainingFirstPages = contexts.slice(2).map((c) => c.page);
+        yield* Scope.close(firstConnection, Exit.succeed(undefined));
+        expect(remainingFirstPages).toHaveLength(2);
+        expect(remainingFirstPages.every((p) => p.isClosed())).toBe(true);
+        expect(secondPage.isClosed()).toBe(false);
+        expect((yield* first.open.pipe(Effect.flip))._tag).toBe("IntegrationBrowserError");
+        yield* Scope.close(secondConnection, Exit.succeed(undefined));
+        expect(secondPage.isClosed()).toBe(true);
+      }),
+    ).pipe(Effect.provide(layer)),
 );

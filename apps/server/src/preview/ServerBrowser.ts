@@ -486,14 +486,18 @@ const make = Effect.gen(function* () {
   const host = { platform: yield* HostProcess.Platform, arch: yield* HostProcess.Architecture };
   const manager = yield* PreviewManager.PreviewManager;
   const privateManager = yield* PreviewManager.makeWithOptions({ privateSessions: true });
-  const signInThreads = new Map<string, string>();
-  const signInOwners = new Map<string, number>();
+  interface SignInOwner {
+    readonly authSessionId: string;
+    readonly threads: Set<string>;
+    active: boolean;
+  }
+  const signInThreads = new Map<string, SignInOwner>();
   const signInLock = yield* Semaphore.make(1);
   const managerFor = (threadId: string) =>
     IntegrationBrowser.isIntegrationAuthThread(threadId) ? privateManager : manager;
   const mayAccess = (threadId: string, authSessionId: string | undefined) =>
     !IntegrationBrowser.isIntegrationAuthThread(threadId) ||
-    (authSessionId !== undefined && signInThreads.get(authSessionId) === threadId);
+    (authSessionId !== undefined && signInThreads.get(threadId)?.authSessionId === authSessionId);
   const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const previewBrowser = yield* PreviewBrowser.PreviewBrowser;
@@ -2543,15 +2547,11 @@ const make = Effect.gen(function* () {
       catch: (cause) => new PreviewClearProfileError({ profileId, cause }),
     });
 
-  const closeMuseUnlocked = (authSessionId: string, expectedThreadId?: string) =>
+  const closeMuseUnlocked = (owner: SignInOwner, threadId: string) =>
     Effect.gen(function* () {
-      const threadId = signInThreads.get(authSessionId);
-      if (
-        threadId === undefined ||
-        (expectedThreadId !== undefined && threadId !== expectedThreadId)
-      )
-        return;
-      signInThreads.delete(authSessionId);
+      if (signInThreads.get(threadId) !== owner) return;
+      signInThreads.delete(threadId);
+      owner.threads.delete(threadId);
       const { sessions } = yield* privateManager.list({ threadId: ThreadId.make(threadId) });
       for (const session of sessions) {
         const tab = tabs.get(tabKey(threadId, session.tabId));
@@ -2561,26 +2561,53 @@ const make = Effect.gen(function* () {
           .pipe(Effect.ignore);
       }
     });
-  const closeMuse = (authSessionId: string, expectedThreadId?: string) =>
-    signInLock.withPermit(closeMuseUnlocked(authSessionId, expectedThreadId));
-  const retainMuseOwner = (authSessionId: string) =>
+  const museSignInOwner = (authSessionId: string) =>
     Effect.acquireRelease(
-      signInLock.withPermit(
-        Effect.sync(() => {
-          signInOwners.set(authSessionId, (signInOwners.get(authSessionId) ?? 0) + 1);
-        }),
-      ),
-      () =>
+      Effect.sync((): SignInOwner => ({ authSessionId, threads: new Set(), active: true })),
+      (owner) =>
         signInLock.withPermit(
           Effect.gen(function* () {
-            const remaining = (signInOwners.get(authSessionId) ?? 1) - 1;
-            if (remaining > 0) signInOwners.set(authSessionId, remaining);
-            else {
-              signInOwners.delete(authSessionId);
-              yield* closeMuseUnlocked(authSessionId);
-            }
+            owner.active = false;
+            for (const threadId of owner.threads) yield* closeMuseUnlocked(owner, threadId);
           }),
         ),
+    ).pipe(
+      Effect.map((owner): IntegrationBrowser.MuseSignInOwner => ({
+        close: (threadId) => signInLock.withPermit(closeMuseUnlocked(owner, threadId)),
+        open: Effect.suspend(() => {
+          const threadId = ThreadId.make(
+            `${IntegrationBrowser.MUSE_AUTH_THREAD}:${NodeCrypto.randomUUID()}`,
+          );
+          return Effect.gen(function* () {
+            if (!owner.active)
+              return yield* new IntegrationBrowser.IntegrationBrowserError({
+                cause: new Error("The sign-in connection has closed."),
+              });
+            signInThreads.set(threadId, owner);
+            owner.threads.add(threadId);
+            const snapshot = yield* privateManager.open({
+              threadId,
+              profileId: IntegrationBrowser.MUSE_AUTH_PROFILE,
+              url: "https://muse.ai/",
+              runtime: "server",
+              reveal: false,
+            });
+            yield* Effect.tryPromise({
+              try: () => ensureTab(snapshot),
+              catch: (cause) => new IntegrationBrowser.IntegrationBrowserError({ cause }),
+            });
+            return { threadId: snapshot.threadId, tabId: snapshot.tabId };
+          }).pipe(
+            signInLock.withPermit,
+            Effect.onError(() => signInLock.withPermit(closeMuseUnlocked(owner, threadId))),
+            Effect.mapError((cause) =>
+              isIntegrationBrowserError(cause)
+                ? cause
+                : new IntegrationBrowser.IntegrationBrowserError({ cause }),
+            ),
+          );
+        }),
+      })),
     );
 
   const service = ServerBrowser.of({
@@ -2592,46 +2619,12 @@ const make = Effect.gen(function* () {
   });
   return Context.make(ServerBrowser, service).pipe(
     Context.add(IntegrationBrowser.IntegrationBrowser, {
-      closeMuse,
-      retainMuseOwner,
+      museSignInOwner,
       museTransportPage: Effect.tryPromise({
         try: async () =>
           (await contexts.contextFor(IntegrationBrowser.MUSE_AUTH_PROFILE)).newPage(),
         catch: (cause) => new IntegrationBrowser.IntegrationBrowserError({ cause }),
       }),
-      openMuse: (authSessionId) =>
-        Effect.gen(function* () {
-          const threadId = ThreadId.make(
-            signInThreads.get(authSessionId) ??
-              `${IntegrationBrowser.MUSE_AUTH_THREAD}:${NodeCrypto.randomUUID()}`,
-          );
-          signInThreads.set(authSessionId, threadId);
-          const { sessions } = yield* privateManager.list({ threadId });
-          const snapshot =
-            sessions.find(
-              (session) => session.profileId === IntegrationBrowser.MUSE_AUTH_PROFILE,
-            ) ??
-            (yield* privateManager.open({
-              threadId,
-              profileId: IntegrationBrowser.MUSE_AUTH_PROFILE,
-              url: "https://muse.ai/",
-              runtime: "server",
-              reveal: false,
-            }));
-          yield* Effect.tryPromise({
-            try: () => ensureTab(snapshot),
-            catch: (cause) => new IntegrationBrowser.IntegrationBrowserError({ cause }),
-          });
-          return { threadId: snapshot.threadId, tabId: snapshot.tabId };
-        }).pipe(
-          signInLock.withPermit,
-          Effect.onError(() => closeMuse(authSessionId)),
-          Effect.mapError((cause) =>
-            isIntegrationBrowserError(cause)
-              ? cause
-              : new IntegrationBrowser.IntegrationBrowserError({ cause }),
-          ),
-        ),
       museCookies: Effect.tryPromise({
         try: async () => {
           const directory = NodePath.join(

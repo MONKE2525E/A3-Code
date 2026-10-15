@@ -1679,8 +1679,7 @@ const layerWsRpc = (
       const terminalManager = yield* TerminalManager.TerminalManager;
       const previewManager = yield* PreviewManager.PreviewManager;
       const integrationBrowser = yield* IntegrationBrowser.IntegrationBrowser;
-      // Tabs can share one auth session; retire sign-in pages only after its last socket leaves.
-      yield* integrationBrowser.retainMuseOwner(currentSessionId);
+      const museSignIn = yield* integrationBrowser.museSignInOwner(currentSessionId);
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const modelManifest = yield* ModelManifest.ModelManifest;
@@ -3323,10 +3322,9 @@ const layerWsRpc = (
               (unsubscribe) => Effect.sync(unsubscribe),
             ),
           ),
-        [WS_METHODS.museAgentsCloseSignIn]: (input) =>
-          integrationBrowser.closeMuse(currentSessionId, input.threadId),
+        [WS_METHODS.museAgentsCloseSignIn]: (input) => museSignIn.close(input.threadId),
         [WS_METHODS.museAgentsSignIn]: () =>
-          integrationBrowser.openMuse(currentSessionId).pipe(
+          museSignIn.open.pipe(
             Effect.mapError(
               () =>
                 new NativeAgentError({

@@ -19,17 +19,20 @@ export class IntegrationBrowserError extends Schema.TaggedError<IntegrationBrows
 }
 
 /** Human-only sign-in. Cookies stay in the environment's private browser profile. */
+export interface MuseSignInOwner {
+  readonly open: Effect.Effect<
+    { readonly threadId: string; readonly tabId: string },
+    IntegrationBrowserError
+  >;
+  readonly close: (threadId: string) => Effect.Effect<void>;
+}
+
 export class IntegrationBrowser extends Context.Service<
   IntegrationBrowser,
   {
-    readonly openMuse: (
+    readonly museSignInOwner: (
       authSessionId: string,
-    ) => Effect.Effect<
-      { readonly threadId: string; readonly tabId: string },
-      IntegrationBrowserError
-    >;
-    readonly retainMuseOwner: (authSessionId: string) => Effect.Effect<void, never, Scope.Scope>;
-    readonly closeMuse: (authSessionId: string, threadId?: string) => Effect.Effect<void>;
+    ) => Effect.Effect<MuseSignInOwner, never, Scope.Scope>;
     readonly museCookies: Effect.Effect<readonly Cookie[], IntegrationBrowserError>;
     readonly museTransportPage: Effect.Effect<Page, IntegrationBrowserError>;
   }
