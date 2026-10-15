@@ -363,7 +363,14 @@ const make = Effect.gen(function* () {
         args: ["init", "--quiet"],
         timeoutMs: 10_000,
       })
-      .pipe(Effect.mapError((cause) => new ScratchFolderError({ folder: workspaceRoot, cause })));
+      .pipe(
+        Effect.catchIf(
+          (error) =>
+            PlatformError.isPlatformError(error.cause) && error.cause.reason._tag === "NotFound",
+          () => Effect.void,
+        ),
+        Effect.mapError((cause) => new ScratchFolderError({ folder: workspaceRoot, cause })),
+      );
     const id = yield* crypto.randomUUIDv4.pipe(
       Effect.mapError((cause) => new ScratchProjectError({ workspaceRoot, cause })),
     );

@@ -641,3 +641,49 @@ it.effect("removes the folder when the repository cannot be made", () =>
     },
   ),
 );
+
+it.effect.each(["NotFound", "PermissionDenied"] as const)(
+  "native storage handles Git spawn $0 without masking other failures",
+  (reason) =>
+    withScratch(
+      ({ baseDir }) =>
+        Effect.gen(function* () {
+          const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+          const projects = yield* ProjectService.ProjectService;
+          if (reason === "NotFound") {
+            const first = yield* folders.ensureNativeAgentProject;
+            assert.deepEqual(yield* folders.ensureNativeAgentProject, first);
+            const project = Option.getOrThrow(yield* projects.getById(first.projectId));
+            const path = yield* Path.Path;
+            assert.equal(project.workspaceRoot, path.join(baseDir, "native-agents"));
+            const fs = yield* FileSystem.FileSystem;
+            assert.isTrue(yield* fs.exists(project.workspaceRoot));
+          } else {
+            assert.equal(
+              (yield* Effect.flip(folders.ensureNativeAgentProject))._tag,
+              "ScratchFolderError",
+            );
+            assert.deepEqual((yield* projects.snapshot).projects, []);
+          }
+        }),
+      {
+        git: Layer.mock(GitVcsDriver.GitVcsDriver)({
+          execute: (input) =>
+            Effect.fail(
+              new GitCommandError({
+                operation: input.operation,
+                command: "git",
+                cwd: input.cwd,
+                detail: "Failed to spawn Git process.",
+                cause: PlatformError.systemError({
+                  _tag: reason,
+                  module: "ChildProcess",
+                  method: "spawn",
+                  syscall: "spawn git",
+                }),
+              }),
+            ),
+        }),
+      },
+    ),
+);
