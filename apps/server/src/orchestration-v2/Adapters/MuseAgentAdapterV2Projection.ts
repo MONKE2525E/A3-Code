@@ -81,7 +81,7 @@ export function museTerminalStatus(status: string | undefined) {
 
 /** Only standalone native metadata is hidden; bracketed prose and inline examples stay literal. */
 const MUSE_INLINE_MARKER =
-  /^[\t ]*(?:\[\[hatch_widget:[^\]\r\n]*\]\]|\[(?:image|file|audio|video|document):[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+[\t ]+workspace\/[^\]\r\n]+\])[\t ]*\r?$/gm;
+  /^[\t ]*(?:\[\[hatch_widget:widget-[0-9a-f]{8}\]\]|\[(?:image|file|audio|video|document):[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+[\t ]+workspace\/[^\]\r\n]+\])[\t ]*\r?$/gm;
 export function stripMuseInlineMarkers(text: string): string {
   const stripped = text.replace(MUSE_INLINE_MARKER, "");
   return stripped === text ? text : stripped.trimEnd();

@@ -684,10 +684,23 @@ it.each(["file", "image", "audio", "video", "document"])(
   },
 );
 
+it.each(["example", "", "widget-example", "widget-5419bf8", "widget-5419bf8d9"])(
+  "preserves literal hatch widget payload %s",
+  (payload) => {
+    const literal = `[[hatch_widget:${payload}]]`;
+    assert.strictEqual(stripMuseInlineMarkers(literal), literal);
+    assert.strictEqual(
+      stripMuseInlineMarkers(`Explain this:\n${literal}`),
+      `Explain this:\n${literal}`,
+    );
+  },
+);
+
 it.each(["message.user", "message.assistant"])(
   "preserves literal bracketed content in live and imported %s messages",
   (event) => {
-    const literal = "Explain [file:README.md], [image:example] and [document:notes].";
+    const literal =
+      "Explain [file:README.md], [image:example] and [document:notes].\n[[hatch_widget:example]]";
     for (const imported of [false, true]) {
       const projection = makeMuseAgentProjection({
         binding,
