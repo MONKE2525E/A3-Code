@@ -64,6 +64,7 @@ import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayo
 import { AcpSessionManagementSection } from "./AcpSessionManagementSection";
 import { MUSE_AGENT_DRIVER } from "../agents/aiAgents";
 import { MuseAgentFeaturesButton } from "../agents/MuseAgentFeaturesDialog";
+import { AddMuseAgentProviderStep } from "../agents/AddMuseAgentProviderStep";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { readCodexSetupMode } from "./CodexSetupSection.logic";
 import {
@@ -1246,6 +1247,20 @@ export function ProviderInstanceCard({
           }
         />
       </SettingsSection>
+
+      {environmentId !== undefined && instance.driver === MUSE_AGENT_DRIVER ? (
+        <SettingsSection title="Connection">
+          <div inert={readOnly} aria-disabled={readOnly || undefined}>
+            <AddMuseAgentProviderStep
+              key={`${environmentId}:${instanceId}`}
+              environmentId={environmentId}
+              environmentLabel="this environment"
+              reconnecting
+              onConnected={() => {}}
+            />
+          </div>
+        </SettingsSection>
+      ) : null}
 
       {setup || environmentFields.length > 0 ? (
         <SettingsSection title="Setup">

@@ -35,10 +35,12 @@ export function AddMuseAgentProviderStep({
   environmentId,
   environmentLabel,
   onConnected,
+  reconnecting = false,
 }: {
   readonly environmentId: EnvironmentId;
   readonly environmentLabel: string;
   readonly onConnected: (instanceId: ProviderInstanceId | undefined) => void;
+  readonly reconnecting?: boolean;
 }) {
   const status = useEnvironmentQuery(museAgentStatusQuery({ environmentId, input: {} }));
   const canSetup = useAtomValue(museAgentSetup.permissionAtom(environmentId));
@@ -110,10 +112,13 @@ export function AddMuseAgentProviderStep({
   return (
     <div className="grid gap-3 pt-4">
       <div>
-        <h3 className="text-sm font-medium text-foreground">Muse</h3>
+        <h3 className="text-sm font-medium text-foreground">
+          {reconnecting ? "Reconnect Muse" : "Muse"}
+        </h3>
         <p className="mt-0.5 text-xs text-muted-foreground">
-          Your personal Muse agent, chatting from {environmentLabel}. Sign in once to connect your
-          account.
+          {reconnecting
+            ? "Sign in again with the same Muse account to restore this connection."
+            : `Your personal Muse agent, chatting from ${environmentLabel}. Sign in once to connect your account.`}
         </p>
       </div>
       {checking ? (
@@ -131,7 +136,7 @@ export function AddMuseAgentProviderStep({
       ) : null}
       <div className="flex flex-wrap gap-2">
         <Button size="sm" disabled={pending || !canSignIn} onClick={() => void openSignIn()}>
-          {pending ? "Opening…" : "Sign in to Muse"}
+          {pending ? "Opening…" : reconnecting ? "Sign in again" : "Sign in to Muse"}
         </Button>
         {canConnect ? (
           <Button
@@ -140,7 +145,7 @@ export function AddMuseAgentProviderStep({
             disabled={pending || !canSetup}
             onClick={() => void connect()}
           >
-            {reconnect ? "Reconnect" : "Use existing session"}
+            {reconnecting || reconnect ? "Reconnect" : "Use existing session"}
           </Button>
         ) : null}
       </div>
@@ -179,7 +184,7 @@ export function AddMuseAgentProviderStep({
             <Button variant="outline" onClick={() => setBrowser(null)}>
               Close
             </Button>
-            <Button disabled={pending} onClick={() => void connect()}>
+            <Button disabled={pending || !canSetup} onClick={() => void connect()}>
               {pending ? "Verifying…" : "Finish sign-in"}
             </Button>
           </DialogFooter>
