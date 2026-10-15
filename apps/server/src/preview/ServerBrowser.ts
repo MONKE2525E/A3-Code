@@ -82,6 +82,7 @@ import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import { presentAsChrome, ServerBrowserContexts } from "./ServerBrowserContexts.ts";
 import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
 import * as IntegrationBrowser from "./IntegrationBrowser.ts";
+import * as Semaphore from "effect/Semaphore";
 
 const SERVER_HOST_CLIENT_ID = SERVER_BROWSER_AUTOMATION_CLIENT_ID;
 const RENDER_SCALE = 2;
@@ -486,6 +487,7 @@ const make = Effect.gen(function* () {
   const manager = yield* PreviewManager.PreviewManager;
   const privateManager = yield* PreviewManager.makeWithOptions({ privateSessions: true });
   const signInThreads = new Map<string, string>();
+  const signInLock = yield* Semaphore.make(1);
   const managerFor = (threadId: string) =>
     IntegrationBrowser.isIntegrationAuthThread(threadId) ? privateManager : manager;
   const mayAccess = (threadId: string, authSessionId: string | undefined) =>
@@ -1245,7 +1247,12 @@ const make = Effect.gen(function* () {
     });
 
   const atTabLimit = (agentSessionId: string) =>
-    tabs.size + pendingTabs.size >= SERVER_TAB_LIMIT ||
+    [...tabs.values()].filter((tab) => !IntegrationBrowser.isIntegrationAuthThread(tab.threadId))
+      .length +
+      [...pendingTabs.keys()].filter(
+        (key) => !IntegrationBrowser.isIntegrationAuthThread(key.split("\0")[0] ?? ""),
+      ).length >=
+      SERVER_TAB_LIMIT ||
     [...tabs.values()].filter((tab) => tab.control.agentId === agentSessionId).length >=
       AGENT_TAB_LIMIT;
 
@@ -2535,6 +2542,27 @@ const make = Effect.gen(function* () {
       catch: (cause) => new PreviewClearProfileError({ profileId, cause }),
     });
 
+  const closeMuse = (authSessionId: string, expectedThreadId?: string) =>
+    signInLock.withPermit(
+      Effect.gen(function* () {
+        const threadId = signInThreads.get(authSessionId);
+        if (
+          threadId === undefined ||
+          (expectedThreadId !== undefined && threadId !== expectedThreadId)
+        )
+          return;
+        signInThreads.delete(authSessionId);
+        const { sessions } = yield* privateManager.list({ threadId: ThreadId.make(threadId) });
+        for (const session of sessions) {
+          const tab = tabs.get(tabKey(threadId, session.tabId));
+          if (tab) dropTab(tab, false);
+          yield* privateManager
+            .close({ threadId: ThreadId.make(threadId), tabId: session.tabId })
+            .pipe(Effect.ignore);
+        }
+      }),
+    );
+
   const service = ServerBrowser.of({
     attachViewer,
     clearProfile,
@@ -2544,6 +2572,7 @@ const make = Effect.gen(function* () {
   });
   return Context.make(ServerBrowser, service).pipe(
     Context.add(IntegrationBrowser.IntegrationBrowser, {
+      closeMuse,
       museTransportPage: Effect.tryPromise({
         try: async () =>
           (await contexts.contextFor(IntegrationBrowser.MUSE_AUTH_PROFILE)).newPage(),
@@ -2574,6 +2603,8 @@ const make = Effect.gen(function* () {
           });
           return { threadId: snapshot.threadId, tabId: snapshot.tabId };
         }).pipe(
+          signInLock.withPermit,
+          Effect.onError(() => closeMuse(authSessionId)),
           Effect.mapError((cause) =>
             isIntegrationBrowserError(cause)
               ? cause

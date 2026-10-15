@@ -48,6 +48,11 @@ export const museAgentSetup = createEnvironmentRpcCommand(connectionAtomRuntime,
     Effect.sync(() => refreshMuseAgent(registry, target.environmentId)),
 });
 
+export const museAgentCloseSignIn = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "environment-data:muse-agent:close-sign-in",
+  tag: WS_METHODS.museAgentsCloseSignIn,
+});
+
 export const museAgentSignIn = createEnvironmentRpcCommand(connectionAtomRuntime, {
   label: "environment-data:muse-agent:sign-in",
   tag: WS_METHODS.museAgentsSignIn,

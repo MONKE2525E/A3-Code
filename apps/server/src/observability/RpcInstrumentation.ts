@@ -142,6 +142,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.museAgentsFeatureUpdate]: "aiAgents",
   [WS_METHODS.museAgentsSetup]: "aiAgents",
   [WS_METHODS.museAgentsSignIn]: "aiAgents",
+  [WS_METHODS.museAgentsCloseSignIn]: "aiAgents",
   [WS_METHODS.museAgentsProfile]: "aiAgents",
   [WS_METHODS.museAgentsOpenThread]: "aiAgents",
   [WS_METHODS.nativeAgentsOpenThread]: "aiAgents",

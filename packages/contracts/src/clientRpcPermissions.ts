@@ -16,6 +16,7 @@ import { WS_METHODS } from "./rpc.ts";
 export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.museAgentsSetup]: AuthSettingsWriteScope,
   [WS_METHODS.museAgentsSignIn]: AuthSettingsWriteScope,
+  [WS_METHODS.museAgentsCloseSignIn]: AuthSettingsWriteScope,
   [WS_METHODS.museAgentsFeatureUpdate]: AuthOrchestrationOperateScope,
   [WS_METHODS.museAgentsOpenThread]: AuthOrchestrationOperateScope,
   [WS_METHODS.nativeAgentsOpenThread]: AuthOrchestrationOperateScope,

@@ -1715,3 +1715,34 @@ it.live(
       }),
     ).pipe(Effect.provide(layer)),
 );
+
+it.live("retires all private pages for a closed owner and lets that owner start fresh", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const integration = yield* IntegrationBrowser.IntegrationBrowser;
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const first = yield* integration.openMuse("owner");
+      const page = contexts[0]!.page;
+      yield* integration.closeMuse("another-owner", first.threadId);
+      expect(page.isClosed()).toBe(false);
+      yield* integration.closeMuse("owner", "stale-thread");
+      expect(page.isClosed()).toBe(false);
+      yield* integration.closeMuse("owner", first.threadId);
+      expect(page.isClosed()).toBe(true);
+      expect(
+        (yield* browser
+          .attachViewer({
+            ...viewerInput(first.tabId, true),
+            threadId: first.threadId,
+            authSessionId: "owner",
+          })
+          .pipe(Effect.flip))._tag,
+      ).toBe("ServerBrowserTabNotFoundError");
+      yield* integration.closeMuse("owner", first.threadId);
+      const next = yield* integration.openMuse("owner");
+      expect(next.threadId).not.toBe(first.threadId);
+      yield* integration.closeMuse("owner");
+      expect(contexts.at(-1)?.page.isClosed()).toBe(true);
+    }),
+  ).pipe(Effect.provide(layer)),
+);

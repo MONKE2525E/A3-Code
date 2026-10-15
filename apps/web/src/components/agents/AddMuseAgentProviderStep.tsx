@@ -4,12 +4,13 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import {
   museAgentSetup,
   museAgentSignIn,
+  museAgentCloseSignIn,
   museAgentStatusQuery,
   refreshMuseAgent,
 } from "~/state/museAgent";
@@ -47,14 +48,35 @@ export function AddMuseAgentProviderStep({
   const [error, setError] = useState<string | null>(null);
 
   const signIn = useAtomCommand(museAgentSignIn, { reportFailure: false, reportDefect: false });
+  const closeSignIn = useAtomCommand(museAgentCloseSignIn, {
+    reportFailure: false,
+    reportDefect: false,
+  });
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const [browser, setBrowser] = useState<{ threadId: string; tabId: string } | null>(null);
+  const browserThreadId = browser?.threadId;
+  useEffect(
+    () => () => {
+      if (browserThreadId)
+        void closeSignIn({ environmentId, input: { threadId: browserThreadId } });
+    },
+    [browserThreadId, closeSignIn, environmentId],
+  );
   const openSignIn = async () => {
     setPending(true);
     setError(null);
     const result = await signIn({ environmentId, input: {} });
     setPending(false);
-    if (result._tag === "Success") setBrowser(result.value);
-    else if (!isAtomCommandInterrupted(result))
+    if (result._tag === "Success") {
+      if (mounted.current) setBrowser(result.value);
+      else void closeSignIn({ environmentId, input: { threadId: result.value.threadId } });
+    } else if (!isAtomCommandInterrupted(result))
       setError("The Muse sign-in browser could not be opened.");
   };
   const checking = status.data === null && status.isPending && status.error === null;
@@ -140,6 +162,7 @@ export function AddMuseAgentProviderStep({
                   threadId={browser.threadId}
                   tabId={browser.tabId}
                   visible
+                  showControlBar={false}
                   onPopup={(tabId) =>
                     setBrowser((current) => (current ? { ...current, tabId } : null))
                   }

@@ -27,6 +27,7 @@ export class IntegrationBrowser extends Context.Service<
       { readonly threadId: string; readonly tabId: string },
       IntegrationBrowserError
     >;
+    readonly closeMuse: (authSessionId: string, threadId?: string) => Effect.Effect<void>;
     readonly museCookies: Effect.Effect<readonly Cookie[], IntegrationBrowserError>;
     readonly museTransportPage: Effect.Effect<Page, IntegrationBrowserError>;
   }

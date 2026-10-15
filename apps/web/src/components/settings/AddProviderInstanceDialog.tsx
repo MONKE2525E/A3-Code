@@ -492,6 +492,7 @@ export function AddProviderInstanceDialog({
                 />
               ) : wizardStep === 0 && isMuseAgent ? (
                 <AddMuseAgentProviderStep
+                  key={environmentId}
                   environmentId={environmentId}
                   environmentLabel={environmentLabel}
                   onConnected={(instanceId) => {

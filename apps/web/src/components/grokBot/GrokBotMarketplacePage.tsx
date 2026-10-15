@@ -110,6 +110,7 @@ function MuseMarketplace({ environmentId }: { readonly environmentId: Environmen
           </>
         ) : (
           <AddMuseAgentProviderStep
+            key={environmentId}
             environmentId={environmentId}
             environmentLabel="this environment"
             onConnected={() => refreshMuseAgent(appAtomRegistry, environmentId)}
