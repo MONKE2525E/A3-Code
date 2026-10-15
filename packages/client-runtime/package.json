@@ -211,10 +211,6 @@
       "types": "./src/state/museAgentDictationHttp.ts",
       "default": "./src/state/museAgentDictationHttp.ts"
     },
-    "./state/grok-bot-threads": {
-      "types": "./src/state/grokBotThreads.ts",
-      "default": "./src/state/grokBotThreads.ts"
-    },
     "./state/preview": {
       "types": "./src/state/preview.ts",
       "default": "./src/state/preview.ts"
