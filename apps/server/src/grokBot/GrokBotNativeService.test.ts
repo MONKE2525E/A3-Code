@@ -342,6 +342,36 @@ it.layer(NodeServices.layer)("Native attachment delivery", (it) => {
       assert.equal(test.requests.length, 0);
     }),
   );
+  it.effect("marks upload failures that never reached a verdict as transient and says why", () =>
+    Effect.gen(function* () {
+      const test = yield* attachmentFixture;
+      const failure = (result: {
+        readonly _tag: string;
+        readonly failure?: unknown;
+      }): Native.NativeAttachmentError => {
+        assert.equal(result._tag, "Failure");
+        return result.failure as Native.NativeAttachmentError;
+      };
+      test.remote.failTransport = true;
+      const dropped = failure(yield* Effect.result(test.service.uploadAttachments(test.input)));
+      test.remote.failTransport = false;
+      assert.deepInclude(dropped, { reason: "upload_failed", transient: true });
+      assert.include(dropped.message, "timed out or lost its connection");
+
+      test.remote.status = 503;
+      const unavailable = failure(yield* Effect.result(test.service.uploadAttachments(test.input)));
+      assert.deepInclude(unavailable, { reason: "upload_failed", transient: true, status: 503 });
+      assert.include(unavailable.message, "HTTP 503");
+
+      // An auth or validation rejection will not heal by sending the same bytes again.
+      for (const status of [400, 401]) {
+        test.remote.status = status;
+        const rejected = failure(yield* Effect.result(test.service.uploadAttachments(test.input)));
+        assert.equal(rejected.reason, "upload_failed");
+        assert.isUndefined(rejected.transient);
+      }
+    }),
+  );
   it.effect("fails closed on invalid receipts and native upload rejection", () =>
     Effect.gen(function* () {
       const test = yield* attachmentFixture;

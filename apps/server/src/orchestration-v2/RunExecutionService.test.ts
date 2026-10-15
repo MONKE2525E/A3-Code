@@ -3802,6 +3802,107 @@ it.effect("refreshes pull requests only once when startup failure closes its eve
   }),
 );
 
+/** Fails the start only after event ingestion has begun, as a real adapter would. */
+const grokBotStartFailure = (cause: unknown, ingestionStarted?: Deferred.Deferred<void>) =>
+  ((input) =>
+    (ingestionStarted === undefined ? Effect.void : Deferred.await(ingestionStarted)).pipe(
+      Effect.andThen(
+        Effect.fail(
+          new ProviderAdapter.ProviderAdapterTurnStartError({
+            driver,
+            threadId: input.threadId,
+            providerThreadId: input.providerThread.id,
+            runId: input.runId,
+            cause,
+          }),
+        ),
+      ),
+    )) satisfies ProviderAdapter.ProviderAdapterV2SessionRuntime["startTurn"];
+const ingestionThatWaitsForStart = (ingestionStarted: Deferred.Deferred<void>) => () =>
+  Stream.unwrap(Deferred.succeed(ingestionStarted, undefined).pipe(Effect.as(Stream.never)));
+const transientUpload = {
+  _tag: "GrokBotNativeAttachmentError",
+  reason: "upload_failed",
+  transient: true,
+  message: "Uploading the attachment to the Grok Bot timed out or lost its connection.",
+};
+
+it.effect(
+  "keeps a Grok Bot run waiting and schedules redelivery after a transient upload failure",
+  () =>
+    Effect.gen(function* () {
+      const { written, observed, submittedEffects } = yield* captureRootRunTermination({
+        key: "grok-bot-transient-start",
+        shouldFinalizeRun: () => Effect.succeed(true),
+        sessionDriver: "grok-bot",
+        events: () => Stream.never,
+        startTurn: grokBotStartFailure(transientUpload),
+        remoteReconcileAttempt: 2,
+        skipIngestionWait: true,
+      });
+      // Neither failed nor finalized: the user's message stays queued for redelivery.
+      assert.deepEqual(observed, []);
+      assert.deepEqual(written, []);
+      assert.deepEqual(
+        submittedEffects.map((effect) => effect.request),
+        [
+          {
+            type: "provider-runtime.reconnect",
+            runId: RunId.make("run:grok-bot-transient-start"),
+            reconcileAttempt: 3,
+          },
+        ],
+      );
+    }),
+);
+
+it.effect("fails a Grok Bot run with the specific upload error once redelivery is exhausted", () =>
+  Effect.gen(function* () {
+    const ingestionStarted = yield* Deferred.make<void>();
+    const { written, observed, submittedEffects } = yield* captureRootRunTermination({
+      key: "grok-bot-transient-start-exhausted",
+      shouldFinalizeRun: () => Effect.succeed(true),
+      sessionDriver: "grok-bot",
+      events: ingestionThatWaitsForStart(ingestionStarted),
+      startTurn: grokBotStartFailure(transientUpload, ingestionStarted),
+      remoteReconcileAttempt: 5,
+    });
+    assert.deepEqual(submittedEffects, []);
+    assert.equal(observed[0], "run:failed");
+    const error = written.find((item) => item.type === "error");
+    assert.equal(error?.failure.message, transientUpload.message);
+    assert.equal(error?.failure.retryable, true);
+  }),
+);
+
+it.effect(
+  "fails a Grok Bot run immediately, naming the stage, when the start failure is final",
+  () =>
+    Effect.gen(function* () {
+      const ingestionStarted = yield* Deferred.make<void>();
+      const { written, observed, submittedEffects } = yield* captureRootRunTermination({
+        key: "grok-bot-final-start",
+        shouldFinalizeRun: () => Effect.succeed(true),
+        sessionDriver: "grok-bot",
+        events: ingestionThatWaitsForStart(ingestionStarted),
+        startTurn: grokBotStartFailure(
+          {
+            _tag: "GrokBotNativeAttachmentError",
+            reason: "missing",
+            message:
+              "An attachment is no longer available. Attach it again; the Grok Bot message was not sent.",
+          },
+          ingestionStarted,
+        ),
+      });
+      assert.deepEqual(submittedEffects, []);
+      assert.equal(observed[0], "run:failed");
+      const error = written.find((item) => item.type === "error");
+      assert.include(error?.failure.message ?? "", "An attachment is no longer available");
+      assert.equal(error?.failure.retryable, null);
+    }),
+);
+
 it.effect("keeps completed runs completed when pull request refresh fails", () =>
   Effect.gen(function* () {
     const { observed } = yield* captureRootRunTermination({
@@ -3828,6 +3929,10 @@ function captureRootRunTermination(input: {
   >;
   readonly startTurn?: ProviderAdapter.ProviderAdapterV2SessionRuntime["startTurn"];
   readonly refreshAfterTurn?: Effect.Effect<void>;
+  readonly sessionDriver?: string;
+  readonly remoteReconcileAttempt?: number;
+  /** Set when the start handler leaves ingestion open, as a scheduled redelivery does. */
+  readonly skipIngestionWait?: boolean;
 }) {
   return Effect.gen(function* () {
     const ids = backgroundScenarioIds(input.key);
@@ -3911,9 +4016,13 @@ function captureRootRunTermination(input: {
       const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
       yield* runExecution.startRootRun({
         commandId: CommandId.make(`command:${input.key}`),
+        ...(input.remoteReconcileAttempt === undefined
+          ? {}
+          : { remoteReconcileAttempt: input.remoteReconcileAttempt }),
         appThread: { id: ids.threadId } as OrchestrationV2AppThread,
         providerSessionId: ProviderSessionId.make(`session:${input.key}`),
         session: {
+          ...(input.sessionDriver === undefined ? {} : { driver: input.sessionDriver }),
           events: Stream.empty,
           subscribeEvents: Effect.succeed({
             events:
@@ -3997,7 +4106,7 @@ function captureRootRunTermination(input: {
       });
     }).pipe(Effect.provide(layerTest));
 
-    yield* Deferred.await(ingestionDone);
+    if (input.skipIngestionWait !== true) yield* Deferred.await(ingestionDone);
     return {
       written: yield* Ref.get(writtenItems),
       observed: yield* Ref.get(observed),

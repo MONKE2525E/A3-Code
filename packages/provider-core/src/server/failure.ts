@@ -31,10 +31,18 @@ export const MAX_PROVIDER_FAILURE_CODE_LENGTH = 128;
 
 const DEFAULT_PROVIDER_FAILURE_MESSAGE = "Provider turn failed.";
 
-/** Translate known categories without exposing arbitrary provider defect text. */
-function causeMessage(cause: unknown): string | undefined {
+/**
+ * Translate known categories without exposing arbitrary provider defect text.
+ * `retryable` is true only when a cause in the chain proves the turn never started
+ * and sending it again later is safe.
+ */
+function causeDetails(cause: unknown): {
+  readonly message: string | undefined;
+  readonly retryable: boolean;
+} {
   const seen = new Set<unknown>();
   let message: string | undefined;
+  let retryable = false;
   for (let depth = 0; depth < 16 && cause != null && !seen.has(cause); depth++) {
     seen.add(cause);
     try {
@@ -45,11 +53,25 @@ function causeMessage(cause: unknown): string | undefined {
       if (typeof cause !== "object") break;
       switch ((cause as Record<string, unknown>)._tag) {
         case "ContextHandoffBudgetError":
-          return new ContextHandoffBudgetError().message;
+          return { message: new ContextHandoffBudgetError().message, retryable: false };
         case "ClaudeBackgroundWorkBlocksQueryReplacementError":
-          return stringField(cause, "message");
+          return { message: stringField(cause, "message"), retryable: false };
         case "ContextHandoffDeliveryUncertainError":
-          return "T3 could not confirm whether conversation history reached the provider. Retry the turn to recover the session.";
+          return {
+            message:
+              "T3 could not confirm whether conversation history reached the provider. Retry the turn to recover the session.",
+            retryable: false,
+          };
+        // Grok Bot start failures carry their own bounded, credential-free reason, which names
+        // the stage that failed (attachment upload, account binding, native delivery).
+        case "GrokBotNativeAttachmentError":
+          if ((cause as { transient?: unknown }).transient === true) retryable = true;
+          return { message: stringField(cause, "message") ?? message, retryable };
+        case "GrokBotBindingError":
+        case "GrokBotNativeRuntimeError":
+        case "GrokBotNativeReadError":
+        case "GrokBotNativeSignedOutError":
+          return { message: stringField(cause, "message") ?? message, retryable };
         case "ProviderAdapterTurnStartError":
           message =
             "The provider could not start this turn. Retry the turn; if it keeps failing, check the provider setup and server logs.";
@@ -72,7 +94,15 @@ function causeMessage(cause: unknown): string | undefined {
       break;
     }
   }
-  return message;
+  return { message, retryable };
+}
+
+/**
+ * True when the cause proves the turn never reached the provider and failed for a transient
+ * reason, so starting it again later is safe and cannot duplicate the message.
+ */
+export function isTransientStartCause(cause: unknown): boolean {
+  return causeDetails(cause).retryable;
 }
 
 function stringField(value: unknown, key: "message" | "code"): string | undefined {
@@ -152,7 +182,8 @@ export function makeProviderFailure(input: {
   readonly retryable?: boolean | null;
   readonly resetAt?: string | null;
 }): OrchestrationV2ProviderFailure {
-  const rawMessage = input.message ?? causeMessage(input.cause) ?? DEFAULT_PROVIDER_FAILURE_MESSAGE;
+  const details = causeDetails(input.cause);
+  const rawMessage = input.message ?? details.message ?? DEFAULT_PROVIDER_FAILURE_MESSAGE;
   const message = boundedText(rawMessage, MAX_PROVIDER_FAILURE_MESSAGE_LENGTH);
   const rawCode = input.code ?? stringField(input.cause, "code") ?? null;
   const code =
@@ -162,7 +193,7 @@ export function makeProviderFailure(input: {
     class: input.class ?? "unknown",
     message: message || DEFAULT_PROVIDER_FAILURE_MESSAGE,
     code,
-    retryable: input.retryable ?? null,
+    retryable: input.retryable ?? (details.retryable ? true : null),
     ...(input.class === "usage_limit" &&
     input.resetAt != null &&
     Number.isFinite(Date.parse(input.resetAt))

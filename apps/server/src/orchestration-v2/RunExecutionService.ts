@@ -46,6 +46,7 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import type { ProjectionStoreV2Error } from "./ProjectionStore.ts";
 import {
+  isTransientStartCause,
   makeProviderFailure,
   makeProviderFailureTurnItem,
 } from "@t3tools/provider-core/server/failure";
@@ -516,6 +517,9 @@ export const RunExecutionServiceV2Error = Schema.Union([
   RunExecutionIngestError,
 ]);
 export type RunExecutionServiceV2Error = typeof RunExecutionServiceV2Error.Type;
+
+/** Matches the cap `scheduleRemoteReconnect` applies to its own redelivery attempts. */
+const MAX_TRANSIENT_START_REDELIVERIES = 5;
 
 /**
  * SERVICE DEFINITION
@@ -1504,7 +1508,12 @@ export const layer: Layer.Layer<
           yield* Effect.andThen(shouldStart, startTurn).pipe(
             Effect.catchCause((cause) =>
               input.session.driver === "grok-bot" &&
-              nativeDeliveryKind(Cause.squash(cause), ["uncertain"])
+              (nativeDeliveryKind(Cause.squash(cause), ["uncertain"]) ||
+                // The bot never received the message and the failure is transient (an attachment
+                // upload that timed out). Keep the run waiting and send again with backoff rather
+                // than discarding what the user wrote; the send is idempotent per message id.
+                (isTransientStartCause(Cause.squash(cause)) &&
+                  (input.remoteReconcileAttempt ?? 0) < MAX_TRANSIENT_START_REDELIVERIES))
                 ? scheduleRemoteReconnect(input.run, input.remoteReconcileAttempt ?? 0).pipe(
                     Effect.mapError(
                       (writeCause) =>
@@ -1516,6 +1525,7 @@ export const layer: Layer.Layer<
                     ),
                   )
                 : input.observationOnly === true &&
+                    !isTransientStartCause(Cause.squash(cause)) &&
                     !nativeDeliveryKind(Cause.squash(cause), ["refused", "invalid_input"])
                   ? Fiber.interrupt(providerEventFiber).pipe(
                       Effect.andThen(

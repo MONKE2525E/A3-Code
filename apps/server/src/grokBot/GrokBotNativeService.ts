@@ -138,6 +138,17 @@ const encodeBinding = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeSecrets = Schema.decodeEffect(Schema.fromJsonString(Secrets));
 const decodeAccounts = Schema.decodeEffect(Schema.fromJsonString(Accounts));
 
+type NativeRequestLimits = { readonly maxBodyBytes: number; readonly timeout: Duration.Input };
+const DEFAULT_REQUEST_LIMITS: NativeRequestLimits = {
+  maxBodyBytes: 2 * 1024 * 1024,
+  timeout: "15 seconds",
+};
+/** A chunk carries up to 512 KiB of base64 upload, which the 15 second read budget cannot cover on a slow cloud hop. */
+const ATTACHMENT_CHUNK_LIMITS: NativeRequestLimits = {
+  maxBodyBytes: 2 * 1024 * 1024,
+  timeout: "30 seconds",
+};
+
 export class NativeReadError extends Schema.TaggedError<NativeReadError>()(
   "GrokBotNativeReadError",
   {
@@ -225,6 +236,9 @@ export class NativeAttachmentError extends Schema.TaggedError<NativeAttachmentEr
       "upload_failed",
       "invalid_receipt",
     ]),
+    /** The upload never reached a verdict (timeout, dropped connection, 429/5xx), so retrying the same upload is safe. */
+    transient: Schema.optionalKey(Schema.Boolean),
+    status: Schema.optionalKey(Schema.Number),
   },
 ) {
   override get message(): string {
@@ -238,6 +252,10 @@ export class NativeAttachmentError extends Schema.TaggedError<NativeAttachmentEr
       case "invalid":
         return "An attachment is empty or unsupported. The Grok Bot message was not sent.";
       default:
+        if (this.reason === "upload_failed" && this.transient === true)
+          return this.status === undefined
+            ? "Uploading the attachment to the Grok Bot timed out or lost its connection. The message was not sent; it can be retried once the Grok Bot service responds."
+            : `Uploading the attachment to the Grok Bot failed because the service was unavailable (HTTP ${this.status}). The message was not sent; it can be retried once the Grok Bot service recovers.`;
         return "The Grok Bot attachment upload could not be confirmed. The message was not sent. Retry the attachment upload.";
     }
   }
@@ -443,6 +461,7 @@ export class GrokBotNativeService extends Context.Service<
       binding: string,
       method: NativeRuntimeMethod,
       input: object,
+      limits?: NativeRequestLimits,
     ) => Effect.Effect<unknown, NativeReadError | NativeSignedOutError>;
     readonly readMcp: (
       binding: string,
@@ -721,10 +740,7 @@ const make = Effect.gen(function* () {
     input: object,
     service: "GrokBotService" | "DashboardService" = "GrokBotService",
     /** The plugin catalog arrives in one large response; every other read stays small. */
-    limits: { readonly maxBodyBytes: number; readonly timeout: Duration.Input } = {
-      maxBodyBytes: 2 * 1024 * 1024,
-      timeout: "15 seconds",
-    },
+    limits: NativeRequestLimits = DEFAULT_REQUEST_LIMITS,
   ) {
     // A fixed official origin prevents a remote client from selecting where credentials go.
     const rpc = HttpClientRequest.post(
@@ -889,6 +905,7 @@ const make = Effect.gen(function* () {
     binding: string,
     method: NativeRuntimeMethod,
     input: object,
+    limits?: NativeRequestLimits,
   ) {
     const auth = yield* boundSession(binding);
     if (method === "SendGrokBotUserMessage") {
@@ -913,6 +930,7 @@ const make = Effect.gen(function* () {
       ].includes(method)
         ? "DashboardService"
         : "GrokBotService",
+      limits,
     );
     yield* boundSession(binding).pipe(
       Effect.catchTags({
@@ -1128,24 +1146,36 @@ const make = Effect.gen(function* () {
       let committedPath: string | undefined;
       while (offset < bytes.byteLength) {
         const end = Math.min(offset + 512 * 1024, bytes.byteLength);
-        const response = yield* runtimeRequest(input.binding, "UploadGrokBotAgentAttachmentChunk", {
-          agentId: input.botId,
-          sessionId: input.sessionId,
-          uploadId,
-          fileName: attachment.name,
-          offset: String(offset),
-          totalSize: String(bytes.byteLength),
-          data: Buffer.from(bytes.subarray(offset, end)).toString("base64"),
-          sha256Hex,
-        }).pipe(
-          Effect.mapError(
-            (error) =>
-              new NativeAttachmentError({
-                reason:
-                  error._tag === "GrokBotNativeReadError" && error.status === 413
-                    ? "too_large"
-                    : "upload_failed",
-              }),
+        const response = yield* runtimeRequest(
+          input.binding,
+          "UploadGrokBotAgentAttachmentChunk",
+          {
+            agentId: input.botId,
+            sessionId: input.sessionId,
+            uploadId,
+            fileName: attachment.name,
+            offset: String(offset),
+            totalSize: String(bytes.byteLength),
+            data: Buffer.from(bytes.subarray(offset, end)).toString("base64"),
+            sha256Hex,
+          },
+          ATTACHMENT_CHUNK_LIMITS,
+        ).pipe(
+          Effect.mapError((error) =>
+            error._tag === "GrokBotNativeReadError" && error.status === 413
+              ? new NativeAttachmentError({ reason: "too_large" })
+              : new NativeAttachmentError({
+                  reason: "upload_failed",
+                  // A chunk is addressed by upload id and offset, so the same chunk can be sent again.
+                  ...(isTransientEgressRefreshError(error)
+                    ? {
+                        transient: true,
+                        ...(error._tag === "GrokBotNativeReadError" && error.status !== undefined
+                          ? { status: error.status }
+                          : {}),
+                      }
+                    : {}),
+                }),
           ),
           Effect.flatMap(Schema.decodeUnknownEffect(receiptSchema)),
           Effect.mapError((error) =>

@@ -1,5 +1,8 @@
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Schedule from "effect/Schedule";
 import * as Semaphore from "effect/Semaphore";
+import { isTransientStartCause } from "@t3tools/provider-core/server/failure";
 import {
   NativeRuntimeError,
   type GrokBotNativeRuntimeService,
@@ -9,6 +12,21 @@ import {
   type GrokBotManagedBinding,
   type GrokBotManagedTurn,
 } from "./GrokBotManagedBinding.ts";
+
+/** Attachment upload attempts after the first, before the run's durable redelivery takes over. */
+export const GROK_BOT_UPLOAD_RETRIES = 2;
+
+/**
+ * Re-sending an upload is safe because chunks are addressed by a deterministic upload id and
+ * offset, and nothing is delivered to the bot until every upload has a receipt. Only
+ * attachment failures the native layer marked transient qualify; everything else is final.
+ */
+export const grokBotUploadRetrySchedule = Schedule.exponential("500 millis").pipe(
+  Schedule.modifyDelay(({ duration }) =>
+    Effect.succeed(Duration.min(duration, Duration.seconds(8))),
+  ),
+  Schedule.jittered,
+);
 
 /** Native acceptance is durable delivery, never successful execution settlement. */
 export const makeGrokBotManagedTurn = Effect.fnUntraced(function* (input: {
@@ -60,14 +78,31 @@ export const makeGrokBotManagedTurn = Effect.fnUntraced(function* (input: {
     const uploaded =
       turn.input.message.attachments.length === 0
         ? undefined
-        : yield* input.native.uploadAttachments({
-            binding: turn.native.binding,
-            botId: turn.native.botId,
-            sessionId: turn.native.sessionId,
-            messageId: turn.messageId,
-            attachmentsDir: attachmentsDir ?? "",
-            attachments: turn.input.message.attachments,
-          });
+        : yield* input.native
+            .uploadAttachments({
+              binding: turn.native.binding,
+              botId: turn.native.botId,
+              sessionId: turn.native.sessionId,
+              messageId: turn.messageId,
+              attachmentsDir: attachmentsDir ?? "",
+              attachments: turn.input.message.attachments,
+            })
+            .pipe(
+              Effect.tapError((error) =>
+                isTransientStartCause(error)
+                  ? Effect.logWarning("Grok Bot attachment upload failed; it will be retried.", {
+                      runId: turn.input.runId,
+                      messageId: turn.messageId,
+                      error,
+                    })
+                  : Effect.void,
+              ),
+              Effect.retry({
+                schedule: grokBotUploadRetrySchedule,
+                times: GROK_BOT_UPLOAD_RETRIES,
+                while: isTransientStartCause,
+              }),
+            );
     const receipt = yield* input.native
       .startTurn({
         binding: turn.native.binding,
