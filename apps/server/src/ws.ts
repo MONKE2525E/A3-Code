@@ -1679,8 +1679,8 @@ const layerWsRpc = (
       const terminalManager = yield* TerminalManager.TerminalManager;
       const previewManager = yield* PreviewManager.PreviewManager;
       const integrationBrowser = yield* IntegrationBrowser.IntegrationBrowser;
-      // A closed or invalidated RPC connection cannot leave its sign-in pages running.
-      yield* Effect.addFinalizer(() => integrationBrowser.closeMuse(currentSessionId));
+      // Tabs can share one auth session; retire sign-in pages only after its last socket leaves.
+      yield* integrationBrowser.retainMuseOwner(currentSessionId);
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const modelManifest = yield* ModelManifest.ModelManifest;

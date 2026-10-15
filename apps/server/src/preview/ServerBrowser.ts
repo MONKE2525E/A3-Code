@@ -487,6 +487,7 @@ const make = Effect.gen(function* () {
   const manager = yield* PreviewManager.PreviewManager;
   const privateManager = yield* PreviewManager.makeWithOptions({ privateSessions: true });
   const signInThreads = new Map<string, string>();
+  const signInOwners = new Map<string, number>();
   const signInLock = yield* Semaphore.make(1);
   const managerFor = (threadId: string) =>
     IntegrationBrowser.isIntegrationAuthThread(threadId) ? privateManager : manager;
@@ -2542,25 +2543,44 @@ const make = Effect.gen(function* () {
       catch: (cause) => new PreviewClearProfileError({ profileId, cause }),
     });
 
+  const closeMuseUnlocked = (authSessionId: string, expectedThreadId?: string) =>
+    Effect.gen(function* () {
+      const threadId = signInThreads.get(authSessionId);
+      if (
+        threadId === undefined ||
+        (expectedThreadId !== undefined && threadId !== expectedThreadId)
+      )
+        return;
+      signInThreads.delete(authSessionId);
+      const { sessions } = yield* privateManager.list({ threadId: ThreadId.make(threadId) });
+      for (const session of sessions) {
+        const tab = tabs.get(tabKey(threadId, session.tabId));
+        if (tab) dropTab(tab, false);
+        yield* privateManager
+          .close({ threadId: ThreadId.make(threadId), tabId: session.tabId })
+          .pipe(Effect.ignore);
+      }
+    });
   const closeMuse = (authSessionId: string, expectedThreadId?: string) =>
-    signInLock.withPermit(
-      Effect.gen(function* () {
-        const threadId = signInThreads.get(authSessionId);
-        if (
-          threadId === undefined ||
-          (expectedThreadId !== undefined && threadId !== expectedThreadId)
-        )
-          return;
-        signInThreads.delete(authSessionId);
-        const { sessions } = yield* privateManager.list({ threadId: ThreadId.make(threadId) });
-        for (const session of sessions) {
-          const tab = tabs.get(tabKey(threadId, session.tabId));
-          if (tab) dropTab(tab, false);
-          yield* privateManager
-            .close({ threadId: ThreadId.make(threadId), tabId: session.tabId })
-            .pipe(Effect.ignore);
-        }
-      }),
+    signInLock.withPermit(closeMuseUnlocked(authSessionId, expectedThreadId));
+  const retainMuseOwner = (authSessionId: string) =>
+    Effect.acquireRelease(
+      signInLock.withPermit(
+        Effect.sync(() => {
+          signInOwners.set(authSessionId, (signInOwners.get(authSessionId) ?? 0) + 1);
+        }),
+      ),
+      () =>
+        signInLock.withPermit(
+          Effect.gen(function* () {
+            const remaining = (signInOwners.get(authSessionId) ?? 1) - 1;
+            if (remaining > 0) signInOwners.set(authSessionId, remaining);
+            else {
+              signInOwners.delete(authSessionId);
+              yield* closeMuseUnlocked(authSessionId);
+            }
+          }),
+        ),
     );
 
   const service = ServerBrowser.of({
@@ -2573,6 +2593,7 @@ const make = Effect.gen(function* () {
   return Context.make(ServerBrowser, service).pipe(
     Context.add(IntegrationBrowser.IntegrationBrowser, {
       closeMuse,
+      retainMuseOwner,
       museTransportPage: Effect.tryPromise({
         try: async () =>
           (await contexts.contextFor(IntegrationBrowser.MUSE_AUTH_PROFILE)).newPage(),

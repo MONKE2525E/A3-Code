@@ -1,6 +1,7 @@
 import type { Cookie, Page } from "playwright-core";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import type * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
 
 export const MUSE_AUTH_PROFILE = "integration-muse-auth";
@@ -27,6 +28,7 @@ export class IntegrationBrowser extends Context.Service<
       { readonly threadId: string; readonly tabId: string },
       IntegrationBrowserError
     >;
+    readonly retainMuseOwner: (authSessionId: string) => Effect.Effect<void, never, Scope.Scope>;
     readonly closeMuse: (authSessionId: string, threadId?: string) => Effect.Effect<void>;
     readonly museCookies: Effect.Effect<readonly Cookie[], IntegrationBrowserError>;
     readonly museTransportPage: Effect.Effect<Page, IntegrationBrowserError>;

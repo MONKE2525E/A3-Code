@@ -18,6 +18,8 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
+import * as Scope from "effect/Scope";
+import * as Exit from "effect/Exit";
 import * as Stream from "effect/Stream";
 import type { BrowserContext, Page } from "playwright-core";
 import { beforeEach, expect, vi } from "vite-plus/test";
@@ -1743,6 +1745,34 @@ it.live("retires all private pages for a closed owner and lets that owner start 
       expect(next.threadId).not.toBe(first.threadId);
       yield* integration.closeMuse("owner");
       expect(contexts.at(-1)?.page.isClosed()).toBe(true);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("keeps a shared session's sign-in page until its last connection scope closes", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const integration = yield* IntegrationBrowser.IntegrationBrowser;
+      const firstConnection = yield* Scope.make();
+      const secondConnection = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(firstConnection, Exit.succeed(undefined)));
+      yield* Effect.addFinalizer(() => Scope.close(secondConnection, Exit.succeed(undefined)));
+      yield* integration
+        .retainMuseOwner("shared-session")
+        .pipe(Effect.provideService(Scope.Scope, firstConnection));
+      yield* integration
+        .retainMuseOwner("shared-session")
+        .pipe(Effect.provideService(Scope.Scope, secondConnection));
+      const signIn = yield* integration.openMuse("shared-session");
+      const page = contexts[0]!.page;
+      yield* Scope.close(firstConnection, Exit.succeed(undefined));
+      expect(page.isClosed()).toBe(false);
+      expect(yield* integration.openMuse("shared-session")).toEqual(signIn);
+      yield* Scope.close(secondConnection, Exit.succeed(undefined));
+      expect(page.isClosed()).toBe(true);
+      const fresh = yield* integration.openMuse("shared-session");
+      expect(fresh.threadId).not.toBe(signIn.threadId);
+      yield* integration.closeMuse("shared-session");
     }),
   ).pipe(Effect.provide(layer)),
 );
