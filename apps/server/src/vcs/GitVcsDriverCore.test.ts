@@ -3094,36 +3094,78 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
       }),
     );
 
-    it.effect("allocates separate branches and paths for concurrent launches", () =>
+    it.effect("allocates separate branches and paths for six concurrent launches", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
         const { initialBranch } = yield* initRepoWithCommit(cwd);
         const driver = yield* GitVcsDriver.GitVcsDriver;
         const worktreesDirectory = yield* makeTmpDir();
         const results = yield* Effect.all(
-          [
+          Array.from({ length: 6 }, () =>
             driver.createWorktree(
               { cwd, path: null, refName: initialBranch, newRefName: "feature" },
               { worktreesDirectory },
             ),
-            driver.createWorktree(
-              { cwd, path: null, refName: initialBranch, newRefName: "feature" },
-              { worktreesDirectory },
-            ),
-          ],
-          { concurrency: 2 },
+          ),
+          { concurrency: 6 },
         );
         assert.deepEqual(results.map((result) => result.worktree.refName).sort(), [
           "feature",
           "feature-2",
+          "feature-3",
+          "feature-4",
+          "feature-5",
+          "feature-6",
         ]);
-        assert.notEqual(results[0].worktree.path, results[1].worktree.path);
+        assert.equal(new Set(results.map((result) => result.worktree.path)).size, 6);
         for (const result of results) {
           assert.equal(
             yield* git(result.worktree.path, ["branch", "--show-current"]),
             result.worktree.refName,
           );
         }
+      }),
+    );
+
+    it.effect("recovers after more than four allocation races", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const worktreesDirectory = yield* makeTmpDir();
+        let addAttempts = 0;
+        const spawner = ChildProcessSpawner.make((command) =>
+          Effect.gen(function* () {
+            if (
+              ChildProcess.isStandardCommand(command) &&
+              command.args.includes("worktree") &&
+              command.args.includes("add")
+            ) {
+              addAttempts++;
+              if (addAttempts <= 5) {
+                return ChildProcessSpawner.makeHandle({
+                  ...makeSuccessfulHandle(""),
+                  exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(255)),
+                  stderr: Stream.encodeText(
+                    Stream.make("fatal: a branch named 'feature' already exists"),
+                  ),
+                });
+              }
+            }
+            return yield* delegate.spawn(command);
+          }),
+        );
+        const driver = yield* makeGitVcsDriverCore().pipe(
+          Effect.provide(layerServerConfig),
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        );
+        const created = yield* driver.createWorktree(
+          { cwd, path: null, refName: initialBranch, newRefName: "feature" },
+          { worktreesDirectory },
+        );
+        assert.equal(addAttempts, 6);
+        assert.equal(created.worktree.refName, "feature");
+        assert.equal(yield* git(created.worktree.path, ["branch", "--show-current"]), "feature");
       }),
     );
 

@@ -3527,8 +3527,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
             cause,
           }),
       }),
+      // Allocation races are transient: rescan until we claim a free name.
+      // Interruption still cancels the operation; other Git failures propagate.
       Effect.retry({
-        times: 3,
         while: (error) =>
           (input.newRefName !== undefined &&
             (error.reason === "branch_already_exists" ||
