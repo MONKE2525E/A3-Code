@@ -3099,6 +3099,64 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         }),
     );
 
+    it.effect.each(["before checkout", "after checkout"] as const)(
+      "allocates another branch when an unused candidate moves %s",
+      (timing) =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          yield* git(cwd, ["branch", "feature"]);
+          yield* git(cwd, ["checkout", "-b", "advanced"]);
+          yield* git(cwd, ["commit", "--allow-empty", "-m", "concurrent work"]);
+          const advanced = yield* git(cwd, ["rev-parse", "HEAD"]);
+          yield* git(cwd, ["checkout", initialBranch]);
+          const base = yield* git(cwd, ["rev-parse", "HEAD"]);
+          const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+          const writer = yield* GitVcsDriver.GitVcsDriver;
+          let moved = false;
+          const spawner = ChildProcessSpawner.make((command) =>
+            Effect.gen(function* () {
+              const reuse =
+                !moved &&
+                ChildProcess.isStandardCommand(command) &&
+                command.args.includes("worktree") &&
+                command.args.includes("add") &&
+                !command.args.includes("-b");
+              const advance = writer
+                .execute({
+                  cwd,
+                  operation: "test.concurrentRefWriter",
+                  args: ["update-ref", "refs/heads/feature", advanced],
+                })
+                .pipe(Effect.orDie);
+              if (reuse) moved = true;
+              if (reuse && timing === "before checkout") yield* advance;
+              const handle = yield* delegate.spawn(command);
+              return reuse && timing === "after checkout"
+                ? ChildProcessSpawner.makeHandle({
+                    ...handle,
+                    exitCode: handle.exitCode.pipe(Effect.tap(() => advance)),
+                  })
+                : handle;
+            }),
+          );
+          const driver = yield* makeGitVcsDriverCore().pipe(
+            Effect.provide(layerServerConfig),
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          );
+          const created = yield* driver.createWorktree(
+            { cwd, path: null, refName: initialBranch, newRefName: "feature" },
+            { worktreesDirectory: yield* makeTmpDir() },
+          );
+          assert.equal(created.worktree.refName, "feature-2");
+          assert.equal(yield* git(created.worktree.path, ["rev-parse", "HEAD"]), base);
+          assert.equal(yield* git(cwd, ["rev-parse", "feature"]), advanced);
+          const worktrees = yield* git(cwd, ["worktree", "list", "--porcelain"]);
+          assert.notInclude(worktrees, "branch refs/heads/feature\n");
+          assert.include(worktrees, "branch refs/heads/feature-2");
+        }),
+    );
+
     it.effect("preserves divergent commits and allocates the next unused branch", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();

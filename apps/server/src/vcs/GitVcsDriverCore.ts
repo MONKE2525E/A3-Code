@@ -3451,6 +3451,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     // a collision always advances allocation, even when exists() reports false.
     const collidedPaths = new Set<string>();
     const createdBranches = new Map<string, string>();
+    const movedBranches = new Set<string>();
     const { worktreePath, targetBranch, createdBranch } = yield* Effect.gen(function* () {
       let targetBranch = input.newRefName ?? input.refName;
       const repoName = path.basename(input.cwd);
@@ -3496,7 +3497,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           );
           // A new-branch request can only reuse an untouched branch at the base.
           // An explicit checkout (no newRefName) preserves the branch's commits.
-          if (checkedOutBranches.has(targetBranch)) continue;
+          if (checkedOutBranches.has(targetBranch) || movedBranches.has(targetBranch)) continue;
           // A prior attempt may have created this suffix before its path failed.
           // Never adopt a suffix that was present before this call.
           if (suffix > 1 && existing.exitCode === 0 && !createdBranches.has(targetBranch)) continue;
@@ -3573,6 +3574,34 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
             : Effect.void,
         ),
       );
+
+      if (input.newRefName !== undefined && !createBranch) {
+        // Ref writers outside allocation can move an unused branch after the
+        // initial scan. Verify what Git actually attached before accepting it.
+        const checkout = yield* executeGit(
+          "GitVcsDriver.createWorktree.verifyReuse",
+          worktreePath,
+          ["rev-parse", "--verify", "HEAD^{commit}"],
+          { allowNonZeroExit: true },
+        ).pipe(
+          Effect.onError(() =>
+            removeWorktree({ cwd: input.cwd, path: worktreePath, force: false }).pipe(
+              Effect.ignore,
+            ),
+          ),
+        );
+        if (checkout.exitCode !== 0 || checkout.stdout.trim() !== baseCommit!.trim()) {
+          yield* removeWorktree({ cwd: input.cwd, path: worktreePath, force: false });
+          movedBranches.add(targetBranch);
+          return yield* new GitCommandError({
+            operation: "GitVcsDriver.createWorktree",
+            command: "git worktree add",
+            cwd: input.cwd,
+            detail: "The reused branch moved during checkout; allocating another branch.",
+            reason: "branch_already_exists",
+          });
+        }
+      }
 
       return {
         worktreePath,
