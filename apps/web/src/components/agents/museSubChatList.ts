@@ -23,7 +23,7 @@ export interface MuseSubChatList {
 }
 
 /** Main chat is never a sub-chat; only side-chat thread ids qualify. */
-export function isMuseSideChatThreadId(threadId: string): boolean {
+function isMuseSideChatThreadId(threadId: string): boolean {
   return SIDE_CHAT_THREAD_ID.test(threadId);
 }
 
