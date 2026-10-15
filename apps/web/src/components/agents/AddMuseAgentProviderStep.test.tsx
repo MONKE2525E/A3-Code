@@ -69,8 +69,13 @@ it("retires the private sign-in page when its dialog closes", async () => {
 });
 it("retires an opening page that completes after the provider dialog unmounts", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  const pending = Promise.withResolvers<unknown>();
-  commands.signIn.mockReturnValue(pending.promise);
+  let finish: (value: unknown) => void = () => {
+    throw new Error("Sign-in promise is not initialized");
+  };
+  const promise = new Promise<unknown>((resolve) => {
+    finish = resolve;
+  });
+  commands.signIn.mockReturnValue(promise);
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -87,7 +92,7 @@ it("retires an opening page that completes after the provider dialog unmounts", 
   await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
   await act(async () => root.unmount());
   await act(async () =>
-    pending.resolve({ _tag: "Success", value: { threadId: "late-private-owner", tabId: "tab" } }),
+    finish({ _tag: "Success", value: { threadId: "late-private-owner", tabId: "tab" } }),
   );
   expect(commands.close).toHaveBeenCalledWith({
     environmentId,
