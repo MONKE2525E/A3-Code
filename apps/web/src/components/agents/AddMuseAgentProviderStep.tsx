@@ -7,18 +7,28 @@ import type { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import { useState } from "react";
 
 import { Button } from "~/components/ui/button";
-import { RefreshIcon } from "~/components/ui/refresh-icon";
-import { Spinner } from "~/components/ui/spinner";
-import { museAgentSetup, museAgentStatusQuery, refreshMuseAgent } from "~/state/museAgent";
+import {
+  museAgentSetup,
+  museAgentSignIn,
+  museAgentStatusQuery,
+  refreshMuseAgent,
+} from "~/state/museAgent";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 
-import { resolveMuseAgentNotice } from "./aiAgents";
+import { ServerBrowserSurface } from "~/browser/ServerBrowserSurface";
+import {
+  Dialog,
+  DialogPopup,
+  DialogHeader,
+  DialogTitle,
+  DialogPanel,
+  DialogFooter,
+} from "~/components/ui/dialog";
 
 /**
- * Native Muse is account-bound and auto-detected, so the wizard has no fields: it shows what was
- * found and offers the one next action. Needs only Muse installed and signed in on the server.
+ * Sign-in runs in an environment-owned private browser and preserves its session.
  */
 export function AddMuseAgentProviderStep({
   environmentId,
@@ -35,10 +45,17 @@ export function AddMuseAgentProviderStep({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const notice = resolveMuseAgentNotice({
-    status: status.data,
-    error: status.error,
-  });
+  const signIn = useAtomCommand(museAgentSignIn, { reportFailure: false, reportDefect: false });
+  const [browser, setBrowser] = useState<{ threadId: string; tabId: string } | null>(null);
+  const openSignIn = async () => {
+    setPending(true);
+    setError(null);
+    const result = await signIn({ environmentId, input: {} });
+    setPending(false);
+    if (result._tag === "Success") setBrowser(result.value);
+    else if (!isAtomCommandInterrupted(result))
+      setError("The Muse sign-in browser could not be opened.");
+  };
   const checking = status.data === null && status.isPending && status.error === null;
   // `ready` stays false until setup verifies the account, so a signed-in Muse must be connectable.
   const data = status.data;
@@ -57,6 +74,7 @@ export function AddMuseAgentProviderStep({
       return;
     }
     if (result.value.ready && result.value.provider) {
+      setBrowser(null);
       onConnected(result.value.provider.instanceId);
       return;
     }
@@ -71,48 +89,78 @@ export function AddMuseAgentProviderStep({
       <div>
         <h3 className="text-sm font-medium text-foreground">Muse</h3>
         <p className="mt-0.5 text-xs text-muted-foreground">
-          Your personal Muse agent, chatting from {environmentLabel}. It is found automatically from
-          the Muse app on that machine.
+          Your personal Muse agent, chatting from {environmentLabel}. Sign in once to connect your
+          account.
         </p>
       </div>
       {checking ? (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <Spinner className="size-3.5" /> Looking for Muse…
-        </div>
-      ) : canConnect ? (
-        <div className="grid gap-1 text-xs text-muted-foreground">
-          <p>
-            {reconnect
-              ? "Muse needs to reconnect before you can chat with it."
-              : "Muse is installed and signed in. Add it to verify the account and start chatting."}
-          </p>
-          {notice.kind !== "ready" && notice.message ? <p role="status">{notice.message}</p> : null}
-        </div>
-      ) : (
         <p role="status" className="text-xs text-muted-foreground">
-          {notice.message}
+          Checking the connection…
         </p>
-      )}
+      ) : null}
+      <p className="text-xs text-muted-foreground">
+        Sign in to Muse in a private browser window. No companion app or API key is required.
+      </p>
       {error ? (
         <p role="alert" className="text-xs text-destructive">
           {error}
         </p>
       ) : null}
       <div className="flex flex-wrap gap-2">
+        <Button size="sm" disabled={pending || !canSetup} onClick={() => void openSignIn()}>
+          {pending ? "Opening…" : "Sign in to Muse"}
+        </Button>
         {canConnect ? (
-          <Button size="sm" disabled={pending || !canSetup} onClick={() => void connect()}>
-            {pending ? "Verifying account..." : reconnect ? "Reconnect Muse" : "Add Muse"}
-          </Button>
-        ) : (
           <Button
             size="sm"
             variant="outline"
-            onClick={() => refreshMuseAgent(appAtomRegistry, environmentId)}
+            disabled={pending || !canSetup}
+            onClick={() => void connect()}
           >
-            <RefreshIcon /> {notice.kind === "error" ? "Retry" : "Check again"}
+            {reconnect ? "Reconnect" : "Use existing session"}
           </Button>
-        )}
+        ) : null}
       </div>
+      <Dialog
+        open={browser !== null}
+        onOpenChange={(open) => {
+          if (!open) setBrowser(null);
+        }}
+      >
+        <DialogPopup className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>Sign in to Muse</DialogTitle>
+          </DialogHeader>
+          <DialogPanel>
+            {browser ? (
+              <div className="h-[60vh] min-h-80">
+                <ServerBrowserSurface
+                  environmentId={environmentId}
+                  threadId={browser.threadId}
+                  tabId={browser.tabId}
+                  visible
+                  onPopup={(tabId) =>
+                    setBrowser((current) => (current ? { ...current, tabId } : null))
+                  }
+                />
+              </div>
+            ) : null}
+            {error ? (
+              <p role="alert" className="text-sm text-destructive">
+                {error}
+              </p>
+            ) : null}
+          </DialogPanel>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBrowser(null)}>
+              Close
+            </Button>
+            <Button disabled={pending} onClick={() => void connect()}>
+              {pending ? "Verifying…" : "Finish sign-in"}
+            </Button>
+          </DialogFooter>
+        </DialogPopup>
+      </Dialog>
     </div>
   );
 }

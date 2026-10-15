@@ -8,7 +8,9 @@ import {
   type NativeAgentFeatureReadInput,
   type ProviderInstanceId,
 } from "@t3tools/contracts";
-import { useState, type ReactNode } from "react";
+import { useAtomValue } from "@effect/atom-react";
+import { useRef, useState, type ReactNode } from "react";
+import { Input } from "~/components/ui/input";
 
 import {
   AlertDialog,
@@ -180,6 +182,15 @@ function ConnectDialog({
         Muse offers no connection step for {connector.name} from here.
       </p>
     );
+  } else if (action.type === "api_key" || action.type === "consent_only") {
+    body = (
+      <ConnectorCredentialForm
+        target={target}
+        connector={connector}
+        authType={action.type}
+        onConnected={onClose}
+      />
+    );
   } else {
     body = (
       <p className="text-sm text-muted-foreground">
@@ -203,6 +214,85 @@ function ConnectDialog({
         </DialogFooter>
       </DialogPopup>
     </Dialog>
+  );
+}
+
+function ConnectorCredentialForm({
+  target,
+  connector,
+  authType,
+  onConnected,
+}: {
+  readonly target: Target;
+  readonly connector: MuseAgentConnector;
+  readonly authType: "api_key" | "consent_only";
+  readonly onConnected: () => void;
+}) {
+  const secret = useRef<HTMLInputElement>(null);
+  const canWrite = useAtomValue(museAgentFeatureUpdate.permissionAtom(target.environmentId));
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const update = useAtomCommand(museAgentFeatureUpdate, {
+    reportFailure: false,
+    reportDefect: false,
+  });
+  return (
+    <form
+      className="grid gap-3"
+      onSubmit={async (event) => {
+        event.preventDefault();
+        if (pending || !canWrite) return;
+        setPending(true);
+        setError(null);
+        const key = secret.current?.value;
+        if (secret.current) secret.current.value = "";
+        const result = await update({
+          environmentId: target.environmentId,
+          input: {
+            operation: "connector_auth",
+            providerInstanceId: target.providerInstanceId,
+            connectorId: connector.id,
+            authType,
+            ...(key === undefined ? {} : { key }),
+          },
+        });
+        setPending(false);
+        if (result._tag === "Success") onConnected();
+        else if (!isAtomCommandInterrupted(result))
+          setError(
+            "Muse could not confirm this connection. Refresh its status before trying again.",
+          );
+      }}
+    >
+      {authType === "api_key" ? (
+        <>
+          <label htmlFor={`muse-key-${connector.id}`} className="text-sm font-medium">
+            API key
+          </label>
+          <Input
+            id={`muse-key-${connector.id}`}
+            ref={secret}
+            type="password"
+            autoComplete="off"
+            required
+            maxLength={65536}
+          />
+          <p className="text-xs text-muted-foreground">
+            Sent directly to Muse's credential service. It is never added to chat or model context.
+          </p>
+        </>
+      ) : (
+        <p className="text-sm text-muted-foreground">Allow Muse to connect to {connector.name}?</p>
+      )}
+      {error ? (
+        <p role="alert" className="text-sm text-destructive">
+          {error}
+        </p>
+      ) : null}
+      <Button type="submit" disabled={!canWrite || pending || error !== null}>
+        {pending ? "Connecting…" : "Connect"}
+      </Button>
+    </form>
   );
 }
 
@@ -434,8 +524,7 @@ function AccountsDialog({
 }
 
 /**
- * Connection management for Muse. Connecting only ever hands the user a link to click; secrets and
- * consent steps stay in the Muse app, and a connector shows as connected only once Muse reports it.
+ * Connection management for Muse. Secret forms bypass chat; connection state comes from Muse.
  */
 export function MuseAgentConnectionsSection({
   environmentId,
@@ -459,7 +548,8 @@ export function MuseAgentConnectionsSection({
     <div className="grid gap-3">
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs text-muted-foreground">
-          Connect, disconnect, and manage linked accounts. Some steps finish in the Muse app.
+          Connect, disconnect, and manage linked accounts. Some providers finish sign-in in a
+          browser.
         </p>
         <Button size="xs" variant="ghost" onClick={view.refresh}>
           Refresh
@@ -525,6 +615,7 @@ export function MuseAgentConnectionsSection({
                     <Button
                       size="sm"
                       variant="outline"
+                      disabled={!canWrite}
                       aria-label={`Connect ${connector.name}`}
                       onClick={() => setPanel({ kind: "connect", connector })}
                     >

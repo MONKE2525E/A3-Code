@@ -1,12 +1,11 @@
 # AI Agents
 
-The **AI Agents** section of the sidebar holds your personal agents: your Grok Bots and Muse. Their chats are ordinary threads that stay with the environment you picked, and they never appear in project lists.
+The **AI Agents** section of the sidebar holds your personal agents: your Grok Bots and Muse. This section and the marketplace appear only after you enable Muse or Grok Bot in Providers. When both are enabled, the marketplace lets you switch between them. Their chats are ordinary threads that stay with the environment you picked, and they never appear in project lists.
 
 ## Muse
 
-Muse is found automatically from Muse for Linux on the machine running your T3 Code server. Sign in there and have Chromium or Chrome installed, then choose **Add Muse** in the sidebar. You can also use **Settings → Providers → Add provider → Muse**. Remote clients use that server's Muse account.
+Choose **Settings → Providers → Add provider → Muse**, then **Sign in to Muse**. Complete sign-in in the private browser window and choose **Finish sign-in**. No companion app is required. Remote clients use the selected server's Muse account.
 
-- **Not installed or signed out:** the sidebar says which one. Install or sign in in the Muse app, then choose **Refresh**.
 - **One agent:** Muse has a single personal agent. Choose its row to open the chat.
 - **Your look:** the name and avatar come from your Muse profile. A video avatar plays only while Muse is working and the row is on screen, and stays still when your system asks for reduced motion.
 - **Tools:** Muse does not need a public endpoint to use T3 Code's tools.
@@ -17,7 +16,7 @@ Open **Muse features** from the chat header or provider settings to search memor
 
 The **Profile** tab edits Muse's Identity, Personality, and Memory files and selects its native chat theme. Changes require **Save**. If a file changed elsewhere, reload it before saving again.
 
-Connection authorization opens in a separate tab. Refresh afterwards to check whether Muse connected it. Authentication methods that require Muse's own app stay there.
+Connection authorization opens in a separate tab. Refresh afterwards to check whether Muse connected it. API keys and consent can be entered directly in T3 Code. Other authentication methods may still require Muse. Credentials requested during a conversation appear in a separate private form; they are sent directly to Muse’s credential store and never added to chat.
 
 Messages support images within a combined 10 MiB inline budget and files up to 50 MiB each, with a 128 MiB total limit. Computer tasks show a still preview in **Muse features → Computer**. Voice calls and the ambient overlay are not currently available through this integration.
 

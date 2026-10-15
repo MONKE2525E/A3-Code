@@ -1,6 +1,7 @@
 import { MuseAgentFeaturesPanel } from "./agents/MuseAgentFeaturesDialog";
 import { GrokBotComputerPanel } from "./grokBot/GrokBotComputerPanel";
 import { GrokBotSecureInputPanel } from "./grokBot/GrokBotSecureInputPanel";
+import { MuseAgentCredentialPanel } from "./agents/MuseAgentCredentialPanel";
 import { GROK_BOT_MAIN_SESSION_ID, grokBotSecretChatTarget } from "./grokBot/grokBotSecretRequest";
 import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
@@ -11754,6 +11755,13 @@ export default function ChatView(props: ChatViewProps) {
                       requests={grokBotSecretRequests}
                     />
                   )}
+                  {isMuseAgentThread && activeThread ? (
+                    <MuseAgentCredentialPanel
+                      environmentId={activeThread.environmentId}
+                      providerInstanceId={activeThread.modelSelection.instanceId}
+                      threadId={activeThread.id}
+                    />
+                  ) : null}
                   <div
                     ref={draftHeroTransition.composerAnchorRef}
                     className="relative z-10"

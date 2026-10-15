@@ -48,6 +48,11 @@ export const museAgentSetup = createEnvironmentRpcCommand(connectionAtomRuntime,
     Effect.sync(() => refreshMuseAgent(registry, target.environmentId)),
 });
 
+export const museAgentSignIn = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "environment-data:muse-agent:sign-in",
+  tag: WS_METHODS.museAgentsSignIn,
+});
+
 /**
  * Native Muse feature reads, one tagged operation per call. Short stale time: these are the
  * account's live data, refreshed by the panel's retry and after every write.
@@ -62,6 +67,17 @@ export const museAgentFeatureReadQuery = createEnvironmentRpcQueryAtomFamily(
   },
 );
 
+export const museAgentCredentialRequestsQuery = createEnvironmentRpcQueryAtomFamily(
+  connectionAtomRuntime,
+  {
+    label: "environment-data:muse-agent:credential-requests",
+    tag: WS_METHODS.museAgentsFeatureRead,
+    staleTimeMs: 1000,
+    idleTtlMs: 10000,
+    refreshIntervalMs: 5000,
+  },
+);
+
 /** Guarded native writes: routine delete, conversation rename, archive and unarchive. */
 export const museAgentFeatureUpdate = createEnvironmentRpcCommand(connectionAtomRuntime, {
   label: "environment-data:muse-agent:feature-update",
@@ -69,6 +85,21 @@ export const museAgentFeatureUpdate = createEnvironmentRpcCommand(connectionAtom
   onSuccess: (target, registry) =>
     Effect.sync(() => {
       const { providerInstanceId } = target.input;
+      if ("connectorId" in target.input) {
+        registry.refresh(
+          museAgentFeatureReadQuery({
+            environmentId: target.environmentId,
+            input: { operation: "connectors", providerInstanceId },
+          }),
+        );
+        for (const operation of ["connector_info", "connector_accounts"] as const)
+          registry.refresh(
+            museAgentFeatureReadQuery({
+              environmentId: target.environmentId,
+              input: { operation, providerInstanceId, connectorId: target.input.connectorId },
+            }),
+          );
+      }
       if (target.input.operation === "computer_action") {
         // Stop/close change one task and the computer list; refresh both, never the other tabs.
         const { sessionId, taskId } = target.input;
