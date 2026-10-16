@@ -26,6 +26,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -145,6 +146,7 @@ const decodeFailure = Schema.decodeUnknownEffect(
   Schema.Struct({
     code: Schema.optionalKey(Schema.String),
     reason: Schema.optionalKey(Schema.String),
+    message: Schema.optionalKey(Schema.String),
   }),
 );
 
@@ -538,10 +540,10 @@ it.effect.each([
           Layer.mock(Secrets.SecretRequests)({}),
           Layer.mock(GitVcsDriver.GitVcsDriver)({}),
           Layer.mock(Repositories.SourceControlRepositoryService)({}),
-          serverConfig,
           NodeServices.layer,
         ]),
         Layer.provide(settings),
+        Layer.provideMerge(serverConfig),
       );
       yield* Effect.gen(function* () {
         const server = yield* McpServer.McpServer;
@@ -665,6 +667,30 @@ it.effect.each([
           Effect.flatMap(decodeProjects),
         );
         assert.equal(list.projects[0]?.id, projectId);
+        const config = yield* ServerConfig.ServerConfig;
+        const path = yield* Path.Path;
+        const managedWorkspace = path.resolve(config.baseDir, "native-agents");
+        const managedProjectId = ProjectId.make("project:protected-native-storage");
+        yield* fs.makeDirectory(managedWorkspace, { recursive: true });
+        yield* projects.create({
+          commandId: CommandId.make("shell:create-managed-project"),
+          projectId: managedProjectId,
+          title: "AI Agents",
+          workspaceRoot: managedWorkspace,
+        });
+        for (const force of [false, true]) {
+          const protectedFailure = yield* invoke(
+            "t3_project_delete",
+            { projectId: managedProjectId, force },
+            "Bearer fixture-oauth-full",
+          ).pipe(Effect.flatMap(decodeFailure));
+          assert.equal(protectedFailure.code, "invalid_request");
+          assert.equal(
+            protectedFailure.message,
+            "The managed AI Agents project cannot be deleted.",
+          );
+          assert.equal((yield* projects.getById(managedProjectId))._tag, "Some");
+        }
         const deniedLaunch = yield* invoke(
           "t3_thread_launch",
           { title: "Denied", projectId, modelSelection: selection },

@@ -80,7 +80,6 @@ import {
   ProjectSearchContentsError,
   ProjectSearchEntriesError,
   ProjectWriteFileError,
-  ProjectMutationError,
   ProviderUploadFeedbackError,
   ProviderSetupError,
   RelayClientInstallFailedError,
@@ -210,7 +209,7 @@ import * as ReviewService from "./review/ReviewService.ts";
 import * as ProjectEnrichmentService from "./project/ProjectEnrichmentService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import * as ManagedProjectFolders from "./project/ManagedProjectFolders.ts";
-import { projectMutationOperation } from "./project/ProjectMutation.ts";
+import { projectMutationOperation, projectMutationRpcError } from "./project/ProjectMutation.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
@@ -3097,19 +3096,9 @@ const layerWsRpc = (
             ),
           ),
         [WS_METHODS.projectsMutate]: (mutation) =>
-          startup.enqueueCommand(mutateProject(mutation)).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectMutationError({
-                  commandId: mutation.commandId,
-                  message:
-                    cause._tag === "ProjectNotEmptyError"
-                      ? cause.message
-                      : "Failed to mutate project.",
-                  cause,
-                }),
-            ),
-          ),
+          startup
+            .enqueueCommand(mutateProject(mutation))
+            .pipe(Effect.mapError((cause) => projectMutationRpcError(mutation.commandId, cause))),
         [WS_METHODS.shellOpenInEditor]: (input) => externalLauncher.launchEditor(input),
         [WS_METHODS.filesystemGetMetadata]: (input) => workspaceFileSystem.getMetadata(input),
         [WS_METHODS.filesystemBrowse]: (input) =>
