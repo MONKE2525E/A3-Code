@@ -2,7 +2,10 @@ import { MuseAgentFeaturesPanel } from "./agents/MuseAgentFeaturesDialog";
 import { GrokBotComputerPanel } from "./grokBot/GrokBotComputerPanel";
 import { GrokBotSecureInputPanel } from "./grokBot/GrokBotSecureInputPanel";
 import { MuseAgentCredentialPanel } from "./agents/MuseAgentCredentialPanel";
-import { MuseAgentRouteConnection } from "./agents/MuseAgentRouteConnection";
+import {
+  MuseAgentRouteConnection,
+  resolveMuseAgentComposerSendBlockedReason,
+} from "./agents/MuseAgentRouteConnection";
 import { GROK_BOT_MAIN_SESSION_ID, grokBotSecretChatTarget } from "./grokBot/grokBotSecretRequest";
 import { ThreadFind, ThreadFindCanvas, type ThreadFindControls } from "./chat/ThreadFindProvider";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
@@ -3298,6 +3301,28 @@ export default function ChatView(props: ChatViewProps) {
   // Native Muse threads use the same compact composer as Grok Bot, so they also skip the strip below.
   const isMuseAgentThread =
     activeThreadId !== null && nativeAgentSourceForThread({ id: activeThreadId }) === "muse-agent";
+  const museAttachScope =
+    isMuseAgentThread && activeThread
+      ? `${activeThread.environmentId}:${activeThread.id}:${activeThread.modelSelection.instanceId}:${activeEnvironmentConnectionPhase === "connected" ? "connected" : "offline"}`
+      : "";
+  const [museAttachScopeState, setMuseAttachScopeState] = useState(museAttachScope);
+  const [museAttachSendBlockedReason, setMuseAttachSendBlockedReason] = useState<
+    string | null | undefined
+  >(undefined);
+  const museAttachSendBlockedReasonRef = useRef<string | null>(null);
+  if (museAttachScopeState !== museAttachScope) {
+    setMuseAttachScopeState(museAttachScope);
+    setMuseAttachSendBlockedReason(undefined);
+  }
+  const museSendBlockedReason = resolveMuseAgentComposerSendBlockedReason(
+    isMuseAgentThread,
+    museAttachSendBlockedReason,
+  );
+  museAttachSendBlockedReasonRef.current = museSendBlockedReason;
+  const onMuseAttachSendBlockedReasonChange = useCallback((reason: string | null) => {
+    museAttachSendBlockedReasonRef.current = reason;
+    setMuseAttachSendBlockedReason((previous) => (previous === reason ? previous : reason));
+  }, []);
   const isNativeAgentComposerThread = isGrokBotThread || isMuseAgentThread;
   const activeProviderInstanceId = selectedProviderEntry?.instanceId ?? null;
   const activeProviderStatus = selectedProviderEntry?.snapshot ?? null;
@@ -4724,6 +4749,10 @@ export default function ChatView(props: ChatViewProps) {
   // never steers or interrupts a running turn.
   const sendAppMessage = useCallback(
     async (text: string) => {
+      const museAttachBlock = museAttachSendBlockedReasonRef.current;
+      if (museAttachBlock != null) {
+        throw new Error(museAttachBlock);
+      }
       if (!isServerThread || activeThreadId === null) {
         throw new Error("Messages from apps need a started thread.");
       }
@@ -8931,7 +8960,8 @@ export default function ChatView(props: ChatViewProps) {
       threadDetailLoading ||
       environmentChangeRef.current !== null ||
       sendInFlightRef.current ||
-      feedbackUploadsInFlightRef.current.has(routeThreadKey)
+      feedbackUploadsInFlightRef.current.has(routeThreadKey) ||
+      museAttachSendBlockedReasonRef.current != null
     ) {
       notifyDirectAnnotationAttached();
       return;
@@ -11031,7 +11061,8 @@ export default function ChatView(props: ChatViewProps) {
     !needsLoadBalancing &&
     !activeEnvironmentUnavailable &&
     !activePendingProgress &&
-    !feedbackUploading;
+    !feedbackUploading &&
+    museSendBlockedReason === null;
   useEffect(() => {
     if (
       !workLocallyResendReady ||
@@ -11582,12 +11613,13 @@ export default function ChatView(props: ChatViewProps) {
             <div className="relative flex min-h-0 flex-1 flex-col bg-background">
               {isMuseAgentThread && activeThread ? (
                 <MuseAgentRouteConnection
-                  key={`muse-route:${activeThread.environmentId}:${activeThread.id}`}
+                  key={`muse-route:${activeThread.environmentId}:${activeThread.id}:${activeThread.modelSelection.instanceId}`}
                   environmentId={activeThread.environmentId}
                   providerInstanceId={activeThread.modelSelection.instanceId}
                   threadId={activeThread.id}
                   connected={activeEnvironmentConnectionPhase === "connected"}
                   hasMessages={displayedTimeline.entries.length > 0}
+                  onSendBlockedReasonChange={onMuseAttachSendBlockedReasonChange}
                 />
               ) : null}
               {/* Messages — LegendList handles virtualization and scrolling internally */}
@@ -11861,7 +11893,8 @@ export default function ChatView(props: ChatViewProps) {
                               canResume={resumableRunId !== null || hasHeldQueuedRuns}
                               isRevertingCheckpoint={isRevertingCheckpoint}
                               sendDisabledReason={
-                                !canOperateThread
+                                museSendBlockedReason ??
+                                (!canOperateThread
                                   ? "This connection cannot change threads."
                                   : isEnvironmentChanging
                                     ? "Preparing machine"
@@ -11873,7 +11906,7 @@ export default function ChatView(props: ChatViewProps) {
                                           ? "Messages loading"
                                           : worktreeSetupBlocksSend
                                             ? "Preparing worktree"
-                                            : projectCloneSendBlockReason
+                                            : projectCloneSendBlockReason)
                               }
                               isPreparingWorktree={isPreparingWorktree && !sendQueuesBehindSetup}
                               queuedRunsControl={
