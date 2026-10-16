@@ -36,8 +36,8 @@ import {
   resolveThreadListV2SnoozeGateExpiryMs,
   resolveThreadListV2Status,
   resolveThreadListV2SwipeActions,
-  filterThreadListV2GenericDestructiveMenuActions,
-  threadListV2AllowsGenericDestructiveActions,
+  filterThreadListV2GenericUnsupportedMenuActions,
+  threadListV2AllowsGenericUnsupportedActions,
   sortThreadsForListV2,
   threadListV2ListItemsAreEqual,
   threadHasUnseenCompletion,
@@ -457,32 +457,40 @@ describe("resolveThreadListV2SwipeActions", () => {
   });
 });
 
-describe("threadListV2 generic destructive actions", () => {
-  it("allows archive and delete for ordinary threads", () => {
-    expect(threadListV2AllowsGenericDestructiveActions({ id: "ordinary" })).toBe(true);
+describe("threadListV2 generic unsupported actions", () => {
+  it("allows archive, delete, and title actions for ordinary threads", () => {
+    expect(threadListV2AllowsGenericUnsupportedActions({ id: "ordinary" })).toBe(true);
     expect(
-      filterThreadListV2GenericDestructiveMenuActions(
-        [{ id: "settle" }, { id: "archive" }, { id: "delete" }],
+      filterThreadListV2GenericUnsupportedMenuActions(
+        [
+          { id: "settle" },
+          { id: "archive" },
+          { id: "delete" },
+          { id: "rename" },
+          { id: "regenerate-title" },
+        ],
         { id: "ordinary" },
       ).map((action) => action.id),
-    ).toEqual(["settle", "archive", "delete"]);
+    ).toEqual(["settle", "archive", "delete", "rename", "regenerate-title"]);
   });
 
-  it("hides archive and delete for Muse while keeping settle", () => {
-    expect(threadListV2AllowsGenericDestructiveActions({ id: "muse-agent:main" })).toBe(false);
-    expect(threadListV2AllowsGenericDestructiveActions({ id: "muse-agent:main:side" })).toBe(false);
+  it("hides Muse-unsafe generic actions while keeping settle", () => {
+    expect(threadListV2AllowsGenericUnsupportedActions({ id: "muse-agent:main" })).toBe(false);
+    expect(threadListV2AllowsGenericUnsupportedActions({ id: "muse-agent:main:side" })).toBe(false);
     expect(
-      filterThreadListV2GenericDestructiveMenuActions(
+      filterThreadListV2GenericUnsupportedMenuActions(
         [
           { id: "settle" },
           { id: "unsettle" },
           { id: "archive" },
           { id: "delete" },
           { id: "rename" },
+          { id: "regenerate-title" },
+          { id: "pin" },
         ],
         { id: "muse-agent:main" },
       ).map((action) => action.id),
-    ).toEqual(["settle", "unsettle", "rename"]);
+    ).toEqual(["settle", "unsettle", "pin"]);
   });
 });
 

@@ -48,8 +48,8 @@ import {
   resolveThreadListV2Status,
   resolveThreadListV2ProviderDrivers,
   resolveThreadListV2SwipeActions,
-  filterThreadListV2GenericDestructiveMenuActions,
-  threadListV2AllowsGenericDestructiveActions,
+  filterThreadListV2GenericUnsupportedMenuActions,
+  threadListV2AllowsGenericUnsupportedActions,
   type ThreadListV2Status,
 } from "./threadListV2";
 import { QueuedMessageIcon } from "./queued-message-icon";
@@ -695,14 +695,14 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     const id = setTimeout(() => bumpSnoozeGateTick((tick) => tick + 1), delayMs);
     return () => clearTimeout(id);
   }, [snoozeGateExpiryMs, snoozeGateTick]);
-  const allowsGenericDestructive = threadListV2AllowsGenericDestructiveActions(thread);
+  const allowsGenericUnsupported = threadListV2AllowsGenericUnsupportedActions(thread);
   const swipeActions = resolveThreadListV2SwipeActions({
     variant,
     settlementSupported: props.settlementSupported,
     snoozeSupported: props.snoozeSupported,
     snoozable: canSnooze(thread, { now: new Date().toISOString() }),
     snoozed: snoozedRow,
-    genericArchiveSupported: allowsGenericDestructive,
+    genericArchiveSupported: allowsGenericUnsupported,
   });
   const snoozePresets = useMemo(
     () => (swipeActions.secondary === "snooze" ? resolveSnoozePresets(new Date()) : ([] as const)),
@@ -1309,7 +1309,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
 
   const menuActions = useMemo(
     () =>
-      filterThreadListV2GenericDestructiveMenuActions<MenuAction>(
+      filterThreadListV2GenericUnsupportedMenuActions<MenuAction>(
         [
           ...(thread.branch
             ? [
@@ -1374,7 +1374,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           // Un-settle), never the secondary snooze action.
           fullSwipeAction="primary"
           fullSwipeWidth={props.fullSwipeWidth ?? windowWidth - 32}
-          onDelete={allowsGenericDestructive ? handleDelete : () => {}}
+          onDelete={allowsGenericUnsupported ? handleDelete : () => {}}
           onSwipeableClose={props.onSwipeableClose}
           onSwipeableWillOpen={props.onSwipeableWillOpen}
           primaryAction={primaryAction}

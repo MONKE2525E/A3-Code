@@ -86,6 +86,7 @@ import {
   type ThreadInspectorMode,
 } from "./thread-inspector-content-stack";
 import { threadRouteIsHydrating } from "./thread-route-hydration";
+import { MuseAgentRouteConnection } from "./MuseAgentRouteConnection";
 import { ThreadHeader } from "./ThreadHeader";
 
 interface ThreadInspectorSelection {
@@ -985,6 +986,14 @@ function ThreadRouteContent(
       />
 
       <ThreadPane>
+        <MuseAgentRouteConnection
+          environmentId={selectedThread.environmentId}
+          threadId={selectedThread.id}
+          providerInstanceId={selectedThread.providerInstanceId}
+          connected={routeConnectionState === "connected"}
+          hasMessages={composer.selectedThreadFeed.length > 0}
+          providers={serverConfig?.providers ?? null}
+        />
         <ThreadDetailScreen
           canOperateThread={canOperateThread}
           selectedThread={selectedThreadWithDraftSettings ?? selectedThread}

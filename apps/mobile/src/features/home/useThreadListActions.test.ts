@@ -22,10 +22,12 @@ const state = vi.hoisted(() => ({
     input: { threadId: string; orderKey?: string };
   }[],
   dialogs: [] as { onConfirm: () => void }[],
+  textInputs: [] as { title: string; onConfirm: (title: string) => void }[],
   alerts: [] as {
     title: string;
     buttons?: { text: string; onPress?: () => void }[];
   }[],
+  prompts: [] as { title: string; callback: (title: string) => void }[],
   afterRequest: undefined as (() => void) | undefined,
 }));
 
@@ -37,7 +39,10 @@ vi.mock("react-native", () => ({
   Alert: {
     alert: (title: string, _message: string, buttons?: { text: string; onPress?: () => void }[]) =>
       state.alerts.push({ title, buttons }),
+    prompt: (title: string, _message: string | undefined, callback: (title: string) => void) =>
+      state.prompts.push({ title, callback }),
   },
+  Platform: { OS: "ios" },
 }));
 vi.mock("expo-haptics", () => ({
   impactAsync: async () => {},
@@ -45,6 +50,8 @@ vi.mock("expo-haptics", () => ({
 }));
 vi.mock("../../components/ConfirmDialogHost", () => ({
   showConfirmDialog: (dialog: { onConfirm: () => void }) => state.dialogs.push(dialog),
+  showTextInputDialog: (dialog: { title: string; onConfirm: (title: string) => void }) =>
+    state.textInputs.push(dialog),
 }));
 vi.mock("../archive/useArchivedThreadSnapshots", () => ({
   refreshArchivedThreadsForEnvironment: () => {},
@@ -178,7 +185,9 @@ beforeEach(() => {
   state.requests = [];
   state.shells = [];
   state.dialogs = [];
+  state.textInputs = [];
   state.alerts = [];
+  state.prompts = [];
   state.afterRequest = undefined;
 });
 
@@ -293,6 +302,33 @@ describe("thread list operation permissions", () => {
     await useArchivedThreadListActions(() => {}).unarchiveThread(muse);
     expect(state.requests).toEqual([]);
     expect(state.alerts).toEqual([]);
+  });
+
+  it("does not open rename or regenerate-title for Muse and sends no metadata RPC", async () => {
+    const muse = makeThread({ id: ThreadId.make("muse-agent:main") });
+    const actions = useThreadListActions();
+    actions.renameThread(muse);
+    await actions.regenerateThreadTitle(muse);
+
+    expect(state.prompts).toEqual([]);
+    expect(state.textInputs).toEqual([]);
+    expect(state.dialogs).toEqual([]);
+    expect(state.alerts).toEqual([]);
+    expect(state.requests).toEqual([]);
+  });
+
+  it("keeps ordinary rename and regenerate-title metadata updates", async () => {
+    const actions = useThreadListActions();
+    actions.renameThread(makeThread());
+    expect(state.prompts).toEqual([expect.objectContaining({ title: "Rename thread" })]);
+    state.prompts[0]!.callback("New title");
+    await Promise.resolve();
+
+    expect(state.requests).toEqual([expect.objectContaining({ action: "updateMetadata" })]);
+
+    state.requests = [];
+    await actions.regenerateThreadTitle(makeThread({ id: ThreadId.make("other-thread") }));
+    expect(state.requests).toEqual([expect.objectContaining({ action: "updateMetadata" })]);
   });
 });
 

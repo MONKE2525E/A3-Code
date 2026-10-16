@@ -30,7 +30,7 @@ import {
 } from "../threads/threadOrder";
 import {
   getThreadListV2OrderedSection,
-  threadListV2AllowsGenericDestructiveActions,
+  threadListV2AllowsGenericUnsupportedActions,
 } from "../threads/threadListV2";
 import { threadCanArchive } from "./threadArchive";
 import { resolveThreadTitleRename } from "../threads/thread-title-rename";
@@ -153,7 +153,7 @@ function useThreadActionExecutor(
         }
         if (
           (action === "archive" || action === "unarchive" || action === "delete") &&
-          !threadListV2AllowsGenericDestructiveActions(thread)
+          !threadListV2AllowsGenericUnsupportedActions(thread)
         ) {
           Alert.alert(
             actionFailureTitle(action),
@@ -227,7 +227,7 @@ function useConfirmDeleteThread(
 ) {
   return useCallback(
     (thread: EnvironmentThreadShell) => {
-      if (!threadListV2AllowsGenericDestructiveActions(thread)) return;
+      if (!threadListV2AllowsGenericUnsupportedActions(thread)) return;
       if (!checkThreadOperationPermission(thread, actionFailureTitle("delete"))) return;
       const title = "Delete thread?";
       const message = `“${thread.title}” will be permanently deleted, including its terminal history.`;
@@ -295,7 +295,7 @@ export function useThreadListActions(): {
 
   const archiveThread = useCallback(
     (thread: EnvironmentThreadShell) => {
-      if (!threadListV2AllowsGenericDestructiveActions(thread)) return;
+      if (!threadListV2AllowsGenericUnsupportedActions(thread)) return;
       void executeAction("archive", thread);
     },
     [executeAction],
@@ -508,6 +508,7 @@ export function useThreadListActions(): {
   );
   const regenerateThreadTitle = useCallback(
     async (thread: EnvironmentThreadShell) => {
+      if (!threadListV2AllowsGenericUnsupportedActions(thread)) return false;
       if (!checkThreadOperationPermission(thread, "Could not regenerate title")) return false;
       const key = scopedThreadKey(thread.environmentId, thread.id);
       if (
@@ -550,6 +551,7 @@ export function useThreadListActions(): {
   );
   const renameThread = useCallback(
     (thread: EnvironmentThreadShell) => {
+      if (!threadListV2AllowsGenericUnsupportedActions(thread)) return;
       const commit = (title: string) => {
         const resolution = resolveThreadTitleRename({ title, originalTitle: thread.title });
         if (resolution.action === "reject-empty") {
@@ -799,7 +801,7 @@ export function useArchivedThreadListActions(
   const executeAction = useThreadActionExecutor(handleCompleted);
   const unarchiveThread = useCallback(
     (thread: EnvironmentThreadShell) => {
-      if (!threadListV2AllowsGenericDestructiveActions(thread)) return;
+      if (!threadListV2AllowsGenericUnsupportedActions(thread)) return;
       void executeAction("unarchive", thread);
     },
     [executeAction],

@@ -111,19 +111,32 @@ export function resolveThreadListV2SnoozeMenuSelection(input: {
   return { _tag: "expired" };
 }
 
-/** Generic archive/delete/unarchive are coding-thread RPCs. Muse restore is a paired native service. */
-export function threadListV2AllowsGenericDestructiveActions(thread: {
+/**
+ * Generic coding-thread menu actions Muse cannot use. Same ids as web
+ * `MUSE_UNSAFE_ACTIONS` (rename, regenerate-title, archive, delete).
+ */
+const THREAD_LIST_V2_MUSE_UNSAFE_ACTIONS = new Set<string>([
+  "rename",
+  "regenerate-title",
+  "archive",
+  "delete",
+]);
+
+/** Ordinary threads may use generic metadata/archive/delete RPCs. Muse cannot. */
+export function threadListV2AllowsGenericUnsupportedActions(thread: {
   readonly id: string;
 }): boolean {
   return nativeAgentSourceForThread(thread) !== "muse-agent";
 }
 
-export function filterThreadListV2GenericDestructiveMenuActions<T extends { readonly id?: string }>(
+export function filterThreadListV2GenericUnsupportedMenuActions<T extends { readonly id?: string }>(
   actions: ReadonlyArray<T>,
   thread: { readonly id: string },
 ): T[] {
-  if (threadListV2AllowsGenericDestructiveActions(thread)) return [...actions];
-  return actions.filter((action) => action.id !== "archive" && action.id !== "delete");
+  if (threadListV2AllowsGenericUnsupportedActions(thread)) return [...actions];
+  return actions.filter(
+    (action) => action.id === undefined || !THREAD_LIST_V2_MUSE_UNSAFE_ACTIONS.has(action.id),
+  );
 }
 
 export function resolveThreadListV2SwipeActions(input: {
