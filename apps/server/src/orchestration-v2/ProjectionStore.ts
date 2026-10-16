@@ -151,7 +151,8 @@ export type ProjectionRecoveryKind =
   | "queued-runs"
   | "runtime"
   | "subagent-results"
-  | "delegated-completions";
+  | "delegated-completions"
+  | "owner-notifications";
 
 /** Persisted state needed for limit recovery, without transcript or fork history. */
 export type ProjectionLimitRecoveryCandidate = Pick<
@@ -377,6 +378,13 @@ export interface ProjectionStoreV2Shape {
     options: ProjectionTimelinePageOptions,
   ) => Effect.Effect<ProjectionTimelinePage, ProjectionStoreV2Error>;
   readonly getMessageCount: (threadId: ThreadId) => Effect.Effect<number, ProjectionStoreV2Error>;
+  /** Last agent sender, without loading message bodies. Later human messages keep the owner. */
+  readonly getLastThreadSender: (
+    threadId: ThreadId,
+  ) => Effect.Effect<
+    { readonly threadId: ThreadId; readonly createdAt: DateTime.Utc } | undefined,
+    ProjectionStoreV2Error
+  >;
   readonly getNextTurnItemOrdinal: (
     threadId: ThreadId,
   ) => Effect.Effect<number, ProjectionStoreV2Error>;
@@ -574,7 +582,29 @@ function needsRecovery(
         )
       );
     case "delegated-completions":
-      return projection.runs.some((run) => run.delegatedCompletion?.delivery != null);
+      return (
+        projection.runs.some((run) => run.delegatedCompletion?.delivery != null) ||
+        projection.subagents.some(
+          (task) =>
+            task.origin === "app_owned" &&
+            ["completed", "failed", "cancelled", "interrupted"].includes(task.status) &&
+            (task.completionDelivery === undefined || task.completionDelivery.state === "pending"),
+        )
+      );
+    case "owner-notifications":
+      return (
+        (projection.messages.some(
+          (message) => message.role === "user" && message.senderThreadId !== undefined,
+        ) &&
+          projection.runs.some((run) =>
+            ["completed", "failed", "cancelled", "interrupted", "rolled_back"].includes(run.status),
+          )) ||
+        (projection.runtimeRequests.some((request) => request.status === "pending") &&
+          (projection.thread.lineage.relationshipToParent === "subagent" ||
+            projection.messages.some(
+              (message) => message.role === "user" && message.senderThreadId !== undefined,
+            )))
+      );
     case "subagent-results": {
       const parentThreadId = projection.thread.lineage.parentThreadId;
       return (
@@ -3673,6 +3703,33 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 WHERE CASE WHEN json_valid(payload_json)
                   THEN json_type(payload_json, '$.delegatedCompletion.delivery') = 'object'
                   ELSE 0 END
+                UNION
+                SELECT thread_id FROM orchestration_v2_projection_subagents
+                WHERE origin = 'app_owned'
+                  AND status IN ('completed', 'failed', 'cancelled', 'interrupted')
+                  AND (json_extract(payload_json, '$.completionDelivery.state') IS NULL
+                    OR json_extract(payload_json, '$.completionDelivery.state') = 'pending')
+              `;
+            case "owner-notifications":
+              return sql`
+                SELECT run.thread_id FROM orchestration_v2_projection_runs AS run
+                WHERE run.status IN ('completed', 'failed', 'cancelled', 'interrupted', 'rolled_back')
+                  AND EXISTS (
+                    SELECT 1 FROM orchestration_v2_projection_messages AS message
+                    WHERE message.thread_id = run.thread_id AND message.role = 'user'
+                      AND json_extract(message.payload_json, '$.senderThreadId') IS NOT NULL
+                  )
+                UNION
+                SELECT request.thread_id FROM orchestration_v2_projection_runtime_requests AS request
+                JOIN orchestration_v2_projection_threads AS thread ON thread.thread_id = request.thread_id
+                WHERE request.status = 'pending' AND (
+                  json_extract(thread.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+                  OR EXISTS (
+                    SELECT 1 FROM orchestration_v2_projection_messages AS message
+                    WHERE message.thread_id = request.thread_id AND message.role = 'user'
+                      AND json_extract(message.payload_json, '$.senderThreadId') IS NOT NULL
+                  )
+                )
               `;
             case "subagent-results":
               return sql`
@@ -4785,6 +4842,26 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         count: number;
       }>`SELECT COUNT(*) AS count FROM orchestration_v2_projection_messages WHERE thread_id = ${threadId}`.pipe(
         Effect.map((rows) => rows[0]?.count ?? 0),
+        Effect.mapError(controlReadError(threadId)),
+      );
+
+    const getLastThreadSender: ProjectionStoreV2Shape["getLastThreadSender"] = (threadId) =>
+      sql<{
+        sender: string;
+        created_at: string;
+      }>`SELECT json_extract(payload_json, '$.senderThreadId') AS sender, created_at
+        FROM orchestration_v2_projection_messages
+        WHERE thread_id = ${threadId} AND role = 'user'
+          AND json_extract(payload_json, '$.senderThreadId') IS NOT NULL
+        ORDER BY created_at DESC, rowid DESC LIMIT 1`.pipe(
+        Effect.map((rows) =>
+          rows[0] === undefined
+            ? undefined
+            : {
+                threadId: ThreadId.make(rows[0].sender),
+                createdAt: DateTime.makeUnsafe(rows[0].created_at),
+              },
+        ),
         Effect.mapError(controlReadError(threadId)),
       );
     const getNextTurnItemOrdinal: ProjectionStoreV2Shape["getNextTurnItemOrdinal"] = (threadId) =>
@@ -6095,6 +6172,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getPendingNativeUserInputs,
       hasUnpairedRunInterruptRequest,
       getMessageCount,
+      getLastThreadSender,
       getNextTurnItemOrdinal,
       getTurnItem,
       getThreadRecords,
@@ -6379,6 +6457,21 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
       getMessageCount: (threadId) =>
         Ref.get(replayState).pipe(
           Effect.map((state) => state.projections.get(threadId)?.messages.length ?? 0),
+        ),
+      getLastThreadSender: (threadId) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) => {
+            const sender = state.projections
+              .get(threadId)
+              ?.messages.filter(
+                (message) => message.role === "user" && message.senderThreadId !== undefined,
+              )
+              .toReversed()
+              .toSorted((left, right) => DateTime.Order(right.createdAt, left.createdAt))[0];
+            return sender?.senderThreadId === undefined
+              ? undefined
+              : { threadId: sender.senderThreadId, createdAt: sender.createdAt };
+          }),
         ),
       getNextTurnItemOrdinal: (threadId) =>
         Ref.get(replayState).pipe(

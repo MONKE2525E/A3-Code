@@ -1,5 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import {
   NativeReadError,
   NativeSignedOutError,
@@ -7,7 +9,7 @@ import {
 } from "../../grokBot/GrokBotNativeService.ts";
 import { NativeRuntimeError } from "../../grokBot/GrokBotNativeRuntimeService.ts";
 import { GrokBotBindingError } from "./GrokBotManagedBinding.ts";
-import { makeGrokBotManagedTurn } from "./GrokBotManagedTurn.ts";
+import { GROK_BOT_UPLOAD_RETRIES, makeGrokBotManagedTurn } from "./GrokBotManagedTurn.ts";
 import { makeBindings, makeNative, makeTurn } from "./GrokBotProvider.testkit.ts";
 
 it.effect("uploads attachments before sending and stops before send on upload failure", () =>
@@ -299,4 +301,100 @@ it.effect.each(["account_switch", "sign_out"] as const)(
         transition === "sign_out" ? "GrokBotNativeSignedOutError" : "GrokBotBindingError",
       );
     }),
+);
+
+const attachmentTurn = Effect.gen(function* () {
+  const original = yield* makeTurn;
+  return {
+    ...original,
+    input: {
+      ...original.input,
+      message: {
+        ...original.input.message,
+        attachments: [
+          {
+            type: "image" as const,
+            id: "fixture",
+            name: "image.png",
+            mimeType: "image/png",
+            sizeBytes: 5,
+          },
+        ],
+      },
+    },
+  };
+});
+const transientUpload = () =>
+  Effect.fail(new NativeAttachmentError({ reason: "upload_failed", transient: true }));
+
+it.effect("retries a transient upload failure with backoff and delivers the message once", () =>
+  Effect.gen(function* () {
+    const turn = yield* attachmentTurn;
+    let uploads = 0;
+    let sends = 0;
+    const core = yield* makeGrokBotManagedTurn({
+      native: makeNative({
+        uploadAttachments: () =>
+          Effect.suspend(() =>
+            ++uploads < GROK_BOT_UPLOAD_RETRIES + 1
+              ? transientUpload()
+              : Effect.succeed({ paths: ["/uploads/image.png"], names: ["image.png"] }),
+          ),
+        startTurn: () =>
+          Effect.sync(() => {
+            sends++;
+            return { delivery: "accepted" as const };
+          }),
+      }),
+      bindings: makeBindings(turn),
+    });
+    const fiber = yield* core.send(turn, "/attachments").pipe(Effect.forkChild);
+    // The backoff is virtual time; the send only finishes once the clock moves past each wait.
+    yield* TestClock.adjust("1 minute");
+    yield* Fiber.join(fiber);
+    assert.equal(uploads, GROK_BOT_UPLOAD_RETRIES + 1);
+    assert.equal(sends, 1);
+  }),
+);
+
+it.effect("gives up after the bounded retries and never sends an undelivered upload", () =>
+  Effect.gen(function* () {
+    const turn = yield* attachmentTurn;
+    let uploads = 0;
+    const core = yield* makeGrokBotManagedTurn({
+      native: makeNative({
+        uploadAttachments: () =>
+          Effect.suspend(() => {
+            uploads++;
+            return transientUpload();
+          }),
+        startTurn: () => Effect.die("must not send without the attachment"),
+      }),
+      bindings: makeBindings(turn),
+    });
+    const fiber = yield* core.send(turn, "/attachments").pipe(Effect.flip, Effect.forkChild);
+    yield* TestClock.adjust("1 minute");
+    const failure = yield* Fiber.join(fiber);
+    assert.equal(failure._tag, "GrokBotNativeAttachmentError");
+    assert.equal(uploads, GROK_BOT_UPLOAD_RETRIES + 1);
+  }),
+);
+
+it.effect("does not retry an upload failure that sending again cannot fix", () =>
+  Effect.gen(function* () {
+    const turn = yield* attachmentTurn;
+    let uploads = 0;
+    const core = yield* makeGrokBotManagedTurn({
+      native: makeNative({
+        uploadAttachments: () =>
+          Effect.suspend(() => {
+            uploads++;
+            return Effect.fail(new NativeAttachmentError({ reason: "missing" }));
+          }),
+      }),
+      bindings: makeBindings(turn),
+    });
+    yield* core.send(turn, "/attachments").pipe(Effect.flip);
+    assert.equal(uploads, 1);
+  }),
 );

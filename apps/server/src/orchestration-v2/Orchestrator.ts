@@ -608,11 +608,26 @@ function legacyPullRequestLink(
   );
 }
 
-function delegatedCompletionWakeDetail(taskIds: ReadonlyArray<string>): string {
+function delegatedCompletionWakeDetail(
+  taskIds: ReadonlyArray<string>,
+  tasks: ReadonlyArray<OrchestrationV2Subagent> = [],
+): string {
   const taskList = taskIds.join(", ");
-  return taskIds.length === 1
-    ? `Delegated task ${taskList} reached a terminal state. Use task_status with taskId ${taskList} to read the result.`
-    : `Delegated tasks ${taskList} reached terminal states. Use task_status with each taskId to read the results.`;
+  const instruction =
+    taskIds.length === 1
+      ? `Delegated task ${taskList} reached a terminal state. Use task_status with taskId ${taskList} to read the result.`
+      : `Delegated tasks ${taskList} reached terminal states. Use task_status with each taskId to read the results.`;
+  return [
+    instruction,
+    ...taskIds.flatMap((id) => {
+      const task = tasks.find((row) => row.id === id);
+      return task === undefined
+        ? []
+        : [
+            `taskId: ${id}; threadId: ${task.childThreadId}; status: ${task.status}; summary: ${task.result?.trim().slice(0, 280) ?? "No result text."}`,
+          ];
+    }),
+  ].join("\n");
 }
 
 function isTerminalDelegatedTaskStatus(status: OrchestrationV2Subagent["status"]): boolean {
@@ -2135,7 +2150,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             occurredAt: now,
             payload: {
               ...message,
-              text: delegatedCompletionWakeDetail(remainingTaskIds),
+              text: delegatedCompletionWakeDetail(remainingTaskIds, projection.subagents),
               delegatedCompletion: {
                 parentRunId: parentRun.id,
                 generation: delivery.generation,
@@ -3851,6 +3866,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly scheduledTaskId?: OrchestrationV2ConversationMessage["scheduledTaskId"];
     readonly senderThreadId?: OrchestrationV2ConversationMessage["senderThreadId"];
     readonly voiceRequest?: OrchestrationV2ConversationMessage["voiceRequest"];
+    readonly notification?: OrchestrationV2ConversationMessage["notification"];
     readonly delegatedCompletion?: OrchestrationV2ConversationMessage["delegatedCompletion"];
     readonly forceRestart: boolean;
   }) =>
@@ -4014,6 +4030,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               : { scheduledTaskId: input.scheduledTaskId }),
             ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
             ...(input.voiceRequest === undefined ? {} : { voiceRequest: input.voiceRequest }),
+            ...(input.notification === undefined ? {} : { notification: input.notification }),
             id: input.messageId,
             threadId: input.command.threadId,
             runId: messageInput.runId,
@@ -4766,13 +4783,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : command.deliveryIntent === "auto"
             ? projection.runs.findLast((run) => run.status === "running")
             : undefined;
-      if (
+      const restartGrokTurn =
         grokTarget?.status === "running" &&
         projection.providerThreads.some(
           (thread) => thread.id === grokTarget.providerThreadId && thread.driver === "grok-bot",
         ) &&
-        (dispatchMode.type === "steer_active" || command.deliveryIntent === "auto")
-      ) {
+        (dispatchMode.type === "steer_active" || command.deliveryIntent === "auto");
+      if (restartGrokTurn) {
         dispatchMode = { type: "restart_active", targetRunId: grokTarget.id };
       }
       if (dispatchMode.type === "steer_active") {
@@ -4794,13 +4811,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           dispatchMode = { type: "start_immediately" };
         }
       }
-      // A restart continuation resumes the interrupted turn, so it starts
-      // immediately rather than queueing like other wakes.
+      // Automatic child-attention delivery can release a native Grok wait.
+      // If that run settled before dispatch, the queued intent starts a new turn.
+      // Restart continuations also start immediately.
       if (
         command.notification !== undefined &&
         (command.createdBy !== "agent" ||
           (command.creationSource !== "server" && command.creationSource !== "provider") ||
           (dispatchMode.type !== "queue_after_active" &&
+            !(
+              command.dispatchMode.type === "queue_after_active" &&
+              command.deliveryIntent === "auto" &&
+              (dispatchMode.type === "start_immediately" || restartGrokTurn)
+            ) &&
             !(
               command.restartContinuationOfRunId !== undefined &&
               dispatchMode.type === "start_immediately"
@@ -4892,7 +4915,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const dispatchText =
         delegatedCompletion === undefined
           ? command.text
-          : delegatedCompletionWakeDetail(delegatedCompletion.taskIds);
+          : delegatedCompletionWakeDetail(delegatedCompletion.taskIds, projection.subagents);
       const sourcePlanProjection =
         command.sourcePlanRef === undefined
           ? null
@@ -4970,6 +4993,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ? {}
             : { senderThreadId: command.senderThreadId }),
           ...(command.voiceRequest === undefined ? {} : { voiceRequest: command.voiceRequest }),
+          ...(command.notification === undefined ? {} : { notification: command.notification }),
           forceRestart: dispatchMode.type === "restart_active",
         });
         return;
@@ -7153,13 +7177,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     // policy when the child terminalizes. Both writers hold this parent lock,
     // so a terminal task means finalize already committed the terminal row and
     // already made its offer decision under the pre-upgrade policy: under
-    // settled_only it offered iff the spawning run was not live. Plan a
-    // delivery only when that run is live now, which is precisely the case
-    // where finalize skipped. The mailbox steers a capable active session or
-    // queues behind that run. When that run is not live, finalize already
-    // offered and a second offer would wake the parent twice. (If the parent settled in between,
-    // this skips a wake that finalize also skipped; a missed wake is cheaper
-    // than a duplicate one, and the result is already in the projection.)
+    // settled_only it offered iff the spawning run was not live. Replan any
+    // terminal result here. The mailbox steers a capable active session or
+    // queues behind that run. Delivery ownership deduplicates a result even
+    // when the spawning run settled between finalization and this upgrade.
     const parentRun =
       task.runId === null
         ? undefined
@@ -7167,8 +7188,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const completionPlan =
       command.completionWake === "always" &&
       isTerminalDelegatedTaskStatus(task.status) &&
-      parentRun !== undefined &&
-      hasLiveRun({ runs: [parentRun] })
+      parentRun !== undefined
         ? yield* planDelegatedCompletionDelivery({
             parentProjection,
             parentRun,
@@ -10114,7 +10134,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ? undefined
               : {
                   ...message,
-                  text: delegatedCompletionWakeDetail(taskIds),
+                  text: delegatedCompletionWakeDetail(
+                    taskIds,
+                    input.parentProjection.subagents.map((task) =>
+                      task.id === input.updatedTask.id ? input.updatedTask : task,
+                    ),
+                  ),
                   delegatedCompletion: {
                     parentRunId: input.parentRun.id,
                     generation: delivery.generation,
@@ -10216,6 +10241,74 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       message: undefined,
       offer: true,
     };
+  });
+
+  // A blocking wait may disappear before reading a terminal result. Revisit
+  // deferred results when its spawning run ends, under the parent thread lock.
+  const offerDeferredDelegatedCompletions = Effect.fnUntraced(function* (threadId: ThreadId) {
+    const candidates = yield* projectionStore.getThreadRecords(threadId, ["subagents", "runs"]);
+    for (const candidate of candidates.subagents) {
+      if (
+        candidate.origin !== "app_owned" ||
+        !isTerminalDelegatedTaskStatus(candidate.status) ||
+        (candidate.completionDelivery !== undefined &&
+          candidate.completionDelivery.state !== "pending") ||
+        candidates.runs.some((run) => run.id === candidate.runId && hasLiveRun({ runs: [run] }))
+      )
+        continue;
+      const parentProjection = yield* projectionStore.getThreadRecords(
+        threadId,
+        ["subagents", "runs", "messages", "providerTurns"],
+        { messageRoles: ["user"] },
+      );
+      const task = parentProjection.subagents.find((row) => row.id === candidate.id)!;
+      const parentRun = parentProjection.runs.find((row) => row.id === task.runId);
+      const now = yield* DateTime.now;
+      const plan = yield* planDelegatedCompletionDelivery({
+        parentProjection,
+        parentRun,
+        task,
+        updatedTask: task,
+        now,
+      });
+      if (
+        plan.task.completionDelivery?.state === task.completionDelivery?.state &&
+        plan.parentRun === undefined
+      )
+        continue;
+      yield* writeSystemEvents([
+        {
+          type: "subagent.updated",
+          threadId,
+          nodeId: task.id,
+          occurredAt: now,
+          payload: plan.task,
+        },
+        ...(plan.parentRun === undefined
+          ? []
+          : [
+              {
+                type: "run.updated" as const,
+                threadId,
+                runId: plan.parentRun.id,
+                occurredAt: now,
+                payload: plan.parentRun,
+              },
+            ]),
+        ...(plan.message === undefined
+          ? []
+          : [
+              {
+                type: "message.updated" as const,
+                threadId,
+                occurredAt: now,
+                payload: plan.message,
+              },
+            ]),
+      ]);
+      if (plan.offer && plan.parentRun !== undefined)
+        yield* offerDelegatedCompletionDelivery(threadId, plan.parentRun.id);
+    }
   });
 
   /**
@@ -11683,6 +11776,99 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         : threadDispatch.withLock(parentThreadId, dispatch);
     });
 
+  const wakeGrokBotOwners = Effect.fnUntraced(function* (
+    event:
+      | {
+          readonly type: "run.updated";
+          readonly threadId: ThreadId;
+          readonly payload: OrchestrationV2Run;
+        }
+      | {
+          readonly type: "runtime-request.updated";
+          readonly threadId: ThreadId;
+          readonly payload: OrchestrationV2ThreadProjection["runtimeRequests"][number];
+        },
+  ) {
+    const attention = event.type === "runtime-request.updated";
+    if (attention && event.payload.status !== "pending") return;
+    const source = yield* projectionStore.getThread(event.threadId);
+    const parentThreadId =
+      source.lineage.relationshipToParent === "subagent" ? source.lineage.parentThreadId : null;
+    const lastSender = yield* projectionStore.getLastThreadSender(event.threadId);
+    const owners = new Set([lastSender?.threadId, ...(attention ? [parentThreadId] : [])]);
+    const sourceId = event.payload.id;
+    const summary = attention
+      ? `Thread ${source.title.slice(0, 120)} needs attention (${event.payload.kind}).`
+      : `Thread ${source.title.slice(0, 120)} ${event.payload.status}.`;
+    for (const ownerId of owners) {
+      if (ownerId == null || ownerId === event.threadId) continue;
+      const owner = yield* projectionStore.getThreadShell(ownerId);
+      if (owner == null || owner.archivedAt !== null || owner.deletedAt !== null) continue;
+      const adapter = yield* providerAdapters.get(owner.providerInstanceId);
+      if (adapter.driver !== "grok-bot") continue;
+      const parent = yield* projectionStore.getThreadRecords(ownerId, ["subagents", "runs"]);
+      const task = parent.subagents.find(
+        (row) => row.origin === "app_owned" && row.childThreadId === event.threadId,
+      );
+      // The delegated-result mailbox already owns the original task's terminal
+      // notification. A thread-send follow-up still has its own return path.
+      if (
+        !attention &&
+        ownerId === parentThreadId &&
+        task !== undefined &&
+        (event.payload.delegatedTaskId === task.id || event.payload.ordinal === 1)
+      )
+        continue;
+      if (attention) {
+        const request = yield* projectionStore.getRuntimeRequest(event.threadId, event.payload.id);
+        if (request?.status !== "pending") continue;
+      }
+      const releaseBlockingWait =
+        attention &&
+        task !== undefined &&
+        (task.completionWake ?? "settled_only") === "settled_only" &&
+        parent.runs.some((run) => run.id === task.runId && run.status === "running");
+      const key = `grok-bot-wake:${ownerId}:${attention ? "request" : "run"}:${sourceId}`;
+      const detail = [
+        summary,
+        `threadId: ${event.threadId}`,
+        `${attention ? "requestId" : "runId"}: ${sourceId}`,
+        ...(task === undefined ? [] : [`taskId: ${task.id}`]),
+        attention
+          ? "Read the pending request with t3_thread_read and arrange a response."
+          : "Read the result with t3_thread_read.",
+      ].join("\n");
+      yield* dispatchWithReceipt({
+        type: "message.dispatch",
+        commandId: CommandId.make(key),
+        threadId: ownerId,
+        messageId: MessageId.make(key),
+        text: detail,
+        attachments: [],
+        createdBy: "agent",
+        creationSource: "server",
+        dispatchMode: { type: "queue_after_active" },
+        // Native Grok turns cannot steer a blocking child wait. Auto delivery
+        // restarts that attempt while retaining the child and its pending request.
+        ...(releaseBlockingWait ? { deliveryIntent: "auto" as const } : {}),
+        notification: {
+          source: { kind: "system" },
+          outcome: attention
+            ? "updated"
+            : event.payload.status === "interrupted" || event.payload.status === "rolled_back"
+              ? "cancelled"
+              : event.payload.status === "completed" ||
+                  event.payload.status === "failed" ||
+                  event.payload.status === "cancelled"
+                ? event.payload.status
+                : "unknown",
+          summary,
+          detail,
+        },
+      });
+    }
+  });
+
   const handleTerminalRun = (stored: OrchestrationV2StoredEvent) =>
     Effect.gen(function* () {
       const threadId = stored.event.threadId;
@@ -11695,7 +11881,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (stored.event.type === "run.updated") {
         yield* threadDispatch.withLock(
           threadId,
-          finalizeDelegatedCompletionDelivery(threadId, stored.event.payload.id),
+          finalizeDelegatedCompletionDelivery(threadId, stored.event.payload.id).pipe(
+            Effect.andThen(offerDeferredDelegatedCompletions(threadId)),
+          ),
         );
       }
       yield* threadDispatch
@@ -11724,6 +11912,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (parentThreadId !== undefined) {
         yield* threadDispatch.withLock(parentThreadId, finalizeAppOwnedSubagent(threadId));
       }
+      if (stored.event.type === "run.updated") yield* wakeGrokBotOwners(stored.event);
     }).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("Failed to react to terminal V2 run", {
@@ -11738,6 +11927,29 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   // below. Replaying the full event table on every server start delays live
   // queue promotion in proportion to the lifetime size of the database.
   const terminalEventsAfterSequence = yield* eventSink.latestSequence().pipe(Effect.orDie);
+  yield* eventSink
+    .stream({ afterSequence: terminalEventsAfterSequence, eventType: "runtime-request.updated" })
+    .pipe(
+      Stream.filter(
+        (stored) =>
+          stored.event.type === "runtime-request.updated" &&
+          stored.event.payload.status === "pending",
+      ),
+      Stream.runForEach((stored) =>
+        (stored.event.type === "runtime-request.updated"
+          ? wakeGrokBotOwners(stored.event)
+          : Effect.void
+        ).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Failed to wake Grok Bot for pending request", {
+              threadId: stored.event.threadId,
+              cause,
+            }),
+          ),
+        ),
+      ),
+      Effect.forkDetach,
+    );
   // Queue promotion can wait on a provider or a thread lock. Subscribe to run
   // updates before buffering so that wait never retains unrelated tool bodies.
   yield* eventSink
@@ -11772,7 +11984,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               const thread = yield* projectionStore.getThreadShell(threadId);
               const parentThreadId = thread?.lineage.parentThreadId;
               if (parentThreadId === undefined || parentThreadId === null) return;
-              yield* threadDispatch.withLock(parentThreadId, finalizeAppOwnedSubagent(threadId));
+              yield* threadDispatch.withLock(
+                parentThreadId,
+                finalizeAppOwnedSubagent(threadId).pipe(
+                  Effect.andThen(offerDeferredDelegatedCompletions(parentThreadId)),
+                ),
+              );
             }).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("Failed to recover terminal app-owned subagent", {
@@ -11799,6 +12016,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               .withLock(
                 threadId,
                 Effect.gen(function* () {
+                  yield* offerDeferredDelegatedCompletions(threadId);
                   const projection = yield* projectionStore.getThreadRecords(threadId, [
                     "runs",
                     "messages",
@@ -11845,6 +12063,50 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ),
       Effect.catchCause((cause) =>
         Effect.logWarning("Failed to inspect delegated completion delivery during recovery", {
+          cause,
+        }),
+      ),
+    );
+    // Reconciliation can commit terminal runs before these subscriptions start.
+    // Re-offer persisted sources; command receipts own deduplication across boots.
+    yield* projectionStore.getRecoveryThreadIds("owner-notifications").pipe(
+      Effect.flatMap((threadIds) =>
+        Effect.forEach(
+          threadIds,
+          (threadId) =>
+            Effect.gen(function* () {
+              const sender = yield* projectionStore.getLastThreadSender(threadId);
+              const projection = yield* projectionStore.getThreadRecords(threadId, [
+                "runs",
+                "runtimeRequests",
+              ]);
+              if (sender !== undefined)
+                for (const run of projection.runs)
+                  if (
+                    delegatedTaskTerminalStatus(run.status) !== null &&
+                    DateTime.Order(run.completedAt ?? run.requestedAt, sender.createdAt) >= 0
+                  )
+                    yield* wakeGrokBotOwners({ type: "run.updated", threadId, payload: run });
+              for (const request of projection.runtimeRequests)
+                if (request.status === "pending")
+                  yield* wakeGrokBotOwners({
+                    type: "runtime-request.updated",
+                    threadId,
+                    payload: request,
+                  });
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Failed to recover Grok Bot owner notification", {
+                  threadId,
+                  cause,
+                }),
+              ),
+            ),
+          { concurrency: 8, discard: true },
+        ),
+      ),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Failed to inspect Grok Bot owner notifications during recovery", {
           cause,
         }),
       ),

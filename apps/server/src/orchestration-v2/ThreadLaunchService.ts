@@ -318,6 +318,7 @@ const make = Effect.gen(function* () {
     const reused = input.reusedWorktree;
     const tracked = input.workspaceStrategy.type === "worktree" || reused !== undefined;
     let createdWorktreePath: string | null = null;
+    let createdBranch: { refName: string; commitSha: string } | undefined;
     let setupTerminalId: string | null = null;
     let workspaceRecorded = false;
     let branchRenameFiber: Fiber.Fiber<void, never> | null = null;
@@ -477,6 +478,8 @@ const make = Effect.gen(function* () {
         worktreePath = worktree.worktree.path;
         branch = worktree.worktree.refName;
         createdWorktreePath = worktreePath;
+        if (worktree.createdBranch !== undefined)
+          createdBranch = { refName: branch, commitSha: worktree.createdBranch.commitSha };
         yield* setupTracker.update(threadId, (snapshot) => ({ ...snapshot, worktreePath, branch }));
         yield* setupTracker.stageStatus(threadId, "checkout", "done");
       }
@@ -516,6 +519,11 @@ const make = Effect.gen(function* () {
               oldBranch,
               newBranch,
               ...(exactName ? { exactName: true } : {}),
+            }),
+          ),
+          Effect.tap((renamed) =>
+            Effect.sync(() => {
+              if (createdBranch !== undefined) createdBranch.refName = renamed.branch;
             }),
           ),
           Effect.flatMap((renamed) =>
@@ -659,6 +667,17 @@ const make = Effect.gen(function* () {
             yield* git
               .removeWorktree({ cwd: project.workspaceRoot, path: removedPath, force: true })
               .pipe(
+                Effect.andThen(() =>
+                  createdBranch === undefined
+                    ? Effect.void
+                    : git
+                        .deleteLocalBranch({
+                          cwd: project.workspaceRoot,
+                          refName: createdBranch.refName,
+                          expectedCommitSha: createdBranch.commitSha,
+                        })
+                        .pipe(Effect.ignoreCause({ log: true })),
+                ),
                 Effect.andThen(
                   threads
                     .dispatch({

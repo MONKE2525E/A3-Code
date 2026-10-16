@@ -188,35 +188,6 @@ const make = Effect.gen(function* () {
       );
     }
 
-    // Fail fast with an actionable message when the branch already exists:
-    // the git driver deliberately keeps stderr out of its errors, so letting
-    // `git worktree add` fail would surface only an opaque failure. The
-    // existence check uses the complete local branch list (exact match); the
-    // paginated substring search only enriches the message with the checkout
-    // location when available.
-    const localBranchNames = yield* gitWorkflow
-      .listLocalBranchNames(projectCwd)
-      .pipe(asOperationFailed("Unable to list branches"));
-    if (localBranchNames.includes(input.branch)) {
-      const existingRef = yield* gitWorkflow
-        .listRefs({ cwd: projectCwd, query: input.branch, refKind: "local" })
-        .pipe(
-          Effect.map((result) =>
-            result.refs.find((ref) => ref.name === input.branch && ref.isRemote !== true),
-          ),
-          Effect.orElseSucceed(() => undefined),
-        );
-      const checkoutPath = existingRef?.worktreePath ?? null;
-      return yield* failure(
-        "invalid_request",
-        `Branch '${input.branch}' already exists${
-          checkoutPath === null ? "" : ` and is checked out at '${checkoutPath}'`
-        }. Choose a different branch name, or delete the existing branch${
-          checkoutPath === null ? "" : " and its worktree"
-        } first.`,
-      );
-    }
-
     let baseRef = input.baseRef;
     if (baseRef === undefined) {
       if (localStatus.refName === null) {
@@ -282,19 +253,18 @@ const make = Effect.gen(function* () {
             }).pipe(Effect.as({ status: "failed", detail } as const));
           });
 
-        // suspend: build the rollback only if cleanup actually runs. Removing
-        // the worktree must succeed before deleting its freshly created branch;
-        // otherwise the branch may still be checked out there.
+        // Preserve reused branches. Only discard a branch created by this call,
+        // only while its original tip is unchanged, preserving hook or concurrent commits.
         const removeCreatedWorktree = Effect.suspend(() =>
           gitWorkflow.removeWorktree({ cwd: projectCwd, path: worktreePath, force: true }).pipe(
-            Effect.andThen(
-              Effect.suspend(() =>
-                gitWorkflow.deleteLocalBranch({
-                  cwd: projectCwd,
-                  refName: worktree.worktree.refName,
-                  force: true,
-                }),
-              ),
+            Effect.andThen(() =>
+              worktree.createdBranch !== undefined
+                ? gitWorkflow.deleteLocalBranch({
+                    cwd: projectCwd,
+                    refName: worktree.worktree.refName,
+                    expectedCommitSha: worktree.createdBranch.commitSha,
+                  })
+                : Effect.void,
             ),
           ),
         ).pipe(Effect.ignoreCause({ log: true }));

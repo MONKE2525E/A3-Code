@@ -17,6 +17,7 @@ import {
   ThreadId,
   type GrokBot,
   type GrokBotOrchestratorConfig,
+  type OrchestrationV2ProviderSession,
 } from "@t3tools/contracts";
 import type { ProviderAdapterV2 } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";

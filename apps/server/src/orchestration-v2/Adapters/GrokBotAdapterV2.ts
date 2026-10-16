@@ -10,6 +10,7 @@ import {
 import type { GrokBotProviderSettings } from "@t3tools/contracts/grokBotProvider";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import { isTransientStartCause } from "@t3tools/provider-core/server/failure";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import type { ProviderDriverCreateInput } from "@t3tools/provider-core/server/driver";
 import * as Clock from "effect/Clock";
@@ -341,6 +342,9 @@ export const makeGrokBotTranscriptProjection = (input: {
       readonly image: boolean;
     }[],
   ) => Effect.Effect<readonly ChatAttachment[], GrokBotBindingError>;
+  readonly existingMessages?: (
+    ids: ReadonlyArray<OrchestrationV2ConversationMessage["id"]>,
+  ) => Effect.Effect<ReadonlyArray<OrchestrationV2ConversationMessage>, GrokBotBindingError>;
   readonly existingMessage?: (
     id: OrchestrationV2ConversationMessage["id"],
   ) => Effect.Effect<OrchestrationV2ConversationMessage | undefined, GrokBotBindingError>;
@@ -468,20 +472,29 @@ export const makeGrokBotTranscriptProjection = (input: {
         if (previous === undefined) newlyOwnedRequests.add(entry.requestId);
       }
     }
+    const existingIds = decodedRows
+      .filter(({ row, entry }) => !messages.has(`${generation}/${row.seq}/${entry.id}`))
+      .map(({ row, entry }) =>
+        input.idAllocator.derive.messageFromProviderItem({
+          driver: GROK_BOT_DRIVER_KIND,
+          nativeItemId: `${grokBotNativeThreadId(input.native)}/${generation}/${row.seq}/${entry.id}`,
+        }),
+      );
+    const persistedById = new Map(
+      (input.existingMessages === undefined || existingIds.length === 0
+        ? []
+        : yield* input.existingMessages(existingIds)
+      ).map((message) => [message.id, message]),
+    );
     for (const { row, entry } of decodedRows) {
       const nativeItemId = `${grokBotNativeThreadId(input.native)}/${generation}/${row.seq}/${entry.id}`;
       const messageId = input.idAllocator.derive.messageFromProviderItem({
         driver: GROK_BOT_DRIVER_KIND,
         nativeItemId,
       });
-      const persisted =
-        entry.kind === "message" &&
-        entry.role === "user" &&
-        entry.clientNonce !== undefined &&
-        managedMessageIds.has(entry.clientNonce) &&
-        input.existingMessage !== undefined
-          ? yield* input.existingMessage(messageId)
-          : undefined;
+      // Native rows can omit their timestamp. Preserve the first import time
+      // across reconnects so old replies cannot move into the newest run.
+      const persisted = persistedById.get(messageId);
       if (
         entry.kind === "message" &&
         entry.role === "user" &&
@@ -916,6 +929,9 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
                         }),
                     ),
                   ),
+          ...(bindings.existingMessages === undefined
+            ? {}
+            : { existingMessages: (ids) => bindings.existingMessages!(owned, ids) }),
           ...(bindings.existingMessage === undefined
             ? {}
             : { existingMessage: (id) => bindings.existingMessage!(owned, id) }),
@@ -1323,6 +1339,13 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
               const attachmentsDir =
                 request.message.attachments.length === 0 ? undefined : host?.paths.attachmentsDir;
               yield* managed.send(turn, attachmentsDir).pipe(
+                // Nothing was delivered, so no answer can be pending. The run redelivers this
+                // message later; the idle watchdog must not fail it while it waits.
+                Effect.tapError((error) =>
+                  isTransientStartCause(error)
+                    ? Effect.sync(() => watchdog.forget(identity.messageId))
+                    : Effect.void,
+                ),
                 Effect.catchIf(
                   (error) =>
                     error._tag === "GrokBotNativeRuntimeError" && error.kind === "uncertain",
@@ -1366,6 +1389,24 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
                 providerTurnId: request.providerTurnId,
               });
               yield* native.interrupt(owned);
+              // Stop/restart owns the old attempt's settlement. A late
+              // watchdog verdict must not revive a superseded native turn.
+              for (const identity of watchdog.pending())
+                if (
+                  identity.providerThreadId === request.providerThread.id &&
+                  identity.providerTurnId === request.providerTurnId
+                ) {
+                  yield* Queue.offerAll(
+                    inbox,
+                    yield* settlements.project({
+                      _tag: "Settlement",
+                      clientNonce: identity.messageId,
+                      outcome: "cancelled",
+                      settledAtMs: yield* Clock.currentTimeMillis,
+                    }),
+                  );
+                  watchdog.forget(identity.messageId);
+                }
             }).pipe(
               Effect.mapError(
                 (cause) =>
