@@ -73,6 +73,12 @@ export function AddMuseAgentProviderStep({
     },
     [browserThreadId, closeSignIn, environmentId],
   );
+  // Dismissing clears the error: the open dialog already showed it, and a remounted copy outside
+  // would be announced to screen readers a second time.
+  const closeSignInDialog = () => {
+    setBrowser(null);
+    setError(null);
+  };
   const openSignIn = async () => {
     setPendingAction("open");
     setError(null);
@@ -198,7 +204,7 @@ export function AddMuseAgentProviderStep({
       <Dialog
         open={browser !== null}
         onOpenChange={(open) => {
-          if (!open) setBrowser(null);
+          if (!open) closeSignInDialog();
         }}
       >
         <DialogPopup className="max-w-4xl">
@@ -227,7 +233,7 @@ export function AddMuseAgentProviderStep({
             ) : null}
           </DialogPanel>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setBrowser(null)}>
+            <Button variant="outline" onClick={closeSignInDialog}>
               Close
             </Button>
             <Button disabled={pending || !canSetup} onClick={() => void connect()}>

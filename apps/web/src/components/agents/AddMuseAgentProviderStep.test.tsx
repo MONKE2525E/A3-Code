@@ -399,3 +399,98 @@ it("announces a failed connect once while the sign-in browser is open", async ()
     container.remove();
   }
 });
+
+const alertTexts = () =>
+  [...document.querySelectorAll('[role="alert"]')].map((alert) => alert.textContent);
+const findButton = (label: string) =>
+  [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+    (button) => button.textContent === label,
+  )!;
+async function dismissSignInDialog(how: "Close" | "Escape" | "X" | "backdrop") {
+  await act(async () => {
+    if (how === "Close") findButton("Close").click();
+    else if (how === "X")
+      document.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click();
+    else if (how === "Escape")
+      document
+        .querySelector('[role="dialog"]')!
+        .dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    else document.querySelector<HTMLElement>('[data-slot="dialog-backdrop"]')!.click();
+  });
+}
+
+it.each([
+  { reconnecting: false, dismiss: "Close" },
+  { reconnecting: false, dismiss: "Escape" },
+  { reconnecting: false, dismiss: "X" },
+  { reconnecting: false, dismiss: "backdrop" },
+  { reconnecting: true, dismiss: "Close" },
+  { reconnecting: true, dismiss: "Escape" },
+  { reconnecting: true, dismiss: "X" },
+  { reconnecting: true, dismiss: "backdrop" },
+] as const)(
+  "does not repeat a failed Finish sign-in alert when dismissed with $dismiss (reconnecting: $reconnecting)",
+  async ({ reconnecting, dismiss }) => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const environmentId = EnvironmentId.make("remote");
+    const instanceId = ProviderInstanceId.make("existing-muse");
+    const onConnected = vi.fn();
+    const signInLabel = reconnecting ? "Sign in again" : "Sign in to Muse";
+    // Once-queues would leak into later cases if an earlier case fails before consuming them.
+    commands.signIn.mockReset();
+    commands.setup.mockReset();
+    commands.signIn
+      .mockResolvedValueOnce({
+        _tag: "Success",
+        value: { threadId: "private-failed", tabId: "tab" },
+      })
+      .mockResolvedValueOnce({
+        _tag: "Success",
+        value: { threadId: "private-retry", tabId: "tab" },
+      });
+    commands.setup
+      .mockResolvedValueOnce({
+        _tag: "Failure",
+        cause: Cause.fail(new Error("The native account changed.")),
+      })
+      .mockResolvedValueOnce({ _tag: "Success", value: { ready: true, provider: { instanceId } } });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <AddMuseAgentProviderStep
+            environmentId={environmentId}
+            environmentLabel="remote"
+            reconnecting={reconnecting}
+            onConnected={onConnected}
+          />,
+        ),
+      );
+      await act(async () => findButton(signInLabel).click());
+      await act(async () => findButton("Finish sign-in").click());
+      expect(alertTexts()).toEqual(["The native account changed."]);
+
+      await dismissSignInDialog(dismiss);
+      expect(commands.close).toHaveBeenCalledWith({
+        environmentId,
+        input: { threadId: "private-failed" },
+      });
+      expect(document.body.textContent).not.toContain("Private sign-in page");
+      // The failure was already announced inside the dialog; it must not remount outside it.
+      expect(alertTexts()).toEqual([]);
+
+      await act(async () => findButton(signInLabel).click());
+      expect(commands.signIn).toHaveBeenCalledTimes(2);
+      expect(document.body.textContent).toContain("Private sign-in page");
+      await act(async () => findButton("Finish sign-in").click());
+      expect(commands.setup).toHaveBeenCalledTimes(2);
+      expect(onConnected).toHaveBeenCalledWith(instanceId);
+      expect(alertTexts()).toEqual([]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  },
+);
