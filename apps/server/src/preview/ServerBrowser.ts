@@ -2561,7 +2561,7 @@ const make = Effect.gen(function* () {
           .pipe(Effect.ignore);
       }
     });
-  const museSignInOwner = (authSessionId: string) =>
+  const museSignInOwner = (authSessionId: string, connectionScope: Scope.Scope) =>
     Effect.acquireRelease(
       Effect.sync((): SignInOwner => ({ authSessionId, threads: new Set(), active: true })),
       (owner) =>
@@ -2608,6 +2608,7 @@ const make = Effect.gen(function* () {
           );
         }),
       })),
+      Effect.provideService(Scope.Scope, connectionScope),
     );
 
   const service = ServerBrowser.of({

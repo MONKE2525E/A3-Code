@@ -32,7 +32,8 @@ export class IntegrationBrowser extends Context.Service<
   {
     readonly museSignInOwner: (
       authSessionId: string,
-    ) => Effect.Effect<MuseSignInOwner, never, Scope.Scope>;
+      connectionScope: Scope.Scope,
+    ) => Effect.Effect<MuseSignInOwner>;
     readonly museCookies: Effect.Effect<readonly Cookie[], IntegrationBrowserError>;
     readonly museTransportPage: Effect.Effect<Page, IntegrationBrowserError>;
   }

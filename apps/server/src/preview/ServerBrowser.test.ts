@@ -1616,7 +1616,7 @@ it.live(
         yield* Effect.addFinalizer(() => Effect.sync(() => focus.mockRestore()));
         const publicManager = yield* Manager.PreviewManager;
         const events = yield* publicManager.subscribeEvents;
-        const creator = yield* integration.museSignInOwner("creator-session");
+        const creator = yield* integration.museSignInOwner("creator-session", yield* Scope.Scope);
         const signIn = yield* creator.open;
         expect(
           (yield* publicManager.list({ threadId: ThreadId.make(signIn.threadId) })).sessions,
@@ -1693,7 +1693,10 @@ it.live(
             yield* browser.openDownload({ ...request, authSessionId: "creator-session" }),
           ),
         ).toBe(true);
-        const anotherOwner = yield* integration.museSignInOwner("another-creator");
+        const anotherOwner = yield* integration.museSignInOwner(
+          "another-creator",
+          yield* Scope.Scope,
+        );
         const another = yield* anotherOwner.open;
         expect(another.threadId).not.toBe(signIn.threadId);
         expect(
@@ -1725,8 +1728,8 @@ it.live("retires only the requested private page for its connection owner", () =
     Effect.gen(function* () {
       const integration = yield* IntegrationBrowser.IntegrationBrowser;
       const browser = yield* ServerBrowser.ServerBrowser;
-      const owner = yield* integration.museSignInOwner("owner");
-      const other = yield* integration.museSignInOwner("another-owner");
+      const owner = yield* integration.museSignInOwner("owner", yield* Scope.Scope);
+      const other = yield* integration.museSignInOwner("another-owner", yield* Scope.Scope);
       const first = yield* owner.open;
       const page = contexts[0]!.page;
       yield* other.close(first.threadId);
@@ -1757,7 +1760,7 @@ it.live("isolates sign-in dialog lifetimes within one authenticated session", ()
   Effect.scoped(
     Effect.gen(function* () {
       const integration = yield* IntegrationBrowser.IntegrationBrowser;
-      const owner = yield* integration.museSignInOwner("shared-session");
+      const owner = yield* integration.museSignInOwner("shared-session", yield* Scope.Scope);
       const first = yield* owner.open;
       const second = yield* owner.open;
       expect(second.threadId).not.toBe(first.threadId);
@@ -1783,12 +1786,8 @@ it.live(
         const secondConnection = yield* Scope.make();
         yield* Effect.addFinalizer(() => Scope.close(firstConnection, Exit.succeed(undefined)));
         yield* Effect.addFinalizer(() => Scope.close(secondConnection, Exit.succeed(undefined)));
-        const first = yield* integration
-          .museSignInOwner("shared-session")
-          .pipe(Effect.provideService(Scope.Scope, firstConnection));
-        const second = yield* integration
-          .museSignInOwner("shared-session")
-          .pipe(Effect.provideService(Scope.Scope, secondConnection));
+        const first = yield* integration.museSignInOwner("shared-session", firstConnection);
+        const second = yield* integration.museSignInOwner("shared-session", secondConnection);
         const firstDialog = yield* first.open;
         const secondDialog = yield* second.open;
         const firstPage = contexts[0]!.page;
@@ -1811,4 +1810,22 @@ it.live(
         expect(secondPage.isClosed()).toBe(true);
       }),
     ).pipe(Effect.provide(layer)),
+);
+
+it.live("keeps sign-in alive past handler setup until its explicit connection scope closes", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const integration = yield* IntegrationBrowser.IntegrationBrowser;
+      const connection = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(connection, Exit.succeed(undefined)));
+      // Handler preparation closes its own scope before the first user RPC arrives.
+      const owner = yield* Effect.scoped(integration.museSignInOwner("session", connection));
+      const page = yield* owner.open;
+      expect(contexts[0]!.page.isClosed()).toBe(false);
+      yield* Scope.close(connection, Exit.succeed(undefined));
+      expect(contexts[0]!.page.isClosed()).toBe(true);
+      yield* owner.close(page.threadId);
+      expect((yield* owner.open.pipe(Effect.flip))._tag).toBe("IntegrationBrowserError");
+    }),
+  ).pipe(Effect.provide(layer)),
 );
