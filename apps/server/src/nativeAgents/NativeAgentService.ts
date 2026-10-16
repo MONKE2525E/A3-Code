@@ -12,7 +12,6 @@ import {
   type MuseAgentConnectionStatus,
   type MuseAgentClientProfile,
   type NativeAgentOpenThreadInput,
-  type NativeAgentReference,
   type NativeAgentOpenThreadResult,
   type NativeAgentFeatureReadInput,
   type NativeAgentFeatureReadResult,
@@ -1117,11 +1116,28 @@ const make = Effect.gen(function* () {
               return yield* new NativeAgentError({ reason: "account_changed" });
             const priorArchived =
               session?.archived ?? (before === null ? !input.archived : before.archivedAt !== null);
+            const setArchived = (archived: boolean) =>
+              features.setSessionArchived(binding, input.sessionId, archived).pipe(
+                Effect.catch((error) => {
+                  if (error.code !== "write_uncertain") return Effect.fail(error);
+                  // A lost response does not imply a failed write. Read the destination view
+                  // before deciding whether the paired shell update (or compensation) can finish.
+                  return features.sessions(binding, archived ? "archived" : "active").pipe(
+                    Effect.flatMap((sessions) => {
+                      const confirmed = sessions.find(
+                        (entry) => entry.sessionId === input.sessionId,
+                      );
+                      return confirmed && (confirmed.archived ?? archived) === archived
+                        ? Effect.void
+                        : Effect.fail(error);
+                    }),
+                  );
+                }),
+                Effect.mapError(featureFailure),
+              );
             // Once native state changes, finish or compensate even if the requesting client leaves.
             return yield* Effect.gen(function* () {
-              yield* features
-                .setSessionArchived(binding, input.sessionId, input.archived)
-                .pipe(Effect.mapError(featureFailure));
+              yield* setArchived(input.archived);
               const synchronized = yield* Effect.gen(function* () {
                 if ((yield* selected(selection.instanceId)).binding !== binding)
                   return yield* new NativeAgentError({ reason: "account_changed" });
@@ -1144,9 +1160,7 @@ const make = Effect.gen(function* () {
                 }
               }).pipe(Effect.exit);
               if (synchronized._tag === "Failure") {
-                const recovered = yield* features
-                  .setSessionArchived(binding, input.sessionId, priorArchived)
-                  .pipe(Effect.exit);
+                const recovered = yield* setArchived(priorArchived).pipe(Effect.exit);
                 return yield* new NativeAgentError({
                   reason: "storage_failed",
                   detail:
@@ -1161,6 +1175,15 @@ const make = Effect.gen(function* () {
         );
       }
       case "session_rename": {
+        const sessions = yield* native.sessions(binding).pipe(Effect.mapError(nativeFailure));
+        const session = sessions.find((entry) => entry.session_id === input.sessionId);
+        if (!session)
+          return yield* new NativeAgentError({
+            reason: "thread_changed",
+            detail: "The Muse conversation could not be found. Refresh and try again.",
+          });
+        if ((yield* selected(selection.instanceId)).binding !== binding)
+          return yield* new NativeAgentError({ reason: "account_changed" });
         const { title } = yield* features
           .renameSession(binding, input.sessionId, input.title)
           .pipe(Effect.mapError(featureFailure));
@@ -1170,7 +1193,9 @@ const make = Effect.gen(function* () {
           if ((yield* selected(selection.instanceId)).binding !== binding)
             return yield* new NativeAgentError({ reason: "account_changed" });
           const identity = yield* canonicalIdentity(selection);
-          const threadId = ThreadId.make(museThreadIdForSession(identity, input.sessionId));
+          const threadId = ThreadId.make(
+            museThreadIdForSession(identity, session.is_primary ? undefined : input.sessionId),
+          );
           const shell = yield* projections
             .getThreadShell(threadId)
             .pipe(Effect.mapError(failure("storage_failed")));

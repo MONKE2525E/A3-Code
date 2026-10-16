@@ -144,6 +144,10 @@ const fixture = (
       failArchiveSync: false,
       archiveSyncFailed: false,
       failArchiveRecovery: false,
+      uncertainArchive: false,
+      archiveWriteCommitted: true,
+      failArchiveRead: false,
+      archiveReadViews: [] as string[],
       pauseArchive: false,
       archiveWritten,
       archiveContinue,
@@ -382,6 +386,26 @@ const fixture = (
           ),
           Layer.provide(
             Layer.mock(Features.MuseAgentFeatureService)({
+              sessions: (_binding, view = "active") =>
+                Effect.gen(function* () {
+                  state.archiveReadViews.push(view);
+                  if (state.failArchiveRead)
+                    return yield* new Features.MuseAgentFeatureError({
+                      feature: "sessions",
+                      code: "connection_unavailable",
+                    });
+                  return (view === "archived") === state.nativeArchived
+                    ? [
+                        {
+                          sessionId: "side-one",
+                          status: "idle",
+                          isPrimary: false,
+                          isThread: true,
+                          archived: state.nativeArchived,
+                        },
+                      ]
+                    : [];
+                }),
               setSessionArchived: (binding, sessionId, archived) =>
                 Effect.gen(function* () {
                   state.archiveCalls.push({ binding, sessionId, archived });
@@ -390,8 +414,13 @@ const fixture = (
                       feature: "sessions",
                       code: "unavailable",
                     });
-                  state.nativeArchived = archived;
+                  if (state.archiveWriteCommitted) state.nativeArchived = archived;
                   state.archiveSyncFailed = archived && state.failArchiveSync;
+                  if (state.uncertainArchive)
+                    return yield* new Features.MuseAgentFeatureError({
+                      feature: "sessions",
+                      code: "write_uncertain",
+                    });
                   if (archived && state.pauseArchive) {
                     yield* Deferred.succeed(archiveWritten, undefined);
                     yield* Deferred.await(archiveContinue);
@@ -1887,6 +1916,33 @@ it.effect("synchronizes an opened side conversation title after a native rename"
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
 
+it.effect("renames the primary session on the canonical main shell and retries partial sync", () =>
+  Effect.gen(function* () {
+    const h = yield* fixture();
+    const main = yield* h.service.open(reference);
+    const side = yield* h.service.open({ ...reference, sessionId: "side-one" });
+    const input = {
+      providerInstanceId: instanceId,
+      operation: "session_rename",
+      sessionId: "primary",
+      title: "Main renamed",
+    } as const;
+    h.state.failRenameSync = true;
+    assert.deepStrictEqual(yield* h.service.featureUpdate(input), {
+      updated: true,
+      title: "Main renamed",
+      titleSyncPending: true,
+    });
+    h.state.failRenameSync = false;
+    assert.deepStrictEqual(yield* h.service.featureUpdate(input), {
+      updated: true,
+      title: "Main renamed",
+    });
+    assert.equal((yield* h.projections.getThreadShell(main.threadId))?.title, "Main renamed");
+    assert.equal((yield* h.projections.getThreadShell(side.threadId))?.title, "Side research");
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
 it.effect.each(["projection", "account"] as const)(
   "reports a committed native rename as partial success after %s sync failure and allows retry",
   (failure) =>
@@ -1934,6 +1990,88 @@ it.effect("pairs direct native archives and restores with the canonical T3 shell
         archived,
       );
     }
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect("reconciles committed archive and restore writes after their responses are lost", () =>
+  Effect.gen(function* () {
+    const h = yield* fixture();
+    const opened = yield* h.service.open({ ...reference, sessionId: "side-one" });
+    h.state.uncertainArchive = true;
+    for (const archived of [true, false]) {
+      assert.deepStrictEqual(
+        yield* h.service.featureUpdate({
+          providerInstanceId: instanceId,
+          operation: "session_archive",
+          sessionId: "side-one",
+          archived,
+        }),
+        { updated: true },
+      );
+      assert.equal(h.state.nativeArchived, archived);
+      assert.equal(
+        (yield* h.projections.getThreadShell(opened.threadId))?.archivedAt !== null,
+        archived,
+      );
+    }
+    assert.deepStrictEqual(h.state.archiveReadViews, ["archived", "active"]);
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect.each(["not-committed", "read-unavailable"] as const)(
+  "does not claim archive synchronization when an uncertain write is %s",
+  (mode) =>
+    Effect.gen(function* () {
+      const h = yield* fixture();
+      const opened = yield* h.service.open({ ...reference, sessionId: "side-one" });
+      h.state.uncertainArchive = true;
+      h.state.archiveWriteCommitted = mode === "read-unavailable";
+      h.state.failArchiveRead = mode === "read-unavailable";
+      const error = yield* Effect.flip(
+        h.service.featureUpdate({
+          providerInstanceId: instanceId,
+          operation: "session_archive",
+          sessionId: "side-one",
+          archived: true,
+        }),
+      );
+      assert.equal(error.reason, "provider_unavailable");
+      assert.equal((yield* h.projections.getThreadShell(opened.threadId))?.archivedAt, null);
+      h.state.uncertainArchive = false;
+      h.state.archiveWriteCommitted = true;
+      h.state.failArchiveRead = false;
+      assert.deepStrictEqual(
+        yield* h.service.featureUpdate({
+          providerInstanceId: instanceId,
+          operation: "session_archive",
+          sessionId: "side-one",
+          archived: true,
+        }),
+        { updated: true },
+      );
+      assert.notEqual((yield* h.projections.getThreadShell(opened.threadId))?.archivedAt, null);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect("confirms uncertain compensation after a committed archive cannot update its shell", () =>
+  Effect.gen(function* () {
+    const h = yield* fixture();
+    const opened = yield* h.service.open({ ...reference, sessionId: "side-one" });
+    h.state.uncertainArchive = true;
+    h.state.failArchiveSync = true;
+    const error = yield* Effect.flip(
+      h.service.featureUpdate({
+        providerInstanceId: instanceId,
+        operation: "session_archive",
+        sessionId: "side-one",
+        archived: true,
+      }),
+    );
+    assert.equal(error.reason, "storage_failed");
+    assert.match(error.message, /restored the previous archive state/);
+    assert.equal(h.state.nativeArchived, false);
+    assert.equal((yield* h.projections.getThreadShell(opened.threadId))?.archivedAt, null);
+    assert.deepStrictEqual(h.state.archiveReadViews, ["archived", "active"]);
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
 
