@@ -451,6 +451,10 @@ it.effect.each([
         namedProjectsRoot: cwd,
         folderForThread: () => Effect.succeedNone,
       });
+      const serverConfig = Layer.effect(
+        ServerConfig.ServerConfig,
+        Replay.makeReplayServerConfig("shell-mcp-tools").pipe(Effect.orDie),
+      ).pipe(Layer.provide(NodeServices.layer));
       const projects = ProjectService.layer.pipe(
         Layer.provide([
           replay,
@@ -471,6 +475,7 @@ it.effect.each([
             reconcileShells: Effect.succeed({ importedThreadCount: 0, importedMessageCount: 0 }),
           }),
         ]),
+        Layer.provide(serverConfig),
       );
       const providers = ProviderRegistryMock.layer([
         snapshot(nativeInstance, ProviderDriverKind.make("grok-bot"), selection.model),
@@ -533,10 +538,7 @@ it.effect.each([
           Layer.mock(Secrets.SecretRequests)({}),
           Layer.mock(GitVcsDriver.GitVcsDriver)({}),
           Layer.mock(Repositories.SourceControlRepositoryService)({}),
-          Layer.effect(
-            ServerConfig.ServerConfig,
-            Replay.makeReplayServerConfig("shell-mcp-tools").pipe(Effect.orDie),
-          ).pipe(Layer.provide(NodeServices.layer)),
+          serverConfig,
           NodeServices.layer,
         ]),
         Layer.provide(settings),

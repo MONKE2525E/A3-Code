@@ -12,6 +12,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -72,6 +73,82 @@ const layerDatabase = SqlitePersistence.layerMemory.pipe(
 );
 const decodeEffectRequest = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationEffectRequestV2),
+);
+
+it.effect.each([false, true])(
+  "refuses generic deletion of managed native storage, force=%s",
+  (force) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const projectId = ProjectId.make("project:managed-native");
+      yield* seedProject(projectId);
+      yield* sql`UPDATE projection_projects SET workspace_root = ${path.resolve(config.baseDir, "native-agents")} WHERE project_id = ${projectId}`;
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectService.make;
+        const error = yield* Effect.flip(
+          service.delete({
+            commandId: CommandId.make(`command:delete-managed:${force}`),
+            projectId,
+            force,
+          }),
+        );
+        assert.equal(error._tag, "ProjectProtectedError");
+        assert.isTrue(Option.isSome(yield* service.getById(projectId)));
+        const deleted =
+          yield* sql`SELECT 1 FROM orchestration_events WHERE event_type = 'project.deleted'`;
+        assert.lengthOf(deleted, 0);
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect(
+  "refuses a force-delete cascade containing canonical Muse or Grok shells even after a root edit",
+  () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project:relocated-native");
+      yield* seedProject(projectId);
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectService.make;
+        const sink = yield* EventSink.EventSinkV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const ids = [ThreadId.make("muse-agent:canonical"), ThreadId.make("grok-bot:canonical")];
+        yield* sink.write({ events: ids.map((id) => nativeThreadCreated(projectId, id)) });
+        const error = yield* Effect.flip(
+          service.delete({
+            commandId: CommandId.make("command:delete-native-cascade"),
+            projectId,
+            force: true,
+          }),
+        );
+        assert.equal(error._tag, "ProjectProtectedError");
+        assert.isTrue(Option.isSome(yield* service.getById(projectId)));
+        for (const id of ids)
+          assert.isNull((yield* projections.getThreadProjection(id)).thread.deletedAt);
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect(
+  "allows deleting an ordinary project named AI Agents in a different native-agents folder",
+  () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project:user-agents");
+      const sql = yield* SqlClient.SqlClient;
+      yield* seedProject(projectId);
+      yield* sql`UPDATE projection_projects SET title = 'AI Agents', workspace_root = '/work/native-agents' WHERE project_id = ${projectId}`;
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectService.make;
+        const deleted = yield* service.delete({
+          commandId: CommandId.make("command:delete-user-agents"),
+          projectId,
+          force: true,
+        });
+        assert.isNotNull(deleted.deletedAt);
+        assert.isTrue(Option.isNone(yield* service.getById(projectId)));
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
 );
 
 const seedProject = Effect.fn("ProjectDeletionTest.seedProject")(function* (projectId: ProjectId) {

@@ -1,5 +1,6 @@
 import {
   CommandId,
+  isNativeAgentBackingThread,
   type OrchestrationProjectShell,
   ProjectId,
   type Project,
@@ -14,6 +15,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
@@ -33,6 +35,7 @@ import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as ServerConfig from "../config.ts";
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
   readonly commandId: CommandId;
@@ -83,6 +86,15 @@ export class ProjectNotEmptyError extends Schema.TaggedError<ProjectNotEmptyErro
   }
 }
 
+export class ProjectProtectedError extends Schema.TaggedError<ProjectProtectedError>()(
+  "ProjectProtectedError",
+  { projectId: ProjectId },
+) {
+  override get message(): string {
+    return "The managed AI Agents project cannot be deleted.";
+  }
+}
+
 export class ProjectOperationError extends Schema.TaggedError<ProjectOperationError>()(
   "ProjectOperationError",
   {
@@ -108,6 +120,7 @@ export type ProjectServiceError =
   | ProjectNotFoundError
   | ProjectConflictError
   | ProjectNotEmptyError
+  | ProjectProtectedError
   | ProjectOperationError;
 
 export class ProjectService extends Context.Service<
@@ -155,6 +168,9 @@ export const make = Effect.gen(function* () {
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const config = yield* ServerConfig.ServerConfig;
+  const path = yield* Path.Path;
+  const nativeAgentWorkspaceRoot = path.resolve(config.baseDir, "native-agents");
   // Commands for one project run in order. Commands that claim a workspace root
   // also hold that root, so two projects cannot both claim it.
   const projectLocks = yield* KeyedLock.make<ProjectId>();
@@ -469,6 +485,8 @@ export const make = Effect.gen(function* () {
     const projectThreads = [...snapshot.threads, ...snapshot.archivedThreads].filter(
       (thread) => thread.projectId === projectId,
     );
+    if (projectThreads.some(isNativeAgentBackingThread))
+      return yield* new ProjectProtectedError({ projectId });
     if (projectThreads.length > 0 && input.force !== true) {
       return yield* new ProjectNotEmptyError({ projectId });
     }
@@ -513,6 +531,9 @@ export const make = Effect.gen(function* () {
       if (Option.isNone(existing)) {
         return yield* new ProjectNotFoundError({ projectId });
       }
+
+      if (path.resolve(existing.value.workspaceRoot) === nativeAgentWorkspaceRoot)
+        return yield* new ProjectProtectedError({ projectId });
 
       const isFirstDelete = existing.value.deletedAt === null;
       if (isFirstDelete) {

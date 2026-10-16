@@ -2149,6 +2149,7 @@ const layerWsRpc = (
               onSome: (root) => ({ scratchWorkspaceRoot: root }),
             }),
             newProjectsRoot: managedFolders.namedProjectsRoot,
+            nativeAgentWorkspaceRoot: (yield* Path.Path).resolve(config.baseDir, "native-agents"),
           };
         });
 
