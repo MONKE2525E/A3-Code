@@ -6,6 +6,37 @@ import type {
 } from "@t3tools/contracts";
 import { isMuseSessionThread, museSessionForThread } from "./aiAgents";
 
+/**
+ * Intent for `/muse/chat`: the sidebar navigates into chat immediately, and the entry
+ * surface runs the guarded open. Never a thread of another account.
+ */
+export type MuseChatOpenIntent =
+  | {
+      readonly kind: "main";
+      readonly environmentId: EnvironmentId;
+      readonly providerInstanceId: ProviderInstanceId;
+    }
+  | {
+      readonly kind: "session";
+      readonly environmentId: EnvironmentId;
+      readonly providerInstanceId: ProviderInstanceId;
+      readonly threadId: string;
+    };
+
+let museChatOpenIntent: MuseChatOpenIntent | null = null;
+
+export function queueMuseChatOpen(intent: MuseChatOpenIntent): void {
+  museChatOpenIntent = intent;
+}
+
+export function peekMuseChatOpen(): MuseChatOpenIntent | null {
+  return museChatOpenIntent;
+}
+
+export function clearMuseChatOpen(): void {
+  museChatOpenIntent = null;
+}
+
 /** Reattach the selected account's live Muse conversation before navigating to its cached shell. */
 export async function openCachedMuseThread(input: {
   readonly hit: { readonly environmentId: EnvironmentId; readonly threadId: string };

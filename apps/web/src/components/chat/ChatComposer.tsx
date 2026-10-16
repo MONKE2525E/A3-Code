@@ -1152,9 +1152,21 @@ import {
   searchGrokBotComposerConnectors,
 } from "../../lib/grokBotComposerDiscovery";
 import {
+  museComposerApplySelection,
+  museComposerConnectionDescription,
+  museComposerDiscoveryReads,
+  museComposerDollarPickerItems,
+  museComposerGuardTypedSlash,
+  museComposerResolveStop,
+  museComposerSkillPrompt,
+  museComposerSlashPickerItems,
+  type MuseComposerPickerItem,
+} from "../../lib/museAgentComposerDiscovery";
+import {
   grokBotsComposerResourcesQuery,
   grokBotsMarketplacePluginsQuery,
 } from "../../state/grokBots";
+import { museAgentFeatureReadQuery } from "../../state/museAgent";
 import { useDelayedStatus } from "../../hooks/useDelayedStatus";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { usePanelAnimationSettings } from "../../panelAnimations";
@@ -1175,6 +1187,36 @@ const extendReplacementRangeForTrailingSpace = (
   }
   return text[rangeEnd] === " " ? rangeEnd + 1 : rangeEnd;
 };
+
+function musePickerToCommandItem(item: MuseComposerPickerItem): ComposerCommandItem {
+  switch (item.kind) {
+    case "skill":
+      return {
+        id: `muse-skill:${item.skill.name}`,
+        type: "muse-skill",
+        skill: item.skill,
+        label: item.skill.title?.trim() || item.skill.name,
+        description: item.skill.description.trim() || "Use this Muse skill",
+      };
+    case "connector":
+      return {
+        id: `muse-connector:${item.connector.id}`,
+        type: "muse-connector",
+        connector: item.connector,
+        label: item.connector.name,
+        description: museComposerConnectionDescription(item.connector),
+      };
+    case "slash":
+      return {
+        id: `muse-slash:${item.command.name}`,
+        type: "muse-slash-command",
+        name: item.command.name,
+        runnable: item.transport === "stop",
+        label: `/${item.command.name}`,
+        description: item.command.description,
+      };
+  }
+}
 
 function useRestingComposerControlsLayout(host: HTMLDivElement | null, useControlsAsHost = false) {
   const [controls, setControls] = useState<HTMLDivElement | null>(null);
@@ -2286,6 +2328,29 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => grokBotConnectorLogoUrls(grokBotPluginCatalog.data?.plugins ?? []),
     [grokBotPluginCatalog.data],
   );
+  const museComposerReads = museComposerDiscoveryReads(selectedInstanceId);
+  const museComposerSkillsQuery = useEnvironmentQuery(
+    isMuseComposer
+      ? museAgentFeatureReadQuery({
+          environmentId,
+          input: museComposerReads.skills,
+        })
+      : null,
+  );
+  const museComposerConnectorsQuery = useEnvironmentQuery(
+    isMuseComposer
+      ? museAgentFeatureReadQuery({
+          environmentId,
+          input: museComposerReads.connectors,
+        })
+      : null,
+  );
+  const museComposerSkillRows =
+    museComposerSkillsQuery.data?.operation === "skills" ? museComposerSkillsQuery.data.data : [];
+  const museComposerConnectorRows =
+    museComposerConnectorsQuery.data?.operation === "connectors"
+      ? museComposerConnectorsQuery.data.data
+      : [];
   const providerSendBlockReason = getAntigravitySendBlockReason(
     selectedProviderEntry?.snapshot,
     selectedModel,
@@ -2302,16 +2367,26 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     () => selectedProviderEntry?.snapshot ?? null,
     [selectedProviderEntry],
   );
-  const compactCommandAvailable = providerSupportsManualCompaction(selectedProviderEntry);
+  const compactCommandAvailable =
+    !isMuseComposer && providerSupportsManualCompaction(selectedProviderEntry);
   // Memoized so the composer menu memo below can cache between renders.
+  // Native Muse skills are prompt directives, not local skill chips/paths.
   const selectedProviderSkills = useMemo(
     () =>
       isGrokBotComposer
         ? (grokBotComposerResources.data?.skills ?? []).map(grokBotSkillToProviderSkill)
-        : selectedProviderStatus
-          ? resolveProviderSkillsForCwd(selectedProviderStatus, gitCwd)
-          : [],
-    [gitCwd, grokBotComposerResources.data, isGrokBotComposer, selectedProviderStatus],
+        : isMuseComposer
+          ? []
+          : selectedProviderStatus
+            ? resolveProviderSkillsForCwd(selectedProviderStatus, gitCwd)
+            : [],
+    [
+      gitCwd,
+      grokBotComposerResources.data,
+      isGrokBotComposer,
+      isMuseComposer,
+      selectedProviderStatus,
+    ],
   );
   const selectedProviderSlashCommands = useMemo(
     () =>
@@ -2813,6 +2888,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       ];
     }
     if (composerTrigger.kind === "slash-command") {
+      if (isMuseComposer) {
+        return museComposerSlashPickerItems(
+          museComposerSkillRows,
+          museComposerConnectorRows,
+          composerTrigger.query,
+        ).map(musePickerToCommandItem);
+      }
       const builtInSlashCommandItems = [
         {
           id: "slash:model",
@@ -2877,6 +2959,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       return searchSlashCommandItems(slashCommandItems, query);
     }
     if (composerTrigger.kind === "skill") {
+      if (isMuseComposer) {
+        return museComposerDollarPickerItems(
+          museComposerSkillRows,
+          museComposerConnectorRows,
+          composerTrigger.query,
+        ).map(musePickerToCommandItem);
+      }
       return searchProviderSkills(selectedProviderSkills, composerTrigger.query).map((skill) => ({
         id: `skill:${selectedProvider}:${skill.name}`,
         type: "skill" as const,
@@ -2960,9 +3049,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     settings.showSkillsInSlashMenu,
     workspaceEntries.entries,
     isGrokBotComposer,
+    isMuseComposer,
     grokBotComposerResources.data,
     grokBotConnectorLogos,
     grokBotId,
+    museComposerConnectorRows,
+    museComposerSkillRows,
   ]);
 
   const composerMenuOpen = Boolean(composerTrigger);
@@ -3038,6 +3130,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     (isGrokBotComposer &&
       (composerTriggerKind === "path" || composerTriggerKind === "skill") &&
       grokBotComposerResources.isPending) ||
+    (isMuseComposer &&
+      (composerTriggerKind === "skill" || composerTriggerKind === "slash-command") &&
+      (museComposerSkillsQuery.isPending || museComposerConnectorsQuery.isPending)) ||
     (composerTriggerKind === "path" &&
       !isGrokBotComposer &&
       pathTriggerQuery.length > 0 &&
@@ -3055,6 +3150,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       return composerTriggerKind === "skill"
         ? "No native Grok Bot skills found."
         : "No matching bots or connectors.";
+    }
+    if (
+      isMuseComposer &&
+      (composerTriggerKind === "skill" || composerTriggerKind === "slash-command")
+    ) {
+      if (museComposerSkillsQuery.error !== null) return museComposerSkillsQuery.error;
+      if (museComposerConnectorsQuery.error !== null) return museComposerConnectorsQuery.error;
+      return composerTriggerKind === "skill"
+        ? "No native Muse skills or connections found."
+        : "No matching Muse skills, connections, or commands.";
     }
     if (composerTriggerKind === "skill") {
       return "No skills found. Try / to browse provider commands.";
@@ -3081,6 +3186,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     composerTriggerKind,
     grokBotComposerResources.error,
     isGrokBotComposer,
+    isMuseComposer,
+    museComposerConnectorsQuery.error,
+    museComposerSkillsQuery.error,
     pullRequestLookup.data?.errors,
     pullRequestLookup.error,
     pullRequestProjectId,
@@ -4178,6 +4286,63 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         }
         return;
       }
+      if (item.type === "muse-skill" || item.type === "muse-connector") {
+        const selection = museComposerApplySelection(
+          item.type === "muse-skill"
+            ? { kind: "skill", skill: item.skill }
+            : { kind: "connector", connector: item.connector },
+        );
+        if (selection.action !== "replace") return;
+        const replacement = selection.text;
+        const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
+          snapshot.value,
+          trigger.rangeEnd,
+          replacement,
+        );
+        const applied = applyPromptReplacement(
+          trigger.rangeStart,
+          replacementRangeEnd,
+          replacement,
+          { expectedText: snapshot.value.slice(trigger.rangeStart, replacementRangeEnd) },
+        );
+        if (applied) {
+          setComposerHighlightedItemId(null);
+        }
+        return;
+      }
+      if (item.type === "muse-slash-command") {
+        const selection = museComposerApplySelection({
+          kind: "slash",
+          command: {
+            name: item.name,
+            description: item.description,
+            kind: "local",
+          },
+          transport: item.runnable ? "stop" : "unimplemented",
+        });
+        if (selection.action === "stop") {
+          const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+            expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+          });
+          if (applied) {
+            setComposerHighlightedItemId(null);
+            const stop = museComposerResolveStop(canInterrupt);
+            if (stop.action === "interrupt") void onInterrupt();
+            else toastManager.add({ type: "info", title: stop.message });
+          }
+          return;
+        }
+        if (selection.action === "unimplemented") {
+          const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+            expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+          });
+          if (applied) {
+            setComposerHighlightedItemId(null);
+            toastManager.add({ type: "info", title: selection.message });
+          }
+        }
+        return;
+      }
       if (item.type === "path") {
         const replacement = `${serializeComposerFileLink(item.path)} `;
         const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
@@ -4248,7 +4413,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         return;
       }
       if (item.type === "skill") {
-        const replacement = `$${item.skill.name} `;
+        const replacement = isMuseComposer
+          ? museComposerSkillPrompt(item.skill)
+          : `$${item.skill.name} `;
         const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
           snapshot.value,
           trigger.rangeEnd,
@@ -4325,8 +4492,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       addComposerDraftReviewComment,
       addComposerDraftThreadContexts,
       applyPromptReplacement,
+      canInterrupt,
       composerDraftTarget,
       handleInteractionModeChange,
+      isMuseComposer,
+      onInterrupt,
       planModeUiEnabled,
       onUsageLimitsCommand,
       resolveActiveComposerTrigger,
@@ -4442,6 +4612,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         });
         return;
       }
+      if (isMuseComposer && !activePendingProgress) {
+        const typedSlash = museComposerGuardTypedSlash(promptRef.current);
+        if (typedSlash.action !== "allow") {
+          event?.preventDefault();
+          if (typedSlash.action === "stop") {
+            const stop = museComposerResolveStop(canInterrupt);
+            if (stop.action === "interrupt") void onInterrupt();
+            else toastManager.add({ type: "info", title: stop.message });
+          } else {
+            toastManager.add({ type: "info", title: typedSlash.message });
+          }
+          return;
+        }
+      }
       const submission = submitComposerDraft({
         prompt: promptRef.current,
         submissionTarget: activePendingProgress ? "pending-user-input" : "provider-turn",
@@ -4480,6 +4664,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       isSendDisabled,
       noProviderAvailable,
       onSend,
+      onInterrupt,
+      canInterrupt,
+      isMuseComposer,
       settings.followUpBehavior,
       phase,
       promptRef,
@@ -7242,7 +7429,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         ? composerTriggerKind === "skill"
                           ? "Loading Grok Bot skills..."
                           : "Loading bots and connectors..."
-                        : "Searching workspace files..."
+                        : isMuseComposer
+                          ? composerTriggerKind === "skill"
+                            ? "Loading Muse skills and connections..."
+                            : "Loading Muse commands..."
+                          : "Searching workspace files..."
                     : composerMenuEmptyState
                   : ""}
               </div>
@@ -7266,7 +7457,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                             listAriaLabel: "Bots and connectors",
                             loadingStateText: "Loading bots and connectors...",
                           }
-                        : {})}
+                        : isMuseComposer && composerTriggerKind === "skill"
+                          ? {
+                              listAriaLabel: "Muse skills and connections",
+                              loadingStateText: "Loading Muse skills and connections...",
+                            }
+                          : isMuseComposer && composerTriggerKind === "slash-command"
+                            ? {
+                                listAriaLabel: "Muse commands",
+                                loadingStateText: "Loading Muse commands...",
+                              }
+                            : {})}
                     activeItemId={activeComposerMenuItem?.id ?? null}
                     onHighlightedItemChange={onComposerMenuItemHighlighted}
                     onSelect={onSelectComposerItem}
@@ -7769,7 +7970,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                                 : phase === "disconnected"
                                   ? DISCONNECTED_COMPOSER_PLACEHOLDER
                                   : isMuseComposer
-                                    ? "Ask Muse anything"
+                                    ? "Ask Muse. $ or / to use skills and connections"
                                     : isGrokBotComposer
                                       ? "Ask anything, @mention bots/connectors, $use skills, or / for commands"
                                       : "Ask anything, @tag files/folders, $use skills, or / for commands"

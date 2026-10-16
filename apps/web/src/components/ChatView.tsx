@@ -11580,6 +11580,16 @@ export default function ChatView(props: ChatViewProps) {
             </div>
             {/* Messages Wrapper */}
             <div className="relative flex min-h-0 flex-1 flex-col bg-background">
+              {isMuseAgentThread && activeThread ? (
+                <MuseAgentRouteConnection
+                  key={`muse-route:${activeThread.environmentId}:${activeThread.id}`}
+                  environmentId={activeThread.environmentId}
+                  providerInstanceId={activeThread.modelSelection.instanceId}
+                  threadId={activeThread.id}
+                  connected={activeEnvironmentConnectionPhase === "connected"}
+                  hasMessages={displayedTimeline.entries.length > 0}
+                />
+              ) : null}
               {/* Messages — LegendList handles virtualization and scrolling internally */}
               <MessagesTimeline
                 citationRequest={paintOnlyDisplayedTimeline ? null : citationRequest}
@@ -11758,15 +11768,6 @@ export default function ChatView(props: ChatViewProps) {
                       requests={grokBotSecretRequests}
                     />
                   )}
-                  {isMuseAgentThread && activeThread ? (
-                    <MuseAgentRouteConnection
-                      key={`muse-route:${activeThread.environmentId}:${activeThread.id}`}
-                      environmentId={activeThread.environmentId}
-                      providerInstanceId={activeThread.modelSelection.instanceId}
-                      threadId={activeThread.id}
-                      connected={activeEnvironmentConnectionPhase === "connected"}
-                    />
-                  ) : null}
                   {isMuseAgentThread && activeThread ? (
                     <MuseAgentCredentialPanel
                       environmentId={activeThread.environmentId}

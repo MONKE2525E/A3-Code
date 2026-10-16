@@ -8,26 +8,22 @@ import {
   AuthOrchestrationReadScope,
   type EnvironmentId,
   ThreadId,
-  type MuseAgentFeatureSession,
   type NativeAgentFeatureReadInput,
-  ProviderInstanceId as ProviderInstanceIdSchema,
   type ProviderInstanceId,
 } from "@t3tools/contracts";
 import { useBlocker, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   ChevronRightIcon,
-  FingerprintIcon,
+  ClockIcon,
   ListChecksIcon,
-  MessageSquareIcon,
   PencilIcon,
-  SettingsIcon,
   ShieldCheckIcon,
   SparklesIcon,
   ZapIcon,
 } from "lucide-react";
 import {
-  useCallback,
+  useEffect,
   useImperativeHandle,
   useLayoutEffect,
   useMemo,
@@ -48,22 +44,12 @@ import {
 } from "~/components/ui/alert-dialog";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
-import {
-  Dialog,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogPanel,
-  DialogPopup,
-  DialogTitle,
-} from "~/components/ui/dialog";
 import { Input } from "~/components/ui/input";
 import { Sheet, SheetDescription, SheetPopup, SheetTitle } from "~/components/ui/sheet";
 import { Toggle } from "~/components/ui/toggle";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { Spinner } from "~/components/ui/spinner";
-import { toastManager } from "~/components/ui/toast";
 import {
   museAgentFeatureReadQuery,
   museAgentFeatureUpdate,
@@ -71,32 +57,34 @@ import {
   museAgentProfileQuery,
   museAgentStatusQuery,
 } from "~/state/museAgent";
-import { useComposerDraftStore } from "~/composerDraftStore";
 import { registerRightPanelLeaveGuard } from "~/rightPanelStore";
-import { cn } from "~/lib/utils";
 import { buildThreadRouteParams } from "~/threadRoutes";
 import { useEnvironmentQuery } from "~/state/query";
 import { useEnvironmentScope } from "~/state/session";
+import { environmentThreadShells } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
-import ChatMarkdown from "~/components/ChatMarkdown";
+
+import { ThreadAutomationsPanel } from "~/components/chat/ThreadAutomationsPanel";
+import { ThreadRelationshipsPanel } from "~/components/chat/ThreadRelationshipsControl";
 
 import { MuseAgentAvatar } from "./MuseAgentAvatar";
 import { useMuseAgentAvatar } from "./useMuseAgentAvatar";
 import { MuseAgentDeliveryRecovery } from "./MuseAgentDeliveryRecovery";
-import { museSessionForThread } from "./aiAgents";
+import { findCachedMuseAgentThread, museSessionForThread } from "./aiAgents";
 import { MuseAgentComputerSection } from "./MuseAgentComputerSection";
 import { MuseAgentConnectionsSection } from "./MuseAgentConnectionsSection";
-import { MuseAgentDictationSection } from "./MuseAgentDictationSection";
 import { MuseAgentProfileSection } from "./MuseAgentProfileSection";
+import { MuseChatLoading } from "./MuseAgentRouteConnection";
+import { groupMuseRoutines } from "./museAgentRoutines";
 import {
   describeMuseSkill,
+  formatMuseNextRun,
   groupMuseSkills,
-  museMemoryPreview,
-  museSessionTitle,
-  resolveMuseSessionActions,
+  museSkillMatches,
   resolveMuseTabSupport,
   type MuseFeatureTabId,
 } from "./museAgentFeatures.logic";
+import { clearMuseChatOpen, openCachedMuseThread, peekMuseChatOpen } from "./openCachedMuseThread";
 
 type ReadInput = typeof NativeAgentFeatureReadInput.Type;
 type Target = {
@@ -117,6 +105,7 @@ function FeatureState<T>({
   label,
   isEmpty,
   emptyText,
+  keepChildrenOnEmpty = false,
   children,
 }: {
   readonly view: {
@@ -128,6 +117,7 @@ function FeatureState<T>({
   readonly label: string;
   readonly isEmpty: (data: T) => boolean;
   readonly emptyText: string;
+  readonly keepChildrenOnEmpty?: boolean;
   readonly children: (data: T) => ReactNode;
 }) {
   if (view.data === null) {
@@ -158,7 +148,7 @@ function FeatureState<T>({
           </Button>
         </p>
       ) : null}
-      {isEmpty(view.data) ? (
+      {isEmpty(view.data) && !keepChildrenOnEmpty ? (
         <p className="py-6 text-sm text-muted-foreground">{emptyText}</p>
       ) : (
         children(view.data)
@@ -188,186 +178,123 @@ function toneVariant(tone: "success" | "muted" | "warning") {
   return tone === "success" ? "success" : tone === "warning" ? "warning" : "outline";
 }
 
-function MemorySection({ environmentId, providerInstanceId }: Target) {
-  const [draft, setDraft] = useState("");
-  const [query, setQuery] = useState<string | null>(null);
-  const [openUri, setOpenUri] = useState<string | null>(null);
-  const search = useFeatureRead(
-    environmentId,
-    query === null ? null : { operation: "memory_search", providerInstanceId, query },
-  );
-  const detail = useFeatureRead(
-    environmentId,
-    openUri === null ? null : { operation: "memory_read", providerInstanceId, uri: openUri },
-  );
-  const results = search.data?.operation === "memory_search" ? search.data.data : null;
-  const memory = detail.data?.operation === "memory_read" ? detail.data.data : null;
-  return (
-    <div className="grid gap-3">
-      <form
-        className="flex gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          setQuery(draft.trim());
-        }}
-      >
-        <Input
-          aria-label="Search Muse memory"
-          placeholder="Search what Muse remembers"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-        />
-        <Button type="submit" variant="outline" disabled={draft.trim().length === 0}>
-          Search
-        </Button>
-      </form>
-      {query === null ? (
-        <p className="py-4 text-sm text-muted-foreground">
-          Search to browse Muse's memories. They are read-only here.
-        </p>
-      ) : (
-        <FeatureState
-          view={{ ...search, data: results }}
-          label="memories"
-          isEmpty={(items) => items.length === 0}
-          emptyText={`No memories match “${query}”.`}
-        >
-          {(items) => (
-            <ul className="grid gap-2">
-              {items.map((item) => (
-                <Row key={item.uri}>
-                  <button
-                    type="button"
-                    className="grid min-w-0 flex-1 gap-0.5 rounded-sm text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                    onClick={() => setOpenUri(item.uri)}
-                  >
-                    <span className="truncate text-sm font-medium text-foreground">
-                      {item.title || "Untitled memory"}
-                    </span>
-                    <span className="line-clamp-2 text-xs text-muted-foreground">
-                      {museMemoryPreview(item.summary ?? item.contentMarkdown) ?? "No preview"}
-                    </span>
-                  </button>
-                </Row>
-              ))}
-            </ul>
-          )}
-        </FeatureState>
-      )}
-      <Dialog open={openUri !== null} onOpenChange={(open) => (open ? null : setOpenUri(null))}>
-        <DialogPopup className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>{memory?.title || "Memory"}</DialogTitle>
-          </DialogHeader>
-          <DialogPanel>
-            <FeatureState
-              view={{ ...detail, data: memory }}
-              label="memory"
-              isEmpty={() => false}
-              emptyText=""
-            >
-              {(item) => (
-                <ChatMarkdown
-                  text={item.contentMarkdown ?? item.summary ?? "This memory has no text."}
-                  cwd={undefined}
-                  environmentId={environmentId}
-                  className="select-text"
-                />
-              )}
-            </FeatureState>
-          </DialogPanel>
-        </DialogPopup>
-      </Dialog>
-    </div>
-  );
-}
-
-function useOpenMuseChatWithDraft(
-  { environmentId, providerInstanceId }: Target,
-  onClose: () => void,
-) {
-  const navigate = useNavigate();
-  const openThread = useAtomCommand(museAgentOpenThread, { reportFailure: false });
-  const canOpen = useAtomValue(museAgentOpenThread.permissionAtom(environmentId));
-  const [opening, setOpening] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const start = useCallback(
-    async (prompt: string) => {
-      if (opening) return;
-      setError(null);
-      // Always go through the guarded open: the server validates the account, unarchives and
-      // reattaches history. It is idempotent, so a repeat returns the same canonical thread.
-      setOpening(true);
-      const result = await openThread({
-        environmentId,
-        input: { providerInstanceId: ProviderInstanceIdSchema.make(providerInstanceId) },
-      });
-      setOpening(false);
-      if (result._tag !== "Success") {
-        if (!isAtomCommandInterrupted(result)) {
-          const failure = squashAtomCommandFailure(result);
-          setError(failure instanceof Error ? failure.message : "Could not open Muse.");
-        }
-        return;
-      }
-      const ref = scopeThreadRef(environmentId, result.value.threadId);
-      // Keep whatever the user already typed; the seed goes below it. Never auto-sent.
-      const store = useComposerDraftStore.getState();
-      const existing = store.getComposerDraft(ref)?.prompt ?? "";
-      store.setPrompt(ref, existing.trim().length > 0 ? `${existing}\n\n${prompt}` : prompt);
-      onClose();
-      void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(ref) });
-    },
-    [environmentId, navigate, onClose, opening, openThread, providerInstanceId],
-  );
-  return { start, canOpen: canOpen && !opening, error };
-}
+const SKILL_SECTION_PREVIEW = 4;
+const SKILL_CARD_CLASS =
+  "min-w-0 rounded-xl border bg-card flex items-center gap-3 p-3 transition-colors hover:bg-accent/50";
 
 export function MuseAgentSkillsSection({ environmentId, providerInstanceId }: Target) {
   const view = useFeatureRead(environmentId, { operation: "skills", providerInstanceId });
   const skills = view.data?.operation === "skills" ? view.data.data : null;
-  const groups = useMemo(() => (skills ? groupMuseSkills(skills) : []), [skills]);
+  const [search, setSearch] = useState("");
+  const [category, setCategory] = useState("all");
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const needle = search.trim().toLowerCase();
+  const presentCategories = useMemo(
+    () => (skills ? groupMuseSkills(skills).map((group) => group.category) : []),
+    [skills],
+  );
+  const sections = useMemo(() => {
+    if (skills === null) return [];
+    const grouped = groupMuseSkills(skills.filter((skill) => museSkillMatches(skill, needle)));
+    return category === "all" ? grouped : grouped.filter((group) => group.category === category);
+  }, [category, needle, skills]);
+  const searching = needle !== "";
   return (
     <FeatureState
       view={{ ...view, data: skills }}
       label="skills"
       isEmpty={(items) => items.length === 0}
       emptyText="Muse reports no skills."
+      keepChildrenOnEmpty
     >
-      {() => (
-        <>
-          <p className="text-xs text-muted-foreground">
-            Skills are managed in the Muse app. Availability is what Muse reports.
-          </p>
-          {groups.map((group) => (
-            <section key={group.category} className="grid gap-2">
-              <h4 className="text-xs font-medium text-muted-foreground uppercase">
-                {group.category}
-              </h4>
-              <ul className="grid gap-2">
-                {group.skills.map((skill) => {
-                  const state = describeMuseSkill(skill);
-                  return (
-                    <Row key={skill.name}>
-                      <div className="grid min-w-0 flex-1 gap-0.5">
-                        <span className="truncate text-sm font-medium text-foreground">
-                          {skill.title ?? skill.name}
-                        </span>
-                        <span className="line-clamp-2 text-xs text-muted-foreground">
-                          {skill.description}
-                        </span>
-                        {state.detail ? (
-                          <span className="text-xs text-muted-foreground">{state.detail}</span>
-                        ) : null}
-                      </div>
-                      <Badge variant={toneVariant(state.tone)}>{state.label}</Badge>
-                    </Row>
-                  );
-                })}
-              </ul>
-            </section>
-          ))}
-        </>
+      {(items) => (
+        <div className="space-y-6">
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+            <Input
+              placeholder="Search skills"
+              aria-label="Search skills"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+            <Button size="touch-sm" variant="ghost-muted" onClick={view.refresh}>
+              <RefreshIcon refreshing={view.isPending} />
+              Refresh
+            </Button>
+          </div>
+          {presentCategories.length > 1 ? (
+            <div role="group" aria-label="Skill category" className="flex flex-wrap gap-1">
+              {["all", ...presentCategories].map((key) => (
+                <Button
+                  key={key}
+                  size="sm"
+                  variant={category === key ? "secondary" : "ghost"}
+                  aria-pressed={category === key}
+                  onClick={() => setCategory(key)}
+                >
+                  {key === "all" ? "All" : key}
+                </Button>
+              ))}
+            </div>
+          ) : null}
+          {items.length === 0 ? (
+            <p className="py-6 text-sm text-muted-foreground">Muse reports no skills.</p>
+          ) : sections.length === 0 ? (
+            <p className="text-sm text-muted-foreground">Nothing matches.</p>
+          ) : (
+            sections.map((section) => {
+              const preview = searching || category !== "all" || expanded.has(section.category);
+              const shown = preview
+                ? section.skills
+                : section.skills.slice(0, SKILL_SECTION_PREVIEW);
+              return (
+                <section key={section.category} className="space-y-2" aria-label={section.category}>
+                  <div className="flex items-center justify-between gap-2">
+                    <h4 className="text-sm font-medium text-foreground">{section.category}</h4>
+                    {!preview && section.skills.length > SKILL_SECTION_PREVIEW ? (
+                      <Button
+                        size="xs"
+                        variant="ghost-muted"
+                        onClick={() =>
+                          setExpanded((current) => new Set([...current, section.category]))
+                        }
+                      >
+                        View all
+                      </Button>
+                    ) : null}
+                  </div>
+                  <ul className="grid gap-2 sm:grid-cols-2">
+                    {shown.map((skill) => {
+                      const state = describeMuseSkill(skill);
+                      return (
+                        <li key={skill.name} className={SKILL_CARD_CLASS}>
+                          <span
+                            aria-hidden="true"
+                            className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground"
+                          >
+                            <SparklesIcon className="size-4" />
+                          </span>
+                          <div className="grid min-w-0 flex-1 gap-0.5">
+                            <span className="truncate text-sm font-medium text-foreground">
+                              {skill.title ?? skill.name}
+                            </span>
+                            {skill.description ? (
+                              <span className="line-clamp-1 text-xs leading-5 text-muted-foreground">
+                                {skill.description}
+                              </span>
+                            ) : null}
+                          </div>
+                          {state.showBadge ? (
+                            <Badge variant={toneVariant(state.tone)}>{state.label}</Badge>
+                          ) : null}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </section>
+              );
+            })
+          )}
+        </div>
       )}
     </FeatureState>
   );
@@ -414,21 +341,123 @@ function ActivitySection({ environmentId, providerInstanceId }: Target) {
   );
 }
 
-/** What the Profile page shows instead of its main view: an ability, or Muse's computer from the gear. */
-type MuseAbility = Extract<MuseFeatureTabId, "memory" | "connections" | "skills" | "dictation">;
-type MuseDetail = MuseAbility | "computer" | "activity" | "approvals";
+/** Native schedules Muse owns. Empty until Muse reports at least one task. */
+function RoutinesSection({
+  environmentId,
+  providerInstanceId,
+  threadId,
+}: Target & { readonly threadId?: string }) {
+  const view = useFeatureRead(environmentId, { operation: "tasks", providerInstanceId });
+  const tasks = view.data?.operation === "tasks" ? view.data.data : null;
+  const groups = useMemo(() => (tasks ? groupMuseRoutines(tasks) : []), [tasks]);
+  const now = Date.now();
+  return (
+    <div className="grid gap-6">
+      <p className="text-xs text-muted-foreground">
+        Routines Muse runs itself. T3 scheduled tasks on this chat, if any, appear separately below.
+      </p>
+      <FeatureState
+        view={{ ...view, data: tasks }}
+        label="routines"
+        isEmpty={(items) => items.length === 0}
+        emptyText="Ask Muse in chat to create a routine. Muse runs these itself; they are not T3 scheduled tasks."
+      >
+        {() =>
+          groups.map((group) => (
+            <section key={group.group} className="grid gap-2">
+              <h4 className="text-xs font-medium text-muted-foreground uppercase">{group.label}</h4>
+              <ul className="grid gap-1">
+                {group.tasks.map((routine) => {
+                  const nextRun = formatMuseNextRun(routine.nextRunAtUtc, now);
+                  return (
+                    <Row key={routine.id} icon={<ClockIcon />}>
+                      <div className="grid min-w-0 flex-1 gap-0.5">
+                        <span className="truncate text-sm font-semibold text-foreground">
+                          {routine.title?.trim() || "Untitled routine"}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {routine.scheduleLabel}
+                          {nextRun ? ` · ${nextRun}` : ""}
+                        </span>
+                      </div>
+                    </Row>
+                  );
+                })}
+              </ul>
+            </section>
+          ))
+        }
+      </FeatureState>
+      {threadId ? (
+        <ThreadAutomationsPanel environmentId={environmentId} threadId={ThreadId.make(threadId)} />
+      ) : null}
+    </div>
+  );
+}
+
+function useResolvedMuseThreadId(
+  environmentId: EnvironmentId,
+  providerInstanceId: ProviderInstanceId,
+  threadId?: string,
+): string | undefined {
+  const shells = useAtomValue(environmentThreadShells.environmentThreadsAtom(environmentId));
+  if (threadId) return threadId;
+  return findCachedMuseAgentThread(shells, providerInstanceId)?.id;
+}
+
+/**
+ * T3 child tasks on the current Muse chat. Native Muse has its own roster (`subagents.list` /
+ * `subagents.status`); that is not in T3's feature-read contract yet, so this never relabels
+ * side chats as subagents.
+ */
+function SubagentsSection({
+  environmentId,
+  threadId,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId?: string;
+}) {
+  return (
+    <div className="grid gap-6">
+      <p className="text-xs text-muted-foreground">
+        T3 child tasks on this chat. Muse's own subagent roster is not available in T3 yet.
+      </p>
+      {threadId ? (
+        <ThreadRelationshipsPanel
+          environmentId={environmentId}
+          threadId={ThreadId.make(threadId)}
+        />
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          Open Muse chat to see T3 child tasks on that conversation.
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** What the Profile page shows instead of its main view. Computer is a list item, not a gear. */
+type MuseDetail =
+  | "activity"
+  | "approvals"
+  | "routines"
+  | "subagents"
+  | "connections"
+  | "skills"
+  | "computer";
 
 const MUSE_ABILITIES: ReadonlyArray<{
-  readonly id: Exclude<MuseDetail, "computer">;
+  readonly id: MuseDetail;
   readonly label: string;
   readonly description: string;
 }> = [
-  { id: "activity", label: "Activity", description: "Tasks and routines" },
+  { id: "activity", label: "Activity", description: "Tasks Muse has recorded" },
   { id: "approvals", label: "Approvals", description: "Review Muse approvals" },
-  { id: "memory", label: "Memory", description: "Search what Muse remembers" },
+  { id: "routines", label: "Routines", description: "Jobs Muse runs on its own" },
+  { id: "subagents", label: "Subagents", description: "T3 child tasks on this chat" },
   { id: "connections", label: "Connections", description: "Accounts Muse can reach" },
   { id: "skills", label: "Skills", description: "What Muse can do" },
-  { id: "dictation", label: "Dictation", description: "Speak to Muse" },
+  { id: "computer", label: "Computer", description: "Muse's computer" },
 ];
 
 type MuseLeaveHandle = {
@@ -459,10 +488,19 @@ function MuseAgentFeaturesBody({
   readonly closeRef?: Ref<MuseLeaveHandle>;
 }) {
   const [detail, setDetail] = useState<MuseDetail | null>(null);
-  const canWrite = useAtomValue(museAgentFeatureUpdate.permissionAtom(environmentId));
+  const canOperateComputer = useAtomValue(
+    museAgentFeatureUpdate.permissionAtom(environmentId, { operation: "computer_action" }),
+  );
+  const canReleaseDelivery = useAtomValue(
+    museAgentFeatureUpdate.permissionAtom(environmentId, { operation: "delivery_release" }),
+  );
   const canConfigure = useAtomValue(
     museAgentFeatureUpdate.permissionAtom(environmentId, { operation: "profile_save" }),
   );
+  const canConnect = useAtomValue(
+    museAgentFeatureUpdate.permissionAtom(environmentId, { operation: "connector_auth" }),
+  );
+  const resolvedThreadId = useResolvedMuseThreadId(environmentId, providerInstanceId, threadId);
   const inventory = useFeatureRead(environmentId, { operation: "inventory", providerInstanceId });
   const inventoryData = inventory.data?.operation === "inventory" ? inventory.data.data : null;
   const target = { environmentId, providerInstanceId };
@@ -471,18 +509,6 @@ function MuseAgentFeaturesBody({
   );
   const avatar = useMuseAgentAvatar(environmentId, profileQuery.data);
   const agentName = profileQuery.data?.name?.trim() || "Muse";
-  // A successful hand-off to chat already delivered the transcript, so it closes without the guard.
-  const [dictationActive, setDictationActive] = useState(false);
-  const handingOffToChat = useRef(false);
-  const dictationChat = useOpenMuseChatWithDraft(target, () => {
-    setDictationActive(false);
-    handingOffToChat.current = true;
-    try {
-      onClose();
-    } finally {
-      handingOffToChat.current = false;
-    }
-  });
   const profileOperations =
     inventoryData !== null
       ? (inventoryData.features.find((feature) => feature.feature === "profile")?.operations ?? [])
@@ -500,7 +526,7 @@ function MuseAgentFeaturesBody({
     else setDetail(leave.detail);
   };
   const requestLeave = (leave: MuseLeave) => {
-    if (profileDirty || dictationActive) {
+    if (profileDirty) {
       setPendingLeave(leave);
       return;
     }
@@ -510,7 +536,7 @@ function MuseAgentFeaturesBody({
     requestClose: () => requestLeave({ kind: "close" }),
     requestAction: (apply, cancel) =>
       requestLeave({ kind: "action", apply, ...(cancel ? { cancel } : {}) }),
-    isDirty: () => !handingOffToChat.current && (profileDirty || dictationActive),
+    isDirty: () => profileDirty,
   }));
   useLayoutEffect(
     () => () => {
@@ -527,7 +553,6 @@ function MuseAgentFeaturesBody({
     setPendingLeave(null);
     if (!leave) return;
     setProfileDirty(false);
-    setDictationActive(false);
     applyLeave(leave);
   };
   const panelSupport = (feature: MuseFeatureTabId) => resolveMuseTabSupport(inventoryData, feature);
@@ -536,41 +561,39 @@ function MuseAgentFeaturesBody({
       This isn't available for Muse yet.
     </p>
   );
+  const supportFor = (detail: MuseDetail): MuseFeatureTabId | null => {
+    if (detail === "activity" || detail === "approvals" || detail === "subagents") return null;
+    return detail;
+  };
 
   let body: ReactNode;
-  if (detail === "computer") {
+  if (detail !== null) {
+    const supportKey = supportFor(detail);
     body = (
       <div className="flex flex-col gap-4 px-5 pb-6">
         <BackToProfile onBack={() => requestLeave({ kind: "go", detail: null })} />
-        <MuseAgentComputerSection {...target} canWrite={canWrite} />
-      </div>
-    );
-  } else if (detail === "activity" || detail === "approvals") {
-    body = (
-      <div className="flex flex-col gap-4 px-5 pb-6">
-        <BackToProfile onBack={() => requestLeave({ kind: "go", detail: null })} />
-        {detail === "activity" ? <ActivitySection {...target} /> : <MuseApprovalsSection />}
-      </div>
-    );
-  } else if (detail !== null) {
-    body = (
-      <div className="flex flex-col gap-4 px-5 pb-6">
-        <BackToProfile onBack={() => requestLeave({ kind: "go", detail: null })} />
-        {panelSupport(detail) === "unavailable" ? (
+        {supportKey !== null && panelSupport(supportKey) === "unavailable" ? (
           unavailable
-        ) : detail === "memory" ? (
-          <MemorySection {...target} />
-        ) : detail === "connections" ? (
-          <MuseAgentConnectionsSection {...target} canWrite={canConfigure} />
-        ) : detail === "skills" ? (
-          <MuseAgentSkillsSection {...target} />
-        ) : (
-          <MuseAgentDictationSection
-            key={`${environmentId}:${providerInstanceId}`}
+        ) : detail === "computer" ? (
+          <MuseAgentComputerSection {...target} canWrite={canOperateComputer} />
+        ) : detail === "activity" ? (
+          <ActivitySection {...target} />
+        ) : detail === "approvals" ? (
+          <MuseApprovalsSection />
+        ) : detail === "routines" ? (
+          <RoutinesSection
             {...target}
-            chat={dictationChat}
-            onActiveChange={setDictationActive}
+            {...(resolvedThreadId ? { threadId: resolvedThreadId } : {})}
           />
+        ) : detail === "subagents" ? (
+          <SubagentsSection
+            environmentId={environmentId}
+            {...(resolvedThreadId ? { threadId: resolvedThreadId } : {})}
+          />
+        ) : detail === "connections" ? (
+          <MuseAgentConnectionsSection {...target} canWrite={canConnect} />
+        ) : (
+          <MuseAgentSkillsSection {...target} />
         )}
       </div>
     );
@@ -581,7 +604,7 @@ function MuseAgentFeaturesBody({
           key={threadId ?? "primary"}
           {...target}
           sessionId={museSessionForThread(threadId)}
-          canWrite={canWrite}
+          canWrite={canReleaseDelivery}
         />
         {panelSupport("profile") === "unavailable" ? (
           unavailable
@@ -619,30 +642,6 @@ function MuseAgentFeaturesBody({
   return (
     <>
       <div className="flex flex-col items-center gap-1 px-5 pt-4 pb-5">
-        <div className="relative w-full">
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  aria-label="Muse's computer"
-                  aria-pressed={detail === "computer"}
-                  className="absolute top-0 right-0"
-                  onClick={() =>
-                    requestLeave({
-                      kind: "go",
-                      detail: detail === "computer" ? null : "computer",
-                    })
-                  }
-                />
-              }
-            >
-              <SettingsIcon />
-            </TooltipTrigger>
-            <TooltipPopup side="bottom">Muse's computer</TooltipPopup>
-          </Tooltip>
-        </div>
         <div className="relative mt-2 mb-2">
           <MuseAgentAvatar
             name={agentName}
@@ -668,9 +667,17 @@ function MuseAgentFeaturesBody({
           </Tooltip>
         </div>
         <p className="text-xl font-semibold">{agentName}</p>
-        <p className="flex items-center gap-1.5 text-sm text-success">
-          <ZapIcon className="size-3.5 fill-current" /> Connected
-        </p>
+        {profileQuery.data ? (
+          <p className="flex items-center gap-1.5 text-sm text-success">
+            <ZapIcon className="size-3.5 fill-current" /> Connected
+          </p>
+        ) : profileQuery.error !== null ? (
+          <p role="alert" className="text-sm text-destructive">
+            Couldn't load this Muse account.
+          </p>
+        ) : profileQuery.isPending ? (
+          <p className="text-sm text-muted-foreground">Loading Muse…</p>
+        ) : null}
       </div>
       <div
         role="tabpanel"
@@ -685,19 +692,15 @@ function MuseAgentFeaturesBody({
       >
         <AlertDialogPopup>
           <AlertDialogHeader>
-            <AlertDialogTitle>
-              {dictationActive ? "Discard dictation?" : "Discard unsaved changes?"}
-            </AlertDialogTitle>
+            <AlertDialogTitle>Discard unsaved changes?</AlertDialogTitle>
             <AlertDialogDescription>
-              {dictationActive
-                ? "Recording stops and any transcript you haven't added to chat is lost. Audio already sent for transcription is ignored."
-                : "Your edits to Muse's profile have not been saved and will be lost."}
+              Your edits to Muse's profile have not been saved and will be lost.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogClose render={<Button variant="outline" />}>Keep editing</AlertDialogClose>
             <Button variant="destructive" onClick={confirmLeave}>
-              {dictationActive ? "Discard dictation" : "Discard changes"}
+              Discard changes
             </Button>
           </AlertDialogFooter>
         </AlertDialogPopup>
@@ -795,35 +798,200 @@ function MuseApprovalsSection() {
   );
 }
 
-/** Standalone routes for Activity and Approvals opened from the Muse flyout. */
+function shortOpenError(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) return fallback;
+  const line = error.message.split("\n")[0]?.trim() ?? "";
+  if (line.length === 0 || line.length > 160 || /[/\\]|\b[\w-]{32,}\b/.test(line)) return fallback;
+  return line;
+}
+
+/**
+ * First-open surface for `/muse/chat`. The sidebar navigates here immediately; this page runs the
+ * guarded open and replace-navigates to the opened thread. It never opens another account's chat.
+ */
+export function MuseAgentChatEntry({ environmentId, providerInstanceId }: Target) {
+  const navigate = useNavigate();
+  const openThread = useAtomCommand(museAgentOpenThread, { reportFailure: false });
+  const canOpen = useAtomValue(museAgentOpenThread.permissionAtom(environmentId));
+  const shells = useAtomValue(environmentThreadShells.environmentThreadsAtom(environmentId));
+  const profile = useEnvironmentQuery(
+    museAgentProfileQuery({ environmentId, input: { providerInstanceId } }),
+  );
+  const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
+  const shellsRef = useRef(shells);
+  shellsRef.current = shells;
+  const openThreadRef = useRef(openThread);
+  openThreadRef.current = openThread;
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
+  // One open per environment/account/retry. Shell writes and callback identity must not abort it.
+  useEffect(() => {
+    const intent = peekMuseChatOpen();
+    if (
+      intent !== null &&
+      (intent.environmentId !== environmentId || intent.providerInstanceId !== providerInstanceId)
+    ) {
+      clearMuseChatOpen();
+      setError(
+        "This conversation belongs to a different Muse account. Reconnect that account to open it.",
+      );
+      return;
+    }
+    if (!canOpen) return;
+    let current = true;
+    setError((previous) => (previous === null ? previous : null));
+    void (async () => {
+      try {
+        if (intent?.kind === "session") {
+          await openCachedMuseThread({
+            hit: { environmentId, threadId: intent.threadId },
+            shells: shellsRef.current.map((thread) => ({
+              environmentId,
+              id: thread.id,
+              providerInstanceId: thread.providerInstanceId,
+            })),
+            openThread: async (target) => {
+              const result = await openThreadRef.current(target);
+              if (result._tag === "Success") return result.value;
+              if (isAtomCommandInterrupted(result)) return null;
+              throw squashAtomCommandFailure(result);
+            },
+            navigate: async (target) => {
+              if (!current) return;
+              clearMuseChatOpen();
+              await navigateRef.current({
+                to: "/$environmentId/$threadId",
+                params: buildThreadRouteParams(
+                  scopeThreadRef(target.environmentId, target.threadId),
+                ),
+                replace: true,
+              });
+            },
+          });
+          return;
+        }
+        const result = await openThreadRef.current({
+          environmentId,
+          input: { providerInstanceId },
+        });
+        if (!current) return;
+        if (result._tag !== "Success") {
+          if (!isAtomCommandInterrupted(result)) {
+            setError(
+              shortOpenError(squashAtomCommandFailure(result), "Could not open Muse. Try again."),
+            );
+          }
+          return;
+        }
+        clearMuseChatOpen();
+        await navigateRef.current({
+          to: "/$environmentId/$threadId",
+          params: buildThreadRouteParams(scopeThreadRef(environmentId, result.value.threadId)),
+          replace: true,
+        });
+      } catch (cause: unknown) {
+        if (current) setError(shortOpenError(cause, "Could not open Muse. Try again."));
+      }
+    })();
+    return () => {
+      current = false;
+    };
+  }, [canOpen, environmentId, providerInstanceId, retry]);
+  if (!canOpen) {
+    return (
+      <p
+        role="status"
+        className="flex min-h-0 flex-1 items-center justify-center p-6 text-center text-sm text-muted-foreground"
+      >
+        Opening Muse needs permission to operate on this environment.
+      </p>
+    );
+  }
+  if (error !== null) {
+    return (
+      <div
+        role="alert"
+        className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-6 text-center"
+      >
+        <p className="text-sm text-destructive">{error}</p>
+        <Button size="sm" variant="outline" onClick={() => setRetry((value) => value + 1)}>
+          Try again
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <MuseChatLoading
+      name={profile.data?.name?.trim() || "Muse"}
+      description="Opening this conversation. Nothing is sent to Muse."
+    />
+  );
+}
+
+export type MuseAgentSectionId = "activity" | "approvals" | "chat" | "routines" | "subagents";
+
+const SECTION_TITLE: Record<Exclude<MuseAgentSectionId, "chat">, string> = {
+  activity: "Activity",
+  approvals: "Approvals",
+  routines: "Routines",
+  subagents: "Subagents",
+};
+
+/** Standalone routes opened from the Muse flyout, plus first-open chat. */
 export function MuseAgentSectionPage({
   environmentId,
   providerInstanceId,
   section,
-}: Target & { readonly section: "activity" | "approvals" }) {
+}: Target & { readonly section: MuseAgentSectionId }) {
+  if (section === "chat") {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <MuseAgentChatEntry environmentId={environmentId} providerInstanceId={providerInstanceId} />
+      </div>
+    );
+  }
+  return (
+    <MuseAgentNamedSectionPage
+      environmentId={environmentId}
+      providerInstanceId={providerInstanceId}
+      section={section}
+    />
+  );
+}
+
+function MuseAgentNamedSectionPage({
+  environmentId,
+  providerInstanceId,
+  section,
+}: Target & { readonly section: Exclude<MuseAgentSectionId, "chat"> }) {
   const inventory = useFeatureRead(environmentId, { operation: "inventory", providerInstanceId });
   const inventoryData = inventory.data?.operation === "inventory" ? inventory.data.data : null;
-  const activityUnavailable =
-    section === "activity" &&
-    resolveMuseTabSupport(inventoryData, "conversations") === "unavailable";
+  const supportKey: MuseFeatureTabId | null =
+    section === "activity" ? "conversations" : section === "routines" ? "routines" : null;
+  const unavailable =
+    supportKey !== null && resolveMuseTabSupport(inventoryData, supportKey) === "unavailable";
+  const target = { environmentId, providerInstanceId };
+  const threadId = useResolvedMuseThreadId(environmentId, providerInstanceId);
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      <h2 className="px-5 pt-5 pb-3 text-xl font-semibold">
-        {section === "activity" ? "Activity" : "Approvals"}
-      </h2>
+      <h2 className="px-5 pt-5 pb-3 text-xl font-semibold">{SECTION_TITLE[section]}</h2>
       <div className="min-h-0 flex-1 overflow-y-auto">
         {section === "approvals" ? (
           <MuseApprovalsSection />
-        ) : activityUnavailable ? (
+        ) : unavailable ? (
           <p role="status" className="px-6 py-10 text-center text-sm text-muted-foreground">
             This isn't available for Muse yet.
           </p>
         ) : (
           <div className="px-5 pb-6">
-            <ActivitySection
-              environmentId={environmentId}
-              providerInstanceId={providerInstanceId}
-            />
+            {section === "activity" ? (
+              <ActivitySection {...target} />
+            ) : section === "routines" ? (
+              <RoutinesSection {...target} {...(threadId ? { threadId } : {})} />
+            ) : (
+              <SubagentsSection environmentId={environmentId} {...(threadId ? { threadId } : {})} />
+            )}
           </div>
         )}
       </div>

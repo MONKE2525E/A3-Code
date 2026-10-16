@@ -53,6 +53,7 @@ vi.mock("~/components/settings/settingsLayout", () => ({
   SettingsSection: ({ children }: { children: React.ReactNode }) => <section>{children}</section>,
 }));
 vi.mock("~/components/settings/settingsSearch", () => ({ searchableSetting: () => ({}) }));
+vi.mock("./marketplaceIconCache", () => ({ loadMarketplaceIcon: async () => null }));
 vi.mock("./GrokBotPluginAuthCallback", () => ({ GrokBotPluginAuthCallback: () => null }));
 vi.mock("./GrokBotMarketplaceBrowse", () => ({ GrokBotMarketplaceBrowse: () => null }));
 vi.mock("../agents/MuseAgentFeaturesDialog", () => ({ MuseAgentSkillsSection: () => null }));

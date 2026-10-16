@@ -91,19 +91,16 @@ function MuseMarketplace({ environmentId }: { readonly environmentId: Environmen
   const provider = status.data?.ready ? status.data.provider : null;
   return (
     <SettingsSection title="Muse marketplace">
-      <div className="grid gap-6 px-4 py-4">
+      <div className="grid gap-6 px-3 py-4 sm:px-4">
         {provider ? (
           <>
-            <section className="grid gap-3">
-              <h3 className="text-base font-semibold">Connections</h3>
-              <MuseAgentConnectionsSection
-                environmentId={environmentId}
-                providerInstanceId={provider.instanceId}
-                canWrite={canWrite}
-              />
-            </section>
-            <section className="grid gap-3">
-              <h3 className="text-base font-semibold">Skills</h3>
+            <MuseAgentConnectionsSection
+              environmentId={environmentId}
+              providerInstanceId={provider.instanceId}
+              canWrite={canWrite}
+            />
+            <section className="space-y-2" aria-label="Skills">
+              <h4 className="text-sm font-medium text-foreground">Skills</h4>
               <MuseAgentSkillsSection
                 environmentId={environmentId}
                 providerInstanceId={provider.instanceId}

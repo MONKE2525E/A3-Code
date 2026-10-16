@@ -182,15 +182,17 @@ function ProfileDocumentEditor({
           </Button>
         </p>
       ) : null}
-      <Textarea
-        aria-label={`Muse ${label}`}
-        value={text}
-        readOnly={!canEdit}
-        disabled={saving}
-        maxLength={1_048_576}
-        spellCheck={false}
-        onChange={(event) => setDraft(event.target.value)}
-      />
+      <div className="[&_textarea]:resize-none">
+        <Textarea
+          aria-label={`Muse ${label}`}
+          value={text}
+          readOnly={!canEdit}
+          disabled={saving}
+          maxLength={1_048_576}
+          spellCheck={false}
+          onChange={(event) => setDraft(event.target.value)}
+        />
+      </div>
       {error ? (
         <p role="alert" className="text-xs text-destructive">
           {error}

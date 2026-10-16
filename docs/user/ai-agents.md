@@ -12,7 +12,7 @@ Choose **Settings → Providers → Add provider → Muse**, then **Sign in to M
 
 Muse Code, the coding provider, is separate and unchanged.
 
-Open **Muse features** from the chat header or provider settings to search memories and see connections, skills, and computer status. Manage side conversations from Muse's sidebar menu. View and delete Muse routines in **Settings → Scheduled Tasks**. To create or edit a routine, ask Muse in chat.
+Open **Muse features** from the chat header or provider settings to edit your profile and manage connections, skills, and computer tasks. Manage side conversations from Muse's sidebar menu. View and delete Muse routines in **Settings → Scheduled Tasks**. To create or edit a routine, ask Muse in chat.
 
 The profile editor updates Muse's Identity, Personality, and Memory files. Changes require **Save**. If a file changed elsewhere, reload it before saving again.
 
@@ -23,12 +23,6 @@ Messages support images within a combined 10 MiB inline budget and files up to 5
 ### Controlling Muse's computer
 
 Choose a task, then **Take control** and confirm. Muse pauses on that task while you drive its browser in a live view; there is no view-only mode. Choose **Release control** when you are done. The view closes if control expires, the connection drops, or you hide the task, and you can take control again to reconnect. You need permission to operate on the environment, and a task Muse is using is never taken without your confirmation.
-
-### Dictation
-
-**Muse features → Dictation** turns speech into text on the machine running Muse, so audio never goes to a cloud service. Choose **Record**, speak for up to 60 seconds, then **Stop and transcribe**. Edit the text and choose **Use in chat** to add it below anything already in Muse's composer. It is never sent for you; **Discard** throws it away.
-
-Your browser asks for microphone access the first time, and needs HTTPS or localhost. If the tab says dictation is unavailable, prepare the speech helper and model in Muse for Linux, then choose **Check again**.
 
 ## Grok Bots
 

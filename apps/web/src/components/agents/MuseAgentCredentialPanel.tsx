@@ -1,14 +1,40 @@
 import { useAtomValue } from "@effect/atom-react";
-import type { EnvironmentId, ProviderInstanceId, MuseCredentialRequest } from "@t3tools/contracts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import type {
+  EnvironmentId,
+  MuseAgentConnector,
+  MuseConnectorRequest,
+  MuseCredentialRequest,
+  ProviderInstanceId,
+} from "@t3tools/contracts";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
-import { museAgentCredentialRequestsQuery, museAgentFeatureUpdate } from "~/state/museAgent";
+import {
+  museAgentCredentialRequestsQuery,
+  museAgentFeatureReadQuery,
+  museAgentFeatureUpdate,
+} from "~/state/museAgent";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { museSessionForThread } from "./aiAgents";
+import { MuseAgentConnectorAuthDialog } from "./MuseAgentConnectionsSection";
+import { describeMuseConnector } from "./museAgentFeatures.logic";
 
-type Request = typeof MuseCredentialRequest.Type;
+type VaultRequest = typeof MuseCredentialRequest.Type;
+
+function connectorForRequest(
+  request: MuseConnectorRequest,
+  connectors: readonly MuseAgentConnector[],
+): MuseAgentConnector {
+  return (
+    connectors.find((connector) => connector.id === request.connectorId) ?? {
+      id: request.connectorId,
+      name: request.title.trim() || request.connectorId,
+      description: "",
+      state: "unknown",
+    }
+  );
+}
 
 /** Values remain in DOM fields and go directly to Muse's vault, outside the conversation. */
 export function MuseAgentCredentialPanel({
@@ -31,19 +57,49 @@ export function MuseAgentCredentialPanel({
       },
     }),
   );
-  const canWrite = useAtomValue(museAgentFeatureUpdate.permissionAtom(environmentId));
+  const connectorsView = useEnvironmentQuery(
+    museAgentFeatureReadQuery({
+      environmentId,
+      input: { operation: "connectors", providerInstanceId },
+    }),
+  );
+  const canSubmitCredential = useAtomValue(
+    museAgentFeatureUpdate.permissionAtom(environmentId, { operation: "credential_submit" }),
+  );
+  const canAuthorizeConnector = useAtomValue(
+    museAgentFeatureUpdate.permissionAtom(environmentId, { operation: "connector_auth" }),
+  );
   const data = view.data?.operation === "credential_requests" ? view.data.data : null;
-  if (!data?.requests.length) return null;
+  const vaultRequests = data?.requests ?? [];
+  const connectorRequests = data?.connectorRequests ?? [];
+  const connectors =
+    connectorsView.data?.operation === "connectors" ? connectorsView.data.data : [];
+  const refreshInbox = useCallback(() => {
+    view.refresh();
+    connectorsView.refresh();
+  }, [connectorsView, view]);
+  if (vaultRequests.length === 0 && connectorRequests.length === 0) return null;
   return (
     <div className="grid gap-3 px-4 pb-3">
-      {data.requests.map((request) => (
+      {vaultRequests.map((request) => (
         <CredentialForm
           key={`${environmentId}:${providerInstanceId}:${request.sessionId}:${request.requestId}`}
           environmentId={environmentId}
           providerInstanceId={providerInstanceId}
           request={request}
-          canWrite={canWrite}
+          canWrite={canSubmitCredential}
           onSaved={view.refresh}
+        />
+      ))}
+      {connectorRequests.map((request) => (
+        <ConnectorRequestCard
+          key={`${environmentId}:${providerInstanceId}:${request.sessionId}:${request.requestId}`}
+          environmentId={environmentId}
+          providerInstanceId={providerInstanceId}
+          request={request}
+          connector={connectorForRequest(request, connectors)}
+          canWrite={canAuthorizeConnector}
+          onRecheck={refreshInbox}
         />
       ))}
     </div>
@@ -59,7 +115,7 @@ function CredentialForm({
 }: {
   readonly environmentId: EnvironmentId;
   readonly providerInstanceId: ProviderInstanceId;
-  readonly request: Request;
+  readonly request: VaultRequest;
   readonly canWrite: boolean;
   readonly onSaved: () => void;
 }) {
@@ -144,5 +200,53 @@ function CredentialForm({
         </Button>
       </div>
     </form>
+  );
+}
+
+function ConnectorRequestCard({
+  environmentId,
+  providerInstanceId,
+  request,
+  connector,
+  canWrite,
+  onRecheck,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly request: MuseConnectorRequest;
+  readonly connector: MuseAgentConnector;
+  readonly canWrite: boolean;
+  readonly onRecheck: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const presentation = useMemo(() => describeMuseConnector(connector), [connector]);
+  return (
+    <div className="grid gap-3 rounded-lg border p-4">
+      <div>
+        <p className="text-sm font-medium">{request.title || connector.name}</p>
+        <p className="text-xs text-muted-foreground">{presentation.label}</p>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Connect {connector.name} here. Authorization stays in Muse's connector flow and never enters
+        the conversation or model context.
+      </p>
+      <div>
+        <Button type="button" disabled={!canWrite} onClick={() => setOpen(true)}>
+          Connect
+        </Button>
+      </div>
+      {open ? (
+        <MuseAgentConnectorAuthDialog
+          environmentId={environmentId}
+          providerInstanceId={providerInstanceId}
+          connector={connector}
+          onClose={() => {
+            setOpen(false);
+            onRecheck();
+          }}
+          onRecheck={onRecheck}
+        />
+      ) : null}
+    </div>
   );
 }

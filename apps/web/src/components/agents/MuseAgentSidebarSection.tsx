@@ -7,7 +7,7 @@ import {
 import { type EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { ChevronLeftIcon, ListChecksIcon, ShieldCheckIcon } from "lucide-react";
+import { BotIcon, ChevronLeftIcon, ClockIcon, ListChecksIcon, ShieldCheckIcon } from "lucide-react";
 import { useCallback, useMemo, useRef, useState, type RefObject } from "react";
 
 import { MenuItem } from "~/components/ui/menu";
@@ -42,7 +42,7 @@ import { MuseAgentConversations } from "./MuseAgentConversations";
 import { MuseSubChatConnector } from "./MuseSubChatConnector";
 import { resolveMuseSubChatList, type MuseSubChatEntry } from "./museSubChatList";
 import { useMuseAgentAvatar } from "./useMuseAgentAvatar";
-import { openCachedMuseThread } from "./openCachedMuseThread";
+import { openCachedMuseThread, queueMuseChatOpen } from "./openCachedMuseThread";
 
 const MUSE_PINNED_STORAGE_KEY = "t3code:muse-agent-pinned";
 
@@ -91,6 +91,7 @@ export function MuseAgentSidebarSection({
   }
   if (state.kind === "enable") {
     const reconnect = state.mode === "reconnect";
+    const detail = enableStatusDetail(state.detail);
     return (
       <div className="flex flex-col gap-2 px-2 py-2">
         <p className="text-xs leading-4.5 text-sidebar-muted-foreground">
@@ -98,8 +99,8 @@ export function MuseAgentSidebarSection({
             ? "Muse needs to reconnect before you can chat with it here."
             : "Muse is signed in on this machine. Connect it to verify the account and chat with it here."}
         </p>
-        {state.detail ? (
-          <p className="text-xs leading-4.5 text-sidebar-muted-foreground">{state.detail}</p>
+        {detail ? (
+          <p className="text-xs leading-4.5 text-sidebar-muted-foreground">{detail}</p>
         ) : null}
         {setupError ? (
           <p role="alert" className="text-xs leading-4.5 text-destructive">
@@ -175,9 +176,9 @@ function MuseAgentRoster({
   const open = useCallback(async () => {
     if (opening) return;
     if (isMobile) setOpenMobile(false);
-    setOpening(true);
     setOpenError(null);
     setFailedSubChat(null);
+    const providerInstanceId = ProviderInstanceId.make(instanceId);
     const cached = threads.find(
       (entry) =>
         entry.providerInstanceId === instanceId &&
@@ -187,13 +188,14 @@ function MuseAgentRoster({
     if (cached) {
       // Show the cached chat at once. The guarded open still runs: it validates the account and
       // reattaches history, and a failure surfaces on this row.
+      setOpening(true);
       void navigate({
         to: "/$environmentId/$threadId",
         params: buildThreadRouteParams(scopeThreadRef(environmentId, cached.id)),
       });
       const validated = await openThread({
         environmentId,
-        input: { providerInstanceId: ProviderInstanceId.make(instanceId) },
+        input: { providerInstanceId },
       });
       setOpening(false);
       if (validated._tag !== "Success" && !isAtomCommandInterrupted(validated)) {
@@ -203,25 +205,13 @@ function MuseAgentRoster({
       }
       return;
     }
-    // Without a cached chat, the guarded open is the only way in: it creates the thread.
-    const result = await openThread({
-      environmentId,
-      input: { providerInstanceId: ProviderInstanceId.make(instanceId) },
-    });
-    setOpening(false);
-    if (result._tag !== "Success") {
-      if (!isAtomCommandInterrupted(result)) {
-        setOpenError(
-          shortError(squashAtomCommandFailure(result), "Could not open Muse. Try again."),
-        );
-      }
-      return;
-    }
-    const threadId = result.value.threadId;
-    setOpenError(null);
+    // Enter chat immediately. The /muse/chat surface runs the guarded open and never navigates
+    // to another account's thread.
+    queueMuseChatOpen({ kind: "main", environmentId, providerInstanceId });
     void navigate({
-      to: "/$environmentId/$threadId",
-      params: buildThreadRouteParams(scopeThreadRef(environmentId, threadId)),
+      to: "/muse/$section",
+      params: { section: "chat" },
+      search: { environmentId },
     });
   }, [environmentId, instanceId, isMobile, navigate, opening, openThread, setOpenMobile, threads]);
 
@@ -274,6 +264,14 @@ function MuseAgentRoster({
             <ShieldCheckIcon />
             Approvals
           </MenuItem>
+          <MenuItem onClick={() => openMuseSection("routines")}>
+            <ClockIcon />
+            Routines
+          </MenuItem>
+          <MenuItem onClick={() => openMuseSection("subagents")}>
+            <BotIcon />
+            Subagents
+          </MenuItem>
           <MuseAgentConversations
             environmentId={environmentId}
             providerInstanceId={ProviderInstanceId.make(instanceId)}
@@ -292,7 +290,7 @@ function MuseAgentRoster({
   const subChatLabelRef = useRef<HTMLSpanElement | null>(null);
   const openEntry = subChats.open;
   const inSideChat = routeEnvironmentId === environmentId && openEntry !== null;
-  const openMuseSection = (section: "activity" | "approvals") => {
+  const openMuseSection = (section: "activity" | "approvals" | "routines" | "subagents") => {
     if (isMobile) setOpenMobile(false);
     void navigate({
       to: "/muse/$section",
@@ -380,13 +378,17 @@ function MuseAgentRoster({
               size="icon-micro"
               variant="ghost"
               aria-label="Back to Main chat"
-              className="absolute top-1/2 right-1.5 z-20 -translate-y-1/2"
+              className="absolute inset-y-0 right-1.5 z-20 my-auto"
               onClick={() => void open()}
             >
               <ChevronLeftIcon />
             </Button>
           ) : (
-            menu("row")
+            <div className="absolute inset-y-0 right-1.5 z-20 flex items-center">
+              <div className="[&>div]:static [&>div]:top-auto [&>div]:right-auto [&>div]:translate-y-0">
+                {menu("row")}
+              </div>
+            </div>
           )
         }
         footer={errorFooter}
@@ -466,4 +468,12 @@ function sanitizeSetupError(error: unknown): string {
     error,
     "Muse could not be connected. Check that Muse is signed in, then try again.",
   );
+}
+
+/** `status.message` can still say connected while `ready` is false. Enable copy is the truth. */
+function enableStatusDetail(detail: string | null): string | null {
+  if (detail === null) return null;
+  const text = detail.trim();
+  if (/^muse is connected\.?$/i.test(text)) return null;
+  return text;
 }

@@ -13,14 +13,41 @@ const mocks = vi.hoisted(() => ({
   operate: true,
   blockNavigation: (() => false) as () => boolean | Promise<boolean>,
   read: vi.fn(),
+  refresh: vi.fn(),
   update: vi.fn(),
+  navigate: vi.fn(),
+  threads: [] as Array<{ id: string; providerInstanceId: string }>,
+  skills: [] as Array<{
+    name: string;
+    description: string;
+    category: string;
+    title?: string;
+    enabled?: boolean;
+    disabled?: boolean;
+    userDisabled?: boolean;
+    eligible?: boolean;
+  }>,
+  tasks: [] as Array<{ id: string; title?: string; scheduleKey: string }>,
+  sessions: [] as Array<{
+    sessionId: string;
+    status: string;
+    isPrimary: boolean;
+    isThread: boolean;
+    title?: string;
+    snippet?: string;
+  }>,
+  profile: {
+    data: { name: "Muse" } as { name: string } | null,
+    error: null as string | null,
+    isPending: false,
+  },
 }));
 vi.mock("@effect/atom-react", () => ({
-  useAtomValue: (permission: unknown) =>
-    permission === "settings" ? mocks.settings : mocks.operate,
+  useAtomValue: (atom: unknown) =>
+    atom === "settings" ? mocks.settings : atom === "threads" ? mocks.threads : mocks.operate,
 }));
 vi.mock("@tanstack/react-router", () => ({
-  useNavigate: () => vi.fn(),
+  useNavigate: () => mocks.navigate,
   useBlocker: (options: {
     shouldBlockFn: (route: {
       current: { pathname: string };
@@ -34,6 +61,9 @@ vi.mock("@tanstack/react-router", () => ({
       });
   },
 }));
+vi.mock("~/state/threads", () => ({
+  environmentThreadShells: { environmentThreadsAtom: () => "threads" },
+}));
 vi.mock("~/state/session", () => ({ useEnvironmentScope: () => true }));
 vi.mock("~/state/museAgent", () => ({
   museAgentFeatureReadQuery: (query: unknown) => {
@@ -44,16 +74,25 @@ vi.mock("~/state/museAgent", () => ({
   museAgentProfileQuery: () => "profile",
   museAgentFeatureUpdate: {
     permissionAtom: (_environment: unknown, input?: { operation: string }) =>
-      input?.operation === "profile_save" ? "settings" : "operate",
+      input?.operation === "profile_save" || input?.operation === "connector_auth"
+        ? "settings"
+        : "operate",
   },
   museAgentOpenThread: { permissionAtom: () => true },
   refreshMuseAgent: vi.fn(),
 }));
 vi.mock("~/state/query", () => ({
   useEnvironmentQuery: (query: unknown) => {
+    if (query === "profile") {
+      return {
+        data: mocks.profile.data,
+        error: mocks.profile.error,
+        isPending: mocks.profile.isPending,
+        refresh: mocks.refresh,
+      };
+    }
     let data: unknown = null;
     if (query === "status") data = { ready: true, provider: { instanceId: mocks.connected } };
-    else if (query === "profile") data = { name: "Muse" };
     else if (query && typeof query === "object" && "input" in query) {
       const input = query.input as { operation: string };
       data =
@@ -66,9 +105,15 @@ vi.mock("~/state/query", () => ({
             }
           : input.operation === "profile_document"
             ? { operation: "profile_document", data: { content: "Original", revision: "r1" } }
-            : null;
+            : input.operation === "skills"
+              ? { operation: "skills", data: mocks.skills }
+              : input.operation === "tasks"
+                ? { operation: "tasks", data: mocks.tasks }
+                : input.operation === "sessions"
+                  ? { operation: "sessions", data: mocks.sessions }
+                  : null;
     }
-    return { data, error: null, isPending: false, refresh: vi.fn() };
+    return { data, error: null, isPending: false, refresh: mocks.refresh };
   },
 }));
 vi.mock("~/state/use-atom-command", () => ({ useAtomCommand: () => mocks.update }));
@@ -78,27 +123,26 @@ vi.mock("./useMuseAgentAvatar", () => ({
 vi.mock("./MuseAgentComputerSection", () => ({ MuseAgentComputerSection: () => null }));
 vi.mock("./MuseAgentConnectionsSection", () => ({ MuseAgentConnectionsSection: () => null }));
 vi.mock("./MuseAgentDeliveryRecovery", () => ({ MuseAgentDeliveryRecovery: () => null }));
-vi.mock("./MuseAgentDictationSection", () => ({
-  MuseAgentDictationSection: ({
-    onActiveChange,
-    chat,
-  }: {
-    onActiveChange: (active: boolean) => void;
-    chat: { start: (prompt: string) => Promise<void> };
-  }) => (
-    <>
-      <button onClick={() => onActiveChange(true)}>Start recording</button>
-      <button onClick={() => void chat.start("Transcript")}>Add transcript</button>
-    </>
+vi.mock("~/components/chat/ThreadRelationshipsControl", () => ({
+  ThreadRelationshipsPanel: ({ threadId }: { threadId: string }) => (
+    <div>T3 child tasks for {threadId}</div>
   ),
 }));
-vi.mock("~/components/ChatMarkdown", () => ({ default: () => null }));
+vi.mock("~/components/chat/ThreadAutomationsPanel", () => ({
+  ThreadAutomationsPanel: ({ threadId }: { threadId: string }) => (
+    <div>T3 scheduled tasks for {threadId}</div>
+  ),
+}));
 
 import {
+  MuseAgentChatEntry,
   MuseAgentFeaturesButton,
   MuseAgentFeaturesPanel,
   MuseAgentHeaderFeatures,
+  MuseAgentSectionPage,
+  MuseAgentSkillsSection,
 } from "./MuseAgentFeaturesDialog";
+import { clearMuseChatOpen, queueMuseChatOpen } from "./openCachedMuseThread";
 const environmentId = EnvironmentId.make("test-env");
 const providerInstanceId = ProviderInstanceId.make("muse-current");
 let container: HTMLDivElement;
@@ -122,6 +166,15 @@ beforeEach(() => {
   mocks.settings = true;
   mocks.operate = true;
   mocks.read.mockClear();
+  mocks.refresh.mockClear();
+  mocks.update.mockReset();
+  mocks.navigate.mockReset();
+  mocks.skills = [];
+  mocks.tasks = [];
+  mocks.sessions = [];
+  mocks.threads = [];
+  mocks.profile = { data: { name: "Muse" }, error: null, isPending: false };
+  clearMuseChatOpen();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -180,29 +233,6 @@ it.each(["Escape", "Close"])(
     expect(editor.isConnected).toBe(false);
   },
 );
-
-it("confirms sheet dismissal while dictation is active", async () => {
-  await act(async () =>
-    root.render(
-      <MuseAgentFeaturesButton
-        environmentId={environmentId}
-        providerInstanceId={providerInstanceId}
-      />,
-    ),
-  );
-  await click(" Muse features");
-  await click("DictationSpeak to Muse");
-  await click("Start recording");
-  await click("Close");
-  expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain(
-    "Discard dictation?",
-  );
-  await click("Keep editing");
-  expect(button("Start recording").isConnected).toBe(true);
-  await click("Close");
-  await click("Discard dictation");
-  expect(document.querySelector('[role="dialog"]')).toBeNull();
-});
 
 it("does not mount feature reads or the header toggle for another provider's historical thread", async () => {
   const old = ProviderInstanceId.make("muse-old");
@@ -363,31 +393,301 @@ it("blocks thread navigation until a dirty right-panel draft is discarded", asyn
   await click("Discard changes");
   expect(await second).toBe(false);
 });
-it("guards right-panel dictation on tab switches", async () => {
-  useRightPanelStore.setState({ byThreadKey: {} });
-  useRightPanelStore.getState().open(panelRef, "muse-features");
-  await act(async () => root.render(<PanelHost />));
-  await click("DictationSpeak to Muse");
-  await click("Start recording");
-  await act(async () => useRightPanelStore.getState().open(panelRef, "files"));
-  expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain(
-    "Discard dictation?",
+
+it("opens Computer from the ability list instead of a settings gear", async () => {
+  await act(async () =>
+    root.render(
+      <MuseAgentFeaturesButton
+        environmentId={environmentId}
+        providerInstanceId={providerInstanceId}
+      />,
+    ),
   );
-  await click("Keep editing");
-  expect(button("Start recording").isConnected).toBe(true);
-  await act(async () => useRightPanelStore.getState().open(panelRef, "files"));
-  await click("Discard dictation");
-  expect(container.textContent).toBe("Other surface");
+  await click(" Muse features");
+  expect(container.querySelector('button[aria-label="Muse\'s computer"]')).toBeNull();
+  expect(container.textContent).not.toContain("Dictation");
+  expect(container.textContent).not.toContain("Search what Muse remembers");
+  await click("ComputerMuse's computer");
+  expect(
+    [...document.querySelectorAll("button")].some((item) => item.textContent?.includes("Profile")),
+  ).toBe(true);
 });
 
-it("closes without a discard prompt after handing dictation to the chat draft", async () => {
-  useRightPanelStore.setState({ byThreadKey: {} });
-  useRightPanelStore.getState().open(panelRef, "muse-features");
-  mocks.update.mockResolvedValue({ _tag: "Success", value: { threadId: panelRef.threadId } });
-  await act(async () => root.render(<PanelHost />));
-  await click("DictationSpeak to Muse");
-  await click("Start recording");
-  await click("Add transcript");
-  expect(document.querySelector('[role="alertdialog"]')).toBeNull();
-  expect(container.textContent).toBe("Other surface");
+it("browses skills as a searchable card grid and hides unknown status badges", async () => {
+  mocks.skills = [
+    { name: "alpha", title: "Alpha", description: "one", category: "uncategorized" },
+    { name: "beta", title: "Beta", description: "two", category: "uncategorized" },
+    { name: "gamma", title: "Gamma", description: "three", category: "uncategorized" },
+    { name: "delta", title: "Delta", description: "four", category: "uncategorized" },
+    { name: "echo", title: "Echo", description: "five", category: "uncategorized", enabled: true },
+  ];
+  await act(async () =>
+    root.render(
+      <MuseAgentSkillsSection
+        environmentId={environmentId}
+        providerInstanceId={providerInstanceId}
+      />,
+    ),
+  );
+  expect(container.textContent).toContain("Other");
+  expect(container.textContent).not.toContain("Uncategorized");
+  expect(container.textContent).toContain("Alpha");
+  expect(container.textContent).toContain("Echo");
+  expect(container.textContent).not.toContain("Gamma");
+  expect(container.textContent).not.toContain("Status unknown");
+  await click("View all");
+  expect(container.textContent).toContain("Gamma");
+  expect(container.textContent).toContain("Available");
+  const search = container.querySelector<HTMLInputElement>('input[aria-label="Search skills"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(search, "echo");
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  expect(container.textContent).toContain("Echo");
+  expect(container.textContent).not.toContain("Alpha");
+});
+
+it("keeps search and refresh when Muse reports no skills", async () => {
+  mocks.skills = [];
+  await act(async () =>
+    root.render(
+      <MuseAgentSkillsSection
+        environmentId={environmentId}
+        providerInstanceId={providerInstanceId}
+      />,
+    ),
+  );
+  expect(container.textContent).toContain("Muse reports no skills.");
+  expect(container.querySelector('input[aria-label="Search skills"]')).not.toBeNull();
+  await click("Refresh");
+  expect(mocks.refresh).toHaveBeenCalled();
+});
+
+it("does not label a skill Turned off from enabled false alone", async () => {
+  mocks.skills = [
+    { name: "keep", title: "Keep", description: "native keep", category: "Other", enabled: false },
+    { name: "off", title: "Off", description: "explicit", category: "Other", disabled: true },
+    {
+      name: "user",
+      title: "User off",
+      description: "user",
+      category: "Other",
+      userDisabled: true,
+    },
+    { name: "nope", title: "Nope", description: "ineligible", category: "Other", eligible: false },
+  ];
+  await act(async () =>
+    root.render(
+      <MuseAgentSkillsSection
+        environmentId={environmentId}
+        providerInstanceId={providerInstanceId}
+      />,
+    ),
+  );
+  const keep = [...container.querySelectorAll("li")].find((row) =>
+    row.textContent?.includes("Keep"),
+  );
+  const off = [...container.querySelectorAll("li")].find((row) => row.textContent?.includes("Off"));
+  const userOff = [...container.querySelectorAll("li")].find((row) =>
+    row.textContent?.includes("User off"),
+  );
+  const nope = [...container.querySelectorAll("li")].find((row) =>
+    row.textContent?.includes("Nope"),
+  );
+  expect(keep?.textContent).not.toContain("Turned off");
+  expect(off?.textContent).toContain("Turned off");
+  expect(userOff?.textContent).toContain("Turned off");
+  expect(nope?.textContent).toContain("Not eligible");
+});
+
+it("lists native Muse routines from the tasks read and keeps T3 scheduled tasks separate", async () => {
+  const threadId = `muse-agent:${"a".repeat(64)}`;
+  mocks.threads = [{ id: threadId, providerInstanceId: "muse-current" }];
+  mocks.tasks = [{ id: "r1", title: "Morning digest", scheduleKey: "daily 09:00" }];
+  await act(async () =>
+    root.render(
+      <MuseAgentSectionPage
+        environmentId={environmentId}
+        providerInstanceId={providerInstanceId}
+        section="routines"
+      />,
+    ),
+  );
+  expect(container.textContent).toContain("Morning digest");
+  expect(container.textContent).toContain("Routines Muse runs itself");
+  expect(container.textContent).toContain(`T3 scheduled tasks for ${threadId}`);
+});
+
+it("shows an honest empty state when Muse has no routines", async () => {
+  await act(async () =>
+    root.render(
+      <MuseAgentSectionPage
+        environmentId={environmentId}
+        providerInstanceId={providerInstanceId}
+        section="routines"
+      />,
+    ),
+  );
+  expect(container.textContent).toContain("Ask Muse in chat to create a routine");
+  expect(container.textContent).not.toContain("T3 scheduled tasks for");
+});
+
+it("shows T3 child tasks and an honest native subagent gap", async () => {
+  const threadId = `muse-agent:${"b".repeat(64)}`;
+  mocks.threads = [{ id: threadId, providerInstanceId: "muse-current" }];
+  mocks.sessions = [
+    {
+      sessionId: "main",
+      status: "idle",
+      isPrimary: true,
+      isThread: true,
+      title: "Main conversation",
+    },
+    {
+      sessionId: "side",
+      status: "idle",
+      isPrimary: false,
+      isThread: true,
+      title: "Research bot",
+      snippet: "Looking up",
+    },
+  ];
+  await act(async () =>
+    root.render(
+      <MuseAgentSectionPage
+        environmentId={environmentId}
+        providerInstanceId={providerInstanceId}
+        section="subagents"
+      />,
+    ),
+  );
+  expect(container.textContent).toContain("Muse's own subagent roster is not available in T3 yet");
+  expect(container.textContent).toContain(`T3 child tasks for ${threadId}`);
+  expect(container.textContent).not.toContain("Research bot");
+  expect(container.textContent).not.toContain("Main conversation");
+});
+
+it("does not list native side chats as subagents when no Muse chat is open", async () => {
+  mocks.sessions = [
+    {
+      sessionId: "side",
+      status: "idle",
+      isPrimary: false,
+      isThread: true,
+      title: "Research bot",
+    },
+  ];
+  await act(async () =>
+    root.render(
+      <MuseAgentSectionPage
+        environmentId={environmentId}
+        providerInstanceId={providerInstanceId}
+        section="subagents"
+      />,
+    ),
+  );
+  expect(container.textContent).toContain("Open Muse chat to see T3 child tasks");
+  expect(container.textContent).not.toContain("Research bot");
+});
+
+it("claims Connected only after the Muse profile loads", async () => {
+  const renderPanel = async () =>
+    act(async () =>
+      root.render(
+        <MuseAgentFeaturesPanel
+          environmentId={environmentId}
+          providerInstanceId={providerInstanceId}
+          threadId="current-thread"
+          onClose={vi.fn()}
+        />,
+      ),
+    );
+  await renderPanel();
+  expect(container.textContent).toContain("Connected");
+  mocks.profile = { data: null, error: "timeout", isPending: false };
+  await renderPanel();
+  expect(container.textContent).toContain("Couldn't load this Muse account.");
+  expect(container.textContent).not.toContain("Connected");
+  mocks.profile = { data: null, error: null, isPending: true };
+  await renderPanel();
+  expect(container.textContent).toContain("Loading Muse…");
+  expect(container.textContent).not.toContain("Connected");
+  mocks.profile = { data: null, error: null, isPending: false };
+  await renderPanel();
+  expect(container.textContent).not.toContain("Connected");
+  expect(container.textContent).not.toContain("Couldn't load this Muse account.");
+});
+
+it("opens Muse from the chat entry and replace-navigates to the thread", async () => {
+  const threadId = `muse-agent:${"a".repeat(64)}`;
+  mocks.update.mockResolvedValue({ _tag: "Success", value: { threadId } });
+  await act(async () =>
+    root.render(
+      <MuseAgentChatEntry environmentId={environmentId} providerInstanceId={providerInstanceId} />,
+    ),
+  );
+  expect(mocks.update).toHaveBeenCalledWith({
+    environmentId,
+    input: { providerInstanceId },
+  });
+  expect(mocks.navigate).toHaveBeenCalledWith({
+    to: "/$environmentId/$threadId",
+    params: { environmentId, threadId },
+    replace: true,
+  });
+});
+
+it("still replace-navigates once when thread shells update while Muse is opening", async () => {
+  const threadId = `muse-agent:${"b".repeat(64)}`;
+  const pending: Array<(value: unknown) => void> = [];
+  mocks.update.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        pending.push(resolve);
+      }),
+  );
+  await act(async () =>
+    root.render(
+      <MuseAgentChatEntry environmentId={environmentId} providerInstanceId={providerInstanceId} />,
+    ),
+  );
+  expect(mocks.update).toHaveBeenCalledTimes(1);
+  expect(mocks.navigate).not.toHaveBeenCalled();
+  expect(container.textContent).toContain("Opening this conversation. Nothing is sent to Muse.");
+  mocks.threads = [{ id: threadId, providerInstanceId }];
+  await act(async () =>
+    root.render(
+      <MuseAgentChatEntry environmentId={environmentId} providerInstanceId={providerInstanceId} />,
+    ),
+  );
+  expect(mocks.update).toHaveBeenCalledTimes(1);
+  const resolveOpen = pending[0];
+  if (resolveOpen === undefined) throw new Error("Muse open did not start");
+  await act(async () => {
+    resolveOpen({ _tag: "Success", value: { threadId } });
+  });
+  expect(mocks.navigate).toHaveBeenCalledTimes(1);
+  expect(mocks.navigate).toHaveBeenCalledWith({
+    to: "/$environmentId/$threadId",
+    params: { environmentId, threadId },
+    replace: true,
+  });
+  expect(mocks.update).toHaveBeenCalledTimes(1);
+});
+
+it("refuses to open a queued intent for a different Muse account", async () => {
+  queueMuseChatOpen({
+    kind: "main",
+    environmentId: EnvironmentId.make("other-env"),
+    providerInstanceId: ProviderInstanceId.make("other-muse"),
+  });
+  await act(async () =>
+    root.render(
+      <MuseAgentChatEntry environmentId={environmentId} providerInstanceId={providerInstanceId} />,
+    ),
+  );
+  expect(mocks.update).not.toHaveBeenCalled();
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+    "different Muse account",
+  );
 });

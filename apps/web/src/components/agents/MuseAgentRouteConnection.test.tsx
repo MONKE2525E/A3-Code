@@ -29,7 +29,7 @@ it.each([main, side])(
     const render = (connected: boolean) =>
       root.render(
         <MuseAgentRouteConnection
-          {...{ environmentId, providerInstanceId, threadId, connected }}
+          {...{ environmentId, providerInstanceId, threadId, connected, hasMessages: true }}
         />,
       );
     try {
@@ -72,6 +72,7 @@ it("surfaces attach errors and retries the restored conversation", async () => {
           providerInstanceId={providerInstanceId}
           threadId={side}
           connected
+          hasMessages
         />,
       ),
     );
@@ -80,6 +81,41 @@ it("surfaces attach errors and retries the restored conversation", async () => {
     expect(mocks.open).toHaveBeenCalledTimes(2);
     expect(mocks.open.mock.calls[1]).toEqual(mocks.open.mock.calls[0]);
     expect(container.querySelector('[role="alert"]')).toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it("shows a chat loading pane until the first history arrives", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  let finish: (value: unknown) => void = () => {
+    throw new Error("not started");
+  };
+  mocks.open.mockReset().mockReturnValue(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <MuseAgentRouteConnection
+          environmentId={environmentId}
+          providerInstanceId={providerInstanceId}
+          threadId={main}
+          connected
+          hasMessages={false}
+        />,
+      ),
+    );
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("Opening Muse");
+    expect(container.textContent).toContain("Loading conversation history.");
+    expect(container.textContent).not.toContain("Nothing is sent to Muse");
+    expect(container.textContent).not.toContain("Connecting Muse history");
+    await act(async () => finish({ _tag: "Success", value: { threadId: main } }));
+    expect(container.textContent).toBe("");
   } finally {
     await act(async () => root.unmount());
   }
@@ -99,6 +135,7 @@ it("does not attach without destination permission", async () => {
           providerInstanceId={providerInstanceId}
           threadId={main}
           connected
+          hasMessages
         />,
       ),
     );

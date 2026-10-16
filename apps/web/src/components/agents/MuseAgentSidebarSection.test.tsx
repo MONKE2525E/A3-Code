@@ -21,6 +21,14 @@ const mocks = vi.hoisted(() => ({
   openPermission: {},
   canOpen: true,
   open: vi.fn(),
+  status: {
+    installed: true,
+    ready: true,
+    sessionPresent: true,
+    provider: { instanceId: "muse-test" } as { instanceId: string } | null,
+    message: undefined as string | undefined,
+    name: "Muse",
+  },
 }));
 vi.mock("@effect/atom-react", () => ({
   useAtomValue: (atom: unknown) =>
@@ -47,13 +55,8 @@ vi.mock("~/state/museAgent", () => ({
 }));
 vi.mock("~/state/query", () => ({
   useEnvironmentQuery: () => ({
-    data: {
-      installed: true,
-      ready: true,
-      sessionPresent: true,
-      provider: { instanceId: "muse-test" },
-      name: "Muse",
-    },
+    data: mocks.status,
+    error: null,
   }),
 }));
 vi.mock("~/state/use-atom-command", () => ({ useAtomCommand: () => mocks.open }));
@@ -62,11 +65,19 @@ vi.mock("./useMuseAgentAvatar", () => ({
 }));
 vi.mock("./MuseAgentConversations", () => ({ MuseAgentConversations: () => null }));
 import { MuseAgentSidebarSection } from "./MuseAgentSidebarSection";
+import { clearMuseChatOpen } from "./openCachedMuseThread";
 
 beforeEach(() => {
   mocks.threads.length = 0;
   mocks.pinned = true;
   mocks.navigate.mockClear();
+  mocks.status.installed = true;
+  mocks.status.ready = true;
+  mocks.status.sessionPresent = true;
+  mocks.status.provider = { instanceId: "muse-test" };
+  mocks.status.message = undefined;
+  mocks.status.name = "Muse";
+  clearMuseChatOpen();
   vi.stubGlobal("matchMedia", () => ({
     matches: false,
     addEventListener: vi.fn(),
@@ -162,7 +173,7 @@ it.each(["success", "retry", "forbidden"])(
   },
 );
 
-it("keeps Activity and Approvals in the Muse flyout instead of the left sidebar", async () => {
+it("keeps Activity, Approvals, Routines, and Subagents in the Muse flyout instead of the left sidebar", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("matchMedia", () => ({
     matches: false,
@@ -182,6 +193,8 @@ it("keeps Activity and Approvals in the Muse flyout instead of the left sidebar"
     for (const [label, section] of [
       ["Activity", "activity"],
       ["Approvals", "approvals"],
+      ["Routines", "routines"],
+      ["Subagents", "subagents"],
     ]) {
       expect([...container.querySelectorAll("button")].some((x) => x.textContent === label)).toBe(
         false,
@@ -235,17 +248,16 @@ it("disables a pinned Muse tile when opening is forbidden", async () => {
     vi.unstubAllGlobals();
   }
 });
-it.each([false, true])("disables a pinned Muse tile while opening (cached=%s)", async (cached) => {
-  if (cached)
-    mocks.threads.push({
-      id: `muse-agent:${"a".repeat(64)}`,
-      providerInstanceId: "muse-test",
-      archivedAt: null,
-      updatedAt: "2026-01-01T00:00:00Z",
-      status: "idle",
-      latestTurn: null,
-      lastVisitedAt: null,
-    });
+it("disables a pinned Muse tile while a cached chat is opening", async () => {
+  mocks.threads.push({
+    id: `muse-agent:${"a".repeat(64)}`,
+    providerInstanceId: "muse-test",
+    archivedAt: null,
+    updatedAt: "2026-01-01T00:00:00Z",
+    status: "idle",
+    latestTurn: null,
+    lastVisitedAt: null,
+  });
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   let finish: (value: unknown) => void = () => {
     throw new Error("uninitialized");
@@ -282,56 +294,145 @@ it.each([false, true])("disables a pinned Muse tile while opening (cached=%s)", 
   }
 });
 
-it.each([false, true])(
-  "shows an open error and Retry beside a pinned tile (cached=%s)",
-  async (cached) => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    if (cached)
-      mocks.threads.push({
-        id: `muse-agent:${"a".repeat(64)}`,
-        providerInstanceId: "muse-test",
-        archivedAt: null,
-        updatedAt: "2026-01-01T00:00:00Z",
-        status: "idle",
-        latestTurn: null,
-        lastVisitedAt: null,
-      });
-    mocks.open.mockReset();
-    mocks.open
-      .mockResolvedValueOnce({
-        _tag: "Failure",
-        cause: Cause.fail(new Error("Connection unavailable.")),
-      })
-      .mockResolvedValueOnce({ _tag: "Success", value: { threadId: "native-main" } });
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    try {
-      await act(async () =>
-        root.render(
-          <MuseAgentSidebarSection
-            environmentId={EnvironmentId.make("test-env")}
-            onOpenSettings={vi.fn()}
-          />,
-        ),
-      );
-      const tile = [...container.querySelectorAll("button")].find(
-        (button) => button.querySelector("span.truncate")?.textContent === "Muse",
-      )!;
-      await act(async () => tile.click());
-      expect(container.querySelector('[role="alert"]')?.textContent).toBe(
-        "Connection unavailable.",
-      );
-      const retry = [...container.querySelectorAll("button")].find(
-        (button) => button.textContent === "Retry",
-      )!;
-      await act(async () => retry.click());
-      expect(container.querySelector('[role="alert"]')).toBeNull();
-      expect(mocks.open).toHaveBeenCalledTimes(2);
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-      vi.unstubAllGlobals();
-    }
-  },
-);
+it("navigates into chat immediately on first uncached open", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  mocks.open.mockClear();
+  const environmentId = EnvironmentId.make("test-env");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <MuseAgentSidebarSection environmentId={environmentId} onOpenSettings={vi.fn()} />,
+      ),
+    );
+    const tile = [...container.querySelectorAll("button")].find(
+      (button) => button.querySelector("span.truncate")?.textContent === "Muse",
+    )!;
+    await act(async () => tile.click());
+    expect(mocks.open).not.toHaveBeenCalled();
+    expect(mocks.navigate).toHaveBeenCalledWith({
+      to: "/muse/$section",
+      params: { section: "chat" },
+      search: { environmentId },
+    });
+    expect(container.textContent).not.toContain("Opening…");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("shows an open error and Retry beside a pinned tile for a cached chat", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  mocks.threads.push({
+    id: `muse-agent:${"a".repeat(64)}`,
+    providerInstanceId: "muse-test",
+    archivedAt: null,
+    updatedAt: "2026-01-01T00:00:00Z",
+    status: "idle",
+    latestTurn: null,
+    lastVisitedAt: null,
+  });
+  mocks.open.mockReset();
+  mocks.open
+    .mockResolvedValueOnce({
+      _tag: "Failure",
+      cause: Cause.fail(new Error("Connection unavailable.")),
+    })
+    .mockResolvedValueOnce({ _tag: "Success", value: { threadId: "native-main" } });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <MuseAgentSidebarSection
+          environmentId={EnvironmentId.make("test-env")}
+          onOpenSettings={vi.fn()}
+        />,
+      ),
+    );
+    const tile = [...container.querySelectorAll("button")].find(
+      (button) => button.querySelector("span.truncate")?.textContent === "Muse",
+    )!;
+    await act(async () => tile.click());
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Connection unavailable.");
+    const retry = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Retry",
+    )!;
+    await act(async () => retry.click());
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(mocks.open).toHaveBeenCalledTimes(2);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("reconnects a not-ready Muse without also claiming it is connected", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  mocks.status.ready = false;
+  mocks.status.message = "Muse is connected.";
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <MuseAgentSidebarSection
+          environmentId={EnvironmentId.make("test-env")}
+          onOpenSettings={vi.fn()}
+        />,
+      ),
+    );
+    expect(container.textContent).toContain(
+      "Muse needs to reconnect before you can chat with it here.",
+    );
+    expect(
+      [...container.querySelectorAll("button")].some(
+        (button) => button.textContent === "Reconnect Muse",
+      ),
+    ).toBe(true);
+    expect(container.textContent).not.toContain("Muse is connected.");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("still shows a real reconnect reason from Muse status", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  mocks.status.ready = false;
+  mocks.status.message = "Session expired";
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <MuseAgentSidebarSection
+          environmentId={EnvironmentId.make("test-env")}
+          onOpenSettings={vi.fn()}
+        />,
+      ),
+    );
+    expect(container.textContent).toContain(
+      "Muse needs to reconnect before you can chat with it here.",
+    );
+    expect(container.textContent).toContain("Session expired");
+    expect(
+      [...container.querySelectorAll("button")].some(
+        (button) => button.textContent === "Reconnect Muse",
+      ),
+    ).toBe(true);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.unstubAllGlobals();
+  }
+});

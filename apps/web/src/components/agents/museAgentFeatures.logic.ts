@@ -7,26 +7,22 @@ import type {
 } from "@t3tools/contracts";
 
 const MUSE_FEATURE_TABS = [
-  { id: "memory", label: "Memory" },
   { id: "routines", label: "Routines" },
   { id: "connections", label: "Connections" },
   { id: "skills", label: "Skills" },
   { id: "conversations", label: "Conversations" },
   { id: "computer", label: "Computer" },
-  { id: "dictation", label: "Dictation" },
   { id: "profile", label: "Profile" },
 ] as const;
 export type MuseFeatureTabId = (typeof MUSE_FEATURE_TABS)[number]["id"];
 
 /** Inventory feature each tab depends on; "tasks" are the native routines. */
 const TAB_FEATURE: Record<MuseFeatureTabId, string> = {
-  memory: "memory",
   routines: "tasks",
   connections: "connectors",
   skills: "skills",
   conversations: "sessions",
   computer: "computer",
-  dictation: "dictation",
   profile: "profile",
 };
 
@@ -80,28 +76,50 @@ export type MuseSkillPresentation = {
   readonly label: string;
   readonly detail: string | null;
   readonly tone: "success" | "muted" | "warning";
+  /** False when Muse sent no flags: the UI must not invent a status badge. */
+  readonly showBadge: boolean;
 };
 
-/** Reports only what the server sent; a skill with no flags is "unknown", never "enabled". */
+/** Native picker keeps a skill when disabled/userDisabled are not true; enabled:false is not off. */
 export function describeMuseSkill(skill: MuseAgentSkill): MuseSkillPresentation {
   const reason = skill.statusReason?.trim() || null;
   if (skill.blockedByAllowlist) {
-    return { label: "Blocked by policy", detail: reason, tone: "warning" };
+    return { label: "Blocked by policy", detail: reason, tone: "warning", showBadge: true };
   }
-  if (skill.userDisabled || skill.disabled || skill.enabled === false) {
-    return { label: "Turned off", detail: reason, tone: "muted" };
+  if (skill.userDisabled === true || skill.disabled === true) {
+    return { label: "Turned off", detail: reason, tone: "muted", showBadge: true };
   }
   if (skill.eligible === false) {
     return {
       label: skill.requiresAuth ? "Needs sign-in" : "Not eligible",
       detail: reason,
       tone: "warning",
+      showBadge: true,
     };
   }
   if (skill.enabled === true || skill.eligible === true) {
-    return { label: "Available", detail: reason, tone: "success" };
+    return { label: "Available", detail: reason, tone: "success", showBadge: true };
   }
-  return { label: "Status unknown", detail: reason, tone: "muted" };
+  return { label: "Status unknown", detail: reason, tone: "muted", showBadge: false };
+}
+
+/** Muse sends "uncategorized" for ungrouped skills; the browse UI labels that bucket Other. */
+export function museSkillCategoryLabel(category: string): string {
+  const trimmed = category.trim();
+  if (trimmed.length === 0 || trimmed.toLowerCase() === "uncategorized") return "Other";
+  return trimmed;
+}
+
+export function museSkillMatches(
+  skill: Pick<MuseAgentSkill, "name" | "title" | "description" | "category">,
+  needle: string,
+): boolean {
+  if (needle.length === 0) return true;
+  const haystack = [skill.title, skill.name, skill.description, skill.category]
+    .filter((value): value is string => value !== undefined && value.length > 0)
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(needle);
 }
 
 export function groupMuseSkills(
@@ -109,7 +127,7 @@ export function groupMuseSkills(
 ): ReadonlyArray<{ readonly category: string; readonly skills: ReadonlyArray<MuseAgentSkill> }> {
   const groups = new Map<string, MuseAgentSkill[]>();
   for (const skill of skills) {
-    const category = skill.category.trim() || "Other";
+    const category = museSkillCategoryLabel(skill.category);
     const bucket = groups.get(category);
     if (bucket) bucket.push(skill);
     else groups.set(category, [skill]);

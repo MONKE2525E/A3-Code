@@ -8,13 +8,14 @@ import {
   museMemoryPreview,
   museRoutineEditPrompt,
   museSessionTitle,
+  museSkillMatches,
   resolveMuseSessionActions,
   resolveMuseTabSupport,
 } from "./museAgentFeatures.logic";
 
 describe("museAgentFeatures.logic", () => {
   it("never reports a tab as account-verified from the inventory", () => {
-    expect(resolveMuseTabSupport(null, "memory")).toBe("unknown");
+    expect(resolveMuseTabSupport(null, "skills")).toBe("unknown");
     const inventory = {
       accountAvailability: "unverified",
       features: [
@@ -34,12 +35,12 @@ describe("museAgentFeatures.logic", () => {
 
   it("shows unknown connector and skill state instead of inventing one", () => {
     expect(describeMuseConnector({ state: "unknown" }).label).toBe("Status unavailable");
-    expect(describeMuseSkill({ name: "a", description: "", category: "x" }).label).toBe(
-      "Status unknown",
-    );
+    const unknown = describeMuseSkill({ name: "a", description: "", category: "x" });
+    expect(unknown.label).toBe("Status unknown");
+    expect(unknown.showBadge).toBe(false);
     expect(
-      describeMuseSkill({ name: "a", description: "", category: "x", eligible: false }).label,
-    ).toBe("Not eligible");
+      describeMuseSkill({ name: "a", description: "", category: "x", eligible: false }),
+    ).toMatchObject({ label: "Not eligible", showBadge: true });
     expect(
       describeMuseSkill({
         name: "a",
@@ -47,8 +48,22 @@ describe("museAgentFeatures.logic", () => {
         category: "x",
         eligible: false,
         requiresAuth: true,
-      }).label,
-    ).toBe("Needs sign-in");
+      }),
+    ).toMatchObject({ label: "Needs sign-in", showBadge: true });
+    const enabledFalse = describeMuseSkill({
+      name: "a",
+      description: "",
+      category: "x",
+      enabled: false,
+    });
+    expect(enabledFalse.label).not.toBe("Turned off");
+    expect(enabledFalse.showBadge).toBe(false);
+    expect(
+      describeMuseSkill({ name: "a", description: "", category: "x", disabled: true }),
+    ).toMatchObject({ label: "Turned off", showBadge: true });
+    expect(
+      describeMuseSkill({ name: "a", description: "", category: "x", userDisabled: true }),
+    ).toMatchObject({ label: "Turned off", showBadge: true });
   });
 
   it("keeps the primary conversation from being archived and archived ones restorable", () => {
@@ -79,6 +94,20 @@ describe("museAgentFeatures.logic", () => {
     expect(groups.map((group) => group.category)).toEqual(["Alpha", "Zed"]);
     expect(museMemoryPreview("# Title\n\nbody   text", 12)).toBe("# Title body…");
     expect(museMemoryPreview("  ")).toBeNull();
+  });
+
+  it("maps uncategorized skills to Other and matches search text", () => {
+    const groups = groupMuseSkills([
+      { name: "b", description: "beta tool", category: "uncategorized" },
+      { name: "a", description: "", category: "  " },
+    ]);
+    expect(groups.map((group) => group.category)).toEqual(["Other"]);
+    expect(
+      museSkillMatches({ name: "b", description: "beta tool", category: "uncategorized" }, "beta"),
+    ).toBe(true);
+    expect(
+      museSkillMatches({ name: "b", description: "beta tool", category: "uncategorized" }, "alpha"),
+    ).toBe(false);
   });
 });
 

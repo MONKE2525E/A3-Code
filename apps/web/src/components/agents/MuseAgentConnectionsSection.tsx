@@ -9,7 +9,8 @@ import {
   type ProviderInstanceId,
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
-import { useRef, useState, type ReactNode } from "react";
+import { CheckIcon } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Input } from "~/components/ui/input";
 
 import {
@@ -31,10 +32,13 @@ import {
   DialogPopup,
   DialogTitle,
 } from "~/components/ui/dialog";
+import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { Spinner } from "~/components/ui/spinner";
+import { cn } from "~/lib/utils";
 import { museAgentFeatureReadQuery, museAgentFeatureUpdate } from "~/state/museAgent";
 import { useEnvironmentQuery } from "~/state/query";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { loadMarketplaceIcon } from "../grokBot/marketplaceIconCache";
 
 import { describeMuseConnector } from "./museAgentFeatures.logic";
 
@@ -43,13 +47,170 @@ type Target = {
   readonly environmentId: EnvironmentId;
   readonly providerInstanceId: ProviderInstanceId;
 };
+
+/** Environment and Muse instance the native connect flow talks to. */
+export type MuseAgentConnectorAuthTarget = Target;
+
+export type MuseAgentConnectorAuthDialogProps = Target & {
+  readonly connector: MuseAgentConnector;
+  readonly onClose: () => void;
+  /** Re-read connection state after sign-in. Never starts OAuth, never disconnects. */
+  readonly onRecheck: () => void;
+};
 type Panel =
   | { readonly kind: "connect"; readonly connector: MuseAgentConnector }
   | { readonly kind: "disconnect"; readonly connector: MuseAgentConnector }
   | { readonly kind: "accounts"; readonly connector: MuseAgentConnector };
 
+type BrowseCategory = "connected" | "available" | "attention" | "coming_soon";
+
 const UNCERTAIN_WRITE =
   "Muse may not have finished this change. Refresh to check before trying again.";
+const SECTION_PREVIEW = 4;
+const CARD_CLASS =
+  "min-w-0 rounded-xl border bg-card flex items-center gap-3 p-3 transition-colors hover:bg-accent/50";
+const CATEGORY_ORDER: readonly BrowseCategory[] = [
+  "connected",
+  "available",
+  "attention",
+  "coming_soon",
+];
+const CATEGORY_TITLE: Record<BrowseCategory, string> = {
+  connected: "Connected",
+  available: "Available",
+  attention: "Needs attention",
+  coming_soon: "Coming soon",
+};
+const CATEGORY_FILTER_LABEL: Record<"all" | BrowseCategory, string> = {
+  all: "All",
+  ...CATEGORY_TITLE,
+};
+/** Simple Icons slugs that differ from Muse connector ids. Unlisted catalog ids use a sanitized id. */
+const CONNECTOR_ICON_SLUGS: Readonly<Record<string, string>> = {
+  google_calendar: "googlecalendar",
+  google_drive: "googledrive",
+  google_docs: "googledocs",
+  google_mail: "gmail",
+  gmail: "gmail",
+  gohighlevel: "gohighlevel",
+  highlevel: "gohighlevel",
+  meta_business: "meta",
+  microsoft_teams: "microsoftteams",
+  ms_teams: "microsoftteams",
+  office365: "microsoftoffice",
+  onedrive: "microsoftonedrive",
+  outlook: "microsoftoutlook",
+  twitter: "x",
+};
+
+function browseCategory(connector: MuseAgentConnector): BrowseCategory {
+  switch (connector.state) {
+    case "connected":
+      return "connected";
+    case "coming_soon":
+      return "coming_soon";
+    case "unknown":
+      return "attention";
+    case "disconnected":
+      return "available";
+  }
+}
+
+function connectorMatches(connector: MuseAgentConnector, needle: string): boolean {
+  if (needle === "") return true;
+  return [connector.name, connector.description, connector.id].some((field) =>
+    field.toLowerCase().includes(needle),
+  );
+}
+
+function connectorIconUrl(connector: MuseAgentConnector): string | null {
+  if (connector.isCustom) return null;
+  const mapped = CONNECTOR_ICON_SLUGS[connector.id];
+  const slug = mapped ?? connector.id.trim().toLowerCase().replaceAll(/[_-]+/g, "");
+  if (!/^[a-z][a-z0-9]{1,31}$/.test(slug)) return null;
+  return `https://cdn.simpleicons.org/${slug}`;
+}
+
+function connectorTileColor(connector: MuseAgentConnector): string {
+  let hash = 0;
+  for (const char of connector.id || connector.name) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return `hsl(${hash % 360} 55% 45%)`;
+}
+
+function connectorInitial(connector: MuseAgentConnector): string {
+  return (connector.name.trim() || connector.id.trim()).charAt(0).toUpperCase() || "?";
+}
+
+/** Catalog logo through the shared marketplace cache, with a letter tile that is never blank. */
+function ConnectorLogo({
+  connector,
+  pixels = 44,
+}: {
+  readonly connector: MuseAgentConnector;
+  readonly pixels?: number;
+}) {
+  const url = connectorIconUrl(connector);
+  const color = connectorTileColor(connector);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const [cached, setCached] = useState<{ source: string; blobUrl: string | null } | null>(null);
+  const [loadedUrl, setLoadedUrl] = useState<string | null>(null);
+  const source = cached?.source === url ? (cached.blobUrl ?? url) : null;
+  useEffect(() => {
+    if (!url) return;
+    let cancelled = false;
+    let blobUrl: string | undefined;
+    void loadMarketplaceIcon(url).then((blob) => {
+      if (cancelled) return;
+      if (blob) blobUrl = URL.createObjectURL(blob);
+      setCached({ source: url, blobUrl: blobUrl ?? null });
+      setFailedUrl(null);
+    });
+    return () => {
+      cancelled = true;
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+    };
+  }, [url]);
+  useEffect(() => {
+    if (!url || loadedUrl === source) return;
+    const timer = window.setTimeout(() => setFailedUrl(url), 10000);
+    return () => window.clearTimeout(timer);
+  }, [url, source, loadedUrl]);
+  const showImage = source !== null && url !== failedUrl;
+  return (
+    <span
+      className="relative inline-flex shrink-0 overflow-hidden rounded-xl bg-muted/60 ring-1 ring-border/60 ring-inset"
+      style={{ width: pixels, height: pixels }}
+    >
+      {loadedUrl !== source || !showImage ? (
+        <span
+          aria-hidden
+          className="flex size-full items-center justify-center font-semibold text-white"
+          style={{
+            backgroundImage: `linear-gradient(135deg, ${color}, color-mix(in srgb, ${color} 62%, black))`,
+            fontSize: Math.round(pixels * 0.42),
+          }}
+        >
+          {connectorInitial(connector)}
+        </span>
+      ) : null}
+      {showImage ? (
+        <img
+          src={source ?? undefined}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          referrerPolicy="no-referrer"
+          className={cn(
+            "absolute inset-0 size-full object-cover",
+            loadedUrl !== source && "opacity-0",
+          )}
+          onLoad={() => setLoadedUrl(source)}
+          onError={() => setFailedUrl(url)}
+        />
+      ) : null}
+    </span>
+  );
+}
 
 /** Only a plain https link is ever offered to the user; anything else is dropped. */
 function safeHttpsUrl(raw: string | undefined): string | null {
@@ -97,13 +258,29 @@ function ReadError({
 }) {
   return (
     <div role="alert" className="grid gap-2 py-4 text-sm">
-      <p className="text-foreground">Muse {label} could not be loaded.</p>
+      <p className="text-foreground">{connectErrorCopy(label, error)}</p>
       <p className="text-xs text-muted-foreground">{error}</p>
       <Button size="sm" variant="outline" className="w-fit" onClick={refresh}>
         Try again
       </Button>
     </div>
   );
+}
+
+function connectErrorCopy(label: string, error: string): string {
+  const text = error.toLowerCase();
+  if (text.includes("authenticated muse connection is unavailable"))
+    return "Muse is not reachable right now. Retry when the connection is back.";
+  if (
+    text.includes("unavailable in the verified native protocol") ||
+    text.includes("this muse feature is unavailable")
+  )
+    return `Muse cannot start this ${label} from T3 Code. Finish it in the Muse app, then refresh.`;
+  if (text.includes("account or cloud workspace changed"))
+    return "The Muse account changed. Reconnect Muse, then try this connection again.";
+  if (text.includes("unsupported feature response"))
+    return "Muse returned a sign-in T3 Code cannot use. Get a new sign-in link, or finish in the Muse app.";
+  return `Muse ${label} could not be loaded.`;
 }
 
 function useConnectionWrite(target: Target) {
@@ -140,14 +317,37 @@ function useConnectionWrite(target: Target) {
   return { run, pending, error, clearError: () => setError(null) };
 }
 
+/**
+ * Native connector authorization: user-clicked https OAuth, API key, or a Muse-app-only path.
+ * Closes once `connector.state` is `connected`. Does not complete OAuth itself.
+ */
+export function MuseAgentConnectorAuthDialog({
+  environmentId,
+  providerInstanceId,
+  connector,
+  onClose,
+  onRecheck,
+}: MuseAgentConnectorAuthDialogProps) {
+  return (
+    <ConnectDialog
+      target={{ environmentId, providerInstanceId }}
+      connector={connector}
+      onClose={onClose}
+      onRecheck={onRecheck}
+    />
+  );
+}
+
 function ConnectDialog({
   target,
   connector,
   onClose,
+  onRecheck,
 }: {
   readonly target: Target;
   readonly connector: MuseAgentConnector;
   readonly onClose: () => void;
+  readonly onRecheck: () => void;
 }) {
   const view = useConnectionRead(target.environmentId, {
     operation: "connector_info",
@@ -155,6 +355,9 @@ function ConnectDialog({
     connectorId: connector.id,
   });
   const action = view.data?.operation === "connector_info" ? view.data.data.action : null;
+  useEffect(() => {
+    if (connector.state === "connected") onClose();
+  }, [connector.state, onClose]);
   let body: ReactNode;
   let link: string | null = null;
   if (action === null) {
@@ -167,14 +370,32 @@ function ConnectDialog({
   } else if (action.type === "oauth") {
     link = safeHttpsUrl(action.authorizationUrl);
     body = link ? (
-      <p className="text-sm text-muted-foreground">
-        Continue to sign in to {connector.name}. It opens in a new tab. Come back here and refresh
-        once you have finished; the connection only shows as connected after Muse reports it.
-      </p>
+      <div className="grid gap-3">
+        <p className="text-sm text-muted-foreground">
+          Continue to sign in to {connector.name}. It opens in a new tab. When you finish, check the
+          connection here; Muse only marks it connected after it reports the result.
+        </p>
+        <p className="text-xs text-muted-foreground">
+          If the sign-in page says the link expired or is invalid, get a new one and continue again.
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="ghost-muted" onClick={view.refresh}>
+            New sign-in link
+          </Button>
+          <Button size="sm" variant="outline" onClick={onRecheck}>
+            Check connection
+          </Button>
+        </div>
+      </div>
     ) : (
-      <p role="alert" className="text-sm text-destructive">
-        Muse returned a sign-in link that is not a secure https address, so it was not opened.
-      </p>
+      <div className="grid gap-3">
+        <p role="alert" className="text-sm text-destructive">
+          Muse returned a sign-in link that is not a secure https address, so it was not opened.
+        </p>
+        <Button size="sm" variant="outline" className="w-fit" onClick={view.refresh}>
+          Get a new sign-in link
+        </Button>
+      </div>
     );
   } else if (action.type === "none") {
     body = (
@@ -193,10 +414,15 @@ function ConnectDialog({
     );
   } else {
     body = (
-      <p className="text-sm text-muted-foreground">
-        {connector.name} needs a step that cannot be done from T3 Code. Finish connecting in the
-        Muse app, then refresh this list.
-      </p>
+      <div className="grid gap-3">
+        <p className="text-sm text-muted-foreground">
+          {connector.name} uses a Muse-only sign-in. Open the Muse app to connect it, then check the
+          connection here.
+        </p>
+        <Button size="sm" variant="outline" className="w-fit" onClick={onRecheck}>
+          Check connection
+        </Button>
+      </div>
     );
   }
   return (
@@ -525,6 +751,87 @@ function AccountsDialog({
   );
 }
 
+function ConnectorRow({
+  connector,
+  canWrite,
+  onConnect,
+  onAccounts,
+  onDisconnect,
+}: {
+  readonly connector: MuseAgentConnector;
+  readonly canWrite: boolean;
+  readonly onConnect: () => void;
+  readonly onAccounts: () => void;
+  readonly onDisconnect: () => void;
+}) {
+  const state = describeMuseConnector(connector);
+  return (
+    <li className={CARD_CLASS}>
+      <ConnectorLogo connector={connector} />
+      <div className="grid min-w-0 flex-1 gap-0.5">
+        <span className="truncate text-sm font-medium text-foreground">{connector.name}</span>
+        {connector.description ? (
+          <span className="line-clamp-1 text-xs leading-5 text-muted-foreground">
+            {connector.description}
+          </span>
+        ) : null}
+      </div>
+      <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+        {connector.state === "connected" ? (
+          <>
+            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <CheckIcon className="size-3.5" />
+              Connected
+            </span>
+            <Button
+              size="sm"
+              variant="ghost-muted"
+              aria-label={`Accounts for ${connector.name}`}
+              onClick={onAccounts}
+            >
+              Accounts
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost-destructive"
+              disabled={!canWrite}
+              aria-label={`Disconnect ${connector.name}`}
+              onClick={onDisconnect}
+            >
+              Disconnect
+            </Button>
+          </>
+        ) : connector.state === "coming_soon" ? (
+          <span className="text-xs text-muted-foreground">{state.label}</span>
+        ) : connector.state === "unknown" ? (
+          <>
+            <Badge variant="warning">{state.label}</Badge>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!canWrite}
+              aria-label={`Connect ${connector.name}`}
+              onClick={onConnect}
+            >
+              Connect
+            </Button>
+          </>
+        ) : (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!canWrite}
+            aria-label={`Connect ${connector.name}`}
+            onClick={onConnect}
+          >
+            Connect
+          </Button>
+        )}
+      </div>
+    </li>
+  );
+}
+
 /**
  * Connection management for Muse. Secret forms bypass chat; connection state comes from Muse.
  */
@@ -537,7 +844,45 @@ export function MuseAgentConnectionsSection({
   const view = useConnectionRead(environmentId, { operation: "connectors", providerInstanceId });
   const connectors = view.data?.operation === "connectors" ? view.data.data : null;
   const [panel, setPanel] = useState<Panel | null>(null);
+  const [search, setSearch] = useState("");
+  const [category, setCategory] = useState<"all" | BrowseCategory>("all");
+  const [expanded, setExpanded] = useState<ReadonlySet<BrowseCategory>>(() => new Set());
   const close = () => setPanel(null);
+  const liveConnector =
+    panel === null
+      ? null
+      : (connectors?.find((connector) => connector.id === panel.connector.id) ?? panel.connector);
+
+  const needle = search.trim().toLowerCase();
+  const presentCategories = useMemo(() => {
+    const present = new Set<BrowseCategory>();
+    for (const connector of connectors ?? []) present.add(browseCategory(connector));
+    return CATEGORY_ORDER.filter((key) => present.has(key));
+  }, [connectors]);
+  const sections = useMemo(() => {
+    if (connectors === null) return [];
+    const buckets = new Map<BrowseCategory, MuseAgentConnector[]>();
+    for (const connector of connectors) {
+      if (!connectorMatches(connector, needle)) continue;
+      if (category !== "all" && browseCategory(connector) !== category) continue;
+      const key = browseCategory(connector);
+      const bucket = buckets.get(key);
+      if (bucket) bucket.push(connector);
+      else buckets.set(key, [connector]);
+    }
+    return CATEGORY_ORDER.flatMap((key) => {
+      const items = buckets.get(key);
+      if (!items?.length) return [];
+      return [
+        {
+          key,
+          title: CATEGORY_TITLE[key],
+          items: items.toSorted((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)),
+        },
+      ];
+    });
+  }, [category, connectors, needle]);
+  const searching = needle !== "";
 
   if (connectors === null) {
     return view.error === null ? (
@@ -547,16 +892,36 @@ export function MuseAgentConnectionsSection({
     );
   }
   return (
-    <div className="grid gap-3">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-xs text-muted-foreground">
-          Connect, disconnect, and manage linked accounts. Some providers finish sign-in in a
-          browser.
-        </p>
-        <Button size="xs" variant="ghost" onClick={view.refresh}>
+    <div className="space-y-6">
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+        <Input
+          placeholder="Search connections"
+          aria-label="Search connections"
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+        />
+        <Button size="touch-sm" variant="ghost-muted" onClick={view.refresh}>
+          <RefreshIcon refreshing={view.isPending} />
           Refresh
         </Button>
       </div>
+      {presentCategories.length > 1 ? (
+        <div role="group" aria-label="Connection category" className="flex flex-wrap gap-1">
+          {(["all", ...presentCategories] satisfies ReadonlyArray<"all" | BrowseCategory>).map(
+            (key) => (
+              <Button
+                key={key}
+                size="sm"
+                variant={category === key ? "secondary" : "ghost"}
+                aria-pressed={category === key}
+                onClick={() => setCategory(key)}
+              >
+                {CATEGORY_FILTER_LABEL[key]}
+              </Button>
+            ),
+          )}
+        </div>
+      ) : null}
       {view.error !== null ? (
         <p role="alert" className="text-xs text-destructive">
           Could not refresh connections; showing the last result.
@@ -564,87 +929,63 @@ export function MuseAgentConnectionsSection({
       ) : null}
       {connectors.length === 0 ? (
         <p className="py-6 text-sm text-muted-foreground">Muse reports no connections.</p>
+      ) : sections.length === 0 ? (
+        <p className="text-sm text-muted-foreground">Nothing matches.</p>
       ) : (
-        <ul className="grid gap-2">
-          {connectors.map((connector) => {
-            const state = describeMuseConnector(connector);
-            return (
-              <li
-                key={connector.id}
-                className="flex min-w-0 flex-wrap items-start justify-between gap-2 rounded-lg border px-3 py-2.5"
-              >
-                <div className="grid min-w-0 flex-1 gap-0.5">
-                  <span className="truncate text-sm font-medium text-foreground">
-                    {connector.name}
-                  </span>
-                  <span className="line-clamp-2 text-xs text-muted-foreground">
-                    {connector.description}
-                  </span>
-                </div>
-                <div className="flex shrink-0 items-center gap-1">
-                  <Badge
-                    variant={
-                      state.tone === "success"
-                        ? "success"
-                        : state.tone === "warning"
-                          ? "warning"
-                          : "outline"
-                    }
+        sections.map((section) => {
+          const preview = searching || category !== "all" || expanded.has(section.key);
+          const shown = preview ? section.items : section.items.slice(0, SECTION_PREVIEW);
+          return (
+            <section key={section.key} className="space-y-2" aria-label={section.title}>
+              <div className="flex items-center justify-between gap-2">
+                <h4 className="text-sm font-medium text-foreground">{section.title}</h4>
+                {!preview && section.items.length > SECTION_PREVIEW ? (
+                  <Button
+                    size="xs"
+                    variant="ghost-muted"
+                    onClick={() => setExpanded((current) => new Set([...current, section.key]))}
                   >
-                    {state.label}
-                  </Badge>
-                  {connector.state === "connected" ? (
-                    <>
-                      <Button
-                        size="sm"
-                        variant="ghost-muted"
-                        aria-label={`Accounts for ${connector.name}`}
-                        onClick={() => setPanel({ kind: "accounts", connector })}
-                      >
-                        Accounts
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost-destructive"
-                        disabled={!canWrite}
-                        aria-label={`Disconnect ${connector.name}`}
-                        onClick={() => setPanel({ kind: "disconnect", connector })}
-                      >
-                        Disconnect
-                      </Button>
-                    </>
-                  ) : connector.state === "disconnected" ? (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={!canWrite}
-                      aria-label={`Connect ${connector.name}`}
-                      onClick={() => setPanel({ kind: "connect", connector })}
-                    >
-                      Connect
-                    </Button>
-                  ) : null}
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+                    View all
+                  </Button>
+                ) : null}
+              </div>
+              <ul className="grid gap-2 sm:grid-cols-2">
+                {shown.map((connector) => (
+                  <ConnectorRow
+                    key={connector.id}
+                    connector={connector}
+                    canWrite={canWrite}
+                    onConnect={() => setPanel({ kind: "connect", connector })}
+                    onAccounts={() => setPanel({ kind: "accounts", connector })}
+                    onDisconnect={() => setPanel({ kind: "disconnect", connector })}
+                  />
+                ))}
+              </ul>
+            </section>
+          );
+        })
       )}
-      {panel?.kind === "connect" ? (
-        <ConnectDialog target={target} connector={panel.connector} onClose={close} />
+      {panel?.kind === "connect" && liveConnector ? (
+        <MuseAgentConnectorAuthDialog
+          environmentId={environmentId}
+          providerInstanceId={providerInstanceId}
+          connector={liveConnector}
+          onClose={close}
+          onRecheck={view.refresh}
+        />
       ) : null}
-      {panel?.kind === "disconnect" ? (
+      {panel?.kind === "disconnect" && liveConnector ? (
         <DisconnectDialog
           target={target}
-          connector={panel.connector}
+          connector={liveConnector}
           onClose={close}
           onChanged={view.refresh}
         />
       ) : null}
-      {panel?.kind === "accounts" ? (
+      {panel?.kind === "accounts" && liveConnector ? (
         <AccountsDialog
           target={target}
-          connector={panel.connector}
+          connector={liveConnector}
           canWrite={canWrite}
           onClose={close}
         />
