@@ -193,11 +193,15 @@ export function MuseAgentSkillsSection({ environmentId, providerInstanceId }: Ta
     () => (skills ? groupMuseSkills(skills).map((group) => group.category) : []),
     [skills],
   );
+  const selectedCategory =
+    category === "all" || presentCategories.includes(category) ? category : "all";
   const sections = useMemo(() => {
     if (skills === null) return [];
     const grouped = groupMuseSkills(skills.filter((skill) => museSkillMatches(skill, needle)));
-    return category === "all" ? grouped : grouped.filter((group) => group.category === category);
-  }, [category, needle, skills]);
+    return selectedCategory === "all"
+      ? grouped
+      : grouped.filter((group) => group.category === selectedCategory);
+  }, [needle, selectedCategory, skills]);
   const searching = needle !== "";
   return (
     <FeatureState
@@ -227,8 +231,8 @@ export function MuseAgentSkillsSection({ environmentId, providerInstanceId }: Ta
                 <Button
                   key={key}
                   size="sm"
-                  variant={category === key ? "secondary" : "ghost"}
-                  aria-pressed={category === key}
+                  variant={selectedCategory === key ? "secondary" : "ghost"}
+                  aria-pressed={selectedCategory === key}
                   onClick={() => setCategory(key)}
                 >
                   {key === "all" ? "All" : key}
@@ -242,7 +246,8 @@ export function MuseAgentSkillsSection({ environmentId, providerInstanceId }: Ta
             <p className="text-sm text-muted-foreground">Nothing matches.</p>
           ) : (
             sections.map((section) => {
-              const preview = searching || category !== "all" || expanded.has(section.category);
+              const preview =
+                searching || selectedCategory !== "all" || expanded.has(section.category);
               const shown = preview
                 ? section.skills
                 : section.skills.slice(0, SKILL_SECTION_PREVIEW);

@@ -104,7 +104,7 @@ export function describeMuseSkill(skill: MuseAgentSkill): MuseSkillPresentation 
 }
 
 /** Muse sends "uncategorized" for ungrouped skills; the browse UI labels that bucket Other. */
-export function museSkillCategoryLabel(category: string): string {
+function museSkillCategoryLabel(category: string): string {
   const trimmed = category.trim();
   if (trimmed.length === 0 || trimmed.toLowerCase() === "uncategorized") return "Other";
   return trimmed;

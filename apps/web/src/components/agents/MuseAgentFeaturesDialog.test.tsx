@@ -463,6 +463,36 @@ it("keeps search and refresh when Muse reports no skills", async () => {
   expect(mocks.refresh).toHaveBeenCalled();
 });
 
+it("shows remaining skills after a refresh drops the selected category", async () => {
+  mocks.skills = [
+    { name: "a", title: "Alpha tool", description: "one", category: "Alpha" },
+    { name: "z", title: "Zed tool", description: "two", category: "Zed" },
+    { name: "b", title: "Beta tool", description: "three", category: "Beta" },
+  ];
+  const renderSkills = async () =>
+    act(async () =>
+      root.render(
+        <MuseAgentSkillsSection
+          environmentId={environmentId}
+          providerInstanceId={providerInstanceId}
+        />,
+      ),
+    );
+  await renderSkills();
+  await click("Alpha");
+  expect(container.textContent).toContain("Alpha tool");
+  expect(container.textContent).not.toContain("Zed tool");
+  mocks.skills = [
+    { name: "z", title: "Zed tool", description: "two", category: "Zed" },
+    { name: "b", title: "Beta tool", description: "three", category: "Beta" },
+  ];
+  await renderSkills();
+  expect(container.textContent).toContain("Zed tool");
+  expect(container.textContent).toContain("Beta tool");
+  expect(container.textContent).not.toContain("Nothing matches.");
+  expect(button("All").getAttribute("aria-pressed")).toBe("true");
+});
+
 it("does not label a skill Turned off from enabled false alone", async () => {
   mocks.skills = [
     { name: "keep", title: "Keep", description: "native keep", category: "Other", enabled: false },

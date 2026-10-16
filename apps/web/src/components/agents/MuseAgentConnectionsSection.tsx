@@ -859,12 +859,14 @@ export function MuseAgentConnectionsSection({
     for (const connector of connectors ?? []) present.add(browseCategory(connector));
     return CATEGORY_ORDER.filter((key) => present.has(key));
   }, [connectors]);
+  const selectedCategory: "all" | BrowseCategory =
+    category === "all" || presentCategories.includes(category) ? category : "all";
   const sections = useMemo(() => {
     if (connectors === null) return [];
     const buckets = new Map<BrowseCategory, MuseAgentConnector[]>();
     for (const connector of connectors) {
       if (!connectorMatches(connector, needle)) continue;
-      if (category !== "all" && browseCategory(connector) !== category) continue;
+      if (selectedCategory !== "all" && browseCategory(connector) !== selectedCategory) continue;
       const key = browseCategory(connector);
       const bucket = buckets.get(key);
       if (bucket) bucket.push(connector);
@@ -881,7 +883,7 @@ export function MuseAgentConnectionsSection({
         },
       ];
     });
-  }, [category, connectors, needle]);
+  }, [connectors, needle, selectedCategory]);
   const searching = needle !== "";
 
   if (connectors === null) {
@@ -912,8 +914,8 @@ export function MuseAgentConnectionsSection({
               <Button
                 key={key}
                 size="sm"
-                variant={category === key ? "secondary" : "ghost"}
-                aria-pressed={category === key}
+                variant={selectedCategory === key ? "secondary" : "ghost"}
+                aria-pressed={selectedCategory === key}
                 onClick={() => setCategory(key)}
               >
                 {CATEGORY_FILTER_LABEL[key]}
@@ -933,7 +935,7 @@ export function MuseAgentConnectionsSection({
         <p className="text-sm text-muted-foreground">Nothing matches.</p>
       ) : (
         sections.map((section) => {
-          const preview = searching || category !== "all" || expanded.has(section.key);
+          const preview = searching || selectedCategory !== "all" || expanded.has(section.key);
           const shown = preview ? section.items : section.items.slice(0, SECTION_PREVIEW);
           return (
             <section key={section.key} className="space-y-2" aria-label={section.title}>

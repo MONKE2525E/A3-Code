@@ -3,7 +3,6 @@ import {
   createEnvironmentRpcQueryAtomFamily,
 } from "@t3tools/client-runtime/state/runtime";
 import { createMuseAgentComputerStreamCommand } from "@t3tools/client-runtime/state/muse-agent-computer-stream";
-import { createMuseAgentDictationCommand } from "@t3tools/client-runtime/state/muse-agent-dictation";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { WS_METHODS } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -161,9 +160,6 @@ export const museAgentHistoryPageCommand = createEnvironmentRpcCommand(connectio
       );
     }),
 });
-
-/** Uploads one bounded local recording for on-device transcription. Returns text only. */
-export const museAgentDictationCommand = createMuseAgentDictationCommand(connectionAtomRuntime);
 
 /** Mints a fresh ticketed socket URL for one interactive computer viewer. Never cached or stored. */
 export const museAgentComputerStreamCommand =

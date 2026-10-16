@@ -217,6 +217,43 @@ it("filters the catalog from search and category chips", async () => {
   }
 });
 
+it("shows remaining connections after the selected category disappears from a refreshed catalog", async () => {
+  const { container, root } = await mount();
+  try {
+    const connected = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Connected",
+    )!;
+    await act(async () => connected.click());
+    expect(container.textContent).toContain("Browser");
+    expect(container.textContent).not.toContain("Asana");
+    mocks.connectors = [
+      connector({
+        id: "asana",
+        name: "Asana",
+        description: "Plan and track projects and tasks",
+        state: "disconnected",
+      }),
+      connector({ id: "box", name: "Box", description: "Files", state: "disconnected" }),
+    ];
+    await act(async () =>
+      root.render(
+        <MuseAgentConnectionsSection
+          environmentId={environmentId}
+          providerInstanceId={providerInstanceId}
+          canWrite
+        />,
+      ),
+    );
+    expect(container.textContent).toContain("Asana");
+    expect(container.textContent).toContain("Box");
+    expect(container.textContent).not.toContain("Nothing matches.");
+    expect(container.textContent).not.toContain("Browser");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 it("reveals the rest of a long available section from View all", async () => {
   const { container, root } = await mount();
   try {

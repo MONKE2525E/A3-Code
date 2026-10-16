@@ -21,7 +21,8 @@ const state = vi.hoisted(() => ({
   navigate: vi.fn(),
 }));
 
-vi.mock("@tanstack/react-router", () => ({
+vi.mock("@tanstack/react-router", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tanstack/react-router")>()),
   createFileRoute: () => (options: { component: () => ReactNode }) => ({
     options,
     useParams: () => ({ section: state.section }),
@@ -70,6 +71,7 @@ vi.mock("../components/agents/MuseAgentRouteConnection", () => ({
 import { Route } from "./_chat.muse.$section";
 
 const Page = Route.options.component!;
+await Page.preload?.();
 let container: HTMLDivElement;
 let root: Root;
 

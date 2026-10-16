@@ -265,7 +265,7 @@ function microphoneFailure(error: unknown): VoiceAudioFailure {
 }
 
 /** The real browser surface, or a typed reason it is missing. Read lazily so non-browser imports stay safe. */
-export function browserVoiceMedia(): VoiceMedia {
+function browserVoiceMedia(): VoiceMedia {
   if (typeof window === "undefined" || !window.isSecureContext) {
     throw new VoiceAudioError("insecure_context");
   }

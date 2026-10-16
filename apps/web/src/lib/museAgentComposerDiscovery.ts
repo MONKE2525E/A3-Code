@@ -84,11 +84,11 @@ export function museComposerSkillPrompt(skill: Pick<MuseAgentSkill, "name">): st
   return `Use skill ${skill.name}. `;
 }
 
-export function museComposerUnimplementedSlashMessage(command: string): string {
+function museComposerUnimplementedSlashMessage(command: string): string {
   return `/${command} is not wired in T3 yet.`;
 }
 
-export const MUSE_STOP_IDLE_MESSAGE = "Nothing is running to stop";
+const MUSE_STOP_IDLE_MESSAGE = "Nothing is running to stop";
 
 export function museComposerResolveStop(
   canInterrupt: boolean,
