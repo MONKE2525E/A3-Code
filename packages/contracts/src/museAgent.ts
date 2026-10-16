@@ -3,6 +3,8 @@ import * as Schema from "effect/Schema";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import { ThreadId } from "./baseSchemas.ts";
 
+export const MuseAgentAvatarVariant = Schema.String.check(Schema.isPattern(/^[a-z_-]{1,64}$/));
+
 /** Account and cloud workspace identity, hashed by the server; never a credential. */
 export const MuseAgentProviderSettings = Schema.Struct({
   accountBinding: Schema.NullOr(Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/))).pipe(

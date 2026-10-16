@@ -1,4 +1,8 @@
-import { MuseAgentProfile, type MuseAgentStatus } from "@t3tools/contracts/museAgent";
+import {
+  MuseAgentAvatarVariant,
+  MuseAgentProfile,
+  type MuseAgentStatus,
+} from "@t3tools/contracts/museAgent";
 import { ChatAttachment, PROVIDER_SEND_TURN_MAX_ATTACHMENTS } from "@t3tools/contracts";
 import { ProviderPromptNotSubmittedError } from "@t3tools/provider-core/server/ProviderAdapter";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Read bounded server-owned attachments at the native transport Promise boundary.
@@ -105,6 +109,7 @@ const Identity = Schema.Struct({
 const safeText = (value: string | undefined, limit: number) =>
   // oxlint-disable-next-line no-control-regex -- Remove control characters from native identity display fields.
   value?.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, limit);
+const isAvatarVariant = Schema.is(MuseAgentAvatarVariant);
 const avatarPath = (value: string | undefined) =>
   value &&
   /^\/?workspace\/avatars\/[a-zA-Z0-9_./-]+$/.test(value) &&
@@ -323,7 +328,7 @@ const make = Effect.gen(function* () {
         const variants = Object.fromEntries(
           Object.entries(identity.avatar?.video_variants ?? {}).flatMap(([key, value]) => {
             const valuePath = avatarPath(value);
-            return valuePath && /^[a-z_]{1,64}$/.test(key) ? [[key, valuePath]] : [];
+            return valuePath && isAvatarVariant(key) ? [[key, valuePath]] : [];
           }),
         );
         const profile = {

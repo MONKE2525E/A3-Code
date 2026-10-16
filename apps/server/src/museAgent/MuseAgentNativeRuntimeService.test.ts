@@ -566,6 +566,14 @@ it.effect(
             image_path: "workspace/avatars/../secrets",
             canonical_path: "https://private.invalid/asset",
             chat_theme_color: "red",
+            video_variants: {
+              "waiting-for-subagents": "workspace/avatars/waiting.mp4",
+              waiting_for_subagents: "workspace/avatars/waiting-legacy.mp4",
+              "../secret": "workspace/avatars/secret.mp4",
+              IMAGE: "workspace/avatars/image.mp4",
+              ["a".repeat(65)]: "workspace/avatars/long.mp4",
+              working: "workspace/avatars/../secrets.mp4",
+            },
           },
         });
         const next = yield* native.profile(binding);
@@ -573,6 +581,10 @@ it.effect(
         assert.strictEqual(next.avatarImagePath, undefined);
         assert.strictEqual(next.avatarPath, undefined);
         assert.strictEqual(next.chatThemeColor, undefined);
+        assert.deepStrictEqual(next.avatarVideoVariants, {
+          "waiting-for-subagents": "workspace/avatars/waiting.mp4",
+          waiting_for_subagents: "workspace/avatars/waiting-legacy.mp4",
+        });
       }).pipe(Effect.provide(f.layer)),
     ),
 );

@@ -5,6 +5,7 @@ import {
   MuseAgentDictationRequestError,
 } from "./museAgentDictation.ts";
 import { MuseAgentComputerId } from "./museAgentComputer.ts";
+import { MuseAgentAvatarVariant } from "./museAgent.ts";
 import * as Context from "effect/Context";
 import type * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
@@ -727,7 +728,7 @@ class EnvironmentMuseAgentAvatarHttpApi extends HttpApiGroup.make("museAgentAvat
     headers: OptionalBearerHeaders,
     params: Schema.Struct({
       providerInstanceId: ProviderInstanceId,
-      variant: Schema.String.check(Schema.isPattern(/^[a-z_]{1,64}$/)),
+      variant: MuseAgentAvatarVariant,
     }),
     query: Schema.Struct({
       revision: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/))),

@@ -95,7 +95,10 @@ const avatarApp = () => {
     avatar: (provider, variant) =>
       Effect.suspend(() => {
         calls.push({ instanceId: provider, variant });
-        if (provider !== instanceId || !["image", "idle"].includes(variant))
+        if (
+          provider !== instanceId ||
+          !["image", "idle", "waiting-for-subagents"].includes(variant)
+        )
           return Effect.fail(new NativeAgentError({ reason: "provider_unavailable" }));
         return Effect.succeed({
           bytes: new Uint8Array([1, 2, 3]),
@@ -150,6 +153,15 @@ it("native avatar HTTP routes require read authentication before serving media",
     );
     assert.equal(video.status, 200);
     assert.equal(video.headers.get("content-type"), "video/mp4");
+    const waitingVideo = await app.handler(
+      new Request(url.replace(/image$/, "waiting-for-subagents"), {
+        headers: { authorization: "Bearer synthetic-read" },
+      }),
+    );
+    assert.equal(waitingVideo.status, 200);
+    assert.equal(waitingVideo.headers.get("content-type"), "video/mp4");
+    assert.deepEqual(new Uint8Array(await waitingVideo.arrayBuffer()), new Uint8Array([1, 2, 3]));
+    assert.deepEqual(app.calls.at(-1), { instanceId, variant: "waiting-for-subagents" });
   } finally {
     await app.dispose();
   }
