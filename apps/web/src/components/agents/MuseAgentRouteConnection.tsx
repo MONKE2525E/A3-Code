@@ -87,6 +87,55 @@ export function resolveMuseAgentComposerSendBlockedReason(
   return reported === undefined ? MUSE_CONNECTING_SEND_REASON : reported;
 }
 
+/** env:thread:provider:connection — the attach identity a turn must still match. */
+export function museAgentAttachScopeIdentity(input: {
+  readonly environmentId: string;
+  readonly threadId: string;
+  readonly providerInstanceId: string;
+  readonly connected: boolean;
+}): string {
+  return `${input.environmentId}:${input.threadId}:${input.providerInstanceId}:${input.connected ? "connected" : "offline"}`;
+}
+
+/**
+ * Authoritative turn-dispatch gate. Submit-time attach is not enough: prep
+ * (uploads, settings) can span disconnect/reconnect. An unrelated thread's
+ * later attach must not authorize this turn.
+ */
+export function museAgentTurnDispatchBlockedReason(input: {
+  readonly isMuseDispatch: boolean;
+  readonly dispatchScope: string;
+  readonly currentAttachScope: string;
+  readonly currentBlockedReason: string | null;
+  readonly isNewThreadBootstrap?: boolean;
+}): string | null {
+  if (!input.isMuseDispatch) return null;
+  if (input.isNewThreadBootstrap === true) return null;
+  if (input.currentAttachScope !== input.dispatchScope) {
+    return MUSE_CONNECTING_SEND_REASON;
+  }
+  return input.currentBlockedReason;
+}
+
+/**
+ * Read the live attach immediately before the actual dispatch. Callers keep
+ * drafts when this returns `{ ok: false }` — the dispatch callback never runs.
+ */
+export async function guardMuseAgentTurnDispatch<T>(
+  readGate: () => {
+    readonly isMuseDispatch: boolean;
+    readonly dispatchScope: string;
+    readonly currentAttachScope: string;
+    readonly currentBlockedReason: string | null;
+    readonly isNewThreadBootstrap?: boolean;
+  },
+  dispatch: () => Promise<T>,
+): Promise<{ ok: true; value: T } | { ok: false; reason: string }> {
+  const blocked = museAgentTurnDispatchBlockedReason(readGate());
+  if (blocked != null) return { ok: false, reason: blocked };
+  return { ok: true, value: await dispatch() };
+}
+
 /** After an open attempt, transport and unknown-method RPC stay retryable without leaking the cause. */
 function describeMuseAgentOpenFailure(cause: unknown): string {
   if (

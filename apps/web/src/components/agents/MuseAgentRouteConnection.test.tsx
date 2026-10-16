@@ -11,6 +11,8 @@ vi.mock("@effect/atom-react", () => ({ useAtomValue: () => mocks.allowed }));
 vi.mock("~/state/museAgent", () => ({ museAgentOpenThread: { permissionAtom: () => ({}) } }));
 vi.mock("~/state/use-atom-command", () => ({ useAtomCommand: () => mocks.open }));
 import {
+  guardMuseAgentTurnDispatch,
+  museAgentAttachScopeIdentity,
   resolveMuseAgentComposerSendBlockedReason,
   MuseAgentRouteConnection,
 } from "./MuseAgentRouteConnection";
@@ -485,4 +487,115 @@ it("suppresses local state after unmount while the in-flight RPC still settles",
   await act(async () => root.unmount());
   await act(async () => finish({ _tag: "Success", value: { threadId: main } }));
   expect(mocks.open).toHaveBeenCalledTimes(1);
+});
+
+it("does not dispatch after delayed prep when the attach identity relocks, keeps the draft, then sends once after attach", async () => {
+  const dispatchScope = museAgentAttachScopeIdentity({
+    environmentId: environmentId,
+    threadId: main,
+    providerInstanceId,
+    connected: true,
+  });
+  const gate = {
+    isMuseDispatch: true,
+    dispatchScope,
+    currentAttachScope: dispatchScope,
+    currentBlockedReason: null as string | null,
+  };
+  const draft = { text: "keep the uploaded files", attachments: ["shot.png"] };
+  let sends = 0;
+  const dispatch = async () => {
+    sends += 1;
+    draft.text = "";
+    draft.attachments = [];
+    return "sent";
+  };
+
+  await Promise.resolve();
+  gate.currentBlockedReason = "Connecting Muse history…";
+
+  const blocked = await guardMuseAgentTurnDispatch(() => gate, dispatch);
+  expect(blocked).toEqual({ ok: false, reason: "Connecting Muse history…" });
+  expect(sends).toBe(0);
+  expect(draft).toEqual({ text: "keep the uploaded files", attachments: ["shot.png"] });
+
+  gate.currentBlockedReason = null;
+  const sent = await guardMuseAgentTurnDispatch(() => gate, dispatch);
+  expect(sent).toEqual({ ok: true, value: "sent" });
+  expect(sends).toBe(1);
+});
+
+it("does not let an unrelated attached thread authorize a stale Muse dispatch", async () => {
+  let sends = 0;
+  const result = await guardMuseAgentTurnDispatch(
+    () => ({
+      isMuseDispatch: true,
+      dispatchScope: museAgentAttachScopeIdentity({
+        environmentId,
+        threadId: main,
+        providerInstanceId,
+        connected: true,
+      }),
+      currentAttachScope: museAgentAttachScopeIdentity({
+        environmentId,
+        threadId: side,
+        providerInstanceId,
+        connected: true,
+      }),
+      currentBlockedReason: null,
+    }),
+    async () => {
+      sends += 1;
+      return "sent";
+    },
+  );
+  expect(result).toEqual({ ok: false, reason: "Connecting Muse history…" });
+  expect(sends).toBe(0);
+});
+
+it("lets ordinary-thread dispatch through even when a Muse gate is locked", async () => {
+  let sends = 0;
+  const result = await guardMuseAgentTurnDispatch(
+    () => ({
+      isMuseDispatch: false,
+      dispatchScope: "",
+      currentAttachScope: "",
+      currentBlockedReason: "Connecting Muse history…",
+    }),
+    async () => {
+      sends += 1;
+      return "sent";
+    },
+  );
+  expect(result).toEqual({ ok: true, value: "sent" });
+  expect(sends).toBe(1);
+});
+
+it("lets a new Muse thread bootstrap dispatch without the viewed attach identity", async () => {
+  let sends = 0;
+  const result = await guardMuseAgentTurnDispatch(
+    () => ({
+      isMuseDispatch: true,
+      dispatchScope: museAgentAttachScopeIdentity({
+        environmentId,
+        threadId: side,
+        providerInstanceId,
+        connected: true,
+      }),
+      currentAttachScope: museAgentAttachScopeIdentity({
+        environmentId,
+        threadId: main,
+        providerInstanceId,
+        connected: true,
+      }),
+      currentBlockedReason: null,
+      isNewThreadBootstrap: true,
+    }),
+    async () => {
+      sends += 1;
+      return "sent";
+    },
+  );
+  expect(result).toEqual({ ok: true, value: "sent" });
+  expect(sends).toBe(1);
 });
