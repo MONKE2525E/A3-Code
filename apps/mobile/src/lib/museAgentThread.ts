@@ -119,6 +119,54 @@ export async function openCachedMuseThread(input: {
 }
 
 const MUSE_NATIVE_OPEN_RETRY_MESSAGE = "Could not reconnect this Muse conversation.";
+const MUSE_NATIVE_CONNECTING_SEND_REASON = "Connecting Muse history…";
+const MUSE_NATIVE_PERMISSION_SEND_REASON =
+  "Live Muse history needs permission to operate on this environment.";
+const MUSE_NATIVE_RETRY_SEND_REASON = "Retry Muse connection to send";
+
+export type MuseNativeAttachSendGate = {
+  readonly sendAllowed: boolean;
+  readonly sendBlockedReason: string | null;
+};
+
+/**
+ * Send is allowed only after a verified native attach, or when preflight skipped
+ * the RPC (ordinary threads and non-advertised Muse). First paint before the
+ * open effect is blocked because `attached` starts false.
+ */
+export function museNativeAttachSendGate(input: {
+  readonly planKind: "wait" | "skip" | "open";
+  readonly connected: boolean;
+  readonly canOpen: boolean;
+  readonly attached: boolean;
+  readonly error: string | null;
+}): MuseNativeAttachSendGate {
+  if (input.planKind === "skip") {
+    return { sendAllowed: true, sendBlockedReason: null };
+  }
+  if (input.planKind === "wait" || !input.connected) {
+    return { sendAllowed: false, sendBlockedReason: MUSE_NATIVE_CONNECTING_SEND_REASON };
+  }
+  if (!input.canOpen) {
+    return { sendAllowed: false, sendBlockedReason: MUSE_NATIVE_PERMISSION_SEND_REASON };
+  }
+  if (input.attached) {
+    return { sendAllowed: true, sendBlockedReason: null };
+  }
+  if (input.error !== null) {
+    return { sendAllowed: false, sendBlockedReason: MUSE_NATIVE_RETRY_SEND_REASON };
+  }
+  return { sendAllowed: false, sendBlockedReason: MUSE_NATIVE_CONNECTING_SEND_REASON };
+}
+
+/** Shared submit boundary so composer keybindings cannot bypass the attach gate. */
+export async function guardMuseNativeSend<T>(
+  sendBlockedReason: string | null | undefined,
+  send: () => Promise<T>,
+): Promise<T | null> {
+  if (sendBlockedReason != null) return null;
+  return send();
+}
 
 /**
  * Absence is preflight-only (`capability-absent`). After an open attempt, transport,

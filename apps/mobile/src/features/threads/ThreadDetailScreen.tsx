@@ -97,6 +97,7 @@ import { threadDevicePreviews } from "../devices/threadDevicePreviews";
 import { ThreadBrowserFloat } from "../browser/ThreadBrowserFloat";
 import { useThreadServerBrowserTabs } from "../../state/preview";
 import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
+import { guardMuseNativeSend } from "../../lib/museAgentThread";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import {
   clearThreadComposerError,
@@ -224,6 +225,8 @@ export interface ThreadDetailScreenProps {
   readonly onRemoveDraftImage: (imageId: string) => void;
   readonly onStopThread: () => void;
   readonly onSendMessage: (followUp?: ActiveTurnComposerAction) => Promise<MessageId | null>;
+  /** Blocks composer submit until native Muse attach succeeds. Null/omitted keeps send open. */
+  readonly composerSendBlockedReason?: string | null;
   readonly onReconnectEnvironment: () => void;
   /** Whether the model picker may offer providers other than this thread's. */
   readonly canSwitchThreadProvider: boolean;
@@ -968,7 +971,9 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
       const hasUserMessage = selectedThreadFeed.some(
         (entry) => entry.type === "message" && entry.message.role === "user",
       );
-      const messageId = await props.onSendMessage(followUp);
+      const messageId = await guardMuseNativeSend(props.composerSendBlockedReason, () =>
+        props.onSendMessage(followUp),
+      );
       if (messageId === null || selectedThreadKeyRef.current !== targetThreadKey) {
         return messageId;
       }
@@ -992,6 +997,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
     [
       anchorMessageId,
       clearUsageLimitsFor,
+      props.composerSendBlockedReason,
       props.onSendMessage,
       props.selectedThread.latestRun,
       props.selectedThreadQueueCount,
@@ -1432,10 +1438,11 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                         // them against a thread id the server may still reject
                         // would strand them in the outbox.
                         sendBlockedReason={
-                          props.creationState?.kind === "preparing" &&
+                          props.composerSendBlockedReason ??
+                          (props.creationState?.kind === "preparing" &&
                           !props.creationState.serverOwned
                             ? "Starting the task…"
-                            : null
+                            : null)
                         }
                         draftKey={props.composerDraftKey ?? undefined}
                         followUpBehavior={props.followUpBehavior}

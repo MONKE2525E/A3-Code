@@ -638,6 +638,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   }, [onEditorFocusChange, onExpandedChange, settingsSheetPresentation.keepsComposerExpanded]);
   const handleSend = useCallback(
     async (followUp?: ActiveTurnComposerAction) => {
+      if (sendBlockedReason !== null) return;
       if (voiceInput.blocksSubmission || pendingPastedTextAttachmentCountRef.current > 0) return;
       // Typed out in full rather than picked from the menu. Attachments mean the
       // user is sending a prompt, so those go through as usual.
@@ -684,6 +685,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       props.environmentLabel,
       props.selectedThread.id,
       props.selectedThread.title,
+      sendBlockedReason,
       voiceInput.blocksSubmission,
     ],
   );

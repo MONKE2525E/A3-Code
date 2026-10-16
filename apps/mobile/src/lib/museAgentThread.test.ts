@@ -5,7 +5,9 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   describeMuseNativeOpenFailure,
+  guardMuseNativeSend,
   isMuseSessionThread,
+  museNativeAttachSendGate,
   museSessionForThread,
   openCachedMuseThread,
   resolveMuseAgentNativeOpenPlan,
@@ -235,5 +237,99 @@ describe("describeMuseNativeOpenFailure", () => {
     expect(describeMuseNativeOpenFailure("nope")).toBe(
       "Could not reconnect this Muse conversation.",
     );
+  });
+});
+
+describe("museNativeAttachSendGate", () => {
+  it("allows ordinary and non-advertised Muse without waiting for attach", () => {
+    expect(
+      museNativeAttachSendGate({
+        planKind: "skip",
+        connected: true,
+        canOpen: true,
+        attached: false,
+        error: null,
+      }),
+    ).toEqual({ sendAllowed: true, sendBlockedReason: null });
+    expect(
+      museNativeAttachSendGate({
+        planKind: "skip",
+        connected: false,
+        canOpen: false,
+        attached: false,
+        error: "ignored",
+      }),
+    ).toEqual({ sendAllowed: true, sendBlockedReason: null });
+  });
+
+  it("blocks wait, first paint, disconnect, permission, and error until attached", () => {
+    expect(
+      museNativeAttachSendGate({
+        planKind: "wait",
+        connected: true,
+        canOpen: true,
+        attached: false,
+        error: null,
+      }).sendAllowed,
+    ).toBe(false);
+    expect(
+      museNativeAttachSendGate({
+        planKind: "open",
+        connected: true,
+        canOpen: true,
+        attached: false,
+        error: null,
+      }),
+    ).toEqual({
+      sendAllowed: false,
+      sendBlockedReason: "Connecting Muse history…",
+    });
+    expect(
+      museNativeAttachSendGate({
+        planKind: "open",
+        connected: false,
+        canOpen: true,
+        attached: true,
+        error: null,
+      }).sendBlockedReason,
+    ).toBe("Connecting Muse history…");
+    expect(
+      museNativeAttachSendGate({
+        planKind: "open",
+        connected: true,
+        canOpen: false,
+        attached: true,
+        error: null,
+      }).sendBlockedReason,
+    ).toMatch(/permission/);
+    expect(
+      museNativeAttachSendGate({
+        planKind: "open",
+        connected: true,
+        canOpen: true,
+        attached: false,
+        error: "Could not reconnect this Muse conversation.",
+      }),
+    ).toEqual({
+      sendAllowed: false,
+      sendBlockedReason: "Retry Muse connection to send",
+    });
+    expect(
+      museNativeAttachSendGate({
+        planKind: "open",
+        connected: true,
+        canOpen: true,
+        attached: true,
+        error: null,
+      }),
+    ).toEqual({ sendAllowed: true, sendBlockedReason: null });
+  });
+
+  it("does not invoke send while the attach reason is set", async () => {
+    const send = vi.fn(async () => "sent");
+    await expect(guardMuseNativeSend("Connecting Muse history…", send)).resolves.toBeNull();
+    expect(send).not.toHaveBeenCalled();
+    await expect(guardMuseNativeSend(null, send)).resolves.toBe("sent");
+    expect(send).toHaveBeenCalledTimes(1);
   });
 });

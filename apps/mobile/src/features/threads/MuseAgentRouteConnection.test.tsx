@@ -28,6 +28,7 @@ vi.mock("../../components/AppActivityIndicator", () => ({
   AppActivityIndicator: () => <span>spinner</span>,
 }));
 
+import { guardMuseNativeSend, type MuseNativeAttachSendGate } from "../../lib/museAgentThread";
 import { MuseAgentRouteConnection } from "./MuseAgentRouteConnection";
 
 const environmentId = EnvironmentId.make("remote-env");
@@ -35,6 +36,25 @@ const providerInstanceId = ProviderInstanceId.make("historical-muse-provider");
 const main = ThreadId.make(`muse-agent:${"a".repeat(64)}`);
 const side = ThreadId.make(`${main}:${encodeURIComponent("side:one")}`);
 const museProviders = [{ instanceId: providerInstanceId, driver: "muse-agent" }];
+
+function routeProps(
+  overrides: Partial<{
+    threadId: ThreadId;
+    connected: boolean;
+    hasMessages: boolean;
+    providers: ReadonlyArray<{ instanceId: ProviderInstanceId; driver: string }> | null;
+  }> = {},
+) {
+  return {
+    environmentId,
+    providerInstanceId,
+    threadId: main,
+    connected: true,
+    hasMessages: true,
+    providers: museProviders,
+    ...overrides,
+  };
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -293,4 +313,304 @@ it("suppresses local state after unmount while the in-flight RPC still settles",
   await act(async () => root.unmount());
   await act(async () => finish({ _tag: "Success", value: { threadId: main } }));
   expect(mocks.open).toHaveBeenCalledTimes(1);
+});
+
+it("blocks send on the first paint of a delayed open and unlocks after attach", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  let finish: (value: unknown) => void = () => {
+    throw new Error("not started");
+  };
+  mocks.open.mockReset().mockReturnValue(
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  const send = vi.fn(async () => "sent");
+  const gate: { current: MuseNativeAttachSendGate | null } = { current: null };
+  const fireSend = () => {
+    const current = gate.current;
+    if (current === undefined || current === null) throw new Error("missing gate");
+    return guardMuseNativeSend(current.sendBlockedReason, send);
+  };
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <MuseAgentRouteConnection {...routeProps()}>
+          {(value) => {
+            gate.current = value;
+            return <span>{value.sendAllowed ? "allow" : value.sendBlockedReason}</span>;
+          }}
+        </MuseAgentRouteConnection>,
+      ),
+    );
+    expect(container.textContent).toContain("Connecting Muse history…");
+    expect(await fireSend()).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+    await act(async () => finish({ _tag: "Success", value: { threadId: main } }));
+    expect(container.textContent).toContain("allow");
+    expect(await fireSend()).toBe("sent");
+    expect(send).toHaveBeenCalledTimes(1);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it("keeps send blocked through error and retry until attach succeeds", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  let finish: (value: unknown) => void = () => {
+    throw new Error("not started");
+  };
+  mocks.open
+    .mockReset()
+    .mockResolvedValueOnce({
+      _tag: "Failure",
+      cause: Cause.fail(new Error("Wait for the active Muse turn and retry.")),
+    })
+    .mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+  const send = vi.fn(async () => "sent");
+  const gate: { current: MuseNativeAttachSendGate | null } = { current: null };
+  const fireSend = () => {
+    const current = gate.current;
+    if (current === null) throw new Error("missing gate");
+    return guardMuseNativeSend(current.sendBlockedReason, send);
+  };
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <MuseAgentRouteConnection {...routeProps()}>
+          {(value) => {
+            gate.current = value;
+            return <span>{value.sendAllowed ? "allow" : value.sendBlockedReason}</span>;
+          }}
+        </MuseAgentRouteConnection>,
+      ),
+    );
+    expect(container.textContent).toContain("Retry Muse connection to send");
+    expect(container.textContent).toContain("active Muse turn");
+    expect(await fireSend()).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+    await act(async () => container.querySelector("button")!.click());
+    expect(container.textContent).toContain("Connecting Muse history…");
+    expect(await fireSend()).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+    expect(mocks.open).toHaveBeenCalledTimes(2);
+    await act(async () => finish({ _tag: "Success", value: { threadId: main } }));
+    expect(container.textContent).toContain("allow");
+    expect(await fireSend()).toBe("sent");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it("shows retry after an interrupted open on the mounted route and unlocks after retry", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  let finish: (value: unknown) => void = () => {
+    throw new Error("not started");
+  };
+  mocks.open
+    .mockReset()
+    .mockResolvedValueOnce({
+      _tag: "Failure",
+      cause: Cause.interrupt(),
+    })
+    .mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+  const send = vi.fn(async () => "sent");
+  const gate: { current: MuseNativeAttachSendGate | null } = { current: null };
+  const fireSend = () => {
+    const current = gate.current;
+    if (current === null) throw new Error("missing gate");
+    return guardMuseNativeSend(current.sendBlockedReason, send);
+  };
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <MuseAgentRouteConnection {...routeProps()}>
+          {(value) => {
+            gate.current = value;
+            return <span>{value.sendAllowed ? "allow" : value.sendBlockedReason}</span>;
+          }}
+        </MuseAgentRouteConnection>,
+      ),
+    );
+    expect(container.textContent).toContain("interrupted");
+    expect(container.querySelector("button")?.textContent).toContain("Retry Muse connection");
+    expect(await fireSend()).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+    await act(async () => container.querySelector("button")!.click());
+    expect(await fireSend()).toBeNull();
+    await act(async () => finish({ _tag: "Success", value: { threadId: main } }));
+    expect(container.textContent).toContain("allow");
+    expect(await fireSend()).toBe("sent");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it("re-locks send on reconnect, permission loss, and thread change", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  let finish: (value: unknown) => void = () => {
+    throw new Error("not started");
+  };
+  mocks.open.mockReset().mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const send = vi.fn(async () => "sent");
+  const gate: { current: MuseNativeAttachSendGate | null } = { current: null };
+  const fireSend = () => {
+    const current = gate.current;
+    if (current === undefined || current === null) throw new Error("missing gate");
+    return guardMuseNativeSend(current.sendBlockedReason, send);
+  };
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const render = (
+    props: Partial<{
+      threadId: ThreadId;
+      connected: boolean;
+    }> = {},
+  ) =>
+    root.render(
+      <MuseAgentRouteConnection {...routeProps(props)}>
+        {(value) => {
+          gate.current = value;
+          return <span>{value.sendAllowed ? "allow" : value.sendBlockedReason}</span>;
+        }}
+      </MuseAgentRouteConnection>,
+    );
+  try {
+    await act(async () => render());
+    expect(await fireSend()).toBeNull();
+    await act(async () => finish({ _tag: "Success", value: { threadId: main } }));
+    expect(await fireSend()).toBe("sent");
+    send.mockClear();
+
+    await act(async () => render({ connected: false }));
+    expect(await fireSend()).toBeNull();
+    expect(container.textContent).toContain("Connecting Muse history…");
+
+    await act(async () => render({ connected: true }));
+    expect(await fireSend()).toBeNull();
+    await act(async () => finish({ _tag: "Success", value: { threadId: main } }));
+    expect(await fireSend()).toBe("sent");
+    send.mockClear();
+
+    mocks.allowed = false;
+    await act(async () => render({ connected: true }));
+    expect(await fireSend()).toBeNull();
+    expect(container.textContent).toContain("permission");
+    mocks.allowed = true;
+
+    await act(async () => render({ threadId: side }));
+    expect(await fireSend()).toBeNull();
+    await act(async () => finish({ _tag: "Success", value: { threadId: side } }));
+    expect(await fireSend()).toBe("sent");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it("allows send immediately for ordinary and non-advertised Muse without RPC", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  mocks.open.mockClear();
+  const send = vi.fn(async () => "sent");
+  const gate: { current: MuseNativeAttachSendGate | null } = { current: null };
+  const fireSend = () => {
+    const current = gate.current;
+    if (current === undefined || current === null) throw new Error("missing gate");
+    return guardMuseNativeSend(current.sendBlockedReason, send);
+  };
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <MuseAgentRouteConnection {...routeProps({ threadId: ThreadId.make("ordinary-thread") })}>
+          {(value) => {
+            gate.current = value;
+            return <span>{value.sendAllowed ? "allow" : value.sendBlockedReason}</span>;
+          }}
+        </MuseAgentRouteConnection>,
+      ),
+    );
+    expect(await fireSend()).toBe("sent");
+    await act(async () =>
+      root.render(
+        <MuseAgentRouteConnection
+          {...routeProps({
+            providers: [{ instanceId: providerInstanceId, driver: "codex" }],
+          })}
+        >
+          {(value) => {
+            gate.current = value;
+            return <span>{value.sendAllowed ? "allow" : value.sendBlockedReason}</span>;
+          }}
+        </MuseAgentRouteConnection>,
+      ),
+    );
+    expect(await fireSend()).toBe("sent");
+    expect(mocks.open).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it("blocks send while providers are unknown, then unlocks when Muse is not advertised", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  mocks.open.mockClear();
+  const send = vi.fn(async () => "sent");
+  const gate: { current: MuseNativeAttachSendGate | null } = { current: null };
+  const fireSend = () => {
+    const current = gate.current;
+    if (current === undefined || current === null) throw new Error("missing gate");
+    return guardMuseNativeSend(current.sendBlockedReason, send);
+  };
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <MuseAgentRouteConnection {...routeProps({ providers: null })}>
+          {(value) => {
+            gate.current = value;
+            return <span>{value.sendAllowed ? "allow" : value.sendBlockedReason}</span>;
+          }}
+        </MuseAgentRouteConnection>,
+      ),
+    );
+    expect(await fireSend()).toBeNull();
+    expect(container.textContent).toContain("Connecting Muse history…");
+    await act(async () =>
+      root.render(
+        <MuseAgentRouteConnection {...routeProps({ providers: [] })}>
+          {(value) => {
+            gate.current = value;
+            return <span>{value.sendAllowed ? "allow" : value.sendBlockedReason}</span>;
+          }}
+        </MuseAgentRouteConnection>,
+      ),
+    );
+    expect(await fireSend()).toBe("sent");
+    expect(mocks.open).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+  }
 });
