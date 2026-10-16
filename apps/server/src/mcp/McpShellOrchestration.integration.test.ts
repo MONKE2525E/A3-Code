@@ -672,11 +672,9 @@ it.effect.each([
         const managedWorkspace = path.resolve(config.baseDir, "native-agents");
         const managedProjectId = ProjectId.make("project:protected-native-storage");
         yield* fs.makeDirectory(managedWorkspace, { recursive: true });
-        yield* projects.create({
+        yield* projects.bootstrapNativeAgentProject({
           commandId: CommandId.make("shell:create-managed-project"),
           projectId: managedProjectId,
-          title: "AI Agents",
-          workspaceRoot: managedWorkspace,
         });
         for (const force of [false, true]) {
           const protectedFailure = yield* invoke(

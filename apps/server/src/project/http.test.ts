@@ -19,6 +19,7 @@ it.effect.each([
   new ProjectNotEmptyError({ projectId }),
   new ProjectProtectedError({ projectId, operation: "delete" }),
   new ProjectProtectedError({ projectId, operation: "move" }),
+  new ProjectProtectedError({ projectId, operation: "claim" }),
   new ProjectConflictError({
     projectId,
     workspaceRoot: "/workspace/project",

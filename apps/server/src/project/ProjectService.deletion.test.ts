@@ -189,6 +189,83 @@ it.effect.each(["whitespace", "home", "relative-segments"] as const)(
     }).pipe(Effect.provide(layerDatabase)),
 );
 
+it.effect.each(["create", "bootstrap", "update"] as const)(
+  "rejects generic %s claims on an unregistered managed directory before filesystem access",
+  (operation) =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const root = path.resolve(config.baseDir, "native-agents");
+      const projectId = ProjectId.make(`project:reserved-claim:${operation}`);
+      if (operation === "update") yield* seedProject(projectId);
+      assert.isFalse(yield* fs.exists(root));
+      yield* Effect.gen(function* () {
+        const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+        const service = yield* ProjectService.make.pipe(
+          Effect.provideService(WorkspacePaths.WorkspacePaths, {
+            ...workspacePaths,
+            normalizeWorkspaceRoot: () =>
+              Effect.die("Reserved claims must not touch the destination."),
+          }),
+        );
+        const input = {
+          commandId: CommandId.make(`command:reserved-claim:${operation}`),
+          projectId,
+          title: "Ordinary project",
+          workspaceRoot: "  ~/native-agents  ",
+          createWorkspaceRootIfMissing: true,
+        };
+        const claim =
+          operation === "create"
+            ? service.create(input).pipe(Effect.asVoid)
+            : operation === "bootstrap"
+              ? service.bootstrap(input).pipe(Effect.asVoid)
+              : service.update(input).pipe(Effect.asVoid);
+        const error = yield* claim.pipe(Effect.flip);
+        assert.equal(error._tag, "ProjectProtectedError");
+        assert.equal(error.message, "The AI Agents workspace is reserved for native agents.");
+        const row = yield* service.getById(projectId);
+        if (operation === "update")
+          assert.equal(Option.getOrThrow(row).workspaceRoot, `/work/${projectId}`);
+        else assert.isTrue(Option.isNone(row));
+        const sql = yield* SqlClient.SqlClient;
+        assert.lengthOf(yield* sql`SELECT 1 FROM orchestration_events`, 0);
+        assert.isFalse(yield* fs.exists(root));
+      }).pipe(
+        Effect.provide(layerServices),
+        Effect.provideService(HostProcess.HomeDirectory, config.baseDir),
+      );
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("creates and reuses the reserved project through native bootstrap", () =>
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
+    const root = path.resolve(config.baseDir, "native-agents");
+    yield* fs.makeDirectory(root, { recursive: true });
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectService.make.pipe(Effect.provide(WorkspacePaths.layer));
+      const first = yield* service.bootstrapNativeAgentProject({
+        commandId: CommandId.make("command:native-bootstrap"),
+        projectId: ProjectId.make("project:native-bootstrap"),
+      });
+      const second = yield* service.bootstrapNativeAgentProject({
+        commandId: CommandId.make("command:native-bootstrap-again"),
+        projectId: ProjectId.make("project:unused-bootstrap"),
+      });
+      assert.isTrue(first.created);
+      assert.isFalse(second.created);
+      assert.equal(first.project.workspaceRoot, root);
+      assert.equal(second.project.id, first.project.id);
+      const sql = yield* SqlClient.SqlClient;
+      assert.lengthOf(yield* sql`SELECT 1 FROM projection_projects WHERE deleted_at IS NULL`, 1);
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
+);
+
 it.effect("allows moving an ordinary project with the same display name", () =>
   Effect.gen(function* () {
     const projectId = ProjectId.make("project:ordinary-move");

@@ -375,11 +375,9 @@ const make = Effect.gen(function* () {
       Effect.mapError((cause) => new ScratchProjectError({ workspaceRoot, cause })),
     );
     const result = yield* projects
-      .bootstrap({
+      .bootstrapNativeAgentProject({
         commandId: CommandId.make(`native-agent-project:${id}`),
         projectId: ProjectId.make(id),
-        title: "AI Agents",
-        workspaceRoot,
       })
       .pipe(
         Effect.catchTags({

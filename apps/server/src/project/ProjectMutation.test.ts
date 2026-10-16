@@ -20,6 +20,10 @@ const projectId = ProjectId.make("project:mutation-mapping");
 it.each([
   { operation: "delete" as const, message: "The managed AI Agents project cannot be deleted." },
   { operation: "move" as const, message: "The managed AI Agents project cannot be moved." },
+  {
+    operation: "claim" as const,
+    message: "The AI Agents workspace is reserved for native agents.",
+  },
 ])(
   "preserves protected-project rejections in RPC and shared transport messages",
   ({ operation, message }) => {
