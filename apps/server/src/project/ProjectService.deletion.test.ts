@@ -15,6 +15,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -237,6 +238,190 @@ it.effect.each(["create", "bootstrap", "update"] as const)(
         Effect.provideService(HostProcess.HomeDirectory, config.baseDir),
       );
     }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect.each(["create", "bootstrap", "update"] as const)(
+  "rejects a filesystem alias of managed storage through generic %s",
+  (operation) =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const root = path.resolve(config.baseDir, "native-agents");
+      const alias = path.resolve(config.baseDir, "ordinary-looking-alias");
+      yield* fs.makeDirectory(root, { recursive: true });
+      yield* fs.symlink(root, alias);
+      assert.equal(yield* fs.realPath(alias), yield* fs.realPath(root));
+      const projectId = ProjectId.make(`project:alias-claim:${operation}`);
+      if (operation === "update") yield* seedProject(projectId);
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectService.make.pipe(Effect.provide(WorkspacePaths.layer));
+        const input = {
+          commandId: CommandId.make(`command:alias-claim:${operation}`),
+          projectId,
+          title: "Ordinary alias project",
+          workspaceRoot: alias,
+        };
+        const claim =
+          operation === "create"
+            ? service.create(input).pipe(Effect.asVoid)
+            : operation === "bootstrap"
+              ? service.bootstrap(input).pipe(Effect.asVoid)
+              : service.update(input).pipe(Effect.asVoid);
+        const error = yield* claim.pipe(Effect.flip);
+        assert.equal(error._tag, "ProjectProtectedError");
+        const sql = yield* SqlClient.SqlClient;
+        assert.lengthOf(yield* sql`SELECT 1 FROM orchestration_events`, 0);
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("rejects a parent alias before creating missing managed storage", () =>
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
+    const root = path.resolve(config.baseDir, "native-agents");
+    const aliasParent = path.resolve(config.baseDir, "parent-alias");
+    yield* fs.symlink(config.baseDir, aliasParent);
+    assert.isFalse(yield* fs.exists(root));
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectService.make.pipe(Effect.provide(WorkspacePaths.layer));
+      const error = yield* service
+        .create({
+          commandId: CommandId.make("command:missing-alias-claim"),
+          projectId: ProjectId.make("project:missing-alias-claim"),
+          title: "Parent alias",
+          workspaceRoot: path.join(aliasParent, "native-agents"),
+          createWorkspaceRootIfMissing: true,
+        })
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "ProjectProtectedError");
+      assert.isFalse(yield* fs.exists(root));
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect(
+  "accepts an alias of the owned managed directory without replacing its canonical root",
+  () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const sql = yield* SqlClient.SqlClient;
+      const root = path.resolve(config.baseDir, "native-agents");
+      const alias = path.resolve(config.baseDir, "owned-alias");
+      yield* fs.makeDirectory(root, { recursive: true });
+      yield* fs.symlink(root, alias);
+      const projectId = ProjectId.make("project:owned-alias");
+      yield* seedProject(projectId);
+      yield* sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectId}`;
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectService.make.pipe(Effect.provide(WorkspacePaths.layer));
+        const updated = yield* service.update({
+          commandId: CommandId.make("command:owned-alias-update"),
+          projectId,
+          workspaceRoot: alias,
+          title: "Updated through alias",
+        });
+        assert.equal(updated.workspaceRoot, root);
+        assert.equal(updated.title, "Updated through alias");
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("continues to accept a symlink to an ordinary directory", () =>
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
+    const root = path.resolve(config.baseDir, "ordinary");
+    const alias = path.resolve(config.baseDir, "ordinary-alias");
+    yield* fs.makeDirectory(root, { recursive: true });
+    yield* fs.symlink(root, alias);
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectService.make.pipe(Effect.provide(WorkspacePaths.layer));
+      const created = yield* service.create({
+        commandId: CommandId.make("command:ordinary-alias"),
+        projectId: ProjectId.make("project:ordinary-alias"),
+        title: "Ordinary alias",
+        workspaceRoot: alias,
+      });
+      assert.equal(created.workspaceRoot, alias);
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect.each(["delete", "move"] as const)(
+  "protects a legacy managed alias record against %s",
+  (operation) =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const sql = yield* SqlClient.SqlClient;
+      const root = path.resolve(config.baseDir, "native-agents");
+      const alias = path.resolve(config.baseDir, "legacy-alias");
+      yield* fs.makeDirectory(root, { recursive: true });
+      yield* fs.symlink(root, alias);
+      const projectId = ProjectId.make(`project:legacy-alias:${operation}`);
+      yield* seedProject(projectId);
+      yield* sql`UPDATE projection_projects SET workspace_root = ${alias} WHERE project_id = ${projectId}`;
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectService.make;
+        const commandId = CommandId.make(`command:legacy-alias:${operation}`);
+        const mutation =
+          operation === "delete"
+            ? service.delete({ commandId, projectId, force: true })
+            : service.update({ commandId, projectId, workspaceRoot: "/work/unrelated-checkout" });
+        const error = yield* mutation.pipe(Effect.flip);
+        assert.equal(error._tag, "ProjectProtectedError");
+        assert.equal(Option.getOrThrow(yield* service.getById(projectId)).workspaceRoot, alias);
+        assert.lengthOf(yield* sql`SELECT 1 FROM orchestration_events`, 0);
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("fails a reserved-identity check when realPath is denied", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const projectId = ProjectId.make("project:denied-realpath");
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectService.make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          realPath: (root) =>
+            Effect.fail(
+              PlatformError.systemError({
+                _tag: "PermissionDenied",
+                module: "FileSystem",
+                method: "realPath",
+                pathOrDescriptor: root,
+                description: "Test realPath denied.",
+              }),
+            ),
+        }),
+      );
+      const error = yield* service
+        .create({
+          commandId: CommandId.make("command:denied-realpath"),
+          projectId,
+          workspaceRoot: "/work/unchecked-alias",
+          title: "Unchecked",
+        })
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "ProjectOperationError");
+      assert.isTrue(Option.isNone(yield* service.getById(projectId)));
+      yield* seedProject(projectId);
+      const renamed = yield* service.update({
+        commandId: CommandId.make("command:metadata-without-realpath"),
+        projectId,
+        title: "Metadata only",
+      });
+      assert.equal(renamed.title, "Metadata only");
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
 );
 
 it.effect("creates and reuses the reserved project through native bootstrap", () =>

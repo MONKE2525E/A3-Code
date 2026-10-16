@@ -15,6 +15,7 @@ import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -182,10 +183,45 @@ export const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const config = yield* ServerConfig.ServerConfig;
   const path = yield* Path.Path;
+  const fileSystem = yield* FileSystem.FileSystem;
   const nativeAgentWorkspaceRoot = path.resolve(config.baseDir, "native-agents");
   const homeDirectory = yield* HostProcess.HomeDirectory;
   const resolveWorkspaceRoot = (root: string) =>
     path.resolve(expandHomePath(root.trim(), homeDirectory));
+  const realWorkspaceRoot = Effect.fn("ProjectService.realWorkspaceRoot")(function* (root: string) {
+    let current = root;
+    const missingSegments: string[] = [];
+    while (true) {
+      const real = yield* fileSystem.realPath(current).pipe(
+        Effect.catchIf(
+          (error) => error.reason._tag === "NotFound",
+          () => Effect.succeed(null),
+        ),
+        Effect.mapError(
+          (cause) =>
+            new ProjectOperationError({
+              operation: "normalize-workspace",
+              workspaceRoot: root,
+              cause,
+            }),
+        ),
+      );
+      if (real !== null) return path.resolve(real, ...missingSegments);
+      const parent = path.dirname(current);
+      if (parent === current) return path.resolve(current, ...missingSegments);
+      missingSegments.unshift(path.basename(current));
+      current = parent;
+    }
+  });
+  const isNativeAgentWorkspace = Effect.fn("ProjectService.isNativeAgentWorkspace")(function* (
+    root: string,
+  ) {
+    const resolved = resolveWorkspaceRoot(root);
+    if (resolved === nativeAgentWorkspaceRoot) return true;
+    return (
+      (yield* realWorkspaceRoot(resolved)) === (yield* realWorkspaceRoot(nativeAgentWorkspaceRoot))
+    );
+  });
   // Commands for one project run in order. Commands that claim a workspace root
   // also hold that root, so two projects cannot both claim it.
   const projectLocks = yield* KeyedLock.make<ProjectId>();
@@ -385,13 +421,15 @@ export const make = Effect.gen(function* () {
 
   const create: ProjectService["Service"]["create"] = Effect.fn("ProjectService.create")(
     function* (input) {
-      if (resolveWorkspaceRoot(input.workspaceRoot) === nativeAgentWorkspaceRoot)
+      if (yield* isNativeAgentWorkspace(input.workspaceRoot))
         return yield* new ProjectProtectedError({ projectId: input.projectId, operation: "claim" });
       const workspaceRoot = yield* normalizeWorkspaceRoot({
         projectId: input.projectId,
         workspaceRoot: input.workspaceRoot,
         createIfMissing: input.createWorkspaceRootIfMissing ?? false,
       });
+      if (yield* isNativeAgentWorkspace(workspaceRoot))
+        return yield* new ProjectProtectedError({ projectId: input.projectId, operation: "claim" });
       return yield* createAtWorkspace(input, workspaceRoot);
     },
   );
@@ -403,24 +441,31 @@ export const make = Effect.gen(function* () {
         return yield* new ProjectNotFoundError({ projectId: input.projectId });
       }
       const previousRoot = existing.value.workspaceRoot;
-      const requestedRoot = resolveWorkspaceRoot(input.workspaceRoot ?? previousRoot);
-      if (
-        path.resolve(previousRoot) !== nativeAgentWorkspaceRoot &&
-        requestedRoot === nativeAgentWorkspaceRoot
-      )
+      const wasManaged =
+        input.workspaceRoot === undefined
+          ? path.resolve(previousRoot) === nativeAgentWorkspaceRoot
+          : yield* isNativeAgentWorkspace(previousRoot);
+      const requestedManaged =
+        input.workspaceRoot === undefined
+          ? wasManaged
+          : yield* isNativeAgentWorkspace(input.workspaceRoot);
+      if (!wasManaged && requestedManaged)
         return yield* new ProjectProtectedError({ projectId: input.projectId, operation: "claim" });
-      if (
-        path.resolve(previousRoot) === nativeAgentWorkspaceRoot &&
-        requestedRoot !== nativeAgentWorkspaceRoot
-      )
+      if (wasManaged && !requestedManaged)
         return yield* new ProjectProtectedError({ projectId: input.projectId, operation: "move" });
       const workspaceRoot =
-        input.workspaceRoot === undefined
+        input.workspaceRoot === undefined || wasManaged
           ? previousRoot
           : yield* normalizeWorkspaceRoot({
               projectId: input.projectId,
               workspaceRoot: input.workspaceRoot,
             });
+      if (
+        input.workspaceRoot !== undefined &&
+        !wasManaged &&
+        (yield* isNativeAgentWorkspace(workspaceRoot))
+      )
+        return yield* new ProjectProtectedError({ projectId: input.projectId, operation: "claim" });
       yield* commit({
         type: "project.meta.update",
         commandId: input.commandId,
@@ -447,7 +492,7 @@ export const make = Effect.gen(function* () {
 
   const bootstrap: ProjectService["Service"]["bootstrap"] = Effect.fn("ProjectService.bootstrap")(
     function* (input) {
-      if (resolveWorkspaceRoot(input.workspaceRoot) === nativeAgentWorkspaceRoot)
+      if (yield* isNativeAgentWorkspace(input.workspaceRoot))
         return yield* new ProjectProtectedError({ projectId: input.projectId, operation: "claim" });
       const existing = yield* getByWorkspaceRoot(input.workspaceRoot);
       if (Option.isSome(existing)) return { project: existing.value, created: false };
@@ -580,7 +625,7 @@ export const make = Effect.gen(function* () {
         return yield* new ProjectNotFoundError({ projectId });
       }
 
-      if (path.resolve(existing.value.workspaceRoot) === nativeAgentWorkspaceRoot)
+      if (yield* isNativeAgentWorkspace(existing.value.workspaceRoot))
         return yield* new ProjectProtectedError({ projectId, operation: "delete" });
 
       const isFirstDelete = existing.value.deletedAt === null;
