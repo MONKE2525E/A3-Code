@@ -641,6 +641,74 @@ it.effect("requires all preview permissions at the server sign-in boundary", () 
   }).pipe(Effect.scoped),
 );
 
+it.effect("requires settings permission before issuing Muse connector authorization links", () =>
+  Effect.gen(function* () {
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (
+          tag,
+        ): tag is Exclude<
+          keyof typeof RPC_REQUIRED_SCOPES,
+          typeof WS_METHODS.museAgentsFeatureRead
+        > => tag !== WS_METHODS.museAgentsFeatureRead,
+      ),
+    );
+    let handled = 0;
+    const makeClient = (scopes: ReadonlyArray<import("@t3tools/contracts").AuthEnvironmentScope>) =>
+      RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.museAgentsFeatureRead, (input) =>
+              Effect.sync(() => {
+                handled++;
+                return input.operation === "connector_info"
+                  ? {
+                      operation: "connector_info" as const,
+                      data: {
+                        connectorId: "test",
+                        action: {
+                          type: "oauth" as const,
+                          authorizationUrl: "https://example.test/authorize",
+                        },
+                      },
+                    }
+                  : { operation: "connectors" as const, data: [] };
+              }),
+            ),
+            RpcAuthorization.layer(scopes),
+          ),
+        ),
+      );
+    const readClient = yield* makeClient([AuthOrchestrationReadScope]);
+    const operateClient = yield* makeClient([AuthOrchestrationOperateScope]);
+    const settingsClient = yield* makeClient([AuthSettingsWriteScope]);
+    const providerInstanceId = ProviderInstanceId.make("muse-test");
+    const input = { operation: "connector_info", providerInstanceId, connectorId: "test" } as const;
+    for (const client of [readClient, operateClient]) {
+      expect(
+        yield* client[WS_METHODS.museAgentsFeatureRead](input).pipe(Effect.flip),
+      ).toMatchObject({
+        requiredPermission: AuthSettingsWriteScope,
+      });
+    }
+    expect(handled).toBe(0);
+    expect(
+      yield* readClient[WS_METHODS.museAgentsFeatureRead]({
+        operation: "connectors",
+        providerInstanceId,
+      }),
+    ).toEqual({
+      operation: "connectors",
+      data: [],
+    });
+    expect(yield* settingsClient[WS_METHODS.museAgentsFeatureRead](input)).toMatchObject({
+      operation: "connector_info",
+      data: { action: { type: "oauth" } },
+    });
+    expect(handled).toBe(2);
+  }).pipe(Effect.scoped),
+);
+
 it.effect(
   "rejects Muse account updates from conversation-only clients before the handler runs",
   () =>

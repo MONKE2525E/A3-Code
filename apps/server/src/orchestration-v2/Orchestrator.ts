@@ -22,6 +22,7 @@ import {
   CommandId,
   isGrokBotBackingThread,
   isProviderNativeSubagentThread,
+  nativeAgentSourceForThread,
   MessageId,
   type NodeId,
   type ModelSelection,
@@ -11317,6 +11318,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
             ),
           );
+        if (nativeAgentSourceForThread(projection.thread) === "muse-agent") {
+          return yield* new OrchestratorCommandRejectedError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause:
+              "Muse conversations cannot be deleted through generic thread commands. Use Muse's archive controls instead.",
+          });
+        }
         return yield* mapDispatchError(command)(
           planThreadDeletion({
             command,

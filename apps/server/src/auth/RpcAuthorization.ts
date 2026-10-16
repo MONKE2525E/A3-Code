@@ -29,6 +29,7 @@ import {
   RpcScopeAuthorization,
   WS_METHODS,
   WsRpcGroup,
+  NativeAgentFeatureReadInput,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -271,11 +272,19 @@ const requiredScopesForSettingsUpdate = (payload: unknown) => {
 };
 
 const decodeProjectMutation = Schema.decodeUnknownSync(ProjectMutation);
+const decodeNativeFeatureRead = Schema.decodeUnknownSync(NativeAgentFeatureReadInput);
 
 const requiredScopesForRpcCall = (
   method: string,
   payload: unknown,
 ): ReadonlyArray<AuthEnvironmentScope> => {
+  if (method === WS_METHODS.museAgentsFeatureRead) {
+    const input = decodeNativeFeatureRead(payload);
+    // Connector details can mint an OAuth URL that links an account when completed.
+    return [
+      input.operation === "connector_info" ? AuthSettingsWriteScope : AuthOrchestrationReadScope,
+    ];
+  }
   if (method === WS_METHODS.serverRetryResourceTelemetry) {
     return [AuthEnvironmentMaintainScope, AuthDiagnosticsReadScope];
   }
