@@ -11,7 +11,7 @@ type MuseAgentAvatarProps = {
   readonly name: string;
   /** Still image, also the poster while a video is parked. */
   readonly imageUrl?: string | null | undefined;
-  /** Optional looping clip; played only while the agent is active and visible. */
+  /** Optional clip; plays through once each time the agent turns active and visible, then holds. */
   readonly videoUrl?: string | null | undefined;
   readonly active?: boolean;
   readonly size?: keyof typeof SIZE_PX;
@@ -20,7 +20,8 @@ type MuseAgentAvatarProps = {
 
 /**
  * A Muse agent's face: the user's image or video, falling back to an initial. Video is parked
- * when idle, offscreen, in a hidden document, or under reduced motion.
+ * when idle, offscreen, in a hidden document, or under reduced motion. A clip never loops: a long
+ * run would otherwise repaint the avatar for its whole length, so it holds on its last frame.
  */
 export function MuseAgentAvatar(props: MuseAgentAvatarProps) {
   const { name, imageUrl, videoUrl, active = false, size = "lg", className } = props;
@@ -28,8 +29,13 @@ export function MuseAgentAvatar(props: MuseAgentAvatarProps) {
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [onScreen, setOnScreen] = useState(true);
-  const [documentVisible, setDocumentVisible] = useState(true);
-  const [reducedMotion, setReducedMotion] = useState(false);
+  // Read on the first render so the first playback decision already honors these preferences.
+  const [documentVisible, setDocumentVisible] = useState(
+    () => document.visibilityState === "visible",
+  );
+  const [reducedMotion, setReducedMotion] = useState(
+    () => window.matchMedia(REDUCED_MOTION_QUERY).matches,
+  );
   // Failures are remembered by URL, so a new URL from a profile edit gets a fresh attempt.
   const [failedImageUrl, setFailedImageUrl] = useState<string | null>(null);
   const [failedVideoUrl, setFailedVideoUrl] = useState<string | null>(null);
@@ -100,7 +106,6 @@ export function MuseAgentAvatar(props: MuseAgentAvatarProps) {
           src={playableVideoUrl}
           poster={imageUrl ?? undefined}
           muted
-          loop
           playsInline
           preload="metadata"
           onError={() => setFailedVideoUrl(playableVideoUrl)}
