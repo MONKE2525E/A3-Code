@@ -1,3 +1,4 @@
+import type { MuseConnectorRequest } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -25,6 +26,19 @@ const Card = Schema.Struct({
     }),
   ),
 });
+const ConnectorCard = Schema.Struct({
+  title: Text,
+  type: Schema.Literal("connector"),
+  data: Schema.Struct({
+    connector_id: Schema.String.check(
+      Schema.isMinLength(1),
+      Schema.isMaxLength(1024),
+      // eslint-disable-next-line no-control-regex -- Connector IDs are opaque, but must not contain controls.
+      Schema.isPattern(/^[^\u0000-\u001f\u007f]+$/),
+    ),
+  }),
+});
+const decodeConnectorCard = Schema.decodeUnknownOption(ConnectorCard);
 const Frame = Schema.Struct({
   session_id: Text,
   message_id: Schema.optionalKey(Text),
@@ -63,6 +77,11 @@ export class MuseAgentCredentialInbox extends Context.Service<
   {
     readonly observe: (binding: string, frame: MuseAgentNativeEvent) => void;
     readonly pending: (binding: string, sessionId: string) => readonly CredentialRequest[];
+    readonly pendingConnectors: (
+      binding: string,
+      sessionId: string,
+    ) => readonly MuseConnectorRequest[];
+    readonly completeConnector: (binding: string, connectorId: string) => void;
     readonly take: (
       binding: string,
       sessionId: string,
@@ -78,6 +97,25 @@ export class MuseAgentCredentialInbox extends Context.Service<
 
 export const layer = Layer.sync(MuseAgentCredentialInbox, () => {
   const entries = new Map<string, Entry>();
+  const connectorEntries = new Map<
+    string,
+    {
+      readonly binding: string;
+      readonly request: MuseConnectorRequest;
+      state: "pending" | "completed";
+    }
+  >();
+  const reserveSlot = () => {
+    if (entries.size + connectorEntries.size < 128) return true;
+    for (const table of [entries, connectorEntries]) {
+      const completed = [...table].find(([, entry]) => entry.state === "completed");
+      if (completed) {
+        table.delete(completed[0]);
+        return true;
+      }
+    }
+    return false;
+  };
   const key = (binding: string, sessionId: string, requestId: string) =>
     JSON.stringify([binding, sessionId, requestId]);
   return MuseAgentCredentialInbox.of({
@@ -105,6 +143,22 @@ export const layer = Layer.sync(MuseAgentCredentialInbox, () => {
           return;
         }
       }
+      const connector = decodeConnectorCard(data);
+      if (connector._tag === "Some") {
+        const id = key(binding, frame.value.session_id, requestId);
+        if (connectorEntries.has(id) || !reserveSlot()) return;
+        connectorEntries.set(id, {
+          binding,
+          request: {
+            requestId,
+            sessionId: frame.value.session_id,
+            title: connector.value.title,
+            connectorId: connector.value.data.connector_id,
+          },
+          state: "pending",
+        });
+        return;
+      }
       const decoded = decodeCard(data);
       if (decoded._tag === "None") return;
       const card = decoded.value;
@@ -122,11 +176,7 @@ export const layer = Layer.sync(MuseAgentCredentialInbox, () => {
         return;
       }
       if (current) return;
-      if (entries.size >= 128) {
-        const completed = [...entries].find(([, entry]) => entry.state === "completed");
-        if (!completed) return;
-        entries.delete(completed[0]);
-      }
+      if (!reserveSlot()) return;
       entries.set(id, {
         idempotencyKey: NodeCrypto.randomUUID(),
         binding,
@@ -157,6 +207,20 @@ export const layer = Layer.sync(MuseAgentCredentialInbox, () => {
             entry.state === "pending",
         )
         .map((entry) => entry.request),
+    pendingConnectors: (binding, sessionId) =>
+      [...connectorEntries.values()]
+        .filter(
+          (entry) =>
+            entry.binding === binding &&
+            entry.request.sessionId === sessionId &&
+            entry.state === "pending",
+        )
+        .map((entry) => entry.request),
+    completeConnector: (binding, connectorId) => {
+      for (const entry of connectorEntries.values())
+        if (entry.binding === binding && entry.request.connectorId === connectorId)
+          entry.state = "completed";
+    },
     take: (binding, sessionId, requestId) => {
       const entry = entries.get(key(binding, sessionId, requestId));
       if (!entry || entry.state !== "pending") return null;
@@ -170,6 +234,8 @@ export const layer = Layer.sync(MuseAgentCredentialInbox, () => {
     complete: (binding, sessionId, requestId) => {
       const entry = entries.get(key(binding, sessionId, requestId));
       if (entry) entry.state = "completed";
+      const connector = connectorEntries.get(key(binding, sessionId, requestId));
+      if (connector) connector.state = "completed";
     },
   });
 });

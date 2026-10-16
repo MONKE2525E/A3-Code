@@ -729,6 +729,25 @@ const make = Effect.gen(function* () {
         const session = yield* native
           .resolveSession(binding, input.sessionId)
           .pipe(Effect.mapError(nativeFailure));
+        const connectorRequests = Option.isSome(credentialInbox)
+          ? yield* Effect.forEach(
+              credentialInbox.value.pendingConnectors(binding, session.session_id),
+              (request) =>
+                connectors.get(binding, request.connectorId, session.session_id).pipe(
+                  Effect.map((connector) => {
+                    if (connector.state !== "connected") return request;
+                    if (Option.isSome(credentialInbox))
+                      credentialInbox.value.complete(binding, request.sessionId, request.requestId);
+                    return null;
+                  }),
+                  Effect.catchTags({ MuseAgentFeatureError: () => Effect.succeed(request) }),
+                ),
+              { concurrency: 1 },
+            )
+          : [];
+        if ((yield* selected(selection.instanceId)).binding !== binding)
+          return yield* new NativeAgentError({ reason: "account_changed" });
+        const pendingConnectors = connectorRequests.filter((request) => request !== null);
         return {
           operation: input.operation,
           data: {
@@ -736,6 +755,7 @@ const make = Effect.gen(function* () {
             requests: Option.isSome(credentialInbox)
               ? credentialInbox.value.pending(binding, session.session_id)
               : [],
+            ...(pendingConnectors.length ? { connectorRequests: pendingConnectors } : {}),
           },
         };
       }
@@ -869,6 +889,8 @@ const make = Effect.gen(function* () {
         yield* connectors
           .authenticate(binding, input.connectorId, input.authType, input.key)
           .pipe(Effect.mapError(featureFailure));
+        if (Option.isSome(credentialInbox))
+          credentialInbox.value.completeConnector(binding, input.connectorId);
         break;
       case "credential_submit": {
         if (Option.isNone(credentialInbox))

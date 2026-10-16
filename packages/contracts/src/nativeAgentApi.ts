@@ -30,6 +30,13 @@ export const MuseCredentialRequest = Schema.Struct({
   passwordLabel: Schema.String,
   codeLabel: Schema.String,
 });
+export const MuseConnectorRequest = Schema.Struct({
+  requestId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
+  sessionId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
+  title: Schema.String.check(Schema.isMaxLength(1024)),
+  connectorId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
+});
+export type MuseConnectorRequest = typeof MuseConnectorRequest.Type;
 const featureRead = <O extends string>(operation: O) =>
   Schema.Struct({ ...featureReference, operation: Schema.Literal(operation) });
 const NativeAgentHistoryCursor = Schema.Number.check(
@@ -112,6 +119,7 @@ export const NativeAgentFeatureReadResult = Schema.Union([
     data: Schema.Struct({
       sessionId: Schema.String,
       requests: Schema.Array(MuseCredentialRequest),
+      connectorRequests: Schema.optionalKey(Schema.Array(MuseConnectorRequest)),
     }),
   }),
   Schema.Struct({

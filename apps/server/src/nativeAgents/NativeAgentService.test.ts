@@ -161,6 +161,9 @@ const fixture = (
       closeAllowed: true,
       rotateAfterClose: false,
       pretendTerminalShell: false,
+      connectorConnected: false,
+      connectorReadFails: false,
+      connectorAuthCalls: 0,
       failRenameSync: false,
       rotateOnRename: false,
       nativeTitle: "Research",
@@ -462,7 +465,31 @@ const fixture = (
                 }),
             }),
           ),
-          Layer.provide(Layer.mock(Connectors.MuseAgentConnectorService)({})),
+          Layer.provide(
+            Layer.mock(Connectors.MuseAgentConnectorService)({
+              get: (_binding, connectorId) =>
+                Effect.gen(function* () {
+                  if (state.connectorReadFails)
+                    return yield* new Features.MuseAgentFeatureError({
+                      feature: "connectors",
+                      code: "connection_unavailable",
+                    });
+                  return {
+                    id: connectorId,
+                    name: "Example connector",
+                    description: "",
+                    state: state.connectorConnected
+                      ? ("connected" as const)
+                      : ("disconnected" as const),
+                  };
+                }),
+              authenticate: () =>
+                Effect.sync(() => {
+                  state.connectorConnected = true;
+                  state.connectorAuthCalls++;
+                }),
+            }),
+          ),
           Layer.provide(
             Layer.mock(Dictation.MuseAgentDictation)({
               status: Effect.succeed({
@@ -1915,6 +1942,84 @@ it.effect(
       assert.equal(h.state.credentialCalls.length, 1);
       assert.equal(h.state.reads, 0);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect.each([false, true])(
+  "surfaces connector requests even when native connector lookup fails: %s",
+  (readFails) =>
+    Effect.gen(function* () {
+      const h = yield* fixture();
+      h.state.connectorReadFails = readFails;
+      h.inbox.observe(binding, {
+        event: "delta.presentation",
+        payload: {
+          session_id: "primary",
+          id: "native-connector-card",
+          kind: "internal_link_action_card",
+          data: {
+            type: "connector",
+            title: "Example connector",
+            data: { connector_id: "example", url: "https://example.test/private?token=synthetic" },
+          },
+        },
+      });
+      const before = yield* h.service.featureRead({
+        operation: "credential_requests",
+        providerInstanceId: instanceId,
+      });
+      assert.equal(before.operation, "credential_requests");
+      if (before.operation !== "credential_requests") return;
+      assert.lengthOf(before.data.connectorRequests ?? [], 1);
+      assert.equal(before.data.connectorRequests?.[0]?.connectorId, "example");
+      assert.notInclude(JSON.stringify(before), "private?token");
+      const invalid = yield* h.service
+        .featureUpdate({
+          operation: "credential_submit",
+          providerInstanceId: instanceId,
+          sessionId: "primary",
+          requestId: "native-connector-card",
+          password: "synthetic-key",
+        })
+        .pipe(Effect.flip);
+      assert.equal(invalid.reason, "thread_changed");
+      assert.lengthOf(h.state.credentialCalls, 0);
+      yield* h.service.featureUpdate({
+        operation: "connector_auth",
+        providerInstanceId: instanceId,
+        connectorId: "example",
+        authType: "api_key",
+        key: "synthetic-key",
+      });
+      assert.equal(h.state.connectorAuthCalls, 1);
+      const after = yield* h.service.featureRead({
+        operation: "credential_requests",
+        providerInstanceId: instanceId,
+      });
+      if (after.operation !== "credential_requests") return;
+      assert.deepEqual(after.data.connectorRequests ?? [], []);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+it.effect("retires connector prompts after a connection completed outside T3", () =>
+  Effect.gen(function* () {
+    const h = yield* fixture();
+    h.inbox.observe(binding, {
+      event: "delta.presentation",
+      payload: {
+        session_id: "primary",
+        id: "external-connector-card",
+        kind: "internal_link_action_card",
+        data: { type: "connector", title: "Example connector", data: { connector_id: "example" } },
+      },
+    });
+    h.state.connectorConnected = true;
+    const result = yield* h.service.featureRead({
+      operation: "credential_requests",
+      providerInstanceId: instanceId,
+    });
+    if (result.operation !== "credential_requests") return;
+    assert.deepEqual(result.data.connectorRequests ?? [], []);
+    assert.lengthOf(h.inbox.pendingConnectors(binding, "primary"), 0);
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
 
 it.effect("synchronizes an opened side conversation title after a native rename", () =>

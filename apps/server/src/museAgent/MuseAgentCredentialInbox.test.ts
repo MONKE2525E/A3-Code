@@ -72,3 +72,57 @@ it.effect("rejects untrusted targets, subagent cards, malformed cards and comple
     expect(inbox.pending("account", "session-one")).toEqual([]);
   }).pipe(Effect.provide(Inbox.layer)),
 );
+
+const connectorCard = {
+  title: "Example connector",
+  type: "connector",
+  data: { connector_id: "example", url: "https://example.test/private?authorization=synthetic" },
+};
+it.effect(
+  "recovers native connector cards without exposing their URLs or accepting vault submissions",
+  () =>
+    Effect.gen(function* () {
+      const inbox = yield* Inbox.MuseAgentCredentialInbox;
+      inbox.observe("account-one", frame(connectorCard));
+      const pending = inbox.pendingConnectors("account-one", "session-one");
+      expect(pending).toEqual([
+        {
+          requestId: "credential-card",
+          sessionId: "session-one",
+          title: "Example connector",
+          connectorId: "example",
+        },
+      ]);
+      expect(JSON.stringify(pending)).not.toContain("authorization");
+      expect(inbox.pendingConnectors("account-two", "session-one")).toEqual([]);
+      expect(inbox.pendingConnectors("account-one", "session-two")).toEqual([]);
+      expect(inbox.pending("account-one", "session-one")).toEqual([]);
+      expect(inbox.take("account-one", "session-one", "credential-card")).toBeNull();
+      inbox.observe("account-one", frame(connectorCard));
+      expect(inbox.pendingConnectors("account-one", "session-one")).toHaveLength(1);
+      inbox.completeConnector("account-two", "example");
+      expect(inbox.pendingConnectors("account-one", "session-one")).toHaveLength(1);
+      inbox.completeConnector("account-one", "example");
+      inbox.observe("account-one", frame(connectorCard));
+      expect(inbox.pendingConnectors("account-one", "session-one")).toEqual([]);
+    }).pipe(Effect.provide(Inbox.layer)),
+);
+it.effect("bounds connector cards and rejects malformed or hidden card identities", () =>
+  Effect.gen(function* () {
+    const inbox = yield* Inbox.MuseAgentCredentialInbox;
+    inbox.observe("account", frame(connectorCard, { stream_lane: "subagent" }));
+    inbox.observe("account", frame(connectorCard, { transcript_surface: "tool" }));
+    inbox.observe(
+      "account",
+      frame({ ...connectorCard, data: { connector_id: "bad\nidentifier" } }),
+    );
+    expect(inbox.pendingConnectors("account", "session-one")).toEqual([]);
+    for (let i = 0; i < 140; i++)
+      inbox.observe("account", frame(connectorCard, { presentation_id: `connector-${i}` }));
+    expect(inbox.pendingConnectors("account", "session-one")).toHaveLength(128);
+    inbox.complete("account", "session-one", "connector-0");
+    inbox.observe("account", frame(card, { presentation_id: "vault-after-connector" }));
+    expect(inbox.pendingConnectors("account", "session-one")).toHaveLength(127);
+    expect(inbox.pending("account", "session-one")).toHaveLength(1);
+  }).pipe(Effect.provide(Inbox.layer)),
+);
