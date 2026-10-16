@@ -1,8 +1,11 @@
 import * as Mime from "effect/http/Mime";
+import * as NativeAgentService from "./nativeAgents/NativeAgentService.ts";
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  MUSE_DICTATION_MAX_BYTES,
+  MuseAgentDictationRequestError,
 } from "@t3tools/contracts";
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
 import { injectMcpAppCookieBootstrap, injectMcpAppThemeBootstrap } from "@t3tools/shared/mcpApp";
@@ -523,6 +526,107 @@ export const layerGrokBotAvatarEngineRoute = HttpApiBuilder.group(
           });
         }, Effect.catchTags(avatarEngineFailureResponse)),
       );
+  }),
+);
+/** Native media stays behind environment authentication; callers select a variant, not a cloud path. */
+export const layerMuseAgentAvatarRoute = HttpApiBuilder.group(
+  EnvironmentHttpApi,
+  "museAgentAvatar",
+  Effect.fnUntraced(function* (handlers) {
+    const agents = yield* NativeAgentService.NativeAgentService;
+    return handlers.handle(
+      "media",
+      Effect.fnUntraced(function* ({ params }) {
+        yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
+        const asset = yield* agents.avatar(params.providerInstanceId, params.variant).pipe(
+          Effect.catchTags({
+            NativeAgentError: () => failEnvironmentNotFound("muse_agent_avatar_not_found"),
+          }),
+        );
+        return HttpServerResponse.uint8Array(asset.bytes, {
+          contentType: asset.contentType,
+          headers: { "cache-control": "private, no-store", "x-content-type-options": "nosniff" },
+        });
+      }),
+    );
+  }),
+);
+
+export const layerMuseAgentComputerPreviewRoute = HttpApiBuilder.group(
+  EnvironmentHttpApi,
+  "museAgentComputerPreview",
+  Effect.fnUntraced(function* (handlers) {
+    const agents = yield* NativeAgentService.NativeAgentService;
+    return handlers.handle(
+      "media",
+      Effect.fnUntraced(function* ({ params }) {
+        yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
+        const asset = yield* agents
+          .computerPreview(params.providerInstanceId, params.sessionId, params.taskId)
+          .pipe(
+            Effect.catchTags({
+              NativeAgentError: () =>
+                failEnvironmentNotFound("muse_agent_computer_preview_not_found"),
+            }),
+          );
+        return HttpServerResponse.uint8Array(asset.bytes, {
+          contentType: asset.contentType,
+          headers: { "cache-control": "private, no-store", "x-content-type-options": "nosniff" },
+        });
+      }),
+    );
+  }),
+);
+
+// Raw handling authenticates before collecting audio; normal binary decoding buffers first.
+export const layerMuseAgentDictationRoute = HttpApiBuilder.group(
+  EnvironmentHttpApi,
+  "museAgentDictation",
+  Effect.fnUntraced(function* (handlers) {
+    const agents = yield* NativeAgentService.NativeAgentService;
+    return handlers.handleRaw(
+      "transcribe",
+      Effect.fnUntraced(function* ({ params, query, request }) {
+        yield* authenticateRawRouteWithScope(AuthOrchestrationOperateScope);
+        if (
+          request.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() !==
+          "application/octet-stream"
+        )
+          return yield* new MuseAgentDictationRequestError({ code: "invalid_audio" });
+        const length = request.headers["content-length"];
+        if (
+          length !== undefined &&
+          (!/^\d+$/.test(length) || Number(length) > MUSE_DICTATION_MAX_BYTES)
+        )
+          return yield* new MuseAgentDictationRequestError({ code: "invalid_audio" });
+        const body = yield* request.stream.pipe(
+          Stream.runFoldEffect(
+            () => ({ size: 0, chunks: [] as Uint8Array[] }),
+            (state, chunk) => {
+              if (state.size + chunk.byteLength > MUSE_DICTATION_MAX_BYTES)
+                return Effect.fail(new MuseAgentDictationRequestError({ code: "invalid_audio" }));
+              state.size += chunk.byteLength;
+              state.chunks.push(chunk);
+              return Effect.succeed(state);
+            },
+          ),
+          Effect.mapError(() => new MuseAgentDictationRequestError({ code: "invalid_audio" })),
+        );
+        if (body.size < 6 || body.size % 2 !== 0)
+          return yield* new MuseAgentDictationRequestError({ code: "invalid_audio" });
+        const pcm = new Uint8Array(body.size);
+        let offset = 0;
+        for (const chunk of body.chunks) {
+          pcm.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        return yield* agents.dictationTranscribe({
+          providerInstanceId: params.providerInstanceId,
+          pcm,
+          ...(query.language !== undefined ? { language: query.language } : {}),
+        });
+      }),
+    );
   }),
 );
 

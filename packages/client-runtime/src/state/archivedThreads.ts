@@ -1,4 +1,8 @@
-import { EnvironmentId, type OrchestrationV2ArchivedShellSnapshot } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  isNativeAgentBackingThread,
+  type OrchestrationV2ArchivedShellSnapshot,
+} from "@t3tools/contracts";
 import * as Arr from "effect/Array";
 import { pipe } from "effect/Function";
 import * as Option from "effect/Option";
@@ -55,7 +59,14 @@ export function createArchivedThreadSnapshotsAtomFamily<E>(options: {
 
         const snapshot = Option.getOrNull(AsyncResult.value(result));
         if (snapshot !== null) {
-          snapshots.push({ environmentId, snapshot });
+          // Native conversations must restore through their paired native service.
+          snapshots.push({
+            environmentId,
+            snapshot: {
+              ...snapshot,
+              threads: snapshot.threads.filter((thread) => !isNativeAgentBackingThread(thread)),
+            },
+          });
         }
 
         if (error === null && result._tag === "Failure") {

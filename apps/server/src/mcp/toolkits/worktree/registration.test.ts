@@ -35,12 +35,14 @@ import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpSessionRegistry from "../../McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as PreviewBrowser from "../../../preview/PreviewBrowser.ts";
+import * as NativeAgentService from "../../../nativeAgents/NativeAgentService.ts";
 import * as GrokBotService from "../../../grokBot/GrokBotService.ts";
 import * as GrokBotOrchestratorService from "../../../grokBot/GrokBotOrchestratorService.ts";
 import * as GrokBotThreadService from "../../../grokBot/GrokBotThreadService.ts";
 import * as GrokBotTurnCompletion from "../../../grokBot/GrokBotTurnCompletion.ts";
 
 const layerStubServices = Layer.mergeAll(
+  Layer.mock(NativeAgentService.NativeAgentService)({}),
   Layer.mock(GuidedSetup.GrokBotSetupService)({}),
   Layer.mock(GrokBotService.GrokBotService)({}),
   Layer.mock(GrokBotOrchestratorService.GrokBotOrchestratorService)({}),
@@ -153,6 +155,8 @@ it.effect("production mcp layer lists worktree tools over http", () =>
       // than replacing them.
       expect(toolNames).toContain("preview_status");
       expect(toolNames).toContain("delegate_task");
+      expect(toolNames).toContain("muse_agent_discover");
+      expect(toolNames).toContain("muse_agent_send");
       expect(toolNames).toContain("grok_bot_orchestrator_config");
       expect(
         tools.find((tool) => tool.name === "grok_bot_orchestrator_config")?.annotations

@@ -5411,3 +5411,85 @@ it.effect.each(["attachments", "reaction_added", "reaction_removed"] as const)(
       }).pipe(Effect.provide(layerTest({ state, driver, idleTimeoutMs: 1000 })));
     }),
 );
+
+it.effect.each(["idle", "owned-turn", "foreign-turn", "replacement", "non-native"] as const)(
+  "ProviderSessionManagerV2 native delivery release fences %s sessions",
+  (scenario) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make(`native-release-${scenario}`);
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const input = { threadId, providerSessionId, modelSelection, runtimePolicy };
+        const captured = yield* manager.open(input);
+        const providerThread = makeProviderThread({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        if (scenario === "owned-turn" || scenario === "foreign-turn") {
+          const ordinal = scenario === "owned-turn" ? 1 : 2;
+          const runId = idAllocator.derive.run({ threadId, ordinal });
+          yield* captured.startTurn({
+            appThread: (yield* projections.getThreadProjection(threadId)).thread,
+            threadId,
+            runId,
+            runOrdinal: ordinal,
+            providerTurnOrdinal: 1,
+            attemptId: idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+            rootNodeId: idAllocator.derive.rootNode({ runId }),
+            providerThread,
+            message: {
+              createdBy: "user",
+              creationSource: "web",
+              messageId: yield* idAllocator.allocate.message({ threadId, ordinal }),
+              text: "native release fence",
+              attachments: [],
+            },
+            modelSelection,
+            runtimePolicy,
+          });
+        }
+        let current = captured;
+        if (scenario === "replacement") {
+          yield* manager.close(providerSessionId);
+          current = yield* manager.open(input);
+          assert.notStrictEqual(current, captured);
+        }
+        // Reads update the live entry record without replacing its runtime identity.
+        assert.strictEqual(Option.getOrThrow(yield* manager.get(providerSessionId)), current);
+        const closedBefore = (yield* Ref.get(state)).closeCount;
+        const removed = yield* manager.closeNativeDeliverySession({
+          runtime: captured,
+          providerThreadId: providerThread.id,
+          runOrdinal: 1,
+        });
+        const allowed = scenario === "idle" || scenario === "owned-turn";
+        assert.equal(removed, allowed);
+        if (allowed) assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+        else assert.strictEqual(Option.getOrThrow(yield* manager.get(providerSessionId)), current);
+        assert.equal((yield* Ref.get(state)).closeCount, closedBefore + (allowed ? 1 : 0));
+        assert.equal((yield* Ref.get(state)).interruptCount, 0);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            driver: ProviderDriverKind.make(scenario === "non-native" ? "codex" : "muse-agent"),
+            state,
+            idleTimeoutMs: 60_000,
+          }),
+        ),
+      );
+    }),
+);

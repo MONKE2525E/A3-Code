@@ -9,7 +9,11 @@ import { ComputerUseAppIcon } from "~/components/Icons";
 import { useChatCanvas } from "./ChatCanvasContext";
 import { WorkLogBlock, WorkLogButton, WorkLogDetails, WorkLogList, WorkLogRow } from "./WorkLog";
 import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
-import { isGrokBotBackingThread, type WorktreeSetupSnapshot } from "@t3tools/contracts";
+import {
+  isGrokBotBackingThread,
+  isNativeAgentBackingThread,
+  type WorktreeSetupSnapshot,
+} from "@t3tools/contracts";
 import { ReadOnlySourcePreview } from "../files/AttachmentFilePreview";
 import { useRightPanelStore } from "~/rightPanelStore";
 import {
@@ -2859,8 +2863,7 @@ function AttemptFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "at
   );
 }
 
-// Bot replies carry attachments (files the bot produced or received). Rendering mirrors the
-// user row's image, video, and file presentation so both sides of a bot chat look alike.
+// Native agent replies use the same image, video, and file presentation as user messages.
 function AssistantMessageAttachments({
   attachments,
 }: {
@@ -3004,10 +3007,9 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
       </div>
     );
   }
-  // Only a bot's own thread shows assistant attachments; other providers stay text-only.
-  const isGrokBotChat =
-    ctx.threadRef !== null && isGrokBotBackingThread({ id: ctx.threadRef.threadId });
-  const assistantAttachments = isGrokBotChat ? row.message.attachments : undefined;
+  const isNativeAgentChat =
+    ctx.threadRef !== null && isNativeAgentBackingThread({ id: ctx.threadRef.threadId });
+  const assistantAttachments = isNativeAgentChat ? row.message.attachments : undefined;
   const hasAssistantAttachments = (assistantAttachments?.length ?? 0) > 0;
   const messageText =
     row.message.text ||

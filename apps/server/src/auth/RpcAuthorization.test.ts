@@ -33,6 +33,25 @@ import {
 import * as RpcAuthorization from "./RpcAuthorization.ts";
 
 describe("RPC authorization scopes", () => {
+  it("allows native agent inspection separately from setup and opening a chat", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.museAgentsFeatureRead)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.museAgentsFeatureUpdate)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.museAgentsStatus)).toBe(AuthOrchestrationReadScope);
+    expect(requiredScopeForRpcMethod(WS_METHODS.museAgentsProfile)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.museAgentsSetup)).toBe(AuthSettingsWriteScope);
+    expect(requiredScopeForRpcMethod(WS_METHODS.museAgentsOpenThread)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.nativeAgentsOpenThread)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
   it("separates bot reads, messaging, and environment settings", () => {
     for (const method of [
       WS_METHODS.grokBotsStatus,
@@ -581,3 +600,246 @@ describe("persistent bot thread authorization", () => {
     }).pipe(Effect.scoped),
   );
 });
+
+it.effect("requires all preview permissions at the server sign-in boundary", () =>
+  Effect.gen(function* () {
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (
+          tag,
+        ): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof WS_METHODS.museAgentsSignIn> =>
+          tag !== WS_METHODS.museAgentsSignIn,
+      ),
+    );
+    const required = [AuthSettingsWriteScope, AuthOrchestrationReadScope, AuthPreviewOperateScope];
+    let handled = 0;
+    for (const omitted of [...required, null]) {
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.museAgentsSignIn, () =>
+              Effect.sync(() => {
+                handled++;
+                return { threadId: "private-thread", tabId: "private-tab" };
+              }),
+            ),
+            RpcAuthorization.layer(required.filter((scope) => scope !== omitted)),
+          ),
+        ),
+      );
+      if (omitted === null)
+        expect(yield* client[WS_METHODS.museAgentsSignIn]({})).toEqual({
+          threadId: "private-thread",
+          tabId: "private-tab",
+        });
+      else
+        expect(yield* client[WS_METHODS.museAgentsSignIn]({}).pipe(Effect.flip)).toMatchObject({
+          requiredPermission: omitted,
+        });
+    }
+    expect(handled).toBe(1);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("requires settings permission before issuing Muse connector authorization links", () =>
+  Effect.gen(function* () {
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (
+          tag,
+        ): tag is Exclude<
+          keyof typeof RPC_REQUIRED_SCOPES,
+          typeof WS_METHODS.museAgentsFeatureRead
+        > => tag !== WS_METHODS.museAgentsFeatureRead,
+      ),
+    );
+    let handled = 0;
+    const makeClient = (scopes: ReadonlyArray<import("@t3tools/contracts").AuthEnvironmentScope>) =>
+      RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.museAgentsFeatureRead, (input) =>
+              Effect.sync(() => {
+                handled++;
+                return input.operation === "connector_info"
+                  ? {
+                      operation: "connector_info" as const,
+                      data: {
+                        connectorId: "test",
+                        action: {
+                          type: "oauth" as const,
+                          authorizationUrl: "https://example.test/authorize",
+                        },
+                      },
+                    }
+                  : { operation: "connectors" as const, data: [] };
+              }),
+            ),
+            RpcAuthorization.layer(scopes),
+          ),
+        ),
+      );
+    const readClient = yield* makeClient([AuthOrchestrationReadScope]);
+    const operateClient = yield* makeClient([AuthOrchestrationOperateScope]);
+    const settingsClient = yield* makeClient([AuthSettingsWriteScope]);
+    const providerInstanceId = ProviderInstanceId.make("muse-test");
+    const input = { operation: "connector_info", providerInstanceId, connectorId: "test" } as const;
+    for (const client of [readClient, operateClient]) {
+      expect(
+        yield* client[WS_METHODS.museAgentsFeatureRead](input).pipe(Effect.flip),
+      ).toMatchObject({
+        requiredPermission: AuthSettingsWriteScope,
+      });
+    }
+    expect(handled).toBe(0);
+    expect(
+      yield* readClient[WS_METHODS.museAgentsFeatureRead]({
+        operation: "connectors",
+        providerInstanceId,
+      }),
+    ).toEqual({
+      operation: "connectors",
+      data: [],
+    });
+    expect(yield* settingsClient[WS_METHODS.museAgentsFeatureRead](input)).toMatchObject({
+      operation: "connector_info",
+      data: { action: { type: "oauth" } },
+    });
+    expect(handled).toBe(2);
+  }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "rejects Muse account updates from conversation-only clients before the handler runs",
+  () =>
+    Effect.gen(function* () {
+      const group = WsRpcGroup.omit(
+        ...[...WsRpcGroup.requests.keys()].filter(
+          (
+            tag,
+          ): tag is Exclude<
+            keyof typeof RPC_REQUIRED_SCOPES,
+            typeof WS_METHODS.museAgentsFeatureUpdate
+          > => tag !== WS_METHODS.museAgentsFeatureUpdate,
+        ),
+      );
+      let handled = 0;
+      const makeClient = (
+        scopes: ReadonlyArray<import("@t3tools/contracts").AuthEnvironmentScope>,
+      ) =>
+        RpcTest.makeClient(group).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              group.toLayerHandler(WS_METHODS.museAgentsFeatureUpdate, () =>
+                Effect.sync(() => {
+                  handled++;
+                  return { updated: true as const };
+                }),
+              ),
+              RpcAuthorization.layer(scopes),
+            ),
+          ),
+        );
+      const conversationClient = yield* makeClient([AuthOrchestrationOperateScope]);
+      const settingsClient = yield* makeClient([AuthSettingsWriteScope]);
+      const providerInstanceId = ProviderInstanceId.make("muse-test");
+      const configuration = [
+        {
+          operation: "connector_auth",
+          providerInstanceId,
+          connectorId: "test",
+          authType: "consent_only",
+        },
+        { operation: "connector_link", providerInstanceId, connectorId: "test" },
+        {
+          operation: "connector_scope_link",
+          providerInstanceId,
+          connectorId: "test",
+          method: "read",
+        },
+        { operation: "connector_disconnect", providerInstanceId, connectorId: "test" },
+        {
+          operation: "connector_unlink",
+          providerInstanceId,
+          connectorId: "test",
+          accountId: "test",
+        },
+        {
+          operation: "profile_save",
+          providerInstanceId,
+          document: "identity",
+          content: "Draft",
+          expectedRevision: "a".repeat(64),
+        },
+        { operation: "profile_set_theme", providerInstanceId, themeId: "test" },
+      ] as const;
+      for (const input of configuration) {
+        expect(
+          yield* conversationClient[WS_METHODS.museAgentsFeatureUpdate](input).pipe(Effect.flip),
+        ).toMatchObject({ requiredPermission: AuthSettingsWriteScope });
+      }
+      expect(handled).toBe(0);
+      for (const input of configuration) {
+        expect(yield* settingsClient[WS_METHODS.museAgentsFeatureUpdate](input)).toEqual({
+          updated: true,
+        });
+      }
+      expect(handled).toBe(configuration.length);
+      const archive = {
+        operation: "session_archive",
+        providerInstanceId,
+        sessionId: "side",
+        archived: true,
+      } as const;
+      expect(
+        yield* settingsClient[WS_METHODS.museAgentsFeatureUpdate](archive).pipe(Effect.flip),
+      ).toMatchObject({ requiredPermission: AuthOrchestrationOperateScope });
+      expect(yield* conversationClient[WS_METHODS.museAgentsFeatureUpdate](archive)).toEqual({
+        updated: true,
+      });
+      expect(handled).toBe(configuration.length + 1);
+    }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "allows private sign-in cleanup without environment grants but refuses a new sign-in",
+  () =>
+    Effect.gen(function* () {
+      const group = WsRpcGroup.omit(
+        ...[...WsRpcGroup.requests.keys()].filter(
+          (
+            tag,
+          ): tag is Exclude<
+            keyof typeof RPC_REQUIRED_SCOPES,
+            typeof WS_METHODS.museAgentsCloseSignIn | typeof WS_METHODS.museAgentsSignIn
+          > => tag !== WS_METHODS.museAgentsCloseSignIn && tag !== WS_METHODS.museAgentsSignIn,
+        ),
+      );
+      const closed: string[] = [];
+      let opened = false;
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.museAgentsCloseSignIn, ({ threadId }) =>
+              Effect.sync(() => {
+                closed.push(threadId);
+              }),
+            ),
+            group.toLayerHandler(WS_METHODS.museAgentsSignIn, () =>
+              Effect.sync(() => {
+                opened = true;
+                return { threadId: "new-page", tabId: "new-tab" };
+              }),
+            ),
+            RpcAuthorization.layer([]),
+          ),
+        ),
+      );
+      yield* client[WS_METHODS.museAgentsCloseSignIn]({ threadId: "owned-page" });
+      expect(closed).toEqual(["owned-page"]);
+      expect(yield* client[WS_METHODS.museAgentsSignIn]({}).pipe(Effect.flip)).toMatchObject({
+        requiredPermission: AuthSettingsWriteScope,
+      });
+      expect(opened).toBe(false);
+    }).pipe(Effect.scoped),
+);

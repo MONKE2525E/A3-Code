@@ -1,3 +1,11 @@
+import {
+  MuseAgentDictationPcm,
+  MuseAgentDictationLanguage,
+  MuseAgentDictationTranscript,
+  MuseAgentDictationRequestError,
+} from "./museAgentDictation.ts";
+import { MuseAgentComputerId } from "./museAgentComputer.ts";
+import { MuseAgentAvatarVariant } from "./museAgent.ts";
 import * as Context from "effect/Context";
 import type * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
@@ -56,6 +64,7 @@ import {
   OrchestrationV2ThreadHistoryPage,
 } from "./orchestrationV2.ts";
 import { Project, ProjectMutation, ProjectSnapshot } from "./project.ts";
+import { ProviderInstanceId } from "./providerInstance.ts";
 import {
   PullRequestDiffInput,
   PullRequestDiffResult,
@@ -124,6 +133,7 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "orchestration_thread_bounded_snapshot_failed",
   "orchestration_thread_history_failed",
   "grok_bot_avatar_engine_unavailable",
+  "muse_agent_avatar_unavailable",
   "internal_error",
 ]);
 export type EnvironmentInternalErrorReason = typeof EnvironmentInternalErrorReason.Type;
@@ -224,6 +234,8 @@ export class EnvironmentInternalError extends Schema.TaggedError<EnvironmentInte
 export const EnvironmentResourceNotFoundReason = Schema.Literals([
   "thread_not_found",
   "grok_bot_avatar_engine_not_found",
+  "muse_agent_avatar_not_found",
+  "muse_agent_computer_preview_not_found",
 ]);
 export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
 
@@ -711,6 +723,80 @@ class EnvironmentGrokBotAvatarEngineHttpApi extends HttpApiGroup.make("grokBotAv
     }),
   ) {}
 
+class EnvironmentMuseAgentAvatarHttpApi extends HttpApiGroup.make("museAgentAvatar").add(
+  HttpApiEndpoint.get("media", "/api/ai-agents/muse/:providerInstanceId/avatar/:variant", {
+    headers: OptionalBearerHeaders,
+    params: Schema.Struct({
+      providerInstanceId: ProviderInstanceId,
+      variant: MuseAgentAvatarVariant,
+    }),
+    query: Schema.Struct({
+      revision: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/))),
+    }),
+    success: [
+      Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array({ contentType: "image/webp" })),
+      Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array({ contentType: "image/png" })),
+      Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array({ contentType: "image/jpeg" })),
+      Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array({ contentType: "image/gif" })),
+      Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array({ contentType: "image/avif" })),
+      Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array({ contentType: "video/mp4" })),
+      Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array({ contentType: "video/webm" })),
+    ],
+    error: [
+      EnvironmentAuthInvalidError,
+      EnvironmentScopeRequiredError,
+      EnvironmentResourceNotFoundError,
+      EnvironmentInternalError,
+    ],
+  }),
+) {}
+
+class EnvironmentMuseAgentComputerPreviewHttpApi extends HttpApiGroup.make(
+  "museAgentComputerPreview",
+).add(
+  HttpApiEndpoint.get(
+    "media",
+    "/api/ai-agents/muse/:providerInstanceId/computer/:sessionId/:taskId/preview",
+    {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({
+        providerInstanceId: ProviderInstanceId,
+        sessionId: MuseAgentComputerId,
+        taskId: MuseAgentComputerId,
+      }),
+      success: [
+        Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array({ contentType: "image/png" })),
+        Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array({ contentType: "image/jpeg" })),
+        Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array({ contentType: "image/webp" })),
+      ],
+      error: [
+        EnvironmentAuthInvalidError,
+        EnvironmentScopeRequiredError,
+        EnvironmentResourceNotFoundError,
+        EnvironmentInternalError,
+      ],
+    },
+  ),
+) {}
+
+class EnvironmentMuseAgentDictationHttpApi extends HttpApiGroup.make("museAgentDictation").add(
+  HttpApiEndpoint.post("transcribe", "/api/ai-agents/muse/:providerInstanceId/dictation", {
+    headers: OptionalBearerHeaders,
+    params: Schema.Struct({ providerInstanceId: ProviderInstanceId }),
+    query: Schema.Struct({ language: Schema.optionalKey(MuseAgentDictationLanguage) }),
+    payload: MuseAgentDictationPcm.pipe(
+      HttpApiSchema.asUint8Array({ contentType: "application/octet-stream" }),
+    ),
+    success: MuseAgentDictationTranscript,
+    error: [
+      EnvironmentAuthInvalidError,
+      EnvironmentScopeRequiredError,
+      EnvironmentInternalError,
+      MuseAgentDictationRequestError,
+    ],
+  }),
+) {}
+
 class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
   .add(
     HttpApiEndpoint.post("linkProof", "/api/connect/link-proof", {
@@ -803,6 +889,9 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentOrchestrationHttpApi)
   .add(EnvironmentPullRequestsHttpApi)
   .add(EnvironmentGrokBotAvatarEngineHttpApi)
+  .add(EnvironmentMuseAgentAvatarHttpApi)
+  .add(EnvironmentMuseAgentComputerPreviewHttpApi)
+  .add(EnvironmentMuseAgentDictationHttpApi)
   .add(EnvironmentProjectsHttpApi)
   .add(EnvironmentConnectHttpApi)
   .add(EnvironmentWebhooksHttpApi) {}

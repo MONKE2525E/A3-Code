@@ -7,6 +7,7 @@ import {
   ProjectNotEmptyError,
   ProjectNotFoundError,
   ProjectOperationError,
+  ProjectProtectedError,
 } from "./ProjectService.ts";
 import { ServerRuntimeStartupError } from "../serverRuntimeStartup.ts";
 import { failProjectMutation } from "./http.ts";
@@ -16,6 +17,9 @@ const projectId = ProjectId.make("project:http-mutation");
 it.effect.each([
   new ProjectNotFoundError({ projectId }),
   new ProjectNotEmptyError({ projectId }),
+  new ProjectProtectedError({ projectId, operation: "delete" }),
+  new ProjectProtectedError({ projectId, operation: "move" }),
+  new ProjectProtectedError({ projectId, operation: "claim" }),
   new ProjectConflictError({
     projectId,
     workspaceRoot: "/workspace/project",

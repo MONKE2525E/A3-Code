@@ -1,3 +1,23 @@
+import * as MuseAgentSessionSource from "./museAgent/MuseAgentSessionSource.ts";
+import * as MuseAgentCredentialInbox from "./museAgent/MuseAgentCredentialInbox.ts";
+import * as MuseAgentTransport from "./museAgent/MuseAgentTransport.ts";
+import * as MuseAgentDeliveryStore from "./museAgent/MuseAgentDeliveryStore.ts";
+import * as MuseAgentNativeRuntimeService from "./museAgent/MuseAgentNativeRuntimeService.ts";
+import * as MuseAgentDirectToolsPort from "./museAgent/MuseAgentDirectToolsPort.ts";
+import * as MuseAgentDirectToolsBroker from "./museAgent/MuseAgentDirectToolsBroker.ts";
+import * as MuseAgentDirectToolsCatalog from "./museAgent/MuseAgentDirectToolsCatalog.ts";
+import * as MuseAgentDirectTools from "./museAgent/MuseAgentDirectTools.ts";
+import * as NativeAgentService from "./nativeAgents/NativeAgentService.ts";
+import * as MuseComputerSocketRoute from "./nativeAgents/MuseComputerSocketRoute.ts";
+import * as MuseAgentFeatureService from "./museAgent/MuseAgentFeatureService.ts";
+import * as MuseAgentConnectorService from "./museAgent/MuseAgentConnectorService.ts";
+import * as MuseAgentComputerService from "./museAgent/MuseAgentComputerService.ts";
+import * as MuseAgentDictation from "./museAgent/MuseAgentDictation.ts";
+import * as NativeAgentMcpAuthority from "./nativeAgents/NativeAgentMcpAuthority.ts";
+import * as HtmlRender from "./htmlRender/HtmlRender.ts";
+import * as OrchestratorMcpService from "./mcp/OrchestratorMcpService.ts";
+import * as ThreadMetadataMcpService from "./mcp/ThreadMetadataMcpService.ts";
+import * as WorktreeMcpService from "./mcp/WorktreeMcpService.ts";
 import * as GrokBotComputerService from "./grokBot/GrokBotComputerService.ts";
 import * as GrokBotNetworkService from "./grokBot/GrokBotNetworkService.ts";
 import * as GrokBotSecretService from "./grokBot/GrokBotSecretService.ts";
@@ -470,6 +490,13 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
 );
 
 const layerServerEnvironment = ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer));
+const layerSharedServerBrowser = ServerBrowser.layer.pipe(
+  Layer.provide(DesktopBrowserChannel.layer),
+  Layer.provide(PreviewManager.layer),
+  Layer.provide(PreviewBrowser.layer),
+  Layer.provide(PreviewAutomationBroker.layer),
+  Layer.provide(layerServerEnvironment),
+);
 
 const layerAuth = EnvironmentAuth.layer.pipe(
   Layer.provideMerge(layerPersistence),
@@ -663,12 +690,33 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
 const layerGrokBotNativeRuntime = GrokBotNativeRuntimeService.layer.pipe(
   Layer.provideMerge(GrokBotNativeService.layer.pipe(Layer.provide(ProcessRunner.layer))),
 );
+const layerMuseAgentNativeRuntime = MuseAgentNativeRuntimeService.layer.pipe(
+  Layer.provideMerge(
+    MuseAgentTransport.layer.pipe(Layer.provideMerge(MuseAgentSessionSource.layer)),
+  ),
+  Layer.provide(
+    MuseAgentDeliveryStore.layer.pipe(
+      Layer.provide(ProviderHostLive.layer),
+      Layer.provide(layerBackground),
+      Layer.provide(ServerSecretStore.layer),
+    ),
+  ),
+  Layer.provideMerge(MuseAgentCredentialInbox.layer),
+  Layer.provideMerge(layerSharedServerBrowser),
+);
 const layerGrokBotManagedState = GrokBotManagedStateStore.layer.pipe(
   Layer.provide(layerPersistence),
 );
 const layerGrokBotMcpAuthority = GrokBotMcpAuthority.layer.pipe(
   Layer.provide(layerGrokBotNativeRuntime),
   Layer.provide(layerGrokBotManagedState),
+  Layer.provide(ProjectionStoreV2.layer.pipe(Layer.provide(layerPersistence))),
+);
+const layerNativeAgentMcpAuthority = NativeAgentMcpAuthority.layer.pipe(
+  Layer.provide(layerGrokBotNativeRuntime),
+  Layer.provide(layerGrokBotManagedState),
+  Layer.provide(layerMuseAgentNativeRuntime),
+  Layer.provide(layerServerSettings),
   Layer.provide(ProjectionStoreV2.layer.pipe(Layer.provide(layerPersistence))),
 );
 const layerGrokBotManagedBinding = GrokBotManagedBindingLive.layer.pipe(
@@ -680,6 +728,8 @@ const layerGrokBotManagedBinding = GrokBotManagedBindingLive.layer.pipe(
 );
 
 const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
+  Layer.provideMerge(layerMuseAgentNativeRuntime),
+  Layer.provideMerge(MuseAgentDirectToolsPort.layer),
   Layer.provideMerge(layerGrokBotManagedBinding),
   Layer.provideMerge(layerGrokBotNativeRuntime),
   Layer.provideMerge(layerPtyAdapter),
@@ -735,18 +785,28 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
   ),
 );
 
-const layerRuntimeDependencies = GrokBotThreadService.layer.pipe(
+const layerRuntimeDependencies = NativeAgentService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      MuseAgentComputerService.layer,
+      MuseAgentConnectorService.layer,
+      MuseAgentDictation.layer.pipe(Layer.provide(ProviderHostLive.layer)),
+    ).pipe(Layer.provide(layerMuseAgentNativeRuntime)),
+  ),
+  Layer.provide(MuseAgentFeatureService.layer.pipe(Layer.provide(layerMuseAgentNativeRuntime))),
+  Layer.provideMerge(GrokBotThreadService.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),
   Layer.provide(ProjectionStoreV2.layer),
   Layer.provideMerge(layerRuntimeCoreDependencies),
-  Layer.provideMerge(GrokBotComputerService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime))),
-  Layer.provideMerge(GrokBotNetworkService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime))),
-  Layer.provideMerge(GrokBotSecretService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime))),
-  Layer.provideMerge(GrokBotRoutineService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime))),
+  // One merged step: `pipe` accepts at most 20 arguments, and each of these only needs the runtime.
   Layer.provideMerge(
-    GrokBotMarketplaceService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime)),
-  ),
-  Layer.provideMerge(
-    GrokBotComposerResourceService.layer.pipe(Layer.provide(layerGrokBotNativeRuntime)),
+    Layer.mergeAll(
+      GrokBotComputerService.layer,
+      GrokBotNetworkService.layer,
+      GrokBotSecretService.layer,
+      GrokBotRoutineService.layer,
+      GrokBotMarketplaceService.layer,
+      GrokBotComposerResourceService.layer,
+    ).pipe(Layer.provide(layerGrokBotNativeRuntime)),
   ),
   // Misc.
   // Usage reads provider history through the ProviderHost, which needs the
@@ -794,6 +854,9 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provide(PullRequestHttp.layer),
       Layer.provide(ProjectHttp.layer),
       Layer.provide(ServerHttp.layerServerEnvironmentHttpApi),
+      Layer.provide(ServerHttp.layerMuseAgentAvatarRoute),
+      Layer.provide(ServerHttp.layerMuseAgentComputerPreviewRoute),
+      Layer.provide(ServerHttp.layerMuseAgentDictationRoute),
       Layer.provide(
         ServerHttp.layerGrokBotAvatarEngineRoute.pipe(Layer.provide(GrokBotAvatarEngine.layer)),
       ),
@@ -805,6 +868,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerHttp.layerAttachmentUploadRoute,
     DeviceHubProxy.layer,
     ServerBrowserStream.routeLayer,
+    MuseComputerSocketRoute.routeLayer,
     ServerHttp.layerStaticAndDevRoute,
     Ws.layer,
   ),
@@ -839,6 +903,17 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),
+  MuseAgentDirectToolsBroker.installLayer.pipe(
+    Layer.provide(
+      MuseAgentDirectTools.layer.pipe(Layer.provide(MuseAgentDirectToolsCatalog.layer)),
+    ),
+    Layer.provide(HtmlRender.layer),
+    Layer.provide(OrchestratorMcpService.layer),
+    Layer.provide(ThreadMetadataMcpService.layer),
+    Layer.provide(WorktreeMcpService.layer),
+    Layer.provide(ThreadCommandExecutor.layer),
+    Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+  ),
 ).pipe(
   // Guides read through the same pull request service as every other surface.
   Layer.provide(
@@ -849,7 +924,7 @@ const layerMakeRoutes = Layer.mergeAll(
   // after the guide service so it reaches that too.
   Layer.provide(layerPullRequestService),
   // The stream route and the WebSocket RPCs share one browser.
-  Layer.provide(ServerBrowser.layer.pipe(Layer.provide(DesktopBrowserChannel.layer))),
+  Layer.provide(layerSharedServerBrowser),
   // Server browser tabs and HTML render previews install and run the same headless browser.
   Layer.provide(PreviewBrowser.layer),
   Layer.provide(PreviewAutomationBroker.layer),
@@ -1225,7 +1300,7 @@ const layerMakeServer = Layer.unwrap(
         McpSessionRegistry.layer.pipe(
           Layer.provide(ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer))),
           Layer.provide(McpRemoteCredentialStore.layer.pipe(Layer.provide(layerPersistence))),
-          Layer.provide(layerGrokBotMcpAuthority),
+          Layer.provide(layerNativeAgentMcpAuthority),
         ),
       ),
       Layer.provide(layerActivation),

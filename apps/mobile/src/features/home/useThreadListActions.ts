@@ -28,7 +28,10 @@ import {
   createThreadMovePlanner,
   threadDropLifecycle,
 } from "../threads/threadOrder";
-import { getThreadListV2OrderedSection } from "../threads/threadListV2";
+import {
+  getThreadListV2OrderedSection,
+  threadListV2AllowsGenericUnsupportedActions,
+} from "../threads/threadListV2";
 import { threadCanArchive } from "./threadArchive";
 import { resolveThreadTitleRename } from "../threads/thread-title-rename";
 
@@ -148,6 +151,16 @@ function useThreadActionExecutor(
           );
           return false;
         }
+        if (
+          (action === "archive" || action === "unarchive" || action === "delete") &&
+          !threadListV2AllowsGenericUnsupportedActions(thread)
+        ) {
+          Alert.alert(
+            actionFailureTitle(action),
+            "Muse conversations cannot use generic archive or delete.",
+          );
+          return false;
+        }
         // Archive keeps its original, narrower guard: never interrupt a
         // thread mid-turn.
         if (action === "archive" && !threadCanArchive(thread.runtime)) {
@@ -214,6 +227,7 @@ function useConfirmDeleteThread(
 ) {
   return useCallback(
     (thread: EnvironmentThreadShell) => {
+      if (!threadListV2AllowsGenericUnsupportedActions(thread)) return;
       if (!checkThreadOperationPermission(thread, actionFailureTitle("delete"))) return;
       const title = "Delete thread?";
       const message = `“${thread.title}” will be permanently deleted, including its terminal history.`;
@@ -281,6 +295,7 @@ export function useThreadListActions(): {
 
   const archiveThread = useCallback(
     (thread: EnvironmentThreadShell) => {
+      if (!threadListV2AllowsGenericUnsupportedActions(thread)) return;
       void executeAction("archive", thread);
     },
     [executeAction],
@@ -493,6 +508,7 @@ export function useThreadListActions(): {
   );
   const regenerateThreadTitle = useCallback(
     async (thread: EnvironmentThreadShell) => {
+      if (!threadListV2AllowsGenericUnsupportedActions(thread)) return false;
       if (!checkThreadOperationPermission(thread, "Could not regenerate title")) return false;
       const key = scopedThreadKey(thread.environmentId, thread.id);
       if (
@@ -535,6 +551,7 @@ export function useThreadListActions(): {
   );
   const renameThread = useCallback(
     (thread: EnvironmentThreadShell) => {
+      if (!threadListV2AllowsGenericUnsupportedActions(thread)) return;
       const commit = (title: string) => {
         const resolution = resolveThreadTitleRename({ title, originalTitle: thread.title });
         if (resolution.action === "reject-empty") {
@@ -784,6 +801,7 @@ export function useArchivedThreadListActions(
   const executeAction = useThreadActionExecutor(handleCompleted);
   const unarchiveThread = useCallback(
     (thread: EnvironmentThreadShell) => {
+      if (!threadListV2AllowsGenericUnsupportedActions(thread)) return;
       void executeAction("unarchive", thread);
     },
     [executeAction],

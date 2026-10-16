@@ -125,4 +125,43 @@ describe("ComposerCommandMenu", () => {
     expect(markup).toContain(">Repo</span>");
     expect(markup).toContain("Find the right skill or workflow");
   });
+
+  it("renders Muse slash skills as prompt replacements, not /skill: paths", () => {
+    const markup = renderToStaticMarkup(
+      <ComposerCommandMenu
+        listId="test-suggestions"
+        items={[
+          {
+            id: "muse-skill:web-search",
+            type: "muse-skill",
+            skill: { name: "web-search", description: "Search the web", category: "tools" },
+            label: "Web Search",
+            description: "Use this Muse skill",
+          },
+          {
+            id: "muse-slash:stop",
+            type: "muse-slash-command",
+            name: "stop",
+            runnable: true,
+            label: "/stop",
+            description: "Stop the current response",
+          },
+        ]}
+        resolvedTheme="dark"
+        isLoading={false}
+        triggerKind="slash-command"
+        activeItemId="muse-skill:web-search"
+        onHighlightedItemChange={() => {}}
+        onSelect={() => {}}
+      />,
+    );
+
+    expect(markup).toContain("Web Search");
+    expect(markup).toContain("/stop");
+    expect(markup).toContain("Stop the current response");
+    expect(markup).not.toContain("/compact");
+    expect(markup).not.toContain("Not wired in T3 yet");
+    expect(markup).not.toContain("/skill:");
+    expect(markup).not.toContain("SKILL.md");
+  });
 });

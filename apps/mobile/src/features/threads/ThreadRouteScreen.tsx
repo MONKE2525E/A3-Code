@@ -86,6 +86,8 @@ import {
   type ThreadInspectorMode,
 } from "./thread-inspector-content-stack";
 import { threadRouteIsHydrating } from "./thread-route-hydration";
+import { guardMuseNativeSend } from "../../lib/museAgentThread";
+import { MuseAgentRouteConnection } from "./MuseAgentRouteConnection";
 import { ThreadHeader } from "./ThreadHeader";
 
 interface ThreadInspectorSelection {
@@ -985,97 +987,114 @@ function ThreadRouteContent(
       />
 
       <ThreadPane>
-        <ThreadDetailScreen
-          canOperateThread={canOperateThread}
-          selectedThread={selectedThreadWithDraftSettings ?? selectedThread}
-          contentPresentation={contentPresentation}
-          screenTone={connectionTone(routeConnectionState)}
-          connectionError={routeConnectionError}
-          environmentLabel={selectedEnvironmentConnection?.environmentLabel ?? null}
-          feedbackSubmissions={composer.feedbackSubmissions}
-          onDismissFeedback={composer.dismissFeedback}
-          selectedThreadFeed={composer.selectedThreadFeed}
-          activityRun={composer.selectedThreadActivityRun}
-          activeWorkStartedAt={
-            creationState?.kind === "preparing" ||
-            (worktreeSetup !== null && setupTurnStartedAt === null)
-              ? null
-              : composer.activeWorkStartedAt
-          }
-          isCompacting={composer.isCompacting}
-          runlessWorkActive={composer.runlessWorkActive}
-          providerSubagentStatus={composer.providerSubagentStatus}
-          creationState={creationState}
-          setupWorkingStartedAt={
-            composer.activeWorkStartedAt !== null &&
-            worktreeSetupSnapshot !== null &&
-            composer.selectedThreadFeed.filter(
-              (entry) => entry.type === "message" && entry.message.role === "user",
-            ).length <= 1
-              ? composer.activeWorkStartedAt
-              : null
-          }
-          worktreeSetup={
-            worktreeSetup
-              ? {
-                  snapshot: worktreeSetup,
-                  turnStartedAt: setupTurnStartedAt,
-                  working: composer.activeWorkStartedAt !== null,
-                  turnStarted: setupTurnStartedAt !== null,
-                  onCancel: handleCancelWorktreeSetup,
-                  onWorkLocally: setupMessage && selectedThreadProject ? handleWorkLocally : null,
-                }
-              : null
-          }
-          activePendingApproval={requests.activePendingApproval}
-          respondingApprovalId={requests.respondingApprovalId}
-          activePendingUserInput={requests.activePendingUserInput}
-          activePendingUserInputDrafts={requests.activePendingUserInputDrafts}
-          activePendingUserInputAnswers={requests.activePendingUserInputAnswers}
-          respondingUserInputId={requests.respondingUserInputId}
-          draftMessage={composer.draftMessage}
-          draftAttachments={composer.draftAttachments}
-          connectionStateLabel={routeConnectionState}
-          threadSyncStatus={selectedThreadDetailState.status}
-          historyControls={historyControls}
-          activeThreadBusy={composer.activeThreadBusy}
-          canStopThread={awaitingBootstrapTurn || composer.interruptibleRunId !== null}
-          queuedRunEdit={composer.queuedRunEdit}
-          composerDraftKey={composer.composerDraftKey}
-          followUpBehavior={composer.followUpBehavior}
-          canSteerActiveTurn={composer.canSteerActiveTurn}
-          isSavingQueuedEdit={composer.isSavingQueuedEdit}
-          onCancelQueuedRunEdit={composer.cancelQueuedRunEdit}
-          onRemoveQueuedEditAttachment={composer.onRemoveQueuedEditAttachment}
+        <MuseAgentRouteConnection
           environmentId={selectedThread.environmentId}
-          projectWorkspaceRoot={selectedThreadProject?.workspaceRoot ?? null}
-          threadCwd={selectedThreadCwd}
-          selectedThreadQueueCount={composer.selectedThreadQueueCount}
-          queuedMessages={composer.selectedThreadQueuedMessages}
-          dispatchingMessageId={composer.dispatchingQueuedMessageId}
-          layoutVariant={layout.variant}
-          usesAutomaticContentInsets={usesNativeHeaderGlass}
-          onOpenConnectionEditor={handleOpenConnectionEditor}
-          onChangeDraftMessage={composer.onChangeDraftMessage}
-          onPickDraftMedia={composer.onPickDraftMedia}
-          onPickDraftFiles={composer.onPickDraftFiles}
-          onNativePasteImages={composer.onNativePasteImages}
-          onNativePasteText={composer.onNativePasteText}
-          onRemoveDraftImage={composer.onRemoveDraftImage}
-          serverConfig={serverConfig}
-          onStopThread={awaitingBootstrapTurn ? handleCancelWorktreeSetup : handleStopThread}
-          onSendMessage={composer.onSendMessage}
-          onReconnectEnvironment={handleReconnectEnvironment}
-          canSwitchThreadProvider={composer.canSwitchThreadProvider}
-          onUpdateThreadModelSelection={composer.onUpdateModelSelection}
-          onUpdateThreadRuntimeMode={composer.onUpdateRuntimeMode}
-          onUpdateThreadInteractionMode={composer.onUpdateInteractionMode}
-          onRespondToApproval={requests.onRespondToApproval}
-          onSelectUserInputOption={requests.onSelectUserInputOption}
-          onChangeUserInputCustomAnswer={requests.onChangeUserInputCustomAnswer}
-          onSubmitUserInput={requests.onSubmitUserInput}
-          onDismissUserInput={requests.onDismissUserInput}
-        />
+          threadId={selectedThread.id}
+          providerInstanceId={selectedThread.providerInstanceId}
+          connected={routeConnectionState === "connected"}
+          hasMessages={composer.selectedThreadFeed.length > 0}
+          providers={serverConfig?.providers ?? null}
+        >
+          {(museAttach) => (
+            <ThreadDetailScreen
+              canOperateThread={canOperateThread}
+              selectedThread={selectedThreadWithDraftSettings ?? selectedThread}
+              contentPresentation={contentPresentation}
+              screenTone={connectionTone(routeConnectionState)}
+              connectionError={routeConnectionError}
+              environmentLabel={selectedEnvironmentConnection?.environmentLabel ?? null}
+              feedbackSubmissions={composer.feedbackSubmissions}
+              onDismissFeedback={composer.dismissFeedback}
+              selectedThreadFeed={composer.selectedThreadFeed}
+              activityRun={composer.selectedThreadActivityRun}
+              activeWorkStartedAt={
+                creationState?.kind === "preparing" ||
+                (worktreeSetup !== null && setupTurnStartedAt === null)
+                  ? null
+                  : composer.activeWorkStartedAt
+              }
+              isCompacting={composer.isCompacting}
+              runlessWorkActive={composer.runlessWorkActive}
+              providerSubagentStatus={composer.providerSubagentStatus}
+              creationState={creationState}
+              setupWorkingStartedAt={
+                composer.activeWorkStartedAt !== null &&
+                worktreeSetupSnapshot !== null &&
+                composer.selectedThreadFeed.filter(
+                  (entry) => entry.type === "message" && entry.message.role === "user",
+                ).length <= 1
+                  ? composer.activeWorkStartedAt
+                  : null
+              }
+              worktreeSetup={
+                worktreeSetup
+                  ? {
+                      snapshot: worktreeSetup,
+                      turnStartedAt: setupTurnStartedAt,
+                      working: composer.activeWorkStartedAt !== null,
+                      turnStarted: setupTurnStartedAt !== null,
+                      onCancel: handleCancelWorktreeSetup,
+                      onWorkLocally:
+                        setupMessage && selectedThreadProject ? handleWorkLocally : null,
+                    }
+                  : null
+              }
+              activePendingApproval={requests.activePendingApproval}
+              respondingApprovalId={requests.respondingApprovalId}
+              activePendingUserInput={requests.activePendingUserInput}
+              activePendingUserInputDrafts={requests.activePendingUserInputDrafts}
+              activePendingUserInputAnswers={requests.activePendingUserInputAnswers}
+              respondingUserInputId={requests.respondingUserInputId}
+              draftMessage={composer.draftMessage}
+              draftAttachments={composer.draftAttachments}
+              connectionStateLabel={routeConnectionState}
+              threadSyncStatus={selectedThreadDetailState.status}
+              historyControls={historyControls}
+              activeThreadBusy={composer.activeThreadBusy}
+              canStopThread={awaitingBootstrapTurn || composer.interruptibleRunId !== null}
+              queuedRunEdit={composer.queuedRunEdit}
+              composerDraftKey={composer.composerDraftKey}
+              followUpBehavior={composer.followUpBehavior}
+              canSteerActiveTurn={composer.canSteerActiveTurn}
+              isSavingQueuedEdit={composer.isSavingQueuedEdit}
+              onCancelQueuedRunEdit={composer.cancelQueuedRunEdit}
+              onRemoveQueuedEditAttachment={composer.onRemoveQueuedEditAttachment}
+              environmentId={selectedThread.environmentId}
+              projectWorkspaceRoot={selectedThreadProject?.workspaceRoot ?? null}
+              threadCwd={selectedThreadCwd}
+              selectedThreadQueueCount={composer.selectedThreadQueueCount}
+              queuedMessages={composer.selectedThreadQueuedMessages}
+              dispatchingMessageId={composer.dispatchingQueuedMessageId}
+              layoutVariant={layout.variant}
+              usesAutomaticContentInsets={usesNativeHeaderGlass}
+              onOpenConnectionEditor={handleOpenConnectionEditor}
+              onChangeDraftMessage={composer.onChangeDraftMessage}
+              onPickDraftMedia={composer.onPickDraftMedia}
+              onPickDraftFiles={composer.onPickDraftFiles}
+              onNativePasteImages={composer.onNativePasteImages}
+              onNativePasteText={composer.onNativePasteText}
+              onRemoveDraftImage={composer.onRemoveDraftImage}
+              serverConfig={serverConfig}
+              onStopThread={awaitingBootstrapTurn ? handleCancelWorktreeSetup : handleStopThread}
+              composerSendBlockedReason={museAttach.sendBlockedReason}
+              onSendMessage={(followUp) =>
+                guardMuseNativeSend(museAttach.sendBlockedReason, () =>
+                  composer.onSendMessage(followUp),
+                )
+              }
+              onReconnectEnvironment={handleReconnectEnvironment}
+              canSwitchThreadProvider={composer.canSwitchThreadProvider}
+              onUpdateThreadModelSelection={composer.onUpdateModelSelection}
+              onUpdateThreadRuntimeMode={composer.onUpdateRuntimeMode}
+              onUpdateThreadInteractionMode={composer.onUpdateInteractionMode}
+              onRespondToApproval={requests.onRespondToApproval}
+              onSelectUserInputOption={requests.onSelectUserInputOption}
+              onChangeUserInputCustomAnswer={requests.onChangeUserInputCustomAnswer}
+              onSubmitUserInput={requests.onSubmitUserInput}
+              onDismissUserInput={requests.onDismissUserInput}
+            />
+          )}
+        </MuseAgentRouteConnection>
       </ThreadPane>
     </>
   );

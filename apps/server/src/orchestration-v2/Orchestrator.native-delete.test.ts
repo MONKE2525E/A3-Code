@@ -1,0 +1,191 @@
+import { assert, it } from "@effect/vitest";
+import { CommandId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NativeAgents from "../nativeAgents/NativeAgentService.ts";
+import * as Native from "../museAgent/MuseAgentNativeRuntimeService.ts";
+import * as Transport from "../museAgent/MuseAgentTransport.ts";
+import * as Features from "../museAgent/MuseAgentFeatureService.ts";
+import * as Connectors from "../museAgent/MuseAgentConnectorService.ts";
+import * as Computer from "../museAgent/MuseAgentComputerService.ts";
+import * as Dictation from "../museAgent/MuseAgentDictation.ts";
+import * as Grok from "../grokBot/GrokBotThreadService.ts";
+import * as Settings from "../serverSettings.ts";
+import * as Providers from "../provider/ProviderRegistry.ts";
+import * as Mutator from "../provider/ProviderInstanceRegistryMutator.ts";
+import * as Folders from "../project/ManagedProjectFolders.ts";
+import * as Projects from "./ProjectStore.ts";
+import * as Sessions from "./ProviderSessionManager.ts";
+import { museThreadIdentity, museThreadIdForSession } from "../museAgent/MuseAgentThreadIds.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import { dispatchFailure } from "../mcp/threadAccess.ts";
+import * as Orchestrator from "./Orchestrator.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
+import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
+import { userFacingDispatchErrorMessage } from "./UserFacingErrors.ts";
+
+const database = SqlitePersistence.layerMemory;
+const layer = Layer.mergeAll(
+  ProjectionStore.layer.pipe(Layer.provide(database)),
+  ProviderReplayHarness.layerWithRegistry(
+    { name: "native-delete" },
+    ProviderAdapterRegistry.layerFromAdapters([]),
+    { databaseLayer: database, runEffectWorker: false },
+  ),
+);
+
+const createThread = (threadId: ThreadId) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make(`create:${threadId}`),
+      threadId,
+      projectId: ProjectId.make("project:native-delete"),
+      title: "Conversation",
+      modelSelection: { instanceId: ProviderInstanceId.make("muse-agent"), model: "muse" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+  });
+
+it.effect.each([
+  `muse-agent:${"a".repeat(64)}`,
+  `muse-agent:${"a".repeat(64)}:side%3Achat`,
+  "muse-agent:saved-hash",
+])("rejects generic deletion of %s without changing its canonical shell", (id) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make(id);
+    yield* createThread(threadId);
+    const before = yield* projections.getThreadProjection(threadId);
+    const shellBefore = yield* orchestrator.getShellSnapshot();
+    const command = {
+      type: "thread.delete" as const,
+      commandId: CommandId.make(`delete:${threadId}`),
+      threadId,
+    };
+    const error = yield* Effect.flip(orchestrator.dispatch(command));
+    assert.equal(error._tag, "OrchestratorCommandRejectedError");
+    assert.equal(
+      dispatchFailure(error).message,
+      "Muse conversations cannot be deleted through generic thread commands. Use Muse's archive controls instead.",
+    );
+    assert.equal(userFacingDispatchErrorMessage(error), dispatchFailure(error).message);
+    assert.deepEqual(yield* projections.getThreadProjection(threadId), before);
+    assert.deepEqual(yield* orchestrator.getShellSnapshot(), shellBefore);
+    const replay = yield* Effect.flip(orchestrator.dispatch(command));
+    assert.equal(replay._tag, "OrchestratorCommandPreviouslyRejectedError");
+    assert.isNull((yield* projections.getThread(threadId)).deletedAt);
+    yield* orchestrator.dispatch({
+      type: "thread.archive",
+      commandId: CommandId.make(`archive:${threadId}`),
+      threadId,
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.unarchive",
+      commandId: CommandId.make(`unarchive:${threadId}`),
+      threadId,
+    });
+    const restored = yield* projections.getThread(threadId);
+    assert.isNull(restored.deletedAt);
+    assert.isNull(restored.archivedAt);
+    assert.deepEqual(restored.modelSelection, before.thread.modelSelection);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each(["thread:ordinary", "grok-bot:saved-hash"])(
+  "allows deletion of %s, preserving ordinary deletion and Grok owner cleanup",
+  (id) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = ThreadId.make(id);
+      yield* createThread(threadId);
+      const deleted = yield* orchestrator.dispatch({
+        type: "thread.delete",
+        commandId: CommandId.make("delete:ordinary"),
+        threadId,
+      });
+      assert.isTrue(deleted.storedEvents.some((stored) => stored.event.type === "thread.deleted"));
+      assert.isNotNull((yield* projections.getThread(threadId)).deletedAt);
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect("native Muse open still reopens the canonical conversation after rejected deletion", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const instanceId = ProviderInstanceId.make("muse-agent");
+    const binding = "a".repeat(64);
+    const threadId = ThreadId.make(museThreadIdForSession(museThreadIdentity(binding, instanceId)));
+    yield* createThread(threadId);
+    const service = yield* NativeAgents.NativeAgentService.pipe(
+      Effect.provide(
+        NativeAgents.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(Orchestrator.OrchestratorV2, orchestrator),
+              Layer.succeed(ProjectionStore.ProjectionStoreV2, projections),
+              Layer.mock(Native.MuseAgentNativeRuntimeService)({
+                accountBinding: Effect.succeed(binding),
+                resolveSession: () =>
+                  Effect.succeed({
+                    session_id: "primary",
+                    status: "idle",
+                    is_primary: true,
+                    is_thread: false,
+                  }),
+              }),
+              Settings.layerTest({
+                providerInstances: {
+                  [instanceId]: {
+                    driver: "muse-agent",
+                    enabled: true,
+                    config: { accountBinding: binding },
+                  },
+                },
+              }),
+              Layer.mock(Projects.ProjectStoreV2)({ get: () => Effect.succeedNone }),
+              Layer.mock(Transport.MuseAgentTransport)({}),
+              Layer.mock(Features.MuseAgentFeatureService)({}),
+              Layer.mock(Connectors.MuseAgentConnectorService)({}),
+              Layer.mock(Computer.MuseAgentComputerService)({}),
+              Layer.mock(Dictation.MuseAgentDictation)({}),
+              Layer.mock(Grok.GrokBotThreadService)({}),
+              Layer.mock(Providers.ProviderRegistry)({}),
+              Layer.mock(Mutator.ProviderInstanceRegistryMutator)({}),
+              Layer.mock(Folders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
+              Layer.mock(Sessions.ProviderSessionManagerV2)({}),
+              NodeCrypto.layer,
+            ),
+          ),
+        ),
+      ),
+    );
+    const reference = {
+      source: "muse-agent" as const,
+      providerInstanceId: instanceId,
+      agentId: "muse",
+    };
+    const opened = yield* service.open(reference);
+    assert.equal(opened.threadId, threadId);
+    const rejected = yield* Effect.flip(
+      orchestrator.dispatch({
+        type: "thread.delete",
+        commandId: CommandId.make("native-open:delete"),
+        threadId,
+      }),
+    );
+    assert.equal(rejected._tag, "OrchestratorCommandRejectedError");
+    assert.deepEqual(yield* service.open(reference), opened);
+    assert.isNull((yield* projections.getThread(threadId)).deletedAt);
+  }).pipe(Effect.provide(layer)),
+);

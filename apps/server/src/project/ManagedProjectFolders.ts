@@ -30,6 +30,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import * as ServerConfig from "../config.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
@@ -104,6 +105,11 @@ export class ManagedProjectFolders extends Context.Service<
     readonly scratchRoot: Effect.Effect<Option.Option<string>>;
     /** Finds or creates the Scratch project and (re)creates its folder. */
     readonly ensureScratchProject: Effect.Effect<{ readonly projectId: ProjectId }, ScratchError>;
+    /** Native agents need storage even when Scratch is unavailable inside a checkout. */
+    readonly ensureNativeAgentProject: Effect.Effect<
+      { readonly projectId: ProjectId },
+      ScratchFolderError | ScratchProjectError
+    >;
     /**
      * Claims a fresh folder for a new thread in the Scratch project, named from
      * the date, its first message, and its id. None for every other project.
@@ -345,6 +351,47 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const nativeStorageLock = yield* Semaphore.make(1);
+  const ensureNativeAgentProject = Effect.gen(function* () {
+    const workspaceRoot = path.resolve(config.baseDir, "native-agents");
+    yield* makeScratchFolder(workspaceRoot);
+    // A nested repository prevents tools from inheriting the host checkout.
+    yield* git
+      .execute({
+        operation: "ManagedProjectFolders.nativeAgents",
+        cwd: workspaceRoot,
+        args: ["init", "--quiet"],
+        timeoutMs: 10_000,
+      })
+      .pipe(
+        Effect.catchIf(
+          (error) =>
+            PlatformError.isPlatformError(error.cause) && error.cause.reason._tag === "NotFound",
+          () => Effect.void,
+        ),
+        Effect.mapError((cause) => new ScratchFolderError({ folder: workspaceRoot, cause })),
+      );
+    const id = yield* crypto.randomUUIDv4.pipe(
+      Effect.mapError((cause) => new ScratchProjectError({ workspaceRoot, cause })),
+    );
+    const result = yield* projects
+      .bootstrapNativeAgentProject({
+        commandId: CommandId.make(`native-agent-project:${id}`),
+        projectId: ProjectId.make(id),
+      })
+      .pipe(
+        Effect.catchTags({
+          ProjectConflictError: (conflict) =>
+            Effect.succeed({
+              project: { id: conflict.conflictingProjectId },
+              created: false,
+            }),
+        }),
+        Effect.mapError((cause) => new ScratchProjectError({ workspaceRoot, cause })),
+      );
+    return { projectId: result.project.id };
+  }).pipe(nativeStorageLock.withPermit);
+
   const isScratchProject = (projectId: ProjectId, root: string) =>
     projects.getById(projectId).pipe(
       Effect.map(
@@ -518,6 +565,7 @@ const make = Effect.gen(function* () {
   return ManagedProjectFolders.of({
     scratchRoot,
     ensureScratchProject,
+    ensureNativeAgentProject,
     folderForThread,
     namedProjectsRoot,
     createNamedProject,

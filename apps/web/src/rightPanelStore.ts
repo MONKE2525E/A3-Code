@@ -28,6 +28,7 @@ const RIGHT_PANEL_KINDS = [
   "preview",
   "device",
   "grok-computer",
+  "muse-features",
   "terminal",
   "pull-request",
   "pull-requests",
@@ -43,6 +44,7 @@ export interface DeviceTabTarget {
 
 export type RightPanelSurface =
   | { id: "grok-computer"; kind: "grok-computer" }
+  | { id: "muse-features"; kind: "muse-features" }
   | { id: `browser:${string}`; kind: "preview"; resourceId: string }
   | { id: "browser:new"; kind: "preview"; resourceId: null }
   | { id: "device" | `device:${string}`; kind: "device"; target?: DeviceTabTarget; title?: string }
@@ -227,6 +229,8 @@ const singletonSurface = (
       return { id: "pull-requests", kind };
     case "grok-computer":
       return { id: "grok-computer", kind };
+    case "muse-features":
+      return { id: "muse-features", kind };
     case "device":
       return { id: "device", kind };
   }
@@ -358,6 +362,31 @@ type RightPanelStoreData = Pick<
   "byThreadKey" | "threadPanelVisibilityByThreadKey"
 >;
 
+const leaveGuards = new Map<
+  string,
+  {
+    surfaceId: string;
+    request: (proceed: () => void) => void;
+    bypass: boolean;
+    shouldBlock: () => boolean;
+  }
+>();
+
+/** A mounted editor guards every store action that would hide or remove its surface. */
+export function registerRightPanelLeaveGuard(
+  ref: ScopedThreadRef,
+  surfaceId: string,
+  request: (proceed: () => void) => void,
+  shouldBlock: () => boolean,
+) {
+  const key = scopedThreadKey(ref);
+  const guard = { surfaceId, request, shouldBlock, bypass: false };
+  leaveGuards.set(key, guard);
+  return () => {
+    if (leaveGuards.get(key) === guard) leaveGuards.delete(key);
+  };
+}
+
 /**
  * Applies a real right-panel mutation and its thread-panel transition atomically.
  * This is the only path real panel actions use, so visibility never has to be
@@ -371,6 +400,36 @@ const updateThread = (
   const current = state.byThreadKey[threadKey] ?? EMPTY_THREAD_STATE;
   const byThreadKey = updateThreadStateMap(state.byThreadKey, threadKey, updater);
   const next = byThreadKey[threadKey] ?? EMPTY_THREAD_STATE;
+  const guard = leaveGuards.get(threadKey);
+  if (
+    guard &&
+    !guard.bypass &&
+    guard.shouldBlock() &&
+    current.isOpen &&
+    current.activeSurfaceId === guard.surfaceId &&
+    (!next.isOpen ||
+      next.activeSurfaceId !== guard.surfaceId ||
+      !next.surfaces.some((surface) => surface.id === guard.surfaceId))
+  ) {
+    guard.request(() => {
+      if (leaveGuards.get(threadKey) !== guard) return;
+      guard.bypass = true;
+      try {
+        useRightPanelStore.setState((latest) =>
+          userAction(
+            latest,
+            threadKey,
+            updater,
+            !next.isOpen || next.surfaces.length < current.surfaces.length,
+          ),
+        );
+      } finally {
+        guard.bypass = false;
+      }
+    });
+    return state;
+  }
+
   let threadPanelVisibilityByThreadKey = state.threadPanelVisibilityByThreadKey;
 
   if (!current.isOpen && next.isOpen) {
@@ -409,8 +468,8 @@ const userAction = (
   threadKey: string,
   updater: (current: ThreadRightPanelState) => ThreadRightPanelState,
   closesView = false,
-): Partial<RightPanelStoreState> => ({
-  ...updateThread(state, threadKey, (current) => {
+): Partial<RightPanelStoreState> => {
+  const updated = updateThread(state, threadKey, (current) => {
     const next = updater(current);
     if (next === current) return current;
     const removedDevices = current.surfaces.filter(
@@ -427,20 +486,24 @@ const userAction = (
         ]),
       ],
     };
-  }),
-  userActionRevisionByThreadKey: {
-    ...state.userActionRevisionByThreadKey,
-    [threadKey]: (state.userActionRevisionByThreadKey[threadKey] ?? 0) + 1,
-  },
-  ...(closesView
-    ? {
-        closeRevisionByThreadKey: {
-          ...state.closeRevisionByThreadKey,
-          [threadKey]: (state.closeRevisionByThreadKey[threadKey] ?? 0) + 1,
-        },
-      }
-    : {}),
-});
+  });
+  if (updated === state) return state;
+  return {
+    ...updated,
+    userActionRevisionByThreadKey: {
+      ...state.userActionRevisionByThreadKey,
+      [threadKey]: (state.userActionRevisionByThreadKey[threadKey] ?? 0) + 1,
+    },
+    ...(closesView
+      ? {
+          closeRevisionByThreadKey: {
+            ...state.closeRevisionByThreadKey,
+            [threadKey]: (state.closeRevisionByThreadKey[threadKey] ?? 0) + 1,
+          },
+        }
+      : {}),
+  };
+};
 
 const closeAction = (
   state: RightPanelStoreState,

@@ -13,10 +13,11 @@ and installs `grok-bot-cli` inside this T3 instance's home.
 When connecting remotely, the Grok Bot desktop session must be on the server's
 computer.
 
-Open a bot from the collapsible **Grok Bots** section under the search field.
+Open a bot from the collapsible **AI Agents** section under the search field,
+which also lists Muse when it is installed and signed in; see [AI Agents](./ai-agents.md).
 Bots use persistent conversations in **No project**. Their backing threads stay
 out of ordinary thread lists. Global search includes their conversations;
-open a matching result or choose a bot through **Grok Bots**. Pinned bots show as
+open a matching result or choose a bot through **AI Agents**. Pinned bots show as
 tiles at the top; pin or hide a bot from its **...** menu. Bots you pinned in the
 Grok Bot desktop app start out pinned. The star marks your main bot and is not
 editable here. Look, name, role, instructions, notification, and visibility
@@ -57,10 +58,10 @@ reason and next step. Approve delegated work in T3 when it asks.
 
 Ask a full-access T3 agent to call `grok_bot_orchestrator_setup`. T3 enables the
 native Grok Bot connection for the account selected in the Grok Bot app.
-Open bots through **Grok Bots**; ordinary coding threads use coding providers.
+Open bots through **AI Agents**; ordinary coding threads use coding providers.
 Repeating setup refreshes the catalog and keeps the same account binding.
 
-Open the bot from **Grok Bots** and name the project where you want its agents
+Open the bot from **AI Agents** and name the project where you want its agents
 to work. The bot stays in **No project**. Its run can track and cancel delegated
 tasks and receive their completion through Orchestrator V2. Agents launched
 into a project use that project's normal threads and pull request controls.

@@ -64,8 +64,9 @@ export class ProviderTurnStartError extends Schema.TaggedError<ProviderTurnStart
 
 const isProviderTurnStartError = Schema.is(ProviderTurnStartError);
 
-/** Claude refuses to replace a process running background work before it reads the prompt. */
+/** Restore inline handoffs when the adapter proves admission was never attempted. */
 const refusedBeforePrompt = (error: unknown): boolean =>
+  Predicate.isTagged(error, "ProviderPromptNotSubmittedError") ||
   Predicate.isTagged(error, "ClaudeBackgroundWorkBlocksQueryReplacementError") ||
   (Predicate.hasProperty(error, "cause") && refusedBeforePrompt(error.cause));
 

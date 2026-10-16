@@ -9,6 +9,7 @@ import {
   RunAttemptId,
   RunId,
   RuntimeRequestId,
+  nativeAgentSourceForThread,
   type ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -426,15 +427,60 @@ const layerBase: Layer.Layer<
     const normalizeEvents = (input: ReadonlyArray<OrchestrationV2DomainEvent>) =>
       Effect.gen(function* () {
         const events = yield* retainManagedAnswers(input);
+        const managedMessages = new Set<string>();
+        const managedItems = new Set<string>();
+        const retained: OrchestrationV2DomainEvent[] = [];
+        // Observer frames may already be queued when a sibling turn commits ownership.
+        // Fence downgrades in this transaction, before either storage or live publication.
+        for (const event of events) {
+          if (nativeAgentSourceForThread({ id: event.threadId }) === "muse-agent") {
+            if (event.type === "message.updated") {
+              if (event.payload.runId !== null) managedMessages.add(event.payload.id);
+              else {
+                if (managedMessages.has(event.payload.id)) continue;
+                const owned = yield* projectionStore
+                  .getThreadRecords(event.threadId, ["messages"], {
+                    messageIds: [event.payload.id],
+                  })
+                  .pipe(
+                    Effect.map((records) =>
+                      records.messages.some((message) => message.runId !== null),
+                    ),
+                    Effect.catchTags({
+                      ProjectionStoreThreadNotFoundError: () => Effect.succeed(false),
+                    }),
+                  );
+                if (owned) {
+                  managedMessages.add(event.payload.id);
+                  continue;
+                }
+              }
+            } else if (event.type === "turn-item.updated") {
+              if (event.payload.runId !== null) managedItems.add(event.payload.id);
+              else {
+                if (managedItems.has(event.payload.id)) continue;
+                const saved = yield* projectionStore.getTurnItem({
+                  threadId: event.threadId,
+                  itemId: event.payload.id,
+                });
+                if (saved !== null && saved.runId !== null) {
+                  managedItems.add(event.payload.id);
+                  continue;
+                }
+              }
+            }
+          }
+          retained.push(event);
+        }
         const runOrdinals = new Map(
-          events.flatMap((event) =>
+          retained.flatMap((event) =>
             event.type === "run.created" || event.type === "run.updated"
               ? [[event.payload.id, event.payload.ordinal] as const]
               : [],
           ),
         );
         return yield* Effect.forEach(
-          events,
+          retained,
           (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
             event.type === "turn-item.updated"
               ? turnItemPositions

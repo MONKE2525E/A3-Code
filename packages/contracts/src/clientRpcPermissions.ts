@@ -3,15 +3,23 @@ import { GitPreparePullRequestThreadInput } from "./git.ts";
 import { GrokBotOrchestratorInput } from "./grokBotOrchestrator.ts";
 import {
   AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  AuthPreviewOperateScope,
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
   type AuthEnvironmentScope,
 } from "./auth.ts";
 import { ORCHESTRATION_V2_WS_METHODS } from "./orchestrationV2.ts";
 import { WS_METHODS } from "./rpc.ts";
+import { NativeAgentFeatureUpdateInput } from "./nativeAgentApi.ts";
 
 /** Incremental client enforcement; the server still authorizes every request. */
 export const CLIENT_GUARDED_RPC_SCOPES = {
+  [WS_METHODS.museAgentsSetup]: AuthSettingsWriteScope,
+  [WS_METHODS.museAgentsSignIn]: AuthSettingsWriteScope,
+  [WS_METHODS.museAgentsFeatureUpdate]: AuthOrchestrationOperateScope,
+  [WS_METHODS.museAgentsOpenThread]: AuthOrchestrationOperateScope,
+  [WS_METHODS.nativeAgentsOpenThread]: AuthOrchestrationOperateScope,
   [WS_METHODS.grokBotsSetup]: AuthSettingsWriteScope,
   [WS_METHODS.grokBotsCreate]: AuthSettingsWriteScope,
   [WS_METHODS.grokBotsImportMarketplaceTemplate]: AuthSettingsWriteScope,
@@ -82,6 +90,32 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 
+// Availability checks need only the operation; the RPC schema validates the full payload.
+const decodeNativeFeatureUpdate = Schema.decodeUnknownSync(
+  Schema.Struct({
+    operation: Schema.Union(
+      NativeAgentFeatureUpdateInput.members.map((member) => member.fields.operation),
+    ),
+  }),
+);
+
+const museFeatureUpdateScopes = {
+  connector_auth: AuthSettingsWriteScope,
+  connector_link: AuthSettingsWriteScope,
+  connector_scope_link: AuthSettingsWriteScope,
+  connector_disconnect: AuthSettingsWriteScope,
+  connector_unlink: AuthSettingsWriteScope,
+  profile_save: AuthSettingsWriteScope,
+  profile_set_theme: AuthSettingsWriteScope,
+  credential_submit: AuthOrchestrationOperateScope,
+  history_page: AuthOrchestrationOperateScope,
+  computer_action: AuthOrchestrationOperateScope,
+  delivery_release: AuthOrchestrationOperateScope,
+  task_delete: AuthOrchestrationOperateScope,
+  session_rename: AuthOrchestrationOperateScope,
+  session_archive: AuthOrchestrationOperateScope,
+} satisfies Record<typeof NativeAgentFeatureUpdateInput.Type.operation, AuthEnvironmentScope>;
+
 const decodePrepareThread = Schema.decodeUnknownSync(GitPreparePullRequestThreadInput);
 const decodeBotOrchestrator = Schema.decodeUnknownSync(GrokBotOrchestratorInput);
 
@@ -89,6 +123,10 @@ export function clientRpcRequiredScopes(
   method: string,
   input: unknown,
 ): readonly AuthEnvironmentScope[] {
+  if (method === WS_METHODS.museAgentsFeatureUpdate && input !== undefined)
+    return [museFeatureUpdateScopes[decodeNativeFeatureUpdate(input).operation]];
+  if (method === WS_METHODS.museAgentsSignIn)
+    return [AuthSettingsWriteScope, AuthOrchestrationReadScope, AuthPreviewOperateScope];
   // Status is a read. Only explicit setup changes the environment's provider.
   // An omitted input still asks for write availability on the setup command.
   if (method === WS_METHODS.grokBotsOrchestratorConfig && input !== undefined) {

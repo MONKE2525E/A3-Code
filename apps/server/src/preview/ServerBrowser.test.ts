@@ -18,6 +18,8 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
+import * as Scope from "effect/Scope";
+import * as Exit from "effect/Exit";
 import * as Stream from "effect/Stream";
 import type { BrowserContext, Page } from "playwright-core";
 import { beforeEach, expect, vi } from "vite-plus/test";
@@ -28,6 +30,7 @@ import * as Broker from "../mcp/PreviewAutomationBroker.ts";
 import * as DesktopChannel from "./DesktopBrowserChannel.ts";
 import * as Manager from "./Manager.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
+import * as IntegrationBrowser from "./IntegrationBrowser.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 
 // Keep the manager, broker, ownership, refs, and viewer paths real; replace Chromium I/O only.
@@ -1565,6 +1568,264 @@ it.live("a desktop page that comes back reconnects without waiting for a viewer"
       // Without a viewer or agent, the server drives the page again, so its URL keeps reaching clients.
       while (desktopConnections.length < 2) yield* Effect.yieldNow;
       expect(desktopConnections).toHaveLength(2);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("agents cannot open the private integration profile by id, alias or default", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      yield* Effect.yieldNow;
+      yield* browser.reportProfiles({
+        profiles: [{ id: "integration-muse-auth", name: "Muse sign-in", kind: "persistent" }],
+        defaultProfileId: "integration-muse-auth",
+      });
+      for (const profileId of [undefined, "integration-muse-auth", "Muse sign-in"]) {
+        const failure = yield* broker
+          .invoke<PreviewAutomationStatus>({
+            scope,
+            operation: "open",
+            input: {
+              reuseExistingTab: false,
+              show: false,
+              ...(profileId === undefined ? {} : { profileId }),
+            },
+          })
+          .pipe(Effect.flip);
+        expect(failure).toMatchObject({
+          _tag: "PreviewAutomationControlInterruptedError",
+          reason: "interrupted",
+        });
+      }
+      expect(contextRequests).toEqual([]);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live(
+  "keeps sign-in pages out of public listings and restricts streams and files to their creator",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const browser = yield* ServerBrowser.ServerBrowser;
+        const integration = yield* IntegrationBrowser.IntegrationBrowser;
+        const broker = yield* Broker.PreviewAutomationBroker;
+        const focus = vi.spyOn(broker, "focusHost");
+        yield* Effect.addFinalizer(() => Effect.sync(() => focus.mockRestore()));
+        const publicManager = yield* Manager.PreviewManager;
+        const events = yield* publicManager.subscribeEvents;
+        const creator = yield* integration.museSignInOwner("creator-session", yield* Scope.Scope);
+        const signIn = yield* creator.open;
+        expect(
+          (yield* publicManager.list({ threadId: ThreadId.make(signIn.threadId) })).sessions,
+        ).toEqual([]);
+        expect(
+          (yield* publicManager.list({
+            threadId: ThreadId.make(IntegrationBrowser.MUSE_AUTH_THREAD),
+          })).sessions,
+        ).toEqual([]);
+        expect(yield* PubSub.takeUpTo(events, 100)).toEqual([]);
+
+        for (const authSessionId of [undefined, "other-read-session", "other-operate-session"]) {
+          const input = {
+            ...viewerInput(signIn.tabId, true),
+            threadId: signIn.threadId,
+            ...(authSessionId === undefined ? {} : { authSessionId }),
+          };
+          expect((yield* browser.attachViewer(input).pipe(Effect.flip))._tag).toBe(
+            "ServerBrowserTabNotFoundError",
+          );
+          expect(yield* browser.openDownload({ ...input, downloadId: "anything" })).toEqual(
+            Option.none(),
+          );
+          expect(
+            yield* browser.answerFileChooser({ ...input, chooserId: "anything", files: [] }),
+          ).toBe(false);
+        }
+        const viewer = yield* browser.attachViewer({
+          ...viewerInput(signIn.tabId, true),
+          threadId: signIn.threadId,
+          authSessionId: "creator-session",
+        });
+        expect((yield* Queue.take(viewer.output))._tag).toBe("control");
+        yield* viewer.input({ type: "takeControl" });
+        const page = contexts[0]!.page;
+        const setFiles = vi.fn(async (_files: unknown) => {});
+        page.emit("filechooser", {
+          isMultiple: () => false,
+          element: () => ({ getAttribute: async () => ".txt" }),
+          setFiles,
+        });
+        let picker = yield* Queue.take(viewer.output);
+        while (picker._tag !== "fileChooser") picker = yield* Queue.take(viewer.output);
+        const upload = { ...signIn, chooserId: picker.id, files: [] };
+        expect(
+          yield* browser.answerFileChooser({ ...upload, authSessionId: "other-operate-session" }),
+        ).toBe(false);
+        expect(setFiles).not.toHaveBeenCalled();
+        expect(
+          yield* browser.answerFileChooser({ ...upload, authSessionId: "creator-session" }),
+        ).toBe(true);
+        const saved = yield* Queue.unbounded<string>();
+        const written = Promise.withResolvers<void>();
+        page.emit("download", {
+          failure: async () => null,
+          saveAs: (path: string) => {
+            Queue.offerUnsafe(saved, path);
+            return written.promise;
+          },
+          suggestedFilename: () => "synthetic-private.txt",
+          url: () => "https://muse.ai/synthetic-download",
+        });
+        const fs = yield* FileSystem.FileSystem;
+        yield* fs.writeFileString(yield* Queue.take(saved), "synthetic-private-file");
+        written.resolve();
+        let download = yield* Queue.take(viewer.output);
+        while (download._tag !== "download") download = yield* Queue.take(viewer.output);
+        const request = { ...signIn, downloadId: download.id };
+        expect(
+          yield* browser.openDownload({ ...request, authSessionId: "other-read-session" }),
+        ).toEqual(Option.none());
+        expect(
+          Option.isSome(
+            yield* browser.openDownload({ ...request, authSessionId: "creator-session" }),
+          ),
+        ).toBe(true);
+        const anotherOwner = yield* integration.museSignInOwner(
+          "another-creator",
+          yield* Scope.Scope,
+        );
+        const another = yield* anotherOwner.open;
+        expect(another.threadId).not.toBe(signIn.threadId);
+        expect(
+          (yield* browser
+            .attachViewer({
+              ...viewerInput(another.tabId, true),
+              threadId: another.threadId,
+              authSessionId: "creator-session",
+            })
+            .pipe(Effect.flip))._tag,
+        ).toBe("ServerBrowserTabNotFoundError");
+        expect(
+          (yield* browser.clearProfile(IntegrationBrowser.MUSE_AUTH_PROFILE).pipe(Effect.flip))
+            ._tag,
+        ).toBe("PreviewClearProfileError");
+        expect(yield* PubSub.takeUpTo(events, 100)).toEqual([]);
+        expect(focus).toHaveBeenCalled();
+        expect(
+          focus.mock.calls
+            .flatMap(([report]) => report.liveTabs ?? [])
+            .some((tab) => IntegrationBrowser.isIntegrationAuthThread(tab.threadId)),
+        ).toBe(false);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("retires only the requested private page for its connection owner", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const integration = yield* IntegrationBrowser.IntegrationBrowser;
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const owner = yield* integration.museSignInOwner("owner", yield* Scope.Scope);
+      const other = yield* integration.museSignInOwner("another-owner", yield* Scope.Scope);
+      const first = yield* owner.open;
+      const page = contexts[0]!.page;
+      yield* other.close(first.threadId);
+      expect(page.isClosed()).toBe(false);
+      yield* owner.close("stale-thread");
+      expect(page.isClosed()).toBe(false);
+      yield* owner.close(first.threadId);
+      expect(page.isClosed()).toBe(true);
+      expect(
+        (yield* browser
+          .attachViewer({
+            ...viewerInput(first.tabId, true),
+            threadId: first.threadId,
+            authSessionId: "owner",
+          })
+          .pipe(Effect.flip))._tag,
+      ).toBe("ServerBrowserTabNotFoundError");
+      yield* owner.close(first.threadId);
+      const next = yield* owner.open;
+      expect(next.threadId).not.toBe(first.threadId);
+      yield* owner.close(next.threadId);
+      expect(contexts.at(-1)?.page.isClosed()).toBe(true);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("isolates sign-in dialog lifetimes within one authenticated session", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const integration = yield* IntegrationBrowser.IntegrationBrowser;
+      const owner = yield* integration.museSignInOwner("shared-session", yield* Scope.Scope);
+      const first = yield* owner.open;
+      const second = yield* owner.open;
+      expect(second.threadId).not.toBe(first.threadId);
+      const [firstPage, secondPage] = contexts.map((c) => c.page);
+      yield* owner.close(first.threadId);
+      expect(firstPage!.isClosed()).toBe(true);
+      expect(secondPage!.isClosed()).toBe(false);
+      yield* owner.close(first.threadId);
+      expect(secondPage!.isClosed()).toBe(false);
+      yield* owner.close(second.threadId);
+      expect(secondPage!.isClosed()).toBe(true);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live(
+  "disconnect retires only that connection's dialogs for a shared authenticated session",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const integration = yield* IntegrationBrowser.IntegrationBrowser;
+        const firstConnection = yield* Scope.make();
+        const secondConnection = yield* Scope.make();
+        yield* Effect.addFinalizer(() => Scope.close(firstConnection, Exit.succeed(undefined)));
+        yield* Effect.addFinalizer(() => Scope.close(secondConnection, Exit.succeed(undefined)));
+        const first = yield* integration.museSignInOwner("shared-session", firstConnection);
+        const second = yield* integration.museSignInOwner("shared-session", secondConnection);
+        const firstDialog = yield* first.open;
+        const secondDialog = yield* second.open;
+        const firstPage = contexts[0]!.page;
+        const secondPage = contexts[1]!.page;
+        // Even the same authenticated session cannot release a different connection's consumer.
+        yield* first.close(secondDialog.threadId);
+        expect(secondPage.isClosed()).toBe(false);
+        yield* first.close(firstDialog.threadId);
+        expect(firstPage.isClosed()).toBe(true);
+        expect(secondPage.isClosed()).toBe(false);
+        yield* first.open;
+        yield* first.open;
+        const remainingFirstPages = contexts.slice(2).map((c) => c.page);
+        yield* Scope.close(firstConnection, Exit.succeed(undefined));
+        expect(remainingFirstPages).toHaveLength(2);
+        expect(remainingFirstPages.every((p) => p.isClosed())).toBe(true);
+        expect(secondPage.isClosed()).toBe(false);
+        expect((yield* first.open.pipe(Effect.flip))._tag).toBe("IntegrationBrowserError");
+        yield* Scope.close(secondConnection, Exit.succeed(undefined));
+        expect(secondPage.isClosed()).toBe(true);
+      }),
+    ).pipe(Effect.provide(layer)),
+);
+
+it.live("keeps sign-in alive past handler setup until its explicit connection scope closes", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const integration = yield* IntegrationBrowser.IntegrationBrowser;
+      const connection = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(connection, Exit.succeed(undefined)));
+      // Handler preparation closes its own scope before the first user RPC arrives.
+      const owner = yield* Effect.scoped(integration.museSignInOwner("session", connection));
+      const page = yield* owner.open;
+      expect(contexts[0]!.page.isClosed()).toBe(false);
+      yield* Scope.close(connection, Exit.succeed(undefined));
+      expect(contexts[0]!.page.isClosed()).toBe(true);
+      yield* owner.close(page.threadId);
+      expect((yield* owner.open.pipe(Effect.flip))._tag).toBe("IntegrationBrowserError");
     }),
   ).pipe(Effect.provide(layer)),
 );

@@ -723,6 +723,8 @@ export const ServerConfig = Schema.Struct({
    * and whose data dir is outside a Git checkout.
    */
   scratchWorkspaceRoot: Schema.optionalKey(TrimmedNonEmptyString),
+  /** Internal native-agent storage, excluded from generic project management. */
+  nativeAgentWorkspaceRoot: Schema.optionalKey(TrimmedNonEmptyString),
   /**
    * Folder that holds projects started from just a name. Present only on
    * servers that answer projects.createNew.

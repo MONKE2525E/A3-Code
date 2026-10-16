@@ -216,7 +216,7 @@ const fixture = (
     readonly bots?: readonly GrokBot[];
     readonly botDelete?: Bots.GrokBotService["Service"]["delete"];
     readonly orchestrator?: Orchestrator.OrchestratorV2["Service"];
-    readonly scratchUnavailable?: boolean;
+    readonly storageUnavailable?: boolean;
     readonly providerSessions?: ProviderSessions.ProviderSessionManagerV2["Service"];
   } = {},
 ) =>
@@ -251,8 +251,13 @@ const fixture = (
       Layer.provide(
         Layer.mock(Folders.ManagedProjectFolders)({
           namedProjectsRoot: "/tmp/unused-projects",
-          ensureScratchProject: options.scratchUnavailable
-            ? Effect.fail(new Folders.ScratchUnavailableError())
+          ensureNativeAgentProject: options.storageUnavailable
+            ? Effect.fail(
+                new Folders.ScratchFolderError({
+                  folder: "/tmp/native-agents",
+                  cause: "unavailable",
+                }),
+              )
             : Effect.succeed({ projectId: scratchProjectId }),
         }),
       ),
@@ -520,18 +525,18 @@ it.effect("restores the canonical bot conversation without taking an ordinary pr
   }).pipe(Effect.provide(runtime()), Effect.scoped),
 );
 
-it.effect("requires No project storage even when an older client provides a project", () =>
+it.effect("reports unavailable native storage even when an older client provides a project", () =>
   Effect.gen(function* () {
     yield* seedProjects;
-    const service = yield* fixture({ scratchUnavailable: true });
+    const service = yield* fixture({ storageUnavailable: true });
     assert.equal(
       (yield* Effect.flip(service.open({ botId: bot.id }))).message,
-      "Grok Bot conversations require No project storage, which is unavailable in this environment.",
+      "The Grok Bot thread could not be opened. Try again.",
     );
     const missing = yield* Effect.flip(
       service.open({ botId: bot.id, projectId: ProjectId.make("missing") }),
     );
-    assert.equal(missing.reason, "scratch_unavailable");
+    assert.equal(missing.reason, "storage_failed");
     const linked = yield* fixture({
       bots: [
         {

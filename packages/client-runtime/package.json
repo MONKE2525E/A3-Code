@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./state/muse-agent-computer-stream": {
+      "types": "./src/state/museAgentComputerStream.ts",
+      "default": "./src/state/museAgentComputerStream.ts"
+    },
     "./composerThreadItems": {
       "types": "./src/composerThreadItems.ts",
       "default": "./src/composerThreadItems.ts"
@@ -195,9 +199,17 @@
       "types": "./src/state/grokBotAvatarEngineHttp.ts",
       "default": "./src/state/grokBotAvatarEngineHttp.ts"
     },
-    "./state/grok-bot-threads": {
-      "types": "./src/state/grokBotThreads.ts",
-      "default": "./src/state/grokBotThreads.ts"
+    "./state/muse-agent-avatar": {
+      "types": "./src/state/museAgentAvatarHttp.ts",
+      "default": "./src/state/museAgentAvatarHttp.ts"
+    },
+    "./state/muse-agent-computer-preview": {
+      "types": "./src/state/museAgentComputerPreviewHttp.ts",
+      "default": "./src/state/museAgentComputerPreviewHttp.ts"
+    },
+    "./state/muse-agent-dictation": {
+      "types": "./src/state/museAgentDictationHttp.ts",
+      "default": "./src/state/museAgentDictationHttp.ts"
     },
     "./state/preview": {
       "types": "./src/state/preview.ts",
