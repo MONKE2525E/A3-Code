@@ -103,6 +103,71 @@ it.effect.each([false, true])(
     }).pipe(Effect.provide(layerDatabase)),
 );
 
+it.effect("keeps the managed workspace fixed while allowing its other metadata to change", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const config = yield* ServerConfig.ServerConfig;
+    const path = yield* Path.Path;
+    const projectId = ProjectId.make("project:managed-update");
+    const root = path.resolve(config.baseDir, "native-agents");
+    yield* seedProject(projectId);
+    yield* sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectId}`;
+    yield* Effect.gen(function* () {
+      const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+      const service = yield* ProjectService.make.pipe(
+        Effect.provideService(WorkspacePaths.WorkspacePaths, {
+          ...workspacePaths,
+          normalizeWorkspaceRoot: (requested) =>
+            requested === "/work/unrelated-checkout"
+              ? Effect.die("Managed moves must be rejected before inspecting the destination.")
+              : workspacePaths.normalizeWorkspaceRoot(requested),
+        }),
+      );
+      const error = yield* Effect.flip(
+        service.update({
+          commandId: CommandId.make("command:move-managed"),
+          projectId,
+          workspaceRoot: "/work/unrelated-checkout",
+          title: "Moved",
+        }),
+      );
+      assert.equal(error._tag, "ProjectProtectedError");
+      assert.equal(error.message, "The managed AI Agents project cannot be moved.");
+      const events =
+        yield* sql`SELECT 1 FROM orchestration_events WHERE event_type = 'project.meta-updated'`;
+      assert.lengthOf(events, 0);
+      const unchanged = yield* service.getById(projectId);
+      assert.equal(Option.getOrThrow(unchanged).workspaceRoot, root);
+      assert.equal(Option.getOrThrow(unchanged).title, "Deletion test");
+      const updated = yield* service.update({
+        commandId: CommandId.make("command:rename-managed"),
+        projectId,
+        workspaceRoot: root,
+        title: "Agents",
+      });
+      assert.equal(updated.workspaceRoot, root);
+      assert.equal(updated.title, "Agents");
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("allows moving an ordinary project with the same display name", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("project:ordinary-move");
+    yield* seedProject(projectId);
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectService.make;
+      const updated = yield* service.update({
+        commandId: CommandId.make("command:move-ordinary"),
+        projectId,
+        title: "AI Agents",
+        workspaceRoot: "/work/another/native-agents",
+      });
+      assert.equal(updated.workspaceRoot, "/work/another/native-agents");
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
+);
+
 it.effect(
   "refuses a force-delete cascade containing canonical Muse or Grok shells even after a root edit",
   () =>

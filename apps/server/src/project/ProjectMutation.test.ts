@@ -17,18 +17,21 @@ import { ServerRuntimeStartupError } from "../serverRuntimeStartup.ts";
 
 const projectId = ProjectId.make("project:mutation-mapping");
 
-it("preserves the protected-project rejection in the RPC error and shared transport message", () => {
-  const commandId = CommandId.make("command:delete-managed");
-  const cause = new ProjectProtectedError({ projectId });
-  assert.equal(
-    projectMutationRejectionMessage(cause),
-    "The managed AI Agents project cannot be deleted.",
-  );
-  const error = projectMutationRpcError(commandId, cause);
-  assert.equal(error._tag, "ProjectMutationError");
-  assert.equal(error.commandId, commandId);
-  assert.equal(error.message, "The managed AI Agents project cannot be deleted.");
-});
+it.each([
+  { operation: "delete" as const, message: "The managed AI Agents project cannot be deleted." },
+  { operation: "move" as const, message: "The managed AI Agents project cannot be moved." },
+])(
+  "preserves protected-project rejections in RPC and shared transport messages",
+  ({ operation, message }) => {
+    const commandId = CommandId.make("command:protected-managed");
+    const cause = new ProjectProtectedError({ projectId, operation });
+    assert.equal(projectMutationRejectionMessage(cause), message);
+    const error = projectMutationRpcError(commandId, cause);
+    assert.equal(error._tag, "ProjectMutationError");
+    assert.equal(error.commandId, commandId);
+    assert.equal(error.message, message);
+  },
+);
 
 it.each([
   new ProjectOperationError({

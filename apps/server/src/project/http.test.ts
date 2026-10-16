@@ -17,7 +17,8 @@ const projectId = ProjectId.make("project:http-mutation");
 it.effect.each([
   new ProjectNotFoundError({ projectId }),
   new ProjectNotEmptyError({ projectId }),
-  new ProjectProtectedError({ projectId }),
+  new ProjectProtectedError({ projectId, operation: "delete" }),
+  new ProjectProtectedError({ projectId, operation: "move" }),
   new ProjectConflictError({
     projectId,
     workspaceRoot: "/workspace/project",

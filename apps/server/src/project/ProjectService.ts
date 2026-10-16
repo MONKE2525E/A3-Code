@@ -88,10 +88,12 @@ export class ProjectNotEmptyError extends Schema.TaggedError<ProjectNotEmptyErro
 
 export class ProjectProtectedError extends Schema.TaggedError<ProjectProtectedError>()(
   "ProjectProtectedError",
-  { projectId: ProjectId },
+  { projectId: ProjectId, operation: Schema.Literals(["delete", "move"]) },
 ) {
   override get message(): string {
-    return "The managed AI Agents project cannot be deleted.";
+    return this.operation === "move"
+      ? "The managed AI Agents project cannot be moved."
+      : "The managed AI Agents project cannot be deleted.";
   }
 }
 
@@ -379,6 +381,11 @@ export const make = Effect.gen(function* () {
         return yield* new ProjectNotFoundError({ projectId: input.projectId });
       }
       const previousRoot = existing.value.workspaceRoot;
+      if (
+        path.resolve(previousRoot) === nativeAgentWorkspaceRoot &&
+        path.resolve(input.workspaceRoot ?? previousRoot) !== nativeAgentWorkspaceRoot
+      )
+        return yield* new ProjectProtectedError({ projectId: input.projectId, operation: "move" });
       const workspaceRoot =
         input.workspaceRoot === undefined
           ? previousRoot
@@ -486,7 +493,7 @@ export const make = Effect.gen(function* () {
       (thread) => thread.projectId === projectId,
     );
     if (projectThreads.some(isNativeAgentBackingThread))
-      return yield* new ProjectProtectedError({ projectId });
+      return yield* new ProjectProtectedError({ projectId, operation: "delete" });
     if (projectThreads.length > 0 && input.force !== true) {
       return yield* new ProjectNotEmptyError({ projectId });
     }
@@ -533,7 +540,7 @@ export const make = Effect.gen(function* () {
       }
 
       if (path.resolve(existing.value.workspaceRoot) === nativeAgentWorkspaceRoot)
-        return yield* new ProjectProtectedError({ projectId });
+        return yield* new ProjectProtectedError({ projectId, operation: "delete" });
 
       const isFirstDelete = existing.value.deletedAt === null;
       if (isFirstDelete) {
