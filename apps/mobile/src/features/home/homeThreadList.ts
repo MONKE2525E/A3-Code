@@ -13,7 +13,7 @@ import type {
   SidebarProjectGroupingMode,
   SidebarProjectSortOrder,
 } from "@t3tools/contracts";
-import { isNativeAgentBackingThread } from "@t3tools/contracts";
+import { isGrokBotBackingThread } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
 import * as Order from "effect/Order";
 
@@ -111,7 +111,7 @@ export function sortHomeProjectScopes(input: {
   };
 
   for (const thread of input.threads) {
-    if (thread.archivedAt !== null || isNativeAgentBackingThread(thread)) continue;
+    if (thread.archivedAt !== null || isGrokBotBackingThread(thread)) continue;
     recordActivity(
       scopeKeyByProjectRef.get(scopedProjectKey(thread.environmentId, thread.projectId)),
       getThreadSortTimestamp(thread, input.projectSortOrder),

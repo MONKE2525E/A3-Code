@@ -271,6 +271,29 @@ describe("thread list operation permissions", () => {
 
     expect(state.requests).toEqual([expect.objectContaining({ action: "delete" })]);
   });
+
+  it("hides generic archive and delete for Muse without sending RPCs", async () => {
+    vi.stubEnv("EXPO_OS", "android");
+    const muse = makeThread({ id: ThreadId.make("muse-agent:main") });
+    const actions = useThreadListActions();
+    actions.archiveThread(muse);
+    actions.confirmDeleteThread(muse);
+    await actions.settleThread(muse);
+
+    expect(state.dialogs).toEqual([]);
+    expect(state.alerts.some((alert) => alert.title === "Delete thread?")).toBe(false);
+    expect(state.requests).toEqual([expect.objectContaining({ action: "settle" })]);
+  });
+
+  it("does not treat generic unarchive as Muse restore", async () => {
+    const muse = makeThread({
+      id: ThreadId.make("muse-agent:main"),
+      archivedAt: "2026-09-02T00:00:00.000Z",
+    });
+    await useArchivedThreadListActions(() => {}).unarchiveThread(muse);
+    expect(state.requests).toEqual([]);
+    expect(state.alerts).toEqual([]);
+  });
 });
 
 describe("pinned thread operation permissions", () => {

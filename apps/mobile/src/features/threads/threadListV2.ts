@@ -11,7 +11,7 @@ import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled"
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { resolveThreadProviderStack } from "@t3tools/client-runtime/state/models";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
-import { isNativeAgentBackingThread } from "@t3tools/contracts";
+import { isGrokBotBackingThread, nativeAgentSourceForThread } from "@t3tools/contracts";
 import {
   createInboxReturnTracker,
   isThreadWorking,
@@ -111,6 +111,21 @@ export function resolveThreadListV2SnoozeMenuSelection(input: {
   return { _tag: "expired" };
 }
 
+/** Generic archive/delete/unarchive are coding-thread RPCs. Muse restore is a paired native service. */
+export function threadListV2AllowsGenericDestructiveActions(thread: {
+  readonly id: string;
+}): boolean {
+  return nativeAgentSourceForThread(thread) !== "muse-agent";
+}
+
+export function filterThreadListV2GenericDestructiveMenuActions<T extends { readonly id?: string }>(
+  actions: ReadonlyArray<T>,
+  thread: { readonly id: string },
+): T[] {
+  if (threadListV2AllowsGenericDestructiveActions(thread)) return [...actions];
+  return actions.filter((action) => action.id !== "archive" && action.id !== "delete");
+}
+
 export function resolveThreadListV2SwipeActions(input: {
   readonly variant: "card" | "slim";
   readonly settlementSupported: boolean;
@@ -118,8 +133,10 @@ export function resolveThreadListV2SwipeActions(input: {
   readonly snoozable: boolean;
   /** Row is on the snoozed shelf. */
   readonly snoozed?: boolean;
+  /** False hides the pre-lifecycle Archive fallback (Muse rows). Absent keeps Archive. */
+  readonly genericArchiveSupported?: boolean;
 }): {
-  readonly primary: Exclude<ThreadListV2SwipeAction, "snooze">;
+  readonly primary: Exclude<ThreadListV2SwipeAction, "snooze"> | null;
   readonly secondary: "snooze" | null;
 } {
   if (input.snoozed === true) {
@@ -129,7 +146,9 @@ export function resolveThreadListV2SwipeActions(input: {
     ? input.variant === "slim"
       ? "unsettle"
       : "settle"
-    : "archive";
+    : input.genericArchiveSupported === false
+      ? null
+      : "archive";
   return {
     primary,
     secondary: input.snoozeSupported && input.snoozable ? "snooze" : null,
@@ -244,7 +263,7 @@ export function getThreadListV2OrderedSection(input: {
     if (
       thread.archivedAt !== null ||
       thread.lineage.relationshipToParent === "subagent" ||
-      isNativeAgentBackingThread(thread)
+      isGrokBotBackingThread(thread)
     )
       return false;
     if (
@@ -716,7 +735,7 @@ export function buildThreadListV2Items(input: {
     if (
       thread.archivedAt !== null ||
       thread.lineage.relationshipToParent === "subagent" ||
-      isNativeAgentBackingThread(thread)
+      isGrokBotBackingThread(thread)
     )
       continue;
     // The server stamps settledOverride for the tail.

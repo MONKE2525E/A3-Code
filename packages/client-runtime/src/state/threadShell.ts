@@ -7,7 +7,7 @@ import type {
   ScopedThreadRef,
   ThreadId,
 } from "@t3tools/contracts";
-import { isNativeAgentBackingThread, isProviderNativeSubagentThread } from "@t3tools/contracts";
+import { isGrokBotBackingThread, isProviderNativeSubagentThread } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 
 import type { EnvironmentThreadShell } from "./models.ts";
@@ -252,7 +252,7 @@ export function createEnvironmentThreadShellAtoms(input: {
         if (
           thread.archivedAt !== null ||
           thread.lineage.relationshipToParent === "subagent" ||
-          isNativeAgentBackingThread(thread)
+          isGrokBotBackingThread(thread)
         )
           continue;
         next.push(scopedThread(environmentId, thread));

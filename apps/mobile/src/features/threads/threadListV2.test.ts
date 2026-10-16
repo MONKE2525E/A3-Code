@@ -36,6 +36,8 @@ import {
   resolveThreadListV2SnoozeGateExpiryMs,
   resolveThreadListV2Status,
   resolveThreadListV2SwipeActions,
+  filterThreadListV2GenericDestructiveMenuActions,
+  threadListV2AllowsGenericDestructiveActions,
   sortThreadsForListV2,
   threadListV2ListItemsAreEqual,
   threadHasUnseenCompletion,
@@ -62,47 +64,122 @@ const linkedPullRequest = {
   url: "https://github.com/pingdotgg/t3code/pull/42",
 };
 
-describe.each(["grok-bot", "muse-agent"])(
-  "%s backing threads stay out of thread lists",
-  (source) => {
-    const threads = [
-      makeThread({ id: ThreadId.make("ordinary"), title: "Ordinary" }),
-      makeThread({ id: ThreadId.make(`${source}:9f2c`), title: "Native work" }),
-      makeThread({
-        id: ThreadId.make(`${source}:pinned`),
-        title: "Pinned native work",
-        pinnedAt: NOW,
-      }),
-      makeThread({
-        id: ThreadId.make(`${source}:settled`),
-        title: "Settled native work",
-        settledOverride: "settled",
-      }),
-      makeThread({
-        id: ThreadId.make(`${source}:snoozed`),
-        title: "Snoozed native work",
-        snoozedUntil: "2026-06-03T00:00:00.000Z",
-      }),
-    ];
+describe("Grok Bot backing threads stay out of thread lists", () => {
+  const threads = [
+    makeThread({ id: ThreadId.make("ordinary"), title: "Ordinary" }),
+    makeThread({ id: ThreadId.make("grok-bot:9f2c"), title: "Bot work" }),
+    makeThread({
+      id: ThreadId.make("grok-bot:pinned"),
+      title: "Pinned bot work",
+      pinnedAt: NOW,
+    }),
+    makeThread({
+      id: ThreadId.make("grok-bot:settled"),
+      title: "Settled bot work",
+      settledOverride: "settled",
+    }),
+    makeThread({
+      id: ThreadId.make("grok-bot:snoozed"),
+      title: "Snoozed bot work",
+      snoozedUntil: "2026-06-03T00:00:00.000Z",
+    }),
+  ];
 
-    it("omits them from the list layout and the reorderable active section", () => {
-      expect(
-        buildThreadListV2Items({
-          threads,
-          environmentId: null,
-          searchQuery: "",
-          now: NOW,
-        }).items.map((item) => item.thread.id),
-      ).toEqual(["ordinary"]);
-      expect(getThreadListV2OrderedSection({ threads, section: "pinned", now: NOW })).toEqual([]);
-      expect(
-        getThreadListV2OrderedSection({ threads, section: "active", now: NOW }).map(
-          (thread) => thread.id,
-        ),
-      ).toEqual(["ordinary"]);
+  it("omits them from the list layout and the reorderable active section", () => {
+    expect(
+      buildThreadListV2Items({
+        threads,
+        environmentId: null,
+        searchQuery: "",
+        now: NOW,
+        snoozedShelfExpanded: true,
+      }).items.map((item) => item.thread.id),
+    ).toEqual(["ordinary"]);
+    expect(getThreadListV2OrderedSection({ threads, section: "pinned", now: NOW })).toEqual([]);
+    expect(
+      getThreadListV2OrderedSection({ threads, section: "active", now: NOW }).map(
+        (thread) => thread.id,
+      ),
+    ).toEqual(["ordinary"]);
+  });
+});
+
+describe("Muse backing threads stay in generic navigation", () => {
+  const mainId = ThreadId.make("muse-agent:main");
+  const sideId = ThreadId.make("muse-agent:main:side");
+  const pinnedId = ThreadId.make("muse-agent:pinned");
+  const settledId = ThreadId.make("muse-agent:settled");
+  const snoozedId = ThreadId.make("muse-agent:snoozed");
+  const grokId = ThreadId.make("grok-bot:hidden");
+  const threads = [
+    makeThread({ id: ThreadId.make("ordinary"), title: "Ordinary" }),
+    makeThread({ id: grokId, title: "Hidden bot work" }),
+    makeThread({ id: mainId, title: "Muse main" }),
+    makeThread({
+      id: sideId,
+      title: "Muse side",
+      lineage: {
+        parentThreadId: mainId,
+        rootThreadId: mainId,
+        relationshipToParent: null,
+      },
+    }),
+    makeThread({ id: pinnedId, title: "Muse pinned", pinnedAt: NOW }),
+    makeThread({
+      id: settledId,
+      title: "Muse settled",
+      settledOverride: "settled",
+    }),
+    makeThread({
+      id: snoozedId,
+      title: "Muse snoozed",
+      snoozedUntil: "2026-06-03T00:00:00.000Z",
+    }),
+  ];
+
+  it("keeps main, side, pinned, settled, and snoozed Muse chats visible while Groks stay hidden", () => {
+    const layout = buildThreadListV2Items({
+      threads,
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+      snoozedShelfExpanded: true,
     });
-  },
-);
+    const ids = layout.items.map((item) => item.thread.id);
+    expect(ids).toEqual(
+      expect.arrayContaining([mainId, sideId, pinnedId, settledId, snoozedId, "ordinary"]),
+    );
+    expect(ids).not.toContain(grokId);
+    expect(layout.items.find((item) => item.thread.id === pinnedId)).toMatchObject({
+      pinned: true,
+      snoozed: false,
+    });
+    expect(layout.items.find((item) => item.thread.id === settledId)).toMatchObject({
+      pinned: false,
+      snoozed: false,
+      variant: "slim",
+    });
+    expect(layout.items.find((item) => item.thread.id === snoozedId)).toMatchObject({
+      snoozed: true,
+      variant: "slim",
+    });
+    expect(
+      getThreadListV2OrderedSection({ threads, section: "pinned", now: NOW }).map(
+        (thread) => thread.id,
+      ),
+    ).toEqual([pinnedId]);
+    const activeIds = getThreadListV2OrderedSection({
+      threads,
+      section: "active",
+      now: NOW,
+    }).map((thread) => thread.id);
+    expect(activeIds).toEqual(expect.arrayContaining([mainId, sideId, "ordinary"]));
+    expect(activeIds).not.toContain(grokId);
+    expect(activeIds).not.toContain(pinnedId);
+    expect(activeIds).not.toContain(settledId);
+    expect(activeIds).not.toContain(snoozedId);
+  });
+});
 
 describe("resolveThreadListV2SnoozeMenuSelection", () => {
   it("accepts a displayed evening preset while its wake time is still future", () => {
@@ -343,6 +420,30 @@ describe("resolveThreadListV2SwipeActions", () => {
     ).toEqual({ primary: "archive", secondary: null });
   });
 
+  it("omits the archive fallback when generic archive is unsupported", () => {
+    expect(
+      resolveThreadListV2SwipeActions({
+        variant: "card",
+        settlementSupported: false,
+        snoozeSupported: false,
+        snoozable: true,
+        genericArchiveSupported: false,
+      }),
+    ).toEqual({ primary: null, secondary: null });
+  });
+
+  it("keeps settle when generic archive is unsupported on a lifecycle server", () => {
+    expect(
+      resolveThreadListV2SwipeActions({
+        variant: "card",
+        settlementSupported: true,
+        snoozeSupported: true,
+        snoozable: true,
+        genericArchiveSupported: false,
+      }),
+    ).toEqual({ primary: "settle", secondary: "snooze" });
+  });
+
   it("offers wake and no snooze on a snoozed row", () => {
     expect(
       resolveThreadListV2SwipeActions({
@@ -353,6 +454,35 @@ describe("resolveThreadListV2SwipeActions", () => {
         snoozed: true,
       }),
     ).toEqual({ primary: "unsnooze", secondary: null });
+  });
+});
+
+describe("threadListV2 generic destructive actions", () => {
+  it("allows archive and delete for ordinary threads", () => {
+    expect(threadListV2AllowsGenericDestructiveActions({ id: "ordinary" })).toBe(true);
+    expect(
+      filterThreadListV2GenericDestructiveMenuActions(
+        [{ id: "settle" }, { id: "archive" }, { id: "delete" }],
+        { id: "ordinary" },
+      ).map((action) => action.id),
+    ).toEqual(["settle", "archive", "delete"]);
+  });
+
+  it("hides archive and delete for Muse while keeping settle", () => {
+    expect(threadListV2AllowsGenericDestructiveActions({ id: "muse-agent:main" })).toBe(false);
+    expect(threadListV2AllowsGenericDestructiveActions({ id: "muse-agent:main:side" })).toBe(false);
+    expect(
+      filterThreadListV2GenericDestructiveMenuActions(
+        [
+          { id: "settle" },
+          { id: "unsettle" },
+          { id: "archive" },
+          { id: "delete" },
+          { id: "rename" },
+        ],
+        { id: "muse-agent:main" },
+      ).map((action) => action.id),
+    ).toEqual(["settle", "unsettle", "rename"]);
   });
 });
 

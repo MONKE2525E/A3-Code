@@ -103,25 +103,55 @@ describe("v2 thread shell lists", () => {
     registry.dispose();
   });
 
-  it.each(["grok-bot", "muse-agent"])(
-    "keeps %s backing threads out of navigation but in the raw list",
-    (source) => {
-      const { registry, threads, snapshotAtom } = makeHarness();
-      const root = v2ThreadShell;
-      const bot = { ...root, id: ThreadId.make(`${source}:9f2c`) };
-      registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: [root, bot] });
-      const dispose = registry.mount(threads.navigationThreadShellsAtom);
-      expect(registry.get(threads.navigationThreadShellsAtom).map((thread) => thread.id)).toEqual([
-        root.id,
-      ]);
-      expect(registry.get(threads.threadShellsAtom).map((thread) => thread.id)).toEqual([
-        root.id,
-        bot.id,
-      ]);
-      dispose();
-      registry.dispose();
-    },
-  );
+  it("keeps grok-bot backing threads out of navigation but in the raw list", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const root = v2ThreadShell;
+    const bot = { ...root, id: ThreadId.make("grok-bot:9f2c") };
+    registry.set(snapshotAtom(environmentId), { ...v2ShellSnapshot, threads: [root, bot] });
+    const dispose = registry.mount(threads.navigationThreadShellsAtom);
+    expect(registry.get(threads.navigationThreadShellsAtom).map((thread) => thread.id)).toEqual([
+      root.id,
+    ]);
+    expect(registry.get(threads.threadShellsAtom).map((thread) => thread.id)).toEqual([
+      root.id,
+      bot.id,
+    ]);
+    dispose();
+    registry.dispose();
+  });
+
+  it("keeps muse-agent main and side chats in navigation and the raw list", () => {
+    const { registry, threads, snapshotAtom } = makeHarness();
+    const root = v2ThreadShell;
+    const main = { ...root, id: ThreadId.make("muse-agent:9f2c") };
+    const side = {
+      ...root,
+      id: ThreadId.make("muse-agent:9f2c:side"),
+      lineage: {
+        ...root.lineage,
+        parentThreadId: main.id,
+        rootThreadId: main.id,
+        relationshipToParent: null,
+      },
+    };
+    registry.set(snapshotAtom(environmentId), {
+      ...v2ShellSnapshot,
+      threads: [root, main, side],
+    });
+    const dispose = registry.mount(threads.navigationThreadShellsAtom);
+    expect(registry.get(threads.navigationThreadShellsAtom).map((thread) => thread.id)).toEqual([
+      root.id,
+      main.id,
+      side.id,
+    ]);
+    expect(registry.get(threads.threadShellsAtom).map((thread) => thread.id)).toEqual([
+      root.id,
+      main.id,
+      side.id,
+    ]);
+    dispose();
+    registry.dispose();
+  });
 
   it("leaves switched-off environments out of navigation", () => {
     const { registry, threads, catalogValueAtom } = makeHarness([

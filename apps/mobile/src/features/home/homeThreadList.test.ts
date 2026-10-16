@@ -49,46 +49,49 @@ function makeThread(
 }
 
 describe("home project scopes", () => {
-  it.each(["grok-bot", "muse-agent"])(
-    "ignores %s backing activity when sorting projects",
-    (source) => {
-      const environmentId = EnvironmentId.make("environment-1");
-      const projects = ["older", "newer"].map((id) =>
-        makeProject({ environmentId, id: ProjectId.make(id), title: id }),
-      );
-      const scopes = buildHomeProjectScopes({
-        projects,
-        environmentId: null,
-        projectGroupingMode: "separate",
-      });
-      const threads = projects.map((project, index) =>
-        makeThread({
-          environmentId,
-          projectId: project.id,
-          id: ThreadId.make(`ordinary-${index}`),
-          title: "Coding task",
-          updatedAt: `2026-06-0${index + 2}T00:00:00.000Z`,
-        }),
-      );
-      threads.push(
-        makeThread({
-          environmentId,
-          projectId: projects[0]!.id,
-          id: ThreadId.make(`${source}:main`),
-          title: "Native agent",
-          updatedAt: "2026-06-05T00:00:00.000Z",
-        }),
-      );
-      expect(
-        sortHomeProjectScopes({
-          scopes,
-          threads,
-          pendingTasks: [],
-          projectSortOrder: "updated_at",
-        }).map((scope) => scope.representative.id),
-      ).toEqual(["newer", "older"]);
-    },
-  );
+  function projectSortFixture(source: "grok-bot" | "muse-agent") {
+    const environmentId = EnvironmentId.make("environment-1");
+    const projects = ["older", "newer"].map((id) =>
+      makeProject({ environmentId, id: ProjectId.make(id), title: id }),
+    );
+    const scopes = buildHomeProjectScopes({
+      projects,
+      environmentId: null,
+      projectGroupingMode: "separate",
+    });
+    const threads = projects.map((project, index) =>
+      makeThread({
+        environmentId,
+        projectId: project.id,
+        id: ThreadId.make(`ordinary-${index}`),
+        title: "Coding task",
+        updatedAt: `2026-06-0${index + 2}T00:00:00.000Z`,
+      }),
+    );
+    threads.push(
+      makeThread({
+        environmentId,
+        projectId: projects[0]!.id,
+        id: ThreadId.make(`${source}:main`),
+        title: "Native agent",
+        updatedAt: "2026-06-05T00:00:00.000Z",
+      }),
+    );
+    return sortHomeProjectScopes({
+      scopes,
+      threads,
+      pendingTasks: [],
+      projectSortOrder: "updated_at",
+    }).map((scope) => scope.representative.id);
+  }
+
+  it("ignores grok-bot backing activity when sorting projects", () => {
+    expect(projectSortFixture("grok-bot")).toEqual(["newer", "older"]);
+  });
+
+  it("counts muse-agent backing activity when sorting projects", () => {
+    expect(projectSortFixture("muse-agent")).toEqual(["older", "newer"]);
+  });
 
   it("filters threads across both scratch hosts while retaining the selected environment boundary", () => {
     const localEnvironmentId = EnvironmentId.make("local");
