@@ -7,6 +7,7 @@ import type { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "~/components/ui/button";
+import { SettingsRow } from "~/components/settings/settingsLayout";
 import {
   museAgentSetup,
   museAgentSignIn,
@@ -46,7 +47,9 @@ export function AddMuseAgentProviderStep({
   const canSetup = useAtomValue(museAgentSetup.permissionAtom(environmentId));
   const canSignIn = useAtomValue(museAgentSignIn.permissionAtom(environmentId));
   const setup = useAtomCommand(museAgentSetup, { reportFailure: false });
-  const [pending, setPending] = useState(false);
+  // Tracks which action is running so each button labels only its own work.
+  const [pendingAction, setPendingAction] = useState<"open" | "verify" | null>(null);
+  const pending = pendingAction !== null;
   const [error, setError] = useState<string | null>(null);
 
   const signIn = useAtomCommand(museAgentSignIn, { reportFailure: false, reportDefect: false });
@@ -71,10 +74,10 @@ export function AddMuseAgentProviderStep({
     [browserThreadId, closeSignIn, environmentId],
   );
   const openSignIn = async () => {
-    setPending(true);
+    setPendingAction("open");
     setError(null);
     const result = await signIn({ environmentId, input: {} });
-    setPending(false);
+    setPendingAction(null);
     if (result._tag === "Success") {
       if (mounted.current) setBrowser(result.value);
       else void closeSignIn({ environmentId, input: { threadId: result.value.threadId } });
@@ -88,10 +91,10 @@ export function AddMuseAgentProviderStep({
   const reconnect = canConnect && !!data.provider;
 
   const connect = async () => {
-    setPending(true);
+    setPendingAction("verify");
     setError(null);
     const result = await setup({ environmentId, input: {} });
-    setPending(false);
+    setPendingAction(null);
     if (result._tag === "Failure") {
       if (isAtomCommandInterrupted(result)) return;
       const failure = squashAtomCommandFailure(result);
@@ -109,46 +112,89 @@ export function AddMuseAgentProviderStep({
     refreshMuseAgent(appAtomRegistry, environmentId);
   };
 
+  // The server also reports installed=false when inspection fails, so only an inspected install
+  // with no session counts as a verified miss.
+  const recoveryDescription = checking
+    ? "Checking the connection…"
+    : status.error !== null
+      ? "Could not load Muse status. Sign in again to restore the connection."
+      : canConnect
+        ? "Reconnect with the saved session. Sign in again if it has expired."
+        : data?.installed && !data.sessionPresent
+          ? "No saved Muse session on this environment. Sign in again to connect."
+          : "Could not verify the Muse session. Sign in again to restore the connection.";
+
+  const signInButton = (
+    <Button
+      size="sm"
+      variant={reconnecting && canConnect ? "outline" : "default"}
+      disabled={pending || !canSignIn}
+      onClick={() => void openSignIn()}
+    >
+      {pendingAction === "open" ? "Opening…" : reconnecting ? "Sign in again" : "Sign in to Muse"}
+    </Button>
+  );
+
   return (
-    <div className="grid gap-3 pt-4">
-      <div>
-        <h3 className="text-sm font-medium text-foreground">
-          {reconnecting ? "Reconnect Muse" : "Muse"}
-        </h3>
-        <p className="mt-0.5 text-xs text-muted-foreground">
-          {reconnecting
-            ? "Sign in again with the same Muse account to restore this connection."
-            : `Your personal Muse agent, chatting from ${environmentLabel}. Sign in once to connect your account.`}
-        </p>
-      </div>
-      {checking ? (
-        <p role="status" className="text-xs text-muted-foreground">
-          Checking the connection…
-        </p>
-      ) : null}
-      <p className="text-xs text-muted-foreground">
-        Sign in to Muse in a private browser window. No companion app or API key is required.
-      </p>
-      {error ? (
-        <p role="alert" className="text-xs text-destructive">
-          {error}
-        </p>
-      ) : null}
-      <div className="flex flex-wrap gap-2">
-        <Button size="sm" disabled={pending || !canSignIn} onClick={() => void openSignIn()}>
-          {pending ? "Opening…" : reconnecting ? "Sign in again" : "Sign in to Muse"}
-        </Button>
-        {canConnect ? (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={pending || !canSetup}
-            onClick={() => void connect()}
-          >
-            {reconnecting || reconnect ? "Reconnect" : "Use existing session"}
-          </Button>
-        ) : null}
-      </div>
+    <>
+      {reconnecting ? (
+        <SettingsRow
+          title="Muse account"
+          description={recoveryDescription}
+          control={
+            <>
+              {canConnect ? (
+                <Button size="sm" disabled={pending || !canSetup} onClick={() => void connect()}>
+                  {pendingAction === "verify" ? "Reconnecting…" : "Reconnect"}
+                </Button>
+              ) : null}
+              {signInButton}
+            </>
+          }
+        >
+          {error && !browser ? (
+            <p role="alert" className="text-xs text-destructive">
+              {error}
+            </p>
+          ) : null}
+        </SettingsRow>
+      ) : (
+        <div className="grid gap-3 pt-4">
+          <div>
+            <h3 className="text-sm font-medium text-foreground">Muse</h3>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Your personal Muse agent, chatting from {environmentLabel}. Sign in once to connect
+              your account.
+            </p>
+          </div>
+          {checking ? (
+            <p role="status" className="text-xs text-muted-foreground">
+              Checking the connection…
+            </p>
+          ) : null}
+          <p className="text-xs text-muted-foreground">
+            Sign in to Muse in a private browser window. No companion app or API key is required.
+          </p>
+          {error && !browser ? (
+            <p role="alert" className="text-xs text-destructive">
+              {error}
+            </p>
+          ) : null}
+          <div className="flex flex-wrap gap-2">
+            {signInButton}
+            {canConnect ? (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={pending || !canSetup}
+                onClick={() => void connect()}
+              >
+                {reconnect ? "Reconnect" : "Use existing session"}
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      )}
       <Dialog
         open={browser !== null}
         onOpenChange={(open) => {
@@ -185,11 +231,11 @@ export function AddMuseAgentProviderStep({
               Close
             </Button>
             <Button disabled={pending || !canSetup} onClick={() => void connect()}>
-              {pending ? "Verifying…" : "Finish sign-in"}
+              {pendingAction === "verify" ? "Verifying…" : "Finish sign-in"}
             </Button>
           </DialogFooter>
         </DialogPopup>
       </Dialog>
-    </div>
+    </>
   );
 }

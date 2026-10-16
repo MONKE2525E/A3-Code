@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 const commands = vi.hoisted(() => ({
@@ -10,6 +10,15 @@ const commands = vi.hoisted(() => ({
   setup: vi.fn(),
   canSetup: true,
   canSignIn: true,
+  status: {
+    data: null as null | {
+      installed: boolean;
+      sessionPresent: boolean;
+      provider?: { instanceId: string };
+    },
+    error: null as unknown,
+    isPending: false,
+  },
 }));
 vi.mock("@effect/atom-react", () => ({
   useAtomValue: (permission: string) =>
@@ -23,12 +32,33 @@ vi.mock("~/state/museAgent", () => ({
   refreshMuseAgent: vi.fn(),
 }));
 vi.mock("~/state/query", () => ({
-  useEnvironmentQuery: () => ({ data: null, error: null, isPending: false }),
+  useEnvironmentQuery: () => commands.status,
 }));
 vi.mock("~/state/use-atom-command", () => ({
   useAtomCommand: (command: { kind: keyof typeof commands }) => commands[command.kind],
 }));
 vi.mock("~/rpc/atomRegistry", () => ({ appAtomRegistry: {} }));
+// The settings row reads the full environment catalog; this test covers the step's own state.
+vi.mock("~/components/settings/settingsLayout", () => ({
+  SettingsRow: ({
+    title,
+    description,
+    control,
+    children,
+  }: {
+    title: string;
+    description: string;
+    control: ReactNode;
+    children?: ReactNode;
+  }) => (
+    <div>
+      <h3>{title}</h3>
+      <p>{description}</p>
+      <div>{control}</div>
+      {children}
+    </div>
+  ),
+}));
 vi.mock("~/browser/ServerBrowserSurface", () => ({
   ServerBrowserSurface: () => <div>Private sign-in page</div>,
 }));
@@ -37,6 +67,7 @@ afterEach(() => {
   vi.clearAllMocks();
   commands.canSetup = true;
   commands.canSignIn = true;
+  commands.status = { data: null, error: null, isPending: false };
   vi.unstubAllGlobals();
 });
 it("retires the private sign-in page when its dialog closes", async () => {
@@ -177,3 +208,194 @@ it.each(["connected", "account mismatch", "permission revoked"])(
     }
   },
 );
+
+const savedSession = (instanceId: string) => ({
+  data: { installed: true, sessionPresent: true, provider: { instanceId } },
+  error: null,
+  isPending: false,
+});
+
+it("reconnects the saved session without opening a sign-in browser", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const environmentId = EnvironmentId.make("remote");
+  const instanceId = ProviderInstanceId.make("existing-muse");
+  const onConnected = vi.fn();
+  commands.status = savedSession(instanceId);
+  commands.setup.mockResolvedValue({
+    _tag: "Success",
+    value: { ready: true, provider: { instanceId } },
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <AddMuseAgentProviderStep
+          environmentId={environmentId}
+          environmentLabel="remote"
+          reconnecting
+          onConnected={onConnected}
+        />,
+      ),
+    );
+    const reconnect = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "Reconnect",
+    )!;
+    await act(async () => reconnect.click());
+    expect(commands.setup).toHaveBeenCalledWith({ environmentId, input: {} });
+    expect(onConnected).toHaveBeenCalledWith(instanceId);
+    expect(commands.signIn).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+it("blocks reconnect when setup permission is revoked", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const environmentId = EnvironmentId.make("remote");
+  commands.status = savedSession("existing-muse");
+  commands.canSetup = false;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <AddMuseAgentProviderStep
+          environmentId={environmentId}
+          environmentLabel="remote"
+          reconnecting
+          onConnected={vi.fn()}
+        />,
+      ),
+    );
+    const reconnect = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "Reconnect",
+    )!;
+    expect(reconnect.disabled).toBe(true);
+    await act(async () => reconnect.click());
+    expect(commands.setup).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+it("labels only the reconnect action while it verifies", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const environmentId = EnvironmentId.make("remote");
+  commands.status = savedSession("existing-muse");
+  commands.setup.mockReturnValue(new Promise(() => {}));
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <AddMuseAgentProviderStep
+          environmentId={environmentId}
+          environmentLabel="remote"
+          reconnecting
+          onConnected={vi.fn()}
+        />,
+      ),
+    );
+    const reconnect = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "Reconnect",
+    )!;
+    await act(async () => reconnect.click());
+    expect(container.textContent).toContain("Reconnecting…");
+    expect(container.textContent).not.toContain("Opening…");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+it.each<[string, typeof commands.status, string]>([
+  [
+    "installed is false",
+    { data: { installed: false, sessionPresent: false }, error: null, isPending: false },
+    "Could not verify the Muse session.",
+  ],
+  [
+    "the status is unknown",
+    { data: null, error: null, isPending: false },
+    "Could not verify the Muse session.",
+  ],
+  [
+    "the status query fails",
+    { data: null, error: "Environment unreachable", isPending: false },
+    "Could not load Muse status.",
+  ],
+  [
+    "the inspected install has no session",
+    { data: { installed: true, sessionPresent: false }, error: null, isPending: false },
+    "No saved Muse session on this environment.",
+  ],
+])("describes the Muse account state when %s", async (_, status, copy) => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  commands.status = status;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <AddMuseAgentProviderStep
+          environmentId={EnvironmentId.make("remote")}
+          environmentLabel="remote"
+          reconnecting
+          onConnected={vi.fn()}
+        />,
+      ),
+    );
+    expect(container.textContent).toContain(copy);
+    expect(container.textContent).not.toMatch(/install|disconnect/i);
+    expect([...container.querySelectorAll("button")].map((b) => b.textContent)).toEqual([
+      "Sign in again",
+    ]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+it("announces a failed connect once while the sign-in browser is open", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  commands.signIn.mockResolvedValue({
+    _tag: "Success",
+    value: { threadId: "private-alert", tabId: "tab" },
+  });
+  commands.setup.mockResolvedValue({
+    _tag: "Failure",
+    cause: Cause.fail(new Error("The native account changed.")),
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <AddMuseAgentProviderStep
+          environmentId={EnvironmentId.make("test")}
+          environmentLabel="test"
+          onConnected={vi.fn()}
+        />,
+      ),
+    );
+    await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+    const finish = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => b.textContent === "Finish sign-in",
+    )!;
+    await act(async () => finish.click());
+    expect(
+      [...document.querySelectorAll('[role="alert"]')].map((alert) => alert.textContent),
+    ).toEqual(["The native account changed."]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
