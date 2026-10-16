@@ -56,7 +56,7 @@ import {
   OrchestrationV2SubagentJson as OrchestrationV2SubagentJsonSchema,
   OrchestrationV2TurnItemJson as OrchestrationV2TurnItemJsonSchema,
   OrchestrationV2LatestVisibleMessageSummaryJson as OrchestrationV2LatestVisibleMessageSummaryJsonSchema,
-  isGrokBotBackingThread,
+  isNativeAgentBackingThread,
   orchestrationV2RunWorkStartedAt,
   RunId,
   MessageId,
@@ -1537,7 +1537,7 @@ export function threadShellFromProjection(
           },
     // Thread detail owns message bodies. Keeping them out of shell rows makes
     // initial hydration and streaming updates independent of transcript size.
-    latestVisibleMessage: latestCompletedGrokBotMessage(projection),
+    latestVisibleMessage: latestCompletedNativeAgentMessage(projection),
     latestUserMessageAt: latestUserMessage?.updatedAt ?? null,
     latestUserAuthoredMessageAt:
       userMessages.find((message) => message.createdBy === "user")?.updatedAt ?? null,
@@ -1622,10 +1622,14 @@ function isActivityRunForShell(
   return isInterruptibleRunForShell(run) || run.status === "waiting";
 }
 
-function latestCompletedGrokBotMessage(
+/**
+ * Native agent threads (Grok Bots and Muse) reply outside a finished run, so the shell carries the
+ * newest completed reply whatever run produced it. The SQL shell applies the same rule.
+ */
+function latestCompletedNativeAgentMessage(
   projection: OrchestrationV2ThreadProjection,
 ): OrchestrationV2ThreadShell["latestVisibleMessage"] {
-  if (!isGrokBotBackingThread(projection.thread)) return null;
+  if (!isNativeAgentBackingThread(projection.thread)) return null;
   const rolledBackRunIds = new Set(
     projection.runs.filter((run) => run.status === "rolled_back").map((run) => run.id),
   );
@@ -5339,7 +5343,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ORDER BY secret.updated_at DESC, secret.turn_item_id DESC
                 LIMIT 1
               ) AS pending_secret_request_payload_json,
-              CASE WHEN substr(t.thread_id, 1, 9) = 'grok-bot:' THEN (
+              -- Same native-agent prefixes as isNativeAgentBackingThread in @t3tools/contracts.
+              CASE WHEN substr(t.thread_id, 1, 9) = 'grok-bot:'
+                OR substr(t.thread_id, 1, 11) = 'muse-agent:' THEN (
                 SELECT json_object('id', message.message_id, 'role', message.role,
                   'text', '', 'createdAt', message.created_at, 'updatedAt', message.updated_at)
                 FROM orchestration_v2_projection_messages message
