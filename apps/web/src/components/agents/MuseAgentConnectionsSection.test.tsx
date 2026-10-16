@@ -117,6 +117,26 @@ function setSearch(container: HTMLElement, value: string) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+function pressedCategory(container: HTMLElement) {
+  return (
+    [...container.querySelectorAll('[role="group"][aria-label="Connection category"] button')].find(
+      (button) => button.getAttribute("aria-pressed") === "true",
+    )?.textContent ?? null
+  );
+}
+
+async function paint(root: ReturnType<typeof createRoot>, canWrite = true) {
+  await act(async () =>
+    root.render(
+      <MuseAgentConnectionsSection
+        environmentId={environmentId}
+        providerInstanceId={providerInstanceId}
+        canWrite={canWrite}
+      />,
+    ),
+  );
+}
+
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   mocks.canWritePermission = true;
@@ -217,13 +237,14 @@ it("filters the catalog from search and category chips", async () => {
   }
 });
 
-it("shows remaining connections after the selected category disappears from a refreshed catalog", async () => {
+it("keeps All after a vanished Connected category returns on a later catalog", async () => {
   const { container, root } = await mount();
   try {
     const connected = [...container.querySelectorAll("button")].find(
       (button) => button.textContent === "Connected",
     )!;
     await act(async () => connected.click());
+    expect(pressedCategory(container)).toBe("Connected");
     expect(container.textContent).toContain("Browser");
     expect(container.textContent).not.toContain("Asana");
     mocks.connectors = [
@@ -235,19 +256,32 @@ it("shows remaining connections after the selected category disappears from a re
       }),
       connector({ id: "box", name: "Box", description: "Files", state: "disconnected" }),
     ];
-    await act(async () =>
-      root.render(
-        <MuseAgentConnectionsSection
-          environmentId={environmentId}
-          providerInstanceId={providerInstanceId}
-          canWrite
-        />,
-      ),
-    );
+    await paint(root);
     expect(container.textContent).toContain("Asana");
     expect(container.textContent).toContain("Box");
     expect(container.textContent).not.toContain("Nothing matches.");
     expect(container.textContent).not.toContain("Browser");
+    mocks.connectors = [
+      connector({
+        id: "asana",
+        name: "Asana",
+        description: "Plan and track projects and tasks",
+        state: "disconnected",
+      }),
+      connector({
+        id: "browser",
+        name: "Browser",
+        description: "Search the web",
+        state: "connected",
+      }),
+      connector({ id: "box", name: "Box", description: "Files", state: "disconnected" }),
+    ];
+    await paint(root);
+    expect(pressedCategory(container)).toBe("All");
+    expect(container.textContent).toContain("Asana");
+    expect(container.textContent).toContain("Box");
+    expect(container.textContent).toContain("Browser");
+    expect(container.textContent).not.toContain("Nothing matches.");
   } finally {
     await act(async () => root.unmount());
     container.remove();

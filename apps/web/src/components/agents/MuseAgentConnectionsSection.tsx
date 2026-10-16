@@ -861,6 +861,7 @@ export function MuseAgentConnectionsSection({
   }, [connectors]);
   const selectedCategory: "all" | BrowseCategory =
     category === "all" || presentCategories.includes(category) ? category : "all";
+  if (connectors !== null && category !== selectedCategory) setCategory(selectedCategory);
   const sections = useMemo(() => {
     if (connectors === null) return [];
     const buckets = new Map<BrowseCategory, MuseAgentConnector[]>();

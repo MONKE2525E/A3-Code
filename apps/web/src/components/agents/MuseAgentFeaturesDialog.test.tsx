@@ -463,7 +463,7 @@ it("keeps search and refresh when Muse reports no skills", async () => {
   expect(mocks.refresh).toHaveBeenCalled();
 });
 
-it("shows remaining skills after a refresh drops the selected category", async () => {
+it("keeps All selected after a dropped category returns", async () => {
   mocks.skills = [
     { name: "a", title: "Alpha tool", description: "one", category: "Alpha" },
     { name: "z", title: "Zed tool", description: "two", category: "Zed" },
@@ -491,6 +491,17 @@ it("shows remaining skills after a refresh drops the selected category", async (
   expect(container.textContent).toContain("Beta tool");
   expect(container.textContent).not.toContain("Nothing matches.");
   expect(button("All").getAttribute("aria-pressed")).toBe("true");
+  mocks.skills = [
+    { name: "a", title: "Alpha tool", description: "one", category: "Alpha" },
+    { name: "z", title: "Zed tool", description: "two", category: "Zed" },
+    { name: "b", title: "Beta tool", description: "three", category: "Beta" },
+  ];
+  await renderSkills();
+  expect(button("All").getAttribute("aria-pressed")).toBe("true");
+  expect(button("Alpha").getAttribute("aria-pressed")).toBe("false");
+  expect(container.textContent).toContain("Alpha tool");
+  expect(container.textContent).toContain("Zed tool");
+  expect(container.textContent).toContain("Beta tool");
 });
 
 it("does not label a skill Turned off from enabled false alone", async () => {
