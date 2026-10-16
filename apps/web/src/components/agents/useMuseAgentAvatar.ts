@@ -1,4 +1,5 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import { type EnvironmentId, MuseAgentAvatarVariant } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { useEffect, useMemo, useState } from "react";
 
 import { museAgentAvatarQuery } from "~/state/museAgentAvatar";
@@ -13,7 +14,8 @@ export type MuseAgentAvatarProfile = {
   readonly avatarVideoUrls?: Readonly<Record<string, string>> | undefined;
 };
 
-const VARIANT_PATTERN = /^[a-z_]{1,64}$/;
+/** The same variant schema the server's media route enforces, so the client asks only for names it would serve. */
+const isAvatarVariant = Schema.is(MuseAgentAvatarVariant);
 const INSTANCE_PATTERN = /\/ai-agents\/muse\/([^/]+)\/avatar\//;
 
 /** The instance is encoded in the descriptor path the server issued; the profile has no field for it. */
@@ -70,7 +72,7 @@ export function useMuseAgentAvatar(
     instanceFromDescriptor(profile?.avatarImageUrl) ??
     instanceFromDescriptor(videoVariant ? profile?.avatarVideoUrls?.[videoVariant] : undefined);
   const target = (variant: string | null) =>
-    environmentId && revision && providerInstanceId && variant && VARIANT_PATTERN.test(variant)
+    environmentId && revision && providerInstanceId && variant && isAvatarVariant(variant)
       ? museAgentAvatarQuery({
           environmentId,
           input: { providerInstanceId, variant, revision },
