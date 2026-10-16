@@ -39,7 +39,8 @@ import {
 
 export { MUSE_AGENT_DRIVER_KIND };
 const managedMusePrompt = (text: string) =>
-  `T3 Code context: refer to the user only as Monke. Do not use a real name. For registered T3 tools, use the T3 Code device/node attached to this current message.\n\n${text}`;
+  `${text}\n\n[T3 Code: use this message's T3 node for tools; call the user Monke.]`;
+
 export type MuseAgentAdapterV2DriverEnv =
   | Native.MuseAgentNativeRuntimeService
   | DirectToolsPort.MuseAgentDirectToolsPort

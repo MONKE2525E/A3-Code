@@ -10,6 +10,8 @@ import * as EnvironmentHandlers from "../mcp/toolkits/environment/handlers.ts";
 import { EnvironmentToolkit } from "../mcp/toolkits/environment/tools.ts";
 import * as HtmlHandlers from "../mcp/toolkits/html/handlers.ts";
 import { HtmlPreviewToolkit, HtmlRenderToolkit } from "../mcp/toolkits/html/tools.ts";
+import * as MuseHandlers from "../mcp/toolkits/museAgent/handlers.ts";
+import { MuseAgentToolkit } from "../mcp/toolkits/museAgent/tools.ts";
 import * as OrchestratorHandlers from "../mcp/toolkits/orchestrator/handlers.ts";
 import { OrchestratorToolkit } from "../mcp/toolkits/orchestrator/tools.ts";
 import * as PreviewHandlers from "../mcp/toolkits/preview/handlers.ts";
@@ -33,6 +35,7 @@ const tools = Effect.all([
   toolkitRegistration(EnvironmentToolkit, EnvironmentHandlers.layer),
   toolkitRegistration(HtmlPreviewToolkit, HtmlHandlers.layerPreview),
   toolkitRegistration(HtmlRenderToolkit, HtmlHandlers.layerRender),
+  toolkitRegistration(MuseAgentToolkit, MuseHandlers.layer),
   toolkitRegistration(OrchestratorToolkit, OrchestratorHandlers.layer),
   toolkitRegistration(PreviewStandardToolkit, PreviewHandlers.layerStandard),
   toolkitRegistration(PreviewSnapshotToolkit, PreviewHandlers.layerSnapshot),

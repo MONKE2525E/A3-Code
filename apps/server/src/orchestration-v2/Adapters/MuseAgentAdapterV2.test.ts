@@ -1002,7 +1002,7 @@ it.effect("a session taken over by a side chat stops cleanly instead of failing"
   ),
 );
 
-it.effect("sends Monke context without changing visible prompts or attachment-only turns", () =>
+it.effect("sends a skill reference without changing visible or attachment-only prompts", () =>
   Effect.forEach(["Synthetic task", ""], (text) =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1038,7 +1038,7 @@ it.effect("sends Monke context without changing visible prompts or attachment-on
         assert.strictEqual(sent.length, 1);
         assert.strictEqual(
           sent[0]?.text,
-          `T3 Code context: refer to the user only as Monke. Do not use a real name. For registered T3 tools, use the T3 Code device/node attached to this current message.\n\n${text}`,
+          `${text}\n\n[T3 Code: use this message's T3 node for tools; call the user Monke.]`,
         );
         assert.strictEqual(sent[0]?.deliveryKey, turn.attemptId);
         assert.deepStrictEqual(sent[0]?.attachments, {

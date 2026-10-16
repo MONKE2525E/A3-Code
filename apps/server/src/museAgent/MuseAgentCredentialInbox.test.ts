@@ -118,11 +118,50 @@ it.effect("bounds connector cards and rejects malformed or hidden card identitie
     );
     expect(inbox.pendingConnectors("account", "session-one")).toEqual([]);
     for (let i = 0; i < 140; i++)
-      inbox.observe("account", frame(connectorCard, { presentation_id: `connector-${i}` }));
+      inbox.observe(
+        "account",
+        frame(
+          { ...connectorCard, data: { connector_id: `connector-${i}` } },
+          { presentation_id: `connector-${i}` },
+        ),
+      );
     expect(inbox.pendingConnectors("account", "session-one")).toHaveLength(128);
-    inbox.complete("account", "session-one", "connector-0");
+    inbox.complete("account", "session-one", "connector-139");
     inbox.observe("account", frame(card, { presentation_id: "vault-after-connector" }));
     expect(inbox.pendingConnectors("account", "session-one")).toHaveLength(127);
+    expect(inbox.pending("account", "session-one")).toHaveLength(1);
+  }).pipe(Effect.provide(Inbox.layer)),
+);
+
+it.effect.each([
+  { alias: "facebook_cli", canonical: "facebook" },
+  { alias: "messenger_read", canonical: "messenger" },
+  { alias: "stripe_link", canonical: "stripe-link" },
+  { alias: "whatsapp_companion", canonical: "whatsapp" },
+])("resolves the native connector card alias $alias", ({ alias, canonical }) =>
+  Effect.gen(function* () {
+    const inbox = yield* Inbox.MuseAgentCredentialInbox;
+    inbox.observe("account", frame({ ...connectorCard, data: { connector_id: alias } }));
+    expect(inbox.pendingConnectors("account", "session-one")[0]?.connectorId).toBe(canonical);
+  }).pipe(Effect.provide(Inbox.layer)),
+);
+
+it.effect("connector saturation and repeated cards cannot hide vault prompts", () =>
+  Effect.gen(function* () {
+    const inbox = yield* Inbox.MuseAgentCredentialInbox;
+    for (let i = 0; i < 128; i++)
+      inbox.observe(
+        "old-account",
+        frame(
+          { ...connectorCard, data: { connector_id: `connector-${i}` } },
+          { presentation_id: `card-${i}` },
+        ),
+      );
+    inbox.observe("account", frame(card));
+    expect(inbox.pending("account", "session-one")).toHaveLength(1);
+    for (let i = 0; i < 140; i++)
+      inbox.observe("account", frame(connectorCard, { presentation_id: `repeated-${i}` }));
+    expect(inbox.pendingConnectors("account", "session-one")).toHaveLength(1);
     expect(inbox.pending("account", "session-one")).toHaveLength(1);
   }).pipe(Effect.provide(Inbox.layer)),
 );

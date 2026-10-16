@@ -38,6 +38,13 @@ const ConnectorCard = Schema.Struct({
     ),
   }),
 });
+// Native chat cards can still name the legacy skill alias instead of the catalog connector.
+const connectorAliases = new Map([
+  ["facebook_cli", "facebook"],
+  ["messenger_read", "messenger"],
+  ["stripe_link", "stripe-link"],
+  ["whatsapp_companion", "whatsapp"],
+]);
 const decodeConnectorCard = Schema.decodeUnknownOption(ConnectorCard);
 const Frame = Schema.Struct({
   session_id: Text,
@@ -105,16 +112,19 @@ export const layer = Layer.sync(MuseAgentCredentialInbox, () => {
       state: "pending" | "completed";
     }
   >();
-  const reserveSlot = () => {
-    if (entries.size + connectorEntries.size < 128) return true;
-    for (const table of [entries, connectorEntries]) {
-      const completed = [...table].find(([, entry]) => entry.state === "completed");
-      if (completed) {
-        table.delete(completed[0]);
-        return true;
-      }
-    }
-    return false;
+  const reserveVaultSlot = () => {
+    if (entries.size < 128) return true;
+    const completed = [...entries].find(([, entry]) => entry.state === "completed");
+    if (!completed) return false;
+    entries.delete(completed[0]);
+    return true;
+  };
+  const reserveConnectorSlot = () => {
+    if (connectorEntries.size < 128) return;
+    const evicted =
+      [...connectorEntries].find(([, entry]) => entry.state === "completed") ??
+      connectorEntries.entries().next().value;
+    if (evicted) connectorEntries.delete(evicted[0]);
   };
   const key = (binding: string, sessionId: string, requestId: string) =>
     JSON.stringify([binding, sessionId, requestId]);
@@ -146,14 +156,28 @@ export const layer = Layer.sync(MuseAgentCredentialInbox, () => {
       const connector = decodeConnectorCard(data);
       if (connector._tag === "Some") {
         const id = key(binding, frame.value.session_id, requestId);
-        if (connectorEntries.has(id) || !reserveSlot()) return;
+        const connectorId =
+          connectorAliases.get(connector.value.data.connector_id) ??
+          connector.value.data.connector_id;
+        if (
+          connectorEntries.has(id) ||
+          [...connectorEntries.values()].some(
+            (entry) =>
+              entry.state === "pending" &&
+              entry.binding === binding &&
+              entry.request.sessionId === frame.value.session_id &&
+              entry.request.connectorId === connectorId,
+          )
+        )
+          return;
+        reserveConnectorSlot();
         connectorEntries.set(id, {
           binding,
           request: {
             requestId,
             sessionId: frame.value.session_id,
             title: connector.value.title,
-            connectorId: connector.value.data.connector_id,
+            connectorId,
           },
           state: "pending",
         });
@@ -176,7 +200,7 @@ export const layer = Layer.sync(MuseAgentCredentialInbox, () => {
         return;
       }
       if (current) return;
-      if (!reserveSlot()) return;
+      if (!reserveVaultSlot()) return;
       entries.set(id, {
         idempotencyKey: NodeCrypto.randomUUID(),
         binding,

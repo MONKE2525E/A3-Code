@@ -98,6 +98,8 @@ const fixture = (
     const dictationStarted = yield* Deferred.make<void>();
     const archiveWritten = yield* Deferred.make<void>();
     const archiveContinue = yield* Deferred.make<void>();
+    const resolveEntered = yield* Deferred.make<void>();
+    const resolveContinue = yield* Deferred.make<void>();
     const renameWritten = yield* Deferred.make<void>();
     const renameContinue = yield* Deferred.make<void>();
     const state = {
@@ -119,6 +121,9 @@ const fixture = (
       refreshes: 0,
       rotateOnRefresh: false,
       rotateOnResolve: false,
+      pauseResolve: false,
+      resolveEntered,
+      resolveContinue,
       rotateOnProfile: false,
       avatarReads: [] as string[],
       computerCalls: [] as Array<{
@@ -164,6 +169,7 @@ const fixture = (
       connectorConnected: false,
       connectorReadFails: false,
       connectorAuthCalls: 0,
+      connectorCatalogReads: 0,
       failRenameSync: false,
       rotateOnRename: false,
       nativeTitle: "Research",
@@ -228,25 +234,31 @@ const fixture = (
           },
         ]),
       resolveSession: (_binding, sessionId) =>
-        Effect.suspend(() => {
-          if (state.forbidChatResolution)
-            return Effect.die("Computer ownership must not use chat sendability.");
-          return Effect.sync(() => {
-            if (state.rotateOnResolve) state.binding = "b".repeat(64);
-            if (sessionId !== undefined && sessionId !== "primary")
+        Effect.gen(function* () {
+          if (state.pauseResolve) {
+            yield* Deferred.succeed(resolveEntered, undefined);
+            yield* Deferred.await(resolveContinue);
+          }
+          return yield* Effect.suspend(() => {
+            if (state.forbidChatResolution)
+              return Effect.die("Computer ownership must not use chat sendability.");
+            return Effect.sync(() => {
+              if (state.rotateOnResolve) state.binding = "b".repeat(64);
+              if (sessionId !== undefined && sessionId !== "primary")
+                return {
+                  session_id: sessionId,
+                  status: "idle",
+                  is_primary: false,
+                  is_thread: true,
+                  title: "Side research",
+                };
               return {
-                session_id: sessionId,
+                session_id: "primary",
                 status: "idle",
-                is_primary: false,
-                is_thread: true,
-                title: "Side research",
+                is_primary: !state.computerReadOnly,
+                is_thread: state.computerReadOnly,
               };
-            return {
-              session_id: "primary",
-              status: "idle",
-              is_primary: !state.computerReadOnly,
-              is_thread: state.computerReadOnly,
-            };
+            });
           });
         }),
       read: ({ beforeSeq }) =>
@@ -453,6 +465,25 @@ const fixture = (
                       code: "write_uncertain",
                     });
                   return { title: renamedTitle };
+                }),
+              connectors: () =>
+                Effect.gen(function* () {
+                  state.connectorCatalogReads++;
+                  if (state.connectorReadFails)
+                    return yield* new Features.MuseAgentFeatureError({
+                      feature: "connectors",
+                      code: "connection_unavailable",
+                    });
+                  return [
+                    {
+                      id: "example",
+                      name: "Example connector",
+                      description: "",
+                      state: state.connectorConnected
+                        ? ("connected" as const)
+                        : ("disconnected" as const),
+                    },
+                  ];
                 }),
               tasks: (account) =>
                 Effect.sync(() => {
@@ -2411,5 +2442,65 @@ it.effect(
         { binding, sessionId: "side-one", archived: false },
         { binding, sessionId: "primary", archived: false },
       ]);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect("reconciles multiple connector cards with one native catalog read", () =>
+  Effect.gen(function* () {
+    const h = yield* fixture();
+    for (const id of ["first", "second"])
+      h.inbox.observe(binding, {
+        event: "delta.presentation",
+        payload: {
+          session_id: "primary",
+          id,
+          kind: "internal_link_action_card",
+          data: { type: "connector", title: "Example", data: { connector_id: id } },
+        },
+      });
+    const result = yield* h.service.featureRead({
+      operation: "credential_requests",
+      providerInstanceId: instanceId,
+    });
+    if (result.operation !== "credential_requests") return;
+    assert.lengthOf(result.data.connectorRequests ?? [], 2);
+    assert.equal(h.state.connectorCatalogReads, 1);
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect.each([false, true])(
+  "rechecks a caller after native resolution before opening a thread: %s",
+  (archived) =>
+    Effect.gen(function* () {
+      const h = yield* fixture();
+      const target = { ...reference, sessionId: "side-one" };
+      let existing: ThreadId | undefined;
+      if (archived) {
+        existing = (yield* h.service.open(target)).threadId;
+        yield* h.service.featureUpdate({
+          operation: "session_archive",
+          providerInstanceId: instanceId,
+          sessionId: "side-one",
+          archived: true,
+        });
+      }
+      const before = yield* h.orchestrator.getShellSnapshot();
+      const watches = h.state.watches;
+      let authorized = true;
+      const denied = new Error("Caller authorization was revoked");
+      const check = Effect.suspend(() => (authorized ? Effect.void : Effect.fail(denied)));
+      h.state.pauseResolve = true;
+      const pending = yield* h.service
+        .openAuthorized(target, check)
+        .pipe(Effect.flip, Effect.forkChild);
+      yield* Deferred.await(h.state.resolveEntered);
+      authorized = false;
+      yield* Deferred.succeed(h.state.resolveContinue, undefined);
+      assert.strictEqual(yield* Fiber.join(pending), denied);
+      const after = yield* h.orchestrator.getShellSnapshot();
+      assert.equal(after.threads.length, before.threads.length);
+      if (existing) assert.isNotNull(after.threads.find((t) => t.id === existing)?.archivedAt);
+      assert.equal(h.state.watches, watches);
+      assert.equal(h.state.reads, archived ? 1 : 0);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
