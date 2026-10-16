@@ -424,6 +424,116 @@ it.effect("fails a reserved-identity check when realPath is denied", () =>
   }).pipe(Effect.provide(layerDatabase)),
 );
 
+it.effect.each([
+  { operation: "create", insensitive: true },
+  { operation: "bootstrap", insensitive: true },
+  { operation: "update", insensitive: true },
+  { operation: "create", insensitive: false },
+  { operation: "bootstrap", insensitive: false },
+  { operation: "update", insensitive: false },
+] as const)(
+  "resolves missing case variants for $operation, insensitive=$insensitive",
+  ({ operation, insensitive }) =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const root = path.resolve(config.baseDir, "native-agents");
+      const variant = path.resolve(config.baseDir, "NATIVE-AGENTS");
+      let managedExists = false;
+      const filesystem = {
+        ...fs,
+        realPath: (requested: string) => {
+          if (requested !== root && requested !== variant) return fs.realPath(requested);
+          return managedExists && (requested === root || insensitive)
+            ? Effect.succeed(root)
+            : Effect.fail(
+                PlatformError.systemError({
+                  _tag: "NotFound",
+                  module: "FileSystem",
+                  method: "realPath",
+                  pathOrDescriptor: requested,
+                }),
+              );
+        },
+        makeDirectory: (requested: string, options?: Parameters<typeof fs.makeDirectory>[1]) =>
+          requested === root
+            ? Effect.sync(() => {
+                managedExists = true;
+              })
+            : fs.makeDirectory(requested, options),
+      };
+      const projectId = ProjectId.make(`project:case-claim:${operation}:${insensitive}`);
+      if (operation === "update") yield* seedProject(projectId);
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectService.make.pipe(
+          Effect.provideService(FileSystem.FileSystem, filesystem),
+        );
+        const input = {
+          commandId: CommandId.make(`command:case-claim:${operation}:${insensitive}`),
+          projectId,
+          workspaceRoot: variant,
+          title: "Case variant",
+          createWorkspaceRootIfMissing: true,
+        };
+        const mutation =
+          operation === "create"
+            ? service.create(input).pipe(Effect.asVoid)
+            : operation === "bootstrap"
+              ? service.bootstrap(input).pipe(Effect.asVoid)
+              : service.update(input).pipe(Effect.asVoid);
+        const result = yield* mutation.pipe(Effect.exit);
+        if (insensitive) {
+          assert.equal(result._tag, "Failure");
+          const sql = yield* SqlClient.SqlClient;
+          assert.lengthOf(yield* sql`SELECT 1 FROM orchestration_events`, 0);
+          const row = yield* service.getById(projectId);
+          if (operation === "update")
+            assert.equal(Option.getOrThrow(row).workspaceRoot, `/work/${projectId}`);
+          else assert.isTrue(Option.isNone(row));
+        } else {
+          assert.equal(result._tag, "Success");
+          assert.equal(Option.getOrThrow(yield* service.getById(projectId)).workspaceRoot, variant);
+        }
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("reuses a legacy alias owner during native bootstrap", () =>
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
+    const sql = yield* SqlClient.SqlClient;
+    const root = path.resolve(config.baseDir, "native-agents");
+    const alias = path.resolve(config.baseDir, "bootstrap-owner-alias");
+    yield* fs.makeDirectory(root, { recursive: true });
+    yield* fs.symlink(root, alias);
+    const projectId = ProjectId.make("project:legacy-bootstrap-owner");
+    yield* seedProject(projectId);
+    yield* sql`UPDATE projection_projects SET workspace_root = ${alias} WHERE project_id = ${projectId}`;
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectService.make.pipe(Effect.provide(WorkspacePaths.layer));
+      const threadId = ThreadId.make("muse-agent:legacy-bootstrap-thread");
+      const sink = yield* EventSink.EventSinkV2;
+      yield* sink.write({ events: [nativeThreadCreated(projectId, threadId)] });
+      const result = yield* service.bootstrapNativeAgentProject({
+        commandId: CommandId.make("command:reuse-legacy-owner"),
+        projectId: ProjectId.make("project:must-not-create-duplicate"),
+      });
+      assert.isFalse(result.created);
+      assert.equal(result.project.id, projectId);
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      assert.equal(
+        (yield* projections.getThreadProjection(threadId)).thread.projectId,
+        result.project.id,
+      );
+
+      assert.lengthOf(yield* sql`SELECT 1 FROM projection_projects WHERE deleted_at IS NULL`, 1);
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
+);
+
 it.effect("creates and reuses the reserved project through native bootstrap", () =>
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;

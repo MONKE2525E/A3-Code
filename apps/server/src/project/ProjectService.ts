@@ -218,6 +218,22 @@ export const make = Effect.gen(function* () {
   ) {
     const resolved = resolveWorkspaceRoot(root);
     if (resolved === nativeAgentWorkspaceRoot) return true;
+    const candidate = yield* realWorkspaceRoot(resolved);
+    const managed = yield* realWorkspaceRoot(nativeAgentWorkspaceRoot);
+    if (candidate === managed) return true;
+    if (candidate.toLowerCase() !== managed.toLowerCase()) return false;
+    // Missing names do not establish filesystem identity. Materialize our reserved directory
+    // before asking realPath whether a case variant refers to it.
+    yield* fileSystem.makeDirectory(nativeAgentWorkspaceRoot, { recursive: true }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProjectOperationError({
+            operation: "normalize-workspace",
+            workspaceRoot: nativeAgentWorkspaceRoot,
+            cause,
+          }),
+      ),
+    );
     return (
       (yield* realWorkspaceRoot(resolved)) === (yield* realWorkspaceRoot(nativeAgentWorkspaceRoot))
     );
@@ -504,6 +520,17 @@ export const make = Effect.gen(function* () {
     Effect.fn("ProjectService.bootstrapNativeAgentProject")(function* (input) {
       const existing = yield* getByWorkspaceRoot(nativeAgentWorkspaceRoot);
       if (Option.isSome(existing)) return { project: existing.value, created: false };
+      const rows = yield* projects
+        .list()
+        .pipe(
+          Effect.mapError(
+            (cause) => new ProjectOperationError({ operation: "list-projects", cause }),
+          ),
+        );
+      for (const row of rows) {
+        if (yield* isNativeAgentWorkspace(row.workspaceRoot))
+          return { project: yield* hydrate(row), created: false };
+      }
       const project = yield* createAtWorkspace(
         { ...input, title: "AI Agents", workspaceRoot: nativeAgentWorkspaceRoot },
         nativeAgentWorkspaceRoot,
