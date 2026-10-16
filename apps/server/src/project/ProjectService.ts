@@ -9,6 +9,8 @@ import {
   type ProjectSnapshot,
   type ThreadId,
 } from "@t3tools/contracts";
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -383,7 +385,12 @@ export const make = Effect.gen(function* () {
       const previousRoot = existing.value.workspaceRoot;
       if (
         path.resolve(previousRoot) === nativeAgentWorkspaceRoot &&
-        path.resolve(input.workspaceRoot ?? previousRoot) !== nativeAgentWorkspaceRoot
+        path.resolve(
+          expandHomePath(
+            (input.workspaceRoot ?? previousRoot).trim(),
+            yield* HostProcess.HomeDirectory,
+          ),
+        ) !== nativeAgentWorkspaceRoot
       )
         return yield* new ProjectProtectedError({ projectId: input.projectId, operation: "move" });
       const workspaceRoot =

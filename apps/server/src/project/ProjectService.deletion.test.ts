@@ -8,6 +8,8 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as FileSystem from "effect/FileSystem";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -149,6 +151,42 @@ it.effect("keeps the managed workspace fixed while allowing its other metadata t
       assert.equal(updated.title, "Agents");
     }).pipe(Effect.provide(layerServices));
   }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect.each(["whitespace", "home", "relative-segments"] as const)(
+  "accepts an equivalent managed workspace root using %s syntax",
+  (syntax) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const root = path.resolve(config.baseDir, "native-agents");
+      yield* fs.makeDirectory(root, { recursive: true });
+      const projectId = ProjectId.make(`project:equivalent-root:${syntax}`);
+      yield* seedProject(projectId);
+      yield* sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectId}`;
+      const requested =
+        syntax === "home"
+          ? "~/native-agents"
+          : syntax === "whitespace"
+            ? `  ${root}  `
+            : `${root}/../native-agents/.`;
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectService.make.pipe(Effect.provide(WorkspacePaths.layer));
+        const updated = yield* service.update({
+          commandId: CommandId.make(`command:equivalent-root:${syntax}`),
+          projectId,
+          workspaceRoot: requested,
+          title: "Updated agents",
+        });
+        assert.equal(updated.workspaceRoot, root);
+        assert.equal(updated.title, "Updated agents");
+      }).pipe(
+        Effect.provide(layerServices),
+        Effect.provideService(HostProcess.HomeDirectory, config.baseDir),
+      );
+    }).pipe(Effect.provide(layerDatabase)),
 );
 
 it.effect("allows moving an ordinary project with the same display name", () =>
