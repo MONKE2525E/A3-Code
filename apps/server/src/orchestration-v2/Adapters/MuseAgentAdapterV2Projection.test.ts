@@ -26,6 +26,49 @@ const attachment: ChatAttachment = {
   sizeBytes: 16,
 };
 
+it.effect.each([false, true])(
+  "accepts owned turn completion only until a newer foreign user revokes ownership: %s",
+  (revoked) =>
+    Effect.gen(function* () {
+      const turn = yield* makeTurn;
+      const projection = makeMuseAgentProjection({
+        binding,
+        sessionId: "primary",
+        threadId,
+        providerInstanceId: instanceId,
+      });
+      projection.begin(turn);
+      projection.admit(receipt);
+      projection.project(
+        frame("message.user", 1, {
+          message_id: receipt.messageId,
+          reply_to_message_id: null,
+          display_text: "Owned prompt",
+        }),
+      );
+      projection.project(frame("message.assistant", 2, { display_text: "Owned reply" }));
+      if (revoked)
+        projection.project({
+          ...frame("message.user", 3, {
+            message_id: "foreign-user",
+            reply_to_message_id: null,
+            display_text: "Other client prompt",
+          }),
+          meta: { seq: 3, ts_ms: 2000 },
+        });
+      const result = projection.project(
+        frame("delta.turn_done", 4, { reply_to_message_id: null, status: "completed" }),
+      );
+      if (revoked) {
+        assert.deepStrictEqual(result, []);
+        assert.isFalse(projection.isTerminal());
+      } else {
+        assert.equal(result.find((event) => event.type === "turn.terminal")?.status, "completed");
+        assert.isTrue(projection.isTerminal());
+      }
+    }),
+);
+
 it("keeps an answer streaming when a presentation arrives before its remaining text", () => {
   const projection = makeMuseAgentProjection({
     binding,

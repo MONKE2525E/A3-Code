@@ -526,7 +526,7 @@ export function makeMuseAgentProjection(input: {
       return finish(status, now);
     }
     if (frame.event === "delta.turn_done") {
-      if (!active?.receipt || active.terminal) return [];
+      if (!active?.receipt || active.terminal || active.ownershipRevoked) return [];
       const receipt = active.receipt;
       const matches =
         ownsReply(payload) ||
