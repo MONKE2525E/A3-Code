@@ -98,6 +98,8 @@ const fixture = (
     const dictationStarted = yield* Deferred.make<void>();
     const archiveWritten = yield* Deferred.make<void>();
     const archiveContinue = yield* Deferred.make<void>();
+    const renameWritten = yield* Deferred.make<void>();
+    const renameContinue = yield* Deferred.make<void>();
     const state = {
       binding,
       avatarImagePath: "workspace/avatars/synthetic/image.png",
@@ -162,6 +164,11 @@ const fixture = (
       failRenameSync: false,
       rotateOnRename: false,
       nativeTitle: "Research",
+      uncertainRename: false,
+      renameWriteCommitted: true,
+      pauseRename: false,
+      renameWritten,
+      renameContinue,
     };
     const native = makeNative({
       status: Effect.sync(() => ({
@@ -199,6 +206,7 @@ const fixture = (
             status: "idle",
             is_primary: true,
             is_thread: false,
+            title: state.nativeTitle,
           },
           {
             session_id: "side-one",
@@ -206,6 +214,7 @@ const fixture = (
             is_primary: false,
             is_thread: true,
             archived: state.nativeArchived,
+            title: state.nativeTitle,
           },
           {
             session_id: "readonly-side",
@@ -427,9 +436,18 @@ const fixture = (
                   }
                 }),
               renameSession: (_binding, _sessionId, title) =>
-                Effect.sync(() => {
-                  state.nativeTitle = title.trim();
+                Effect.gen(function* () {
+                  if (state.renameWriteCommitted) state.nativeTitle = title.trim();
                   if (state.rotateOnRename) state.binding = "b".repeat(64);
+                  if (state.pauseRename) {
+                    yield* Deferred.succeed(renameWritten, undefined);
+                    yield* Deferred.await(renameContinue);
+                  }
+                  if (state.uncertainRename)
+                    return yield* new Features.MuseAgentFeatureError({
+                      feature: "sessions",
+                      code: "write_uncertain",
+                    });
                   return { title: state.nativeTitle };
                 }),
               tasks: (account) =>
@@ -1970,6 +1988,83 @@ it.effect.each(["projection", "account"] as const)(
         (yield* h.projections.getThreadShell(opened.threadId))?.title,
         input.title,
       );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect.each(["primary", "side-one"])(
+  "reconciles a committed rename for %s when its response is lost",
+  (sessionId) =>
+    Effect.gen(function* () {
+      const h = yield* fixture();
+      const opened = yield* h.service.open({ ...reference, sessionId });
+      h.state.uncertainRename = true;
+      const result = yield* h.service.featureUpdate({
+        providerInstanceId: instanceId,
+        operation: "session_rename",
+        sessionId,
+        title: "  Confirmed title  ",
+      });
+      assert.deepStrictEqual(result, { updated: true, title: "Confirmed title" });
+      assert.equal(
+        (yield* h.projections.getThreadShell(opened.threadId))?.title,
+        "Confirmed title",
+      );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect(
+  "does not claim success for an uncertain rename that did not commit, and permits retry",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* fixture();
+      const opened = yield* h.service.open({ ...reference, sessionId: "side-one" });
+      const input = {
+        providerInstanceId: instanceId,
+        operation: "session_rename",
+        sessionId: "side-one",
+        title: "Requested title",
+      } as const;
+      h.state.uncertainRename = true;
+      h.state.renameWriteCommitted = false;
+      const error = yield* Effect.flip(h.service.featureUpdate(input));
+      assert.equal(error.reason, "provider_unavailable");
+      assert.equal(h.state.nativeTitle, "Research");
+      assert.equal((yield* h.projections.getThreadShell(opened.threadId))?.title, "Side research");
+      h.state.renameWriteCommitted = true;
+      assert.deepStrictEqual(yield* h.service.featureUpdate(input), {
+        updated: true,
+        title: "Requested title",
+      });
+      assert.equal(
+        (yield* h.projections.getThreadShell(opened.threadId))?.title,
+        "Requested title",
+      );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect.each([false, true])(
+  "finishes committed rename synchronization after disconnect, with uncertain response: %s",
+  (uncertain) =>
+    Effect.gen(function* () {
+      const h = yield* fixture();
+      const opened = yield* h.service.open({ ...reference, sessionId: "side-one" });
+      h.state.pauseRename = true;
+      h.state.uncertainRename = uncertain;
+      const pending = yield* h.service
+        .featureUpdate({
+          providerInstanceId: instanceId,
+          operation: "session_rename",
+          sessionId: "side-one",
+          title: "Durable title",
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(h.state.renameWritten);
+      // Deliver cancellation before releasing the native response, rather than racing two fibers.
+      yield* Effect.sync(() => pending.interruptUnsafe());
+      yield* Deferred.succeed(h.state.renameContinue, undefined);
+      yield* Fiber.await(pending);
+      assert.equal(h.state.nativeTitle, "Durable title");
+      assert.equal((yield* h.projections.getThreadShell(opened.threadId))?.title, "Durable title");
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
 
