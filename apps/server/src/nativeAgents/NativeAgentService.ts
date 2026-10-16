@@ -1175,70 +1175,77 @@ const make = Effect.gen(function* () {
         );
       }
       case "session_rename": {
-        const sessions = yield* native.sessions(binding).pipe(Effect.mapError(nativeFailure));
-        const session = sessions.find((entry) => entry.session_id === input.sessionId);
-        if (!session)
-          return yield* new NativeAgentError({
-            reason: "thread_changed",
-            detail: "The Muse conversation could not be found. Refresh and try again.",
-          });
-        if ((yield* selected(selection.instanceId)).binding !== binding)
-          return yield* new NativeAgentError({ reason: "account_changed" });
-        return yield* Effect.gen(function* () {
-          const { title } = yield* features
-            .renameSession(binding, input.sessionId, input.title)
-            .pipe(
-              Effect.catch((error) => {
-                if (error.code !== "write_uncertain") return Effect.fail(featureFailure(error));
-                return native.sessions(binding).pipe(
-                  Effect.mapError(nativeFailure),
-                  Effect.flatMap((sessions) => {
-                    const confirmed = sessions.find(
-                      (entry) => entry.session_id === input.sessionId,
-                    );
-                    return confirmed?.title === input.title.trim()
-                      ? Effect.succeed({ title: confirmed.title })
-                      : Effect.fail(featureFailure(error));
-                  }),
-                );
-              }),
-            );
-          // Muse has committed the rename. Report a partial success if local synchronization fails,
-          // so callers refresh native data and can retry the same title without claiming it was lost.
-          const synchronized = yield* Effect.gen(function* () {
+        return yield* lock.withPermits(1)(
+          Effect.gen(function* () {
+            const sessions = yield* native.sessions(binding).pipe(Effect.mapError(nativeFailure));
+            const session = sessions.find((entry) => entry.session_id === input.sessionId);
+            if (!session)
+              return yield* new NativeAgentError({
+                reason: "thread_changed",
+                detail: "The Muse conversation could not be found. Refresh and try again.",
+              });
             if ((yield* selected(selection.instanceId)).binding !== binding)
               return yield* new NativeAgentError({ reason: "account_changed" });
-            const identity = yield* canonicalIdentity(selection);
-            const threadId = ThreadId.make(
-              museThreadIdForSession(identity, session.is_primary ? undefined : input.sessionId),
-            );
-            const shell = yield* projections
-              .getThreadShell(threadId)
-              .pipe(Effect.mapError(failure("storage_failed")));
-            if (
-              shell &&
-              shell.deletedAt === null &&
-              shell.providerInstanceId === selection.instanceId &&
-              shell.modelSelection.instanceId === selection.instanceId &&
-              shell.modelSelection.model === "muse"
-            ) {
-              const nonce = yield* crypto.randomUUIDv4.pipe(
-                Effect.mapError(failure("storage_failed")),
-              );
-              yield* orchestrator
-                .dispatch({
-                  type: "thread.metadata.update",
-                  commandId: CommandId.make(`muse-agent:rename:${nonce}`),
-                  threadId,
-                  title,
-                })
-                .pipe(Effect.mapError(failure("storage_failed")));
-            }
-          }).pipe(Effect.exit);
-          if (synchronized._tag === "Failure")
-            return { updated: true as const, title, titleSyncPending: true as const };
-          return { updated: true as const, title };
-        }).pipe(Effect.uninterruptible);
+            return yield* Effect.gen(function* () {
+              const { title } = yield* features
+                .renameSession(binding, input.sessionId, input.title)
+                .pipe(
+                  Effect.catch((error) => {
+                    if (error.code !== "write_uncertain") return Effect.fail(featureFailure(error));
+                    return native.sessions(binding).pipe(
+                      Effect.mapError(nativeFailure),
+                      Effect.flatMap((sessions) => {
+                        const confirmed = sessions.find(
+                          (entry) => entry.session_id === input.sessionId,
+                        );
+                        return confirmed?.title === input.title.trim()
+                          ? Effect.succeed({ title: confirmed.title })
+                          : Effect.fail(featureFailure(error));
+                      }),
+                    );
+                  }),
+                );
+              // Muse has committed the rename. Report a partial success if local synchronization fails,
+              // so callers refresh native data and can retry the same title without claiming it was lost.
+              const synchronized = yield* Effect.gen(function* () {
+                if ((yield* selected(selection.instanceId)).binding !== binding)
+                  return yield* new NativeAgentError({ reason: "account_changed" });
+                const identity = yield* canonicalIdentity(selection);
+                const threadId = ThreadId.make(
+                  museThreadIdForSession(
+                    identity,
+                    session.is_primary ? undefined : input.sessionId,
+                  ),
+                );
+                const shell = yield* projections
+                  .getThreadShell(threadId)
+                  .pipe(Effect.mapError(failure("storage_failed")));
+                if (
+                  shell &&
+                  shell.deletedAt === null &&
+                  shell.providerInstanceId === selection.instanceId &&
+                  shell.modelSelection.instanceId === selection.instanceId &&
+                  shell.modelSelection.model === "muse"
+                ) {
+                  const nonce = yield* crypto.randomUUIDv4.pipe(
+                    Effect.mapError(failure("storage_failed")),
+                  );
+                  yield* orchestrator
+                    .dispatch({
+                      type: "thread.metadata.update",
+                      commandId: CommandId.make(`muse-agent:rename:${nonce}`),
+                      threadId,
+                      title,
+                    })
+                    .pipe(Effect.mapError(failure("storage_failed")));
+                }
+              }).pipe(Effect.exit);
+              if (synchronized._tag === "Failure")
+                return { updated: true as const, title, titleSyncPending: true as const };
+              return { updated: true as const, title };
+            }).pipe(Effect.uninterruptible);
+          }),
+        );
       }
     }
     return { updated: true as const };

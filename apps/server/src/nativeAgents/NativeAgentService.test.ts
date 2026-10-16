@@ -437,7 +437,8 @@ const fixture = (
                 }),
               renameSession: (_binding, _sessionId, title) =>
                 Effect.gen(function* () {
-                  if (state.renameWriteCommitted) state.nativeTitle = title.trim();
+                  const renamedTitle = title.trim();
+                  if (state.renameWriteCommitted) state.nativeTitle = renamedTitle;
                   if (state.rotateOnRename) state.binding = "b".repeat(64);
                   if (state.pauseRename) {
                     yield* Deferred.succeed(renameWritten, undefined);
@@ -448,7 +449,7 @@ const fixture = (
                       feature: "sessions",
                       code: "write_uncertain",
                     });
-                  return { title: state.nativeTitle };
+                  return { title: renamedTitle };
                 }),
               tasks: (account) =>
                 Effect.sync(() => {
@@ -1931,6 +1932,38 @@ it.effect("synchronizes an opened side conversation title after a native rename"
     });
     const shell = yield* h.projections.getThreadShell(opened.threadId);
     assert.equal(shell?.title, "Renamed research");
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect("serializes concurrent native renames with their canonical shell updates", () =>
+  Effect.gen(function* () {
+    const h = yield* fixture();
+    const opened = yield* h.service.open({ ...reference, sessionId: "side-one" });
+    const rename = (title: string) =>
+      h.service.featureUpdate({
+        providerInstanceId: instanceId,
+        operation: "session_rename",
+        sessionId: "side-one",
+        title,
+      });
+    h.state.pauseRename = true;
+    const first = yield* rename("First").pipe(Effect.forkChild);
+    yield* Deferred.await(h.state.renameWritten);
+    h.state.pauseRename = false;
+    const secondStarted = yield* Deferred.make<void>();
+    const second = yield* Deferred.succeed(secondStarted, undefined).pipe(
+      Effect.andThen(rename("Second")),
+      Effect.forkChild,
+    );
+    yield* Deferred.await(secondStarted);
+    yield* Effect.yieldNow;
+    const titleWhileFirstPending = h.state.nativeTitle;
+    yield* Deferred.succeed(h.state.renameContinue, undefined);
+    yield* Fiber.join(first);
+    yield* Fiber.join(second);
+    assert.equal(titleWhileFirstPending, "First");
+    assert.equal(h.state.nativeTitle, "Second");
+    assert.equal((yield* h.projections.getThreadShell(opened.threadId))?.title, "Second");
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
 
