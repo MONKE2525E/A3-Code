@@ -172,6 +172,7 @@ const fixture = () => {
     calls,
     cancellations,
     localReleases,
+    remotePaths: () => [...remoteSizes.keys()],
     refuseRelease: () =>
       db.exec(
         "CREATE TRIGGER refuse_release BEFORE UPDATE ON muse_deliveries WHEN NEW.status='released' BEGIN SELECT RAISE(ABORT,'synthetic storage failure'); END",
@@ -793,6 +794,57 @@ it.effect("failed staging abandons pre-prompt intent and permits a deliberate sa
   ),
 );
 
+it.effect.each(["failure", "interruption"] as const)(
+  "removes completed uploads after a later staging %s",
+  (outcome) =>
+    withAttachmentDirectory((directory) =>
+      withFixture((f) =>
+        Effect.gen(function* () {
+          const native = yield* Native.MuseAgentNativeRuntimeService;
+          yield* createLargeFile(directory);
+          yield* Effect.promise(() =>
+            NodeFSP.copyFile(
+              NodePath.join(directory, "large.bin"),
+              NodePath.join(directory, "later.bin"),
+            ),
+          );
+          const attached = largeAttachment(directory);
+          const first = attached.attachments.items[0]!;
+          attached.attachments.items.push({ ...first, id: "later", name: "later.bin" });
+          const laterStarted = yield* Deferred.make<void>();
+          let chunks = 0;
+          f.setStageHook(
+            Effect.suspend(() => {
+              chunks++;
+              if (chunks <= 21) return Effect.void;
+              return Deferred.succeed(laterStarted, undefined).pipe(
+                Effect.andThen(
+                  outcome === "failure"
+                    ? Effect.fail(new Transport.MuseAgentTransportError({ kind: "uncertain" }))
+                    : Effect.never,
+                ),
+              );
+            }),
+          );
+          if (outcome === "failure") {
+            assert.isTrue(isPromptNotSubmitted(yield* Effect.flip(native.send(attached))));
+          } else {
+            const sending = yield* native.send(attached).pipe(Effect.forkChild);
+            yield* Deferred.await(laterStarted);
+            yield* Fiber.interrupt(sending);
+          }
+          assert.deepStrictEqual(f.remotePaths(), []);
+          assert.deepStrictEqual(f.deliveryRows(), []);
+          assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 0);
+          f.setStageHook(Effect.void);
+          yield* native.send(attached);
+          assert.strictEqual(f.remotePaths().length, 2);
+          assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 1);
+        }).pipe(Effect.provide(f.layer)),
+      ),
+    ),
+);
+
 it.effect("interrupted staging abandons only the intent before native chat admission", () =>
   withAttachmentDirectory((directory) =>
     withFixture((f) =>
@@ -875,6 +927,8 @@ it.effect("uncertain chat admission preserves intent without repeating large-fil
         const failed = yield* Effect.flip(native.send(largeAttachment(directory)));
         assert.ok(failed._tag === "MuseAgentTransportError");
         assert.strictEqual(failed.kind, "uncertain");
+        assert.strictEqual(f.remotePaths().length, 1);
+        assert.strictEqual(f.calls.filter((call) => call.method === "fs.delete").length, 0);
         const uploads = f.calls.filter((call) => call.method === "fs.write").length;
         assert.strictEqual(uploads, 21);
         const repeated = yield* Effect.flip(native.send(largeAttachment(directory)));

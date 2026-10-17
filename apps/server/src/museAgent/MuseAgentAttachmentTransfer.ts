@@ -268,9 +268,11 @@ export const materializeMuseAttachment = (
         }),
       (_, exit) =>
         Exit.isFailure(exit)
-          ? transport
-              .request(binding, "fs.delete", { path: temp, recursive: false }, true)
-              .pipe(Effect.ignore)
+          ? Effect.forEach([destination, temp], (path) =>
+              transport
+                .request(binding, "fs.delete", { path, recursive: false }, true)
+                .pipe(Effect.ignore),
+            )
           : Effect.void,
     ).pipe(
       Effect.catchTags({

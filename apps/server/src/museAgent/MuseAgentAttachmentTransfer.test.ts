@@ -189,6 +189,7 @@ it.effect(
       });
       assert.deepStrictEqual(f.files.get(`/${item.path}`), bytes);
       assert.strictEqual(f.files.has(temp), false);
+      assert.strictEqual(f.calls.filter((call) => call.method === "fs.delete").length, 0);
     }),
 );
 
@@ -204,7 +205,7 @@ it.effect("uses separate cloud paths for uploads while retaining the same conten
   }),
 );
 
-it.effect("never repeats ambiguous append and removes only its owned partial file", () =>
+it.effect("never repeats ambiguous append and removes only its owned upload paths", () =>
   Effect.gen(function* () {
     const f = fixture();
     f.failAppend();
@@ -259,6 +260,43 @@ it.effect("cleans the owned partial file when an upload is interrupted", () =>
         params: { path: f.calls[0]?.params.path, recursive: false },
         write: true,
       });
+    }),
+  ),
+);
+
+it.effect("removes a published upload if interrupted before receiving its rename response", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const f = fixture();
+      f.files.set("/workspace/unrelated.txt", Buffer.from("keep"));
+      const published = yield* Deferred.make<void>();
+      const transport = {
+        ...f.transport,
+        request: (target, method, params, write) =>
+          Effect.gen(function* () {
+            const result = yield* f.transport.request(target, method, params, write);
+            if (method === "fs.rename") {
+              yield* Deferred.succeed(published, undefined);
+              return yield* Effect.never;
+            }
+            return result;
+          }),
+      } satisfies Transport.MuseAgentTransport["Service"];
+      const prepared = yield* prepare(Buffer.from("synthetic"), "example.txt", 0);
+      const uploading = yield* Transfer.materializeMuseAttachment(binding, prepared).pipe(
+        Effect.provideService(Transport.MuseAgentTransport, transport),
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(published);
+      assert.strictEqual(f.files.size, 2);
+      yield* Fiber.interrupt(uploading);
+      assert.deepStrictEqual([...f.files.keys()], ["/workspace/unrelated.txt"]);
+      const rename = f.calls.find((call) => call.method === "fs.rename")!;
+      assert.deepStrictEqual(
+        f.calls.filter((call) => call.method === "fs.delete").map((call) => call.params.path),
+        [rename.params.destination, rename.params.source],
+      );
+      assert.strictEqual(f.calls.filter((call) => call.method === "fs.rename").length, 1);
     }),
   ),
 );

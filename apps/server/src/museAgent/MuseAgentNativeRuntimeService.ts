@@ -509,11 +509,18 @@ const make = Effect.gen(function* () {
                   );
                 if (existing) return { ...existing, replayed: true };
                 let promptAttempted = false;
+                const stagedPaths: string[] = [];
                 return yield* restore(
                   Effect.gen(function* () {
                     const items = yield* Effect.forEach(prepared, (attachment) =>
                       materializeMuseAttachment(input.binding, attachment).pipe(
                         Effect.provideService(Transport.MuseAgentTransport, transport),
+                        Effect.onExit((exit) =>
+                          Effect.sync(() => {
+                            if (Exit.isSuccess(exit) && exit.value.type === "file_ref")
+                              stagedPaths.push(`/${exit.value.path}`);
+                          }),
+                        ),
                         Effect.mapError((cause) => new ProviderPromptNotSubmittedError({ cause })),
                       ),
                     );
@@ -554,7 +561,11 @@ const make = Effect.gen(function* () {
                 ).pipe(
                   Effect.onExit((exit) =>
                     !promptAttempted && Exit.isFailure(exit)
-                      ? deliveries.abandonBeforePrompt(input.deliveryKey)
+                      ? Effect.forEach(stagedPaths, (path) =>
+                          transport
+                            .request(input.binding, "fs.delete", { path, recursive: false }, true)
+                            .pipe(Effect.ignore),
+                        ).pipe(Effect.andThen(deliveries.abandonBeforePrompt(input.deliveryKey)))
                       : Effect.void,
                   ),
                   Effect.catchCause((cause) =>
