@@ -276,6 +276,12 @@ export const OrchestratorV2Error = Schema.Union([
 ]);
 export type OrchestratorV2Error = typeof OrchestratorV2Error.Type;
 
+/** Grants the native service creation of one reserved Muse shell; never supplied by clients. */
+export const MuseThreadCreation = Context.Reference<ThreadId | undefined>(
+  "t3/orchestration-v2/MuseThreadCreation",
+  { defaultValue: () => undefined },
+);
+
 export interface OrchestratorV2DispatchResult {
   readonly sequence: number;
   readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
@@ -2520,6 +2526,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         commandType: command.type,
         cause:
           "Muse conversations cannot change provider or model through generic thread commands.",
+      });
+    }
+    if (
+      nativeAgentSourceForThread(thread) === "muse-agent" &&
+      ((command.type === "thread.runtime-mode.set" && command.runtimeMode !== "full-access") ||
+        (command.type === "thread.interaction-mode.set" && command.interactionMode !== "default"))
+    ) {
+      return yield* new OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Muse conversations require full-access runtime and default interaction modes.",
       });
     }
     if (
@@ -10968,6 +10985,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       "orchestration_v2.command_type": command.type,
       "orchestration_v2.thread_id": commandThreadId(command),
     });
+
+    const createdThreadId =
+      command.type === "thread.create"
+        ? command.threadId
+        : command.type === "thread.fork"
+          ? command.targetThreadId
+          : undefined;
+    if (
+      createdThreadId?.startsWith("muse-agent:") &&
+      (command.type !== "thread.create" || (yield* MuseThreadCreation) !== createdThreadId)
+    ) {
+      return yield* new OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Muse thread IDs are reserved for native conversation creation.",
+      });
+    }
 
     const events = yield* Ref.make<Array<OrchestrationV2DomainEvent>>([]);
     const effects = yield* Ref.make<Array<PendingOrchestrationEffectV2>>([]);

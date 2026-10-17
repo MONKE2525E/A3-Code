@@ -36,23 +36,30 @@ const layer = Layer.mergeAll(
   ),
 );
 
-const createThread = (threadId: ThreadId) =>
+const createThread = (threadId: ThreadId, nativeCreation = true) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
-    yield* orchestrator.dispatch({
-      type: "thread.create",
-      commandId: CommandId.make(`create:${threadId}`),
-      threadId,
-      projectId: ProjectId.make("project:native-delete"),
-      title: "Conversation",
-      modelSelection: { instanceId: ProviderInstanceId.make("muse-agent"), model: "muse" },
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      branch: null,
-      worktreePath: null,
-      createdBy: "user",
-      creationSource: "web",
-    });
+    yield* orchestrator
+      .dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`create:${threadId}`),
+        threadId,
+        projectId: ProjectId.make("project:native-delete"),
+        title: "Conversation",
+        modelSelection: { instanceId: ProviderInstanceId.make("muse-agent"), model: "muse" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      })
+      .pipe(
+        Effect.provideService(
+          Orchestrator.MuseThreadCreation,
+          nativeCreation ? threadId : undefined,
+        ),
+      );
   });
 
 it.effect.each([
@@ -305,5 +312,99 @@ it.effect("native Muse open still reopens the canonical conversation after rejec
     }
     assert.deepEqual(yield* service.open(reference), opened);
     assert.isNull((yield* projections.getThread(threadId)).deletedAt);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each([
+  `muse-agent:${"a".repeat(64)}`,
+  `muse-agent:${"a".repeat(64)}:side%3Achat`,
+  "muse-agent:saved-hash",
+])("reserves %s for native creation before recording a shell", (id) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const threadId = ThreadId.make(id);
+    const before = yield* orchestrator.getShellSnapshot();
+    const error = yield* Effect.flip(createThread(threadId, false));
+    assert.equal(error._tag, "OrchestratorCommandRejectedError");
+    assert.deepEqual(yield* orchestrator.getShellSnapshot(), before);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("allows generic ordinary creation without a native creation grant", () =>
+  Effect.gen(function* () {
+    yield* createThread(ThreadId.make("ordinary:unreserved"), false);
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    assert.equal(
+      (yield* projections.getThread(ThreadId.make("ordinary:unreserved"))).title,
+      "Conversation",
+    );
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each([
+  `muse-agent:${"a".repeat(64)}`,
+  `muse-agent:${"a".repeat(64)}:side%3Achat`,
+  "muse-agent:saved-hash",
+])("rejects unsupported policies on %s without changing the shell", (id) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make(id);
+    yield* createThread(threadId);
+    const before = yield* projections.getThreadProjection(threadId);
+    const commands = [
+      {
+        type: "thread.runtime-mode.set",
+        commandId: CommandId.make("policy:runtime"),
+        threadId,
+        runtimeMode: "approval-required",
+      },
+      {
+        type: "thread.interaction-mode.set",
+        commandId: CommandId.make("policy:interaction"),
+        threadId,
+        interactionMode: "plan",
+      },
+    ] as const;
+    for (const command of commands) {
+      const error = yield* Effect.flip(orchestrator.dispatch(command));
+      assert.equal(error._tag, "OrchestratorCommandRejectedError");
+      assert.deepEqual(yield* projections.getThreadProjection(threadId), before);
+    }
+    yield* orchestrator.dispatch({
+      type: "thread.runtime-mode.set",
+      commandId: CommandId.make("policy:runtime:valid"),
+      threadId,
+      runtimeMode: "full-access",
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.interaction-mode.set",
+      commandId: CommandId.make("policy:interaction:valid"),
+      threadId,
+      interactionMode: "default",
+    });
+    const after = yield* projections.getThread(threadId);
+    assert.equal(after.runtimeMode, "full-access");
+    assert.equal(after.interactionMode, "default");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("rejects forks claiming the reserved Muse namespace before reading their source", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const before = yield* orchestrator.getShellSnapshot();
+    const error = yield* Effect.flip(
+      orchestrator.dispatch({
+        type: "thread.fork",
+        commandId: CommandId.make("fork:reserved"),
+        sourceThreadId: ThreadId.make("ordinary:source"),
+        targetThreadId: ThreadId.make(`muse-agent:${"a".repeat(64)}`),
+        sourcePoint: { type: "latest_stable" },
+        createdBy: "user",
+        creationSource: "web",
+      }),
+    );
+    assert.equal(error._tag, "OrchestratorCommandRejectedError");
+    assert.deepEqual(yield* orchestrator.getShellSnapshot(), before);
   }).pipe(Effect.provide(layer)),
 );

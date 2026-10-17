@@ -563,7 +563,10 @@ const make = Effect.gen(function* () {
                 createdBy: "user",
                 creationSource: "server",
               })
-              .pipe(Effect.mapError(failure("storage_failed")));
+              .pipe(
+                Effect.provideService(Orchestrator.MuseThreadCreation, threadId),
+                Effect.mapError(failure("storage_failed")),
+              );
           } else if (previous.archivedAt !== null) {
             yield* check;
             const nonce = yield* crypto.randomUUIDv4.pipe(
