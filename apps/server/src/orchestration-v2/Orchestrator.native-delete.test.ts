@@ -1,5 +1,12 @@
 import { assert, it } from "@effect/vitest";
-import { CommandId, MessageId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  CommandId,
+  MessageId,
+  ProjectId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -26,12 +33,22 @@ import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import { userFacingDispatchErrorMessage } from "./UserFacingErrors.ts";
 
+import { MuseAgentCapabilitiesV2 } from "./Adapters/MuseAgentAdapterV2.ts";
+
 const database = SqlitePersistence.layerMemory;
 const layer = Layer.mergeAll(
   ProjectionStore.layer.pipe(Layer.provide(database)),
   ProviderReplayHarness.layerWithRegistry(
     { name: "native-delete" },
-    ProviderAdapterRegistry.layerFromAdapters([]),
+    ProviderAdapterRegistry.layerFromAdapters([
+      {
+        instanceId: ProviderInstanceId.make("muse-agent"),
+        driver: ProviderDriverKind.make("muse-agent"),
+        getCapabilities: () => Effect.succeed(MuseAgentCapabilitiesV2),
+        planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
+        openSession: () => Effect.die("Provider execution is disabled for command-boundary tests"),
+      },
+    ]),
     { databaseLayer: database, runEffectWorker: false },
   ),
 );
@@ -91,16 +108,24 @@ it.effect.each([
     const replay = yield* Effect.flip(orchestrator.dispatch(command));
     assert.equal(replay._tag, "OrchestratorCommandPreviouslyRejectedError");
     assert.isNull((yield* projections.getThread(threadId)).deletedAt);
-    yield* orchestrator.dispatch({
-      type: "thread.archive",
-      commandId: CommandId.make(`archive:${threadId}`),
-      threadId,
-    });
-    yield* orchestrator.dispatch({
-      type: "thread.unarchive",
-      commandId: CommandId.make(`unarchive:${threadId}`),
-      threadId,
-    });
+    yield* orchestrator
+      .dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make(`archive:${threadId}`),
+        threadId,
+      })
+      .pipe(
+        Effect.provideService(Orchestrator.MuseThreadMutation, { threadId, operation: "archive" }),
+      );
+    yield* orchestrator
+      .dispatch({
+        type: "thread.unarchive",
+        commandId: CommandId.make(`unarchive:${threadId}`),
+        threadId,
+      })
+      .pipe(
+        Effect.provideService(Orchestrator.MuseThreadMutation, { threadId, operation: "archive" }),
+      );
     const restored = yield* projections.getThread(threadId);
     assert.isNull(restored.deletedAt);
     assert.isNull(restored.archivedAt);
@@ -144,6 +169,11 @@ it.effect.each([
 it.effect.each([
   { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
   { instanceId: ProviderInstanceId.make("muse-agent"), model: "other-model" },
+  {
+    instanceId: ProviderInstanceId.make("muse-agent"),
+    model: "muse",
+    options: [{ id: "reasoningEffort", value: "high" }],
+  },
 ])("rejects Muse provider and model overrides in message dispatch: %s", (modelSelection) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -152,23 +182,25 @@ it.effect.each([
     yield* createThread(threadId);
     const before = yield* projections.getThreadProjection(threadId);
     const shellBefore = yield* orchestrator.getShellSnapshot();
-    const error = yield* Effect.flip(
-      orchestrator.dispatch({
-        type: "message.dispatch",
-        commandId: CommandId.make("dispatch:override"),
-        threadId,
-        messageId: MessageId.make("override-message"),
-        text: "Hello",
-        attachments: [],
-        modelSelection,
-        dispatchMode: { type: "defer_start" },
-        createdBy: "user",
-        creationSource: "web",
-      }),
-    );
-    assert.equal(error._tag, "OrchestratorCommandRejectedError");
-    assert.deepEqual(yield* projections.getThreadProjection(threadId), before);
-    assert.deepEqual(yield* orchestrator.getShellSnapshot(), shellBefore);
+    for (const mode of ["defer_start", "start_immediately"] as const) {
+      const error = yield* Effect.flip(
+        orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`dispatch:override:${mode}`),
+          threadId,
+          messageId: MessageId.make("override-message"),
+          text: "Hello",
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: mode },
+          createdBy: "user",
+          creationSource: "web",
+        }),
+      );
+      assert.equal(error._tag, "OrchestratorCommandRejectedError");
+      assert.deepEqual(yield* projections.getThreadProjection(threadId), before);
+      assert.deepEqual(yield* orchestrator.getShellSnapshot(), shellBefore);
+    }
   }).pipe(Effect.provide(layer)),
 );
 
@@ -205,11 +237,10 @@ it.effect.each([
       type: "thread.metadata.update",
       commandId: CommandId.make("metadata:title"),
       threadId,
-      title: "Renamed conversation",
       worktreePath: null,
     });
     const updated = yield* projections.getThread(threadId);
-    assert.equal(updated.title, "Renamed conversation");
+    assert.equal(updated.title, "Conversation");
     assert.isNull(updated.worktreePath);
   }).pipe(Effect.provide(layer)),
 );
@@ -406,5 +437,110 @@ it.effect("rejects forks claiming the reserved Muse namespace before reading the
     );
     assert.equal(error._tag, "OrchestratorCommandRejectedError");
     assert.deepEqual(yield* orchestrator.getShellSnapshot(), before);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each([
+  `muse-agent:${"a".repeat(64)}`,
+  `muse-agent:${"a".repeat(64)}:side%3Achat`,
+  "muse-agent:saved-hash",
+])("requires exact native grants for archive and title changes to %s", (id) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make(id);
+    yield* createThread(threadId);
+    const before = yield* projections.getThreadProjection(threadId);
+    const commands = [
+      { type: "thread.archive", commandId: CommandId.make("paired:archive"), threadId },
+      { type: "thread.unarchive", commandId: CommandId.make("paired:unarchive"), threadId },
+      {
+        type: "thread.metadata.update",
+        commandId: CommandId.make("paired:title"),
+        threadId,
+        title: "Renamed",
+      },
+      {
+        type: "thread.title.regeneration.complete",
+        commandId: CommandId.make("paired:complete"),
+        threadId,
+        requestId: CommandId.make("previous-request"),
+        title: "Generated title",
+      },
+      {
+        type: "thread.metadata.update",
+        commandId: CommandId.make("paired:regenerate"),
+        threadId,
+        regenerateTitle: true,
+      },
+    ] as const;
+    for (const command of commands) {
+      const rejected = yield* Effect.flip(orchestrator.dispatch(command));
+      assert.equal(rejected._tag, "OrchestratorCommandRejectedError");
+      assert.deepEqual(yield* projections.getThreadProjection(threadId), before);
+      const wrongGrant = yield* Effect.flip(
+        orchestrator
+          .dispatch({ ...command, commandId: CommandId.make(`${command.commandId}:wrong-thread`) })
+          .pipe(
+            Effect.provideService(Orchestrator.MuseThreadMutation, {
+              threadId: ThreadId.make("other"),
+              operation: "archive",
+            }),
+          ),
+      );
+      assert.equal(wrongGrant._tag, "OrchestratorCommandRejectedError");
+      const wrongOperation = yield* Effect.flip(
+        orchestrator
+          .dispatch({
+            ...command,
+            commandId: CommandId.make(`${command.commandId}:wrong-operation`),
+          })
+          .pipe(
+            Effect.provideService(Orchestrator.MuseThreadMutation, {
+              threadId,
+              operation:
+                command.type === "thread.archive" || command.type === "thread.unarchive"
+                  ? "rename"
+                  : "archive",
+            }),
+          ),
+      );
+      assert.equal(wrongOperation._tag, "OrchestratorCommandRejectedError");
+    }
+    yield* orchestrator
+      .dispatch({
+        type: "thread.metadata.update",
+        commandId: CommandId.make("paired:rename:valid"),
+        threadId,
+        title: "Native title",
+      })
+      .pipe(
+        Effect.provideService(Orchestrator.MuseThreadMutation, { threadId, operation: "rename" }),
+      );
+    assert.equal((yield* projections.getThread(threadId)).title, "Native title");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("message title seeds preserve the native Muse title", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make(`muse-agent:${"a".repeat(64)}`);
+    yield* createThread(threadId);
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("dispatch:title-seed"),
+      threadId,
+      messageId: MessageId.make("seed-message"),
+      text: "Hello",
+      titleSeed: "Generic title",
+      attachments: [],
+      dispatchMode: { type: "defer_start" },
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const thread = yield* projections.getThread(threadId);
+    assert.equal(thread.title, "Conversation");
+    assert.isUndefined(thread.titleRegeneration);
   }).pipe(Effect.provide(layer)),
 );

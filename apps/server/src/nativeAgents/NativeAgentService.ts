@@ -579,7 +579,13 @@ const make = Effect.gen(function* () {
                 commandId: CommandId.make(`muse-agent:unarchive:${nonce}`),
                 threadId,
               })
-              .pipe(Effect.mapError(failure("storage_failed")));
+              .pipe(
+                Effect.provideService(Orchestrator.MuseThreadMutation, {
+                  threadId,
+                  operation: "archive",
+                }),
+                Effect.mapError(failure("storage_failed")),
+              );
           }
           yield* check;
           yield* observe(threadId, selection.instanceId, authorize);
@@ -1209,7 +1215,13 @@ const make = Effect.gen(function* () {
                       commandId: CommandId.make(`muse-agent:archive:${nonce}`),
                       threadId,
                     })
-                    .pipe(Effect.mapError(failure("storage_failed")));
+                    .pipe(
+                      Effect.provideService(Orchestrator.MuseThreadMutation, {
+                        threadId,
+                        operation: "archive",
+                      }),
+                      Effect.mapError(failure("storage_failed")),
+                    );
                 }
               }).pipe(Effect.exit);
               if (synchronized._tag === "Failure") {
@@ -1290,7 +1302,13 @@ const make = Effect.gen(function* () {
                       threadId,
                       title,
                     })
-                    .pipe(Effect.mapError(failure("storage_failed")));
+                    .pipe(
+                      Effect.provideService(Orchestrator.MuseThreadMutation, {
+                        threadId,
+                        operation: "rename",
+                      }),
+                      Effect.mapError(failure("storage_failed")),
+                    );
                 }
               }).pipe(Effect.exit);
               if (synchronized._tag === "Failure")

@@ -1331,11 +1331,18 @@ it.effect(
         .pipe(Stream.take(1), Stream.runDrain);
       assert.match(opened.threadId, /^muse-agent:[a-f0-9]{64}$/);
       for (const index of [1, 2]) {
-        yield* h.orchestrator.dispatch({
-          type: "thread.archive",
-          commandId: CommandId.make(`facade:archive:${index}`),
-          threadId: opened.threadId,
-        });
+        yield* h.orchestrator
+          .dispatch({
+            type: "thread.archive",
+            commandId: CommandId.make(`facade:archive:${index}`),
+            threadId: opened.threadId,
+          })
+          .pipe(
+            Effect.provideService(Orchestrator.MuseThreadMutation, {
+              threadId: opened.threadId,
+              operation: "archive",
+            }),
+          );
         assert.notEqual((yield* h.projections.getThread(opened.threadId)).archivedAt, null);
         assert.deepEqual(yield* h.service.open(reference), opened);
         assert.equal((yield* h.projections.getThread(opened.threadId)).archivedAt, null);

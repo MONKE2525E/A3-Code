@@ -282,6 +282,11 @@ export const MuseThreadCreation = Context.Reference<ThreadId | undefined>(
   { defaultValue: () => undefined },
 );
 
+/** Authorizes one paired native mutation without exposing a bypass in the wire contract. */
+export const MuseThreadMutation = Context.Reference<
+  { readonly threadId: ThreadId; readonly operation: "archive" | "rename" } | undefined
+>("t3/orchestration-v2/MuseThreadMutation", { defaultValue: () => undefined });
+
 export interface OrchestratorV2DispatchResult {
   readonly sequence: number;
   readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
@@ -2551,6 +2556,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: "Muse conversations cannot change worktree through generic thread commands.",
       });
     }
+    if (nativeAgentSourceForThread(thread) === "muse-agent") {
+      const operation =
+        command.type === "thread.archive" || command.type === "thread.unarchive"
+          ? "archive"
+          : command.type === "thread.title.regeneration.complete" ||
+              (command.type === "thread.metadata.update" &&
+                (command.title !== undefined || command.regenerateTitle === true))
+            ? "rename"
+            : undefined;
+      if (operation !== undefined) {
+        const grant = yield* MuseThreadMutation;
+        if (grant?.threadId !== command.threadId || grant.operation !== operation) {
+          return yield* new OrchestratorCommandRejectedError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Muse conversations require native ${operation} controls to keep Muse and T3 synchronized.`,
+          });
+        }
+      }
+    }
     if (
       command.type === "thread.pull-request.watch" &&
       command.watching &&
@@ -4633,7 +4658,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         nativeAgentSourceForThread(projection.thread) === "muse-agent" &&
         command.modelSelection !== undefined &&
         (command.modelSelection.instanceId !== projection.thread.modelSelection.instanceId ||
-          command.modelSelection.model !== projection.thread.modelSelection.model)
+          command.modelSelection.model !== projection.thread.modelSelection.model ||
+          !!command.modelSelection.options?.length)
       ) {
         return yield* new OrchestratorCommandRejectedError({
           commandId: command.commandId,
@@ -4788,6 +4814,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const onlyMaintenanceHistory =
         userMessages.length > 0 && userMessages.every(isNativeMaintenanceCommand);
       if (
+        nativeAgentSourceForThread(projection.thread) !== "muse-agent" &&
         !isNativeMaintenanceCommand(command) &&
         ((command.titleSeed !== undefined &&
           (yield* projectionStore
