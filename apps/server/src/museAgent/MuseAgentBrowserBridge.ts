@@ -345,7 +345,7 @@ export const museAgentBrowserBridge = String.raw`(() => {
       if (current && Date.now()-current.lastHeartbeatAt >= 15000) {
         current.lastHeartbeatAt = Date.now();
         try { await found.rpc.sendRequest('node.heartbeat',{node_id:current.clientId},{expectedGatewayTargetKey:JSON.stringify([found.rpc.gatewayUrl,found.rpc.vmName??null])}); }
-        catch { if (toolRegistration === current) { clearTools(); emit({event:'transport.disconnected',authority:pinned}); } }
+        catch { if (toolRegistration === current) window.__t3Muse.observeDisconnect({authority:pinned}); }
       }
       return;
     }

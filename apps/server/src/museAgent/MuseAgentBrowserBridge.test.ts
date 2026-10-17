@@ -128,6 +128,7 @@ const fixture = () => {
   };
   let tick: (() => Promise<void>) | undefined;
   let generation = 0;
+  let now = 30000;
   NodeVM.runInNewContext(museAgentBrowserBridge, {
     location: { origin: "https://muse.ai" },
     document: { querySelectorAll: () => [{ __reactFiber$fixture: hostRoot }] },
@@ -139,6 +140,7 @@ const fixture = () => {
     AbortController,
     btoa,
     atob,
+    Date: { now: () => now },
     setInterval: (fn: () => Promise<void>) => {
       tick = fn;
     },
@@ -168,6 +170,9 @@ const fixture = () => {
       delete window.__t3MuseNativeComputerStream;
     },
     tick: () => tick!(),
+    advanceTime: (milliseconds: number) => {
+      now += milliseconds;
+    },
     setBlob: (next: unknown) => {
       blob = next;
     },
@@ -371,6 +376,66 @@ it("heartbeats a registered device and stops renewing it after native removal", 
   await f.bridge.unregister({ authority: f.authority, clientId: "device-uuid", connectionId });
   await f.tick();
   expect(f.calls.filter((call) => call.method === "node.heartbeat")).toHaveLength(1);
+});
+
+it("reattaches after a failed heartbeat on an otherwise unchanged native connection", async () => {
+  const f = fixture();
+  await admission(f);
+  const before = f.bridge.connectionId({ authority: f.authority });
+  const registration = {
+    authority: f.authority,
+    clientId: "device-uuid",
+    nativeSessionId: "primary",
+    connectionId: before,
+    commands: { "t3.probe": {} },
+  };
+  await f.bridge.register(registration);
+  f.advanceTime(15000);
+  f.send.mockRejectedValueOnce(new Error("temporary heartbeat failure"));
+  await f.tick();
+  expect(f.invokes.size).toBe(0);
+  expect(f.events.at(-1)?.event).toBe("transport.disconnected");
+
+  await f.tick();
+  expect(f.events.at(-1)?.event).toBe("transport.reconnected");
+  const after = f.bridge.connectionId({ authority: f.authority });
+  expect(after).not.toBe(before);
+  await expect(f.bridge.register(registration)).rejects.toThrow("registration_scope_changed");
+  await f.bridge.register({ ...registration, connectionId: after });
+  expect(f.invokes.size).toBe(1);
+  await expect(f.bridge.cancelOwned({ authority: f.authority, receipt })).rejects.toThrow(
+    "turn_not_owned",
+  );
+  expect(f.calls.filter((call) => call.method === "chat.stream")).toHaveLength(1);
+  expect(f.calls.filter((call) => call.method === "chat.subscribe")).toHaveLength(0);
+});
+
+it("does not disconnect a replacement registration when an older heartbeat fails", async () => {
+  const f = fixture();
+  await f.bridge.watch({ authority: f.authority, session: "primary" });
+  const connectionId = f.bridge.connectionId({ authority: f.authority });
+  const registration = {
+    authority: f.authority,
+    clientId: "device-uuid",
+    nativeSessionId: "primary",
+    connectionId,
+    commands: { "t3.probe": {} },
+  };
+  await f.bridge.register(registration);
+  const heartbeat = Promise.withResolvers<void>();
+  f.send.mockImplementationOnce(async () => {
+    await heartbeat.promise;
+    return {};
+  });
+  f.advanceTime(15000);
+  const pendingTick = f.tick();
+  await f.bridge.unregister({ authority: f.authority, clientId: "device-uuid", connectionId });
+  await f.bridge.register(registration);
+  heartbeat.reject(new Error("old heartbeat failure"));
+  await pendingTick;
+  expect(f.invokes.size).toBe(1);
+  expect(f.bridge.connectionId({ authority: f.authority })).toBe(connectionId);
+  expect(f.events.some((event) => event.event === "transport.disconnected")).toBe(false);
 });
 const receipt = { sessionId: "primary", messageId: "user-1", replyToMessageId: "carrier-1" };
 const admission = async (f: ReturnType<typeof fixture>) => {
