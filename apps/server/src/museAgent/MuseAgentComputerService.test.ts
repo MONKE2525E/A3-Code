@@ -3,8 +3,6 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
-import * as Deferred from "effect/Deferred";
-import * as Fiber from "effect/Fiber";
 import * as Service from "./MuseAgentComputerService.ts";
 import * as Transport from "./MuseAgentTransport.ts";
 
@@ -72,25 +70,15 @@ const fixture = () => {
   };
   let duringRequest: ((method: string) => void) | undefined;
   let requestError: Transport.MuseAgentTransportError | undefined;
-  let beforeConnection: (() => Effect.Effect<void>) | undefined;
-  let overrideResponse:
-    | ((method: string) => Effect.Effect<unknown, Transport.MuseAgentTransportError> | undefined)
-    | undefined;
   const transport = Transport.MuseAgentTransport.of({
     acquireTurn: () => Effect.succeed(Effect.void),
     connect: Effect.sync(() => account),
-    connectionId: () =>
-      Effect.gen(function* () {
-        if (beforeConnection) yield* beforeConnection();
-        return generation;
-      }),
+    connectionId: () => Effect.sync(() => generation),
     request: (_binding, method, params, write = false) =>
       Effect.suspend(() => {
         calls.push({ method, params, write });
         duringRequest?.(method);
-        return requestError
-          ? Effect.fail(requestError)
-          : (overrideResponse?.(method) ?? Effect.succeed(responses[method]));
+        return requestError ? Effect.fail(requestError) : Effect.succeed(responses[method]);
       }),
     openComputerStream: (_binding, input) =>
       Effect.suspend(() => {
@@ -129,12 +117,6 @@ const fixture = () => {
     failStream: (callback: () => Transport.MuseAgentTransportError) => {
       streamFailure = callback;
     },
-    onConnection: (callback: () => Effect.Effect<void>) => {
-      beforeConnection = callback;
-    },
-    onResponse: (callback: NonNullable<typeof overrideResponse>) => {
-      overrideResponse = callback;
-    },
     layer: Service.layer.pipe(
       Layer.provide(Layer.succeed(Transport.MuseAgentTransport, transport)),
     ),
@@ -171,9 +153,7 @@ it.effect(
           new Uint8Array([82, 70, 66]),
         ]);
         expect(f.streamClosed()).toBe(1);
-        expect(f.calls.filter((call) => call.write)).toEqual([
-          { method: "browser_task.release", params: { task_id: "browser-task" }, write: true },
-        ]);
+        expect(f.calls.filter((call) => call.write)).toEqual([]);
       }),
     ).pipe(Effect.provide(f.layer));
   },
@@ -206,61 +186,51 @@ it.effect(
   },
 );
 
-it.effect(
-  "heartbeats a held takeover and leaves a replacement takeover untouched during cleanup",
-  () => {
-    const f = fixture();
-    f.responses["browser_task.get"] = userState;
-    return Effect.scoped(
-      Effect.gen(function* () {
-        const computer = yield* Service.MuseAgentComputerService;
-        const viewer = yield* computer.openStream(scope, "takeover");
-        yield* TestClock.adjust("5 seconds");
-        expect(f.calls.filter((call) => call.write)).toEqual([
-          { method: "browser_task.heartbeat", params: { task_id: "browser-task" }, write: true },
-        ]);
-        f.responses["browser_task.get"] = {
-          ...userState,
-          lease: { ...userState.lease, takeover_id: "replacement" },
-        };
-        yield* viewer.close;
-        expect(f.streamClosed()).toBe(1);
-        expect(f.calls.filter((call) => call.write)).toEqual([
-          { method: "browser_task.heartbeat", params: { task_id: "browser-task" }, write: true },
-        ]);
-      }),
-    ).pipe(Effect.provide(f.layer));
-  },
-);
-
-it.effect("refuses delayed release, heartbeat and resize from a superseded takeover", () => {
+it.effect("closes only its captured stream when another client replaces the takeover", () => {
   const f = fixture();
-  f.responses["browser_task.get"] = {
-    ...userState,
-    lease: { ...userState.lease, takeover_id: "replacement" },
-  };
-  return Effect.gen(function* () {
-    const computer = yield* Service.MuseAgentComputerService;
-    for (const action of [
-      { action: "release", takeoverId: "takeover" },
-      { action: "heartbeat", takeoverId: "takeover" },
-      {
-        action: "viewer",
-        takeoverId: "takeover",
-        viewer: { width: 800, height: 600, devicePixelRatio: 1 },
-      },
-    ] as const)
-      expect((yield* computer.operate(scope, action).pipe(Effect.flip)).code).toBe(
+  f.responses["browser_task.get"] = userState;
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const computer = yield* Service.MuseAgentComputerService;
+      const viewer = yield* computer.openStream(scope, "takeover");
+      const callsAtOpen = f.calls.length;
+      f.responses["browser_task.get"] = {
+        ...userState,
+        lease: { ...userState.lease, takeover_id: "replacement" },
+      };
+      yield* viewer.close;
+      yield* viewer.close;
+      expect(f.streamClosed()).toBe(1);
+      expect(f.calls.slice(callsAtOpen)).toEqual([]);
+      expect(f.responses["browser_task.get"]).toMatchObject({
+        lease: { takeover_id: "replacement" },
+      });
+      expect((yield* viewer.send(new Uint8Array([1])).pipe(Effect.flip)).code).toBe(
         "control_conflict",
       );
-    expect(f.calls.filter((call) => call.write)).toEqual([]);
-    expect(
-      yield* computer.operate(scope, { action: "release", takeoverId: "replacement" }),
-    ).toEqual({ action: "release", state: expectedAgentState });
-    expect(f.calls.filter((call) => call.write)).toEqual([
-      { method: "browser_task.release", params: { task_id: "browser-task" }, write: true },
-    ]);
-  }).pipe(Effect.provide(f.layer));
+      expect(f.inputBytes).toEqual([]);
+    }),
+  ).pipe(Effect.provide(f.layer));
+});
+
+it.effect("expires the captured lease without renewing or releasing any takeover", () => {
+  const f = fixture();
+  f.responses["browser_task.get"] = userState;
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const computer = yield* Service.MuseAgentComputerService;
+      const viewer = yield* computer.openStream(scope, "takeover");
+      yield* TestClock.adjust("11999 millis");
+      expect(f.streamClosed()).toBe(0);
+      yield* TestClock.adjust("1 millis");
+      expect(f.streamClosed()).toBe(1);
+      expect(f.calls.filter((call) => call.write)).toEqual([]);
+      expect((yield* viewer.send(new Uint8Array([1])).pipe(Effect.flip)).code).toBe(
+        "control_conflict",
+      );
+      expect(f.inputBytes).toEqual([]);
+    }),
+  ).pipe(Effect.provide(f.layer));
 });
 
 it.effect(
@@ -312,118 +282,12 @@ it.effect(
             );
           }),
         ).pipe(Effect.provide(f.layer));
-        expect(f.calls.filter((call) => call.write)).toEqual(
-          replacement
-            ? []
-            : [
-                {
-                  method: "browser_task.release",
-                  params: { task_id: "browser-task" },
-                  write: true,
-                },
-              ],
-        );
+        expect(f.calls.filter((call) => call.write)).toEqual([]);
         expect(f.streams).toEqual([
           { taskId: "browser-task", sessionId: "primary", takeoverId: "takeover" },
         ]);
       }
     });
-  },
-);
-
-it.effect(
-  "serializes stale viewer cleanup with takeover so a delayed read cannot release its replacement",
-  () => {
-    const f = fixture();
-    f.responses["browser_task.get"] = userState;
-    return Effect.scoped(
-      Effect.gen(function* () {
-        const checked = yield* Deferred.make<void>(),
-          resume = yield* Deferred.make<void>();
-        let checks = 0;
-        f.onConnection(() =>
-          Effect.gen(function* () {
-            checks++;
-            if (checks === 4) {
-              yield* Deferred.succeed(checked, undefined);
-              yield* Deferred.await(resume);
-            }
-          }),
-        );
-        const replacement = {
-          ...userState,
-          lease: { ...userState.lease, takeover_id: "replacement" },
-        };
-        f.responses["browser_task.takeover"] = replacement;
-        f.onRequest((method) => {
-          if (method === "browser_task.takeover") f.responses["browser_task.get"] = replacement;
-        });
-        const computer = yield* Service.MuseAgentComputerService;
-        const old = yield* computer.openStream(scope, "takeover");
-        const closing = yield* old.close.pipe(Effect.forkScoped);
-        yield* Deferred.await(checked);
-        const replacing = yield* computer
-          .operate(scope, { action: "takeover" })
-          .pipe(Effect.forkScoped);
-        yield* TestClock.adjust("2 seconds");
-        expect((yield* Fiber.join(replacing)).action).toBe("takeover");
-        yield* Deferred.succeed(resume, undefined);
-        yield* Fiber.join(closing);
-        expect(f.calls.filter((call) => call.write)).toEqual([
-          { method: "browser_task.takeover", params: { task_id: "browser-task" }, write: true },
-        ]);
-        expect((yield* computer.readTask(scope)).state.lease?.takeoverId).toBe("replacement");
-      }),
-    ).pipe(Effect.provide(f.layer));
-  },
-);
-
-it.effect(
-  "serializes heartbeat validation and renewal before a queued replacement takeover",
-  () => {
-    const f = fixture();
-    f.responses["browser_task.get"] = userState;
-    return Effect.scoped(
-      Effect.gen(function* () {
-        const checked = yield* Deferred.make<void>(),
-          resume = yield* Deferred.make<void>();
-        let reads = 0;
-        f.onResponse((method) => {
-          if (method !== "browser_task.get" || ++reads !== 2) return undefined;
-          return Deferred.succeed(checked, undefined).pipe(
-            Effect.andThen(Deferred.await(resume)),
-            Effect.as(userState),
-          );
-        });
-        const replacement = {
-          ...userState,
-          lease: { ...userState.lease, takeover_id: "replacement" },
-        };
-        f.responses["browser_task.takeover"] = replacement;
-        f.onRequest((method) => {
-          if (method === "browser_task.takeover") {
-            f.responses["browser_task.get"] = replacement;
-            f.responses["browser_task.heartbeat"] = replacement;
-          }
-        });
-        const computer = yield* Service.MuseAgentComputerService;
-        const old = yield* computer.openStream(scope, "takeover");
-        yield* TestClock.adjust("5 seconds");
-        yield* Deferred.await(checked);
-        const replacing = yield* computer
-          .operate(scope, { action: "takeover" })
-          .pipe(Effect.forkScoped);
-        yield* Effect.yieldNow;
-        yield* Deferred.succeed(resume, undefined);
-        expect((yield* Fiber.join(replacing)).action).toBe("takeover");
-        yield* old.close;
-        expect(f.calls.filter((call) => call.write)).toEqual([
-          { method: "browser_task.heartbeat", params: { task_id: "browser-task" }, write: true },
-          { method: "browser_task.takeover", params: { task_id: "browser-task" }, write: true },
-        ]);
-        expect((yield* computer.readTask(scope)).state.lease?.takeoverId).toBe("replacement");
-      }),
-    ).pipe(Effect.provide(f.layer));
   },
 );
 
@@ -617,30 +481,9 @@ it.effect("refuses a takeover receipt for another presented task or user lease",
     }
   });
 });
-it.effect("renews and releases only a user lease for the selected task", () => {
+it.effect("rejects unbound lease mutations even when the captured takeover is valid", () => {
   const f = fixture();
   f.responses["browser_task.get"] = userState;
-  return Effect.gen(function* () {
-    const computer = yield* Service.MuseAgentComputerService;
-    expect(
-      (yield* computer.operate(scope, { action: "heartbeat", takeoverId: "takeover" })).action,
-    ).toBe("heartbeat");
-    expect(yield* computer.operate(scope, { action: "release", takeoverId: "takeover" })).toEqual({
-      action: "release",
-      state: expectedAgentState,
-    });
-    expect(f.calls.filter((call) => call.write)).toEqual([
-      { method: "browser_task.heartbeat", params: { task_id: "browser-task" }, write: true },
-      { method: "browser_task.release", params: { task_id: "browser-task" }, write: true },
-    ]);
-  }).pipe(Effect.provide(f.layer));
-});
-it.effect("refuses heartbeat, resize and release for an unrelated user lease", () => {
-  const f = fixture();
-  f.responses["browser_task.get"] = {
-    ...userState,
-    lease: { ...userState.lease, task_id: "other" },
-  };
   return Effect.gen(function* () {
     const computer = yield* Service.MuseAgentComputerService;
     for (const action of [
@@ -651,12 +494,12 @@ it.effect("refuses heartbeat, resize and release for an unrelated user lease", (
         takeoverId: "takeover",
         viewer: { width: 800, height: 600, devicePixelRatio: 1 },
       },
-    ] as const)
-      expect((yield* computer.operate(scope, action).pipe(Effect.flip)).code).toBe(
-        "control_conflict",
-      );
-    expect(f.calls.filter((call) => call.write)).toEqual([]);
-    expect(f.calls[0]?.method).toBe("computer.context");
+    ] as const) {
+      const error = yield* computer.operate(scope, action).pipe(Effect.flip);
+      expect(error.code).toBe("lease_mutation_unsupported");
+      expect(error.message).toContain("lease expires");
+    }
+    expect(f.calls).toEqual([]);
   }).pipe(Effect.provide(f.layer));
 });
 it.effect("bounds framebuffer dimensions before making a native request", () => {
@@ -707,28 +550,6 @@ it.effect("keeps uncertain writes uncertain and never retries a native action", 
   }).pipe(Effect.provide(f.layer));
 });
 
-it.effect("resizes only the selected user task with native viewer dimensions", () => {
-  const f = fixture();
-  f.responses["browser_task.get"] = userState;
-  return Effect.gen(function* () {
-    const computer = yield* Service.MuseAgentComputerService;
-    expect(
-      yield* computer.operate(scope, {
-        action: "viewer",
-        takeoverId: "takeover",
-        viewer: { width: 800, height: 600, devicePixelRatio: 1 },
-      }),
-    ).toEqual({ action: "viewer" });
-    expect(f.calls.at(-1)).toEqual({
-      method: "browser_task.viewer",
-      params: {
-        task_id: "browser-task",
-        viewer: { width: 800, height: 600, device_pixel_ratio: 1 },
-      },
-      write: true,
-    });
-  }).pipe(Effect.provide(f.layer));
-});
 it.effect(
   "refreshes the selected environment using the verified residential profile and receipt",
   () => {

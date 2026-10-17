@@ -22,6 +22,7 @@ export class MuseAgentComputerError extends Schema.TaggedError<MuseAgentComputer
       "invalid_response",
       "preview_unavailable",
       "control_conflict",
+      "lease_mutation_unsupported",
       "write_uncertain",
     ]),
   },
@@ -42,6 +43,8 @@ export class MuseAgentComputerError extends Schema.TaggedError<MuseAgentComputer
         return "This Muse computer task has no supported preview.";
       case "control_conflict":
         return "Muse did not grant control of the selected computer task.";
+      case "lease_mutation_unsupported":
+        return "Muse does not support takeover-bound control updates. Control returns when the current lease expires.";
       case "write_uncertain":
         return "Muse may have accepted this computer action. Refresh before retrying.";
       case "invalid_response":
@@ -308,6 +311,12 @@ const make = Effect.gen(function* () {
   const operate: MuseAgentComputerService["Service"]["operate"] = (input, action) =>
     Effect.gen(function* () {
       const command = yield* decode(MuseAgentComputerAction, action, "invalid_request");
+      if (
+        command.action === "release" ||
+        command.action === "heartbeat" ||
+        command.action === "viewer"
+      )
+        return yield* new MuseAgentComputerError({ code: "lease_mutation_unsupported" });
       let viewer: { width: number; height: number; device_pixel_ratio: number } | undefined;
       if ("viewer" in command && command.viewer) {
         const { width, height, devicePixelRatio } = command.viewer;
@@ -320,16 +329,6 @@ const make = Effect.gen(function* () {
       }
       const current = yield* authorize(input),
         { scope } = current;
-      if (
-        (command.action === "heartbeat" ||
-          command.action === "viewer" ||
-          command.action === "release") &&
-        (current.state.lease?.controlOwner !== "user" ||
-          current.state.lease.taskId !== scope.taskId)
-      )
-        return yield* new MuseAgentComputerError({ code: "control_conflict" });
-      if ("takeoverId" in command && current.state.lease?.takeoverId !== command.takeoverId)
-        return yield* new MuseAgentComputerError({ code: "control_conflict" });
       const result = yield* request(
         scope.binding,
         `browser_task.${command.action}`,
@@ -344,7 +343,7 @@ const make = Effect.gen(function* () {
       );
       if ((yield* connection(scope.binding)) !== current.connectionId)
         return yield* new MuseAgentComputerError({ code: "write_uncertain" });
-      if (command.action === "close" || command.action === "stop" || command.action === "viewer")
+      if (command.action === "close" || command.action === "stop")
         return { action: command.action };
       if (command.action === "refresh_environment")
         return { action: command.action, environment: yield* decode(Refresh, result) };
@@ -357,11 +356,9 @@ const make = Effect.gen(function* () {
       )
         return yield* new MuseAgentComputerError({ code: "control_conflict" });
       if (
-        (command.action === "takeover" || command.action === "heartbeat") &&
+        command.action === "takeover" &&
         (next.lease?.controlOwner !== "user" || next.lease.taskId !== scope.taskId)
       )
-        return yield* new MuseAgentComputerError({ code: "control_conflict" });
-      if (command.action === "release" && next.lease?.controlOwner !== "agent")
         return yield* new MuseAgentComputerError({ code: "control_conflict" });
       return { action: command.action, state: next };
     }).pipe(permit.withPermits(1));
@@ -386,38 +383,15 @@ const make = Effect.gen(function* () {
       )
         return yield* new MuseAgentComputerError({ code: "control_conflict" });
       const takeoverId = lease.takeoverId;
-      let expiresAt = lease.controlExpiresAtMs,
-        closed = false;
+      const expiresAt = lease.controlExpiresAtMs;
+      let closed = false;
       let closeNative = Effect.void;
-      const matches = (snapshot: typeof MuseAgentComputerState.Type) =>
-        snapshot.sessionId === scope.sessionId &&
-        snapshot.presentedTaskId === scope.taskId &&
-        snapshot.lease?.controlOwner === "user" &&
-        snapshot.lease.taskId === scope.taskId &&
-        snapshot.lease.takeoverId === takeoverId;
       const close = Effect.suspend(() => {
         if (closed) return Effect.void;
         closed = true;
-        // Retire this viewer first. Release only its captured lease, never a replacement
-        // takeover another client acquired while this socket was closing.
-        return closeNative.pipe(
-          Effect.andThen(
-            Effect.gen(function* () {
-              const latest = yield* authorize(scope);
-              if (matches(latest.state))
-                yield* request(
-                  scope.binding,
-                  "browser_task.release",
-                  { task_id: scope.taskId },
-                  true,
-                );
-            }).pipe(
-              permit.withPermits(1),
-              Effect.ignore,
-              Effect.timeoutOrElse({ duration: "2 seconds", orElse: () => Effect.void }),
-            ),
-          ),
-        );
+        // The shipped protocol provides no takeover-bound release. Closing this stream
+        // must leave any replacement takeover untouched; the captured lease expires.
+        return closeNative;
       });
       yield* Effect.addFinalizer(() => close);
       const native = yield* transport
@@ -431,51 +405,20 @@ const make = Effect.gen(function* () {
           Effect.onError(() => close),
         );
       closeNative = native.close;
-      const heartbeat: Effect.Effect<void, MuseAgentComputerError> = Effect.suspend(() =>
-        Effect.gen(function* () {
-          if (closed) return;
-          const now = yield* Clock.currentTimeMillis;
-          if (expiresAt <= now)
-            return yield* new MuseAgentComputerError({ code: "control_conflict" });
-          yield* Effect.sleep(Math.max(100, Math.min(5000, Math.floor((expiresAt - now) / 2))));
-          if (closed) return;
-          yield* Effect.gen(function* () {
-            const latest = state(
-              yield* decode(
-                NativeState,
-                yield* request(scope.binding, "browser_task.get", { task_id: scope.taskId }),
-              ),
-            );
-            if (!matches(latest))
-              return yield* new MuseAgentComputerError({ code: "control_conflict" });
-            const next = state(
-              yield* decode(
-                NativeState,
-                yield* request(
-                  scope.binding,
-                  "browser_task.heartbeat",
-                  { task_id: scope.taskId },
-                  true,
-                ),
-              ),
-            );
-            if (!matches(next) || next.lease?.controlExpiresAtMs == null)
-              return yield* new MuseAgentComputerError({ code: "control_conflict" });
-            expiresAt = next.lease.controlExpiresAtMs;
-          }).pipe(permit.withPermits(1));
-          return yield* heartbeat;
-        }),
-      );
-      yield* heartbeat.pipe(
-        Effect.catch(() => close),
+      yield* Effect.sleep(Math.max(0, expiresAt - (yield* Clock.currentTimeMillis))).pipe(
+        Effect.andThen(close),
         Effect.forkScoped,
       );
       return {
         events: native.events.pipe(Stream.mapError(failure), Stream.ensuring(close)),
         send: (data: Uint8Array) =>
-          native.send(data).pipe(
-            Effect.mapError(failure),
-            Effect.onError(() => close),
+          Effect.suspend(() =>
+            closed
+              ? Effect.fail(new MuseAgentComputerError({ code: "control_conflict" }))
+              : native.send(data).pipe(
+                  Effect.mapError(failure),
+                  Effect.onError(() => close),
+                ),
           ),
         close,
       };
