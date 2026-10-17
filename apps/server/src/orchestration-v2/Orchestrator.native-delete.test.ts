@@ -40,20 +40,24 @@ const layer = Layer.mergeAll(
   ProjectionStore.layer.pipe(Layer.provide(database)),
   ProviderReplayHarness.layerWithRegistry(
     { name: "native-delete" },
-    ProviderAdapterRegistry.layerFromAdapters([
-      {
-        instanceId: ProviderInstanceId.make("muse-agent"),
-        driver: ProviderDriverKind.make("muse-agent"),
+    ProviderAdapterRegistry.layerFromAdapters(
+      ["muse-agent", "custom-muse", "codex"].map((instanceId) => ({
+        instanceId: ProviderInstanceId.make(instanceId),
+        driver: ProviderDriverKind.make(instanceId === "codex" ? "codex" : "muse-agent"),
         getCapabilities: () => Effect.succeed(MuseAgentCapabilitiesV2),
         planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
         openSession: () => Effect.die("Provider execution is disabled for command-boundary tests"),
-      },
-    ]),
+      })),
+    ),
     { databaseLayer: database, runEffectWorker: false },
   ),
 );
 
-const createThread = (threadId: ThreadId, nativeCreation = true) =>
+const createThread = (
+  threadId: ThreadId,
+  nativeCreation = true,
+  instanceId = ProviderInstanceId.make(threadId.startsWith("muse-agent:") ? "muse-agent" : "codex"),
+) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     yield* orchestrator
@@ -63,7 +67,7 @@ const createThread = (threadId: ThreadId, nativeCreation = true) =>
         threadId,
         projectId: ProjectId.make("project:native-delete"),
         title: "Conversation",
-        modelSelection: { instanceId: ProviderInstanceId.make("muse-agent"), model: "muse" },
+        modelSelection: { instanceId, model: "muse" },
         runtimeMode: "full-access",
         interactionMode: "default",
         branch: null,
@@ -542,5 +546,59 @@ it.effect("message title seeds preserve the native Muse title", () =>
     const thread = yield* projections.getThread(threadId);
     assert.equal(thread.title, "Conversation");
     assert.isUndefined(thread.titleRegeneration);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each(["muse-agent", "custom-muse"])(
+  "rejects noncanonical creation selecting Muse instance %s",
+  (instanceId) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const before = yield* orchestrator.getShellSnapshot();
+      for (const nativeCreation of [false, true]) {
+        const error = yield* Effect.flip(
+          createThread(
+            ThreadId.make(`ordinary:${nativeCreation}`),
+            nativeCreation,
+            ProviderInstanceId.make(instanceId),
+          ),
+        );
+        assert.equal(error._tag, "OrchestratorCommandRejectedError");
+        assert.equal(
+          userFacingDispatchErrorMessage(error),
+          "Muse conversations must be created through native conversation controls.",
+        );
+        assert.deepEqual(yield* orchestrator.getShellSnapshot(), before);
+      }
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each([
+  `muse-agent:${"a".repeat(64)}`,
+  `muse-agent:${"a".repeat(64)}:side%3Achat`,
+  "muse-agent:saved-hash",
+])("rejects generic forks of Muse conversation %s", (id) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const sourceThreadId = ThreadId.make(id);
+    yield* createThread(sourceThreadId);
+    const before = yield* orchestrator.getShellSnapshot();
+    const error = yield* Effect.flip(
+      orchestrator.dispatch({
+        type: "thread.fork",
+        commandId: CommandId.make("fork:muse-source"),
+        sourceThreadId,
+        targetThreadId: ThreadId.make("ordinary:fork-target"),
+        sourcePoint: { type: "latest_stable" },
+        createdBy: "user",
+        creationSource: "web",
+      }),
+    );
+    assert.equal(error._tag, "OrchestratorCommandRejectedError");
+    assert.equal(
+      userFacingDispatchErrorMessage(error),
+      "Muse conversations cannot be forked through generic thread commands.",
+    );
+    assert.deepEqual(yield* orchestrator.getShellSnapshot(), before);
   }).pipe(Effect.provide(layer)),
 );

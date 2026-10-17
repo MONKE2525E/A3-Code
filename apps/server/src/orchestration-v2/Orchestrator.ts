@@ -3694,6 +3694,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
         ),
       );
+    if (nativeAgentSourceForThread(sourceProjection.thread) === "muse-agent") {
+      return yield* new OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Muse conversations cannot be forked through generic thread commands.",
+      });
+    }
     // The source is not under this command's lock, so check the modes this
     // command copies, not an earlier read the source's user could outrun.
     yield* refuseAboveDispatchModeLimit(command, command.sourceThreadId, sourceProjection.thread);
@@ -11028,6 +11035,31 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         commandType: command.type,
         cause: "Muse thread IDs are reserved for native conversation creation.",
       });
+    }
+
+    if (command.type === "thread.create") {
+      const adapter = yield* providerAdapters.get(command.modelSelection.instanceId).pipe(
+        Effect.catchTags({ ProviderAdapterRegistryLookupError: () => Effect.succeed(undefined) }),
+        Effect.mapError(
+          (cause) =>
+            new OrchestratorProviderAdapterError({
+              commandId: command.commandId,
+              providerInstanceId: command.modelSelection.instanceId,
+              cause,
+            }),
+        ),
+      );
+      if (
+        adapter?.driver === "muse-agent" &&
+        (!command.threadId.startsWith("muse-agent:") ||
+          (yield* MuseThreadCreation) !== command.threadId)
+      ) {
+        return yield* new OrchestratorCommandRejectedError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Muse conversations must be created through native conversation controls.",
+        });
+      }
     }
 
     const events = yield* Ref.make<Array<OrchestrationV2DomainEvent>>([]);
