@@ -6843,6 +6843,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
         ),
       );
+      if (targetAdapter.driver === "muse-agent") {
+        return yield* new OrchestratorCommandRejectedError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Muse cannot run app-owned delegated tasks. Choose a coding provider instead.",
+        });
+      }
 
       const now = command.createdAt ?? (yield* DateTime.now);
       const taskNodeId = idAllocator.derive.delegatedTaskNode({

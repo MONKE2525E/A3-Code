@@ -1192,6 +1192,11 @@ describe("OrchestratorMcpService provider resolution", () => {
             driver: ProviderDriverKind.make("grok-bot"),
             model: "bot-id",
           }),
+          providerSnapshot({
+            instanceId: ProviderInstanceId.make("custom-muse"),
+            driver: ProviderDriverKind.make("muse-agent"),
+            model: "muse-agent",
+          }),
         ];
         const layerDependencies = Layer.mergeAll(
           NodeServices.layer,
@@ -1210,6 +1215,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             antigravityInstanceId,
             disabledAntigravityInstanceId,
             ProviderInstanceId.make("native-bot"),
+            ProviderInstanceId.make("custom-muse"),
           ]),
           Layer.mock(ProjectService.ProjectService)({}),
           Layer.mock(SecretRequests.SecretRequests)({}),
@@ -1223,6 +1229,9 @@ describe("OrchestratorMcpService provider resolution", () => {
             capabilities.providers.map((provider) => [provider.providerInstanceId, provider]),
           );
           assert.isFalse(byId.get(ProviderInstanceId.make("native-bot"))?.canRunChildTask);
+          const muse = byId.get(ProviderInstanceId.make("custom-muse"));
+          assert.isFalse(muse?.canRunChildTask);
+          assert.isFalse(muse?.canRunCrossProviderChildTask);
           for (const provider of providers) {
             assert.deepEqual(
               byId.get(provider.instanceId)?.models.map((model) => model.id),
@@ -1530,6 +1539,60 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.equal(request.modelSelection.instanceId, antigravityInstanceId);
         assert.equal(request.modelSelection.model, "ant-model");
       }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(layerDependencies))));
+    }),
+  );
+
+  it.effect("rejects explicit, driver-only, and inherited Muse delegation before dispatch", () =>
+    Effect.gen(function* () {
+      const museInstanceId = ProviderInstanceId.make("custom-muse");
+      const selection = { instanceId: museInstanceId, model: "muse-agent" };
+      const parent = parentProjection([], selection);
+      let dispatchCount = 0;
+      const dependencies = Layer.mergeAll(
+        NodeServices.layer,
+        ServerSettings.layerTest(),
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          hasReceipt: () => Effect.succeed(false),
+          getThreadRecords: () =>
+            Effect.succeed({
+              ...parent,
+              runs: parent.runs.map((run) => ({ ...run, providerInstanceId: museInstanceId })),
+            }),
+          dispatch: () =>
+            Effect.sync(() => {
+              dispatchCount++;
+              return { sequence: 1, storedEvents: [] };
+            }),
+        }),
+        providerRegistryLayer([
+          providerSnapshot({
+            instanceId: museInstanceId,
+            driver: ProviderDriverKind.make("muse-agent"),
+            model: selection.model,
+          }),
+        ]),
+        adapterRegistryLayer([museInstanceId]),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        for (const target of [
+          { providerInstanceId: museInstanceId },
+          { driverKind: ProviderDriverKind.make("muse-agent") },
+          undefined,
+        ]) {
+          const error = yield* service
+            .delegateTask(
+              { ...scope, thread: { ...scope.thread!, providerInstanceId: museInstanceId } },
+              { task: "Summarize the diff.", target, mode: "async" },
+            )
+            .pipe(Effect.flip);
+          assert.equal(error.code, "provider_unavailable");
+        }
+        assert.equal(dispatchCount, 0);
+      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))));
     }),
   );
 

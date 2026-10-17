@@ -339,6 +339,11 @@ function providerConstraints(
       "Grok Bot runs its canonical bot chat, not coding subagent threads. Choose a coding provider and its advertised model.",
     );
   }
+  if (provider.driver === "muse-agent") {
+    constraints.push(
+      "Muse runs canonical native conversations, not coding subagent threads. Choose a coding provider and its advertised model.",
+    );
+  }
   if (!provider.enabled) constraints.push("Provider instance is disabled.");
   if (!provider.installed) constraints.push("Provider executable is not installed.");
   if (!isProviderAvailable(provider)) {

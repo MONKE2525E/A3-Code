@@ -550,6 +550,53 @@ it.effect("message title seeds preserve the native Muse title", () =>
 );
 
 it.effect.each(["muse-agent", "custom-muse"])(
+  "rejects delegated tasks targeting Muse instance %s before creating a child",
+  (instanceId) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const parentThreadId = ThreadId.make("thread:delegation-parent");
+      yield* createThread(parentThreadId);
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("start:delegation-parent"),
+        threadId: parentThreadId,
+        messageId: MessageId.make("message:delegation-parent"),
+        text: "Delegate a task",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const before = yield* projections.getThreadProjection(parentThreadId);
+      const shellBefore = yield* orchestrator.getShellSnapshot();
+      const parentRun = before.runs[0]!;
+      const error = yield* Effect.flip(
+        orchestrator.dispatch({
+          type: "delegated_task.request",
+          commandId: CommandId.make(`delegate:${instanceId}`),
+          parentThreadId,
+          parentRunId: parentRun.id,
+          parentNodeId: parentRun.rootNodeId!,
+          task: "Inspect the changes",
+          modelSelection: { instanceId: ProviderInstanceId.make(instanceId), model: "muse" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdBy: "agent",
+          creationSource: "mcp",
+        }),
+      );
+      assert.equal(error._tag, "OrchestratorCommandRejectedError");
+      assert.equal(
+        userFacingDispatchErrorMessage(error),
+        "Muse cannot run app-owned delegated tasks. Choose a coding provider instead.",
+      );
+      assert.deepEqual(yield* projections.getThreadProjection(parentThreadId), before);
+      assert.deepEqual(yield* orchestrator.getShellSnapshot(), shellBefore);
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each(["muse-agent", "custom-muse"])(
   "rejects noncanonical creation selecting Muse instance %s",
   (instanceId) =>
     Effect.gen(function* () {
