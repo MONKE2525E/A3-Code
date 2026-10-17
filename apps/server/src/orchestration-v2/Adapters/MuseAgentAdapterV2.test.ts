@@ -626,6 +626,73 @@ it.effect("disconnect interrupts pending registration before it can admit a nati
   ),
 );
 
+it.effect.each([false, true])(
+  "only recovers durable Muse deliveries with terminal replay evidence: terminal=%s",
+  (terminal) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const turn = yield* makeTurn;
+        const released = yield* Deferred.make<void>();
+        const closed = yield* Deferred.make<void>();
+        let sends = 0;
+        let replays = 0;
+        let revokes = 0;
+        const native = makeNative({
+          acquireTurn: () =>
+            Effect.succeed(Deferred.succeed(released, undefined).pipe(Effect.asVoid)),
+          send: () =>
+            Effect.sync(() => {
+              sends++;
+              return { ...receipt, replayed: true };
+            }),
+          replay: () =>
+            Effect.sync(() => {
+              replays++;
+              return terminal
+                ? [
+                    {
+                      event_name: "delta.turn_done",
+                      seq: 9,
+                      occurred_at_ms: 1234,
+                      reply_to_message_id: "user-1",
+                      payload: { session_id: "primary", status: "completed" },
+                    },
+                  ]
+                : [];
+            }),
+        });
+        const port = ToolsPort.MuseAgentDirectToolsPort.of({
+          install: () => Effect.succeed({ uninstall: Effect.void }),
+          start: () =>
+            Effect.succeed({
+              revoke: Effect.sync(() => {
+                revokes++;
+              }),
+              close: Deferred.succeed(closed, undefined).pipe(Effect.asVoid),
+            }),
+        });
+        const adapter = yield* createMuseAgentAdapterV2(options).pipe(
+          Effect.provideService(Native.MuseAgentNativeRuntimeService, native),
+          Effect.provideService(ProviderHost.ProviderHost, host),
+          Effect.provideService(ToolsPort.MuseAgentDirectToolsPort, port),
+        );
+        const runtime = yield* adapter.openSession(sessionInput);
+        const events = yield* runtime.events.pipe(Stream.runDrain, Effect.forkScoped);
+        const result = yield* Effect.exit(runtime.startTurn(turn));
+        assert.strictEqual(Exit.isSuccess(result), terminal);
+        if (!terminal) {
+          assert.strictEqual(Exit.isFailure(yield* Fiber.await(events)), true);
+          assert.strictEqual(Exit.isFailure(yield* Effect.exit(runtime.startTurn(turn))), true);
+        }
+        yield* Deferred.await(closed);
+        yield* Deferred.await(released);
+        assert.strictEqual(sends, 1);
+        assert.strictEqual(replays, 1);
+        assert.strictEqual(revokes, 1);
+      }),
+    ),
+);
+
 it.effect(
   "fails an unsettled reconnected turn instead of advertising a ready runtime without tools",
   () =>

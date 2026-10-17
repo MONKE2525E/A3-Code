@@ -764,6 +764,26 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
                   const replayed = museHistoryFrame(raw, session.session_id);
                   if (replayed) yield* projectFrame(replayed);
                 }
+                // A durable receipt belongs to the original admission's tool client.
+                // Its pending turn cannot use this runtime's replacement registration.
+                if (!projection.isTerminal()) {
+                  const cause = new Native.MuseAgentRuntimeError({
+                    kind: "protocol",
+                    cause: new Error("Muse delivery replay has not settled."),
+                  });
+                  retired = true;
+                  yield* Fiber.interrupt(watchFiber);
+                  yield* watch.close;
+                  yield* Queue.fail(
+                    inbox,
+                    new ProviderAdapter.ProviderAdapterEventStreamError({
+                      driver: MUSE_AGENT_DRIVER_KIND,
+                      providerSessionId: input.providerSessionId,
+                      cause,
+                    }),
+                  );
+                  return yield* cause;
+                }
               }
             }).pipe(
               Effect.onError(() =>
