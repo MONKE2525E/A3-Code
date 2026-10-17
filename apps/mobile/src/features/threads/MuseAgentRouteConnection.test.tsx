@@ -279,7 +279,7 @@ it("does not call fork RPC for ordinary threads or official nightly", async () =
       ),
     );
     expect(mocks.open).not.toHaveBeenCalled();
-    expect(container.textContent).toBe("");
+    expect(container.textContent).toContain("Reconnect its provider to send.");
   } finally {
     await act(async () => root.unmount());
   }
@@ -528,7 +528,7 @@ it("re-locks send on reconnect, permission loss, and thread change", async () =>
   }
 });
 
-it("allows send immediately for ordinary and non-advertised Muse without RPC", async () => {
+it("allows ordinary sends but blocks non-advertised Muse without RPC", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   mocks.open.mockClear();
   const send = vi.fn(async () => "sent");
@@ -566,14 +566,15 @@ it("allows send immediately for ordinary and non-advertised Muse without RPC", a
         </MuseAgentRouteConnection>,
       ),
     );
-    expect(await fireSend()).toBe("sent");
+    expect(await fireSend()).toBeNull();
+    expect(send).toHaveBeenCalledTimes(1);
     expect(mocks.open).not.toHaveBeenCalled();
   } finally {
     await act(async () => root.unmount());
   }
 });
 
-it("blocks send while providers are unknown, then unlocks when Muse is not advertised", async () => {
+it("keeps sends blocked when resolved providers do not advertise Muse", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   mocks.open.mockClear();
   const send = vi.fn(async () => "sent");
@@ -608,7 +609,9 @@ it("blocks send while providers are unknown, then unlocks when Muse is not adver
         </MuseAgentRouteConnection>,
       ),
     );
-    expect(await fireSend()).toBe("sent");
+    expect(await fireSend()).toBeNull();
+    expect(send).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Reconnect its provider to send.");
     expect(mocks.open).not.toHaveBeenCalled();
   } finally {
     await act(async () => root.unmount());
