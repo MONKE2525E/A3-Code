@@ -252,7 +252,7 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
         };
         const inbox = yield* Queue.unbounded<
           ProviderAdapter.ProviderAdapterV2Event,
-          ProviderAdapter.ProviderAdapterV2Error
+          ProviderAdapter.ProviderAdapterV2Error | Cause.Done
         >();
         yield* Effect.addFinalizer(() => Queue.shutdown(inbox));
         yield* Queue.offerAll(inbox, projection.restore());
@@ -389,8 +389,9 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
             yield* publish(batch);
             return batch.filter((event) => event.type === "message.updated").length;
           });
-        // Idle observers may detach when another conversation takes the native route.
-        // A managed turn reacquires that route under the account-wide turn lease.
+        // The native route has one observer. Retire displaced runtimes so reopening
+        // their conversation subscribes again and repairs history through a fresh session.
+        let retired = false;
         const runWatch = (currentWatch: typeof watch) => {
           let superseded = false;
           return currentWatch.events.pipe(
@@ -463,7 +464,20 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
             Effect.andThen(
               Effect.suspend(() =>
                 superseded
-                  ? Effect.void
+                  ? Effect.gen(function* () {
+                      retired = true;
+                      yield* releaseTurn;
+                      yield* Queue.offer(inbox, {
+                        type: "provider_session.updated",
+                        driver: MUSE_AGENT_DRIVER_KIND,
+                        providerSession: {
+                          ...providerSession,
+                          status: "stopped",
+                          updatedAt: yield* DateTime.now,
+                        },
+                      });
+                      yield* Queue.end(inbox);
+                    })
                   : Effect.fail(new Native.MuseAgentRuntimeError({ kind: "protocol" })),
               ),
             ),
@@ -606,6 +620,9 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
                 ),
               );
               yield* Fiber.interrupt(watchFiber);
+              // Admission can wait while another conversation retires this observer.
+              // Awaiting interruption fences every old watcher before installing its replacement.
+              if (retired) return yield* new Native.MuseAgentRuntimeError({ kind: "busy" });
               yield* watch.close;
               watch = yield* native.watch({ binding, sessionId: session.session_id });
               watchFiber = yield* runWatch(watch);

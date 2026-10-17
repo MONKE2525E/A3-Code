@@ -5,8 +5,10 @@ import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as Fiber from "effect/Fiber";
 import * as Exit from "effect/Exit";
+import * as Cause from "effect/Cause";
 import {
   ThreadId,
+  ProviderSessionId,
   RunId,
   RunAttemptId,
   NodeId,
@@ -30,6 +32,7 @@ import * as ToolsPort from "../../museAgent/MuseAgentDirectToolsPort.ts";
 import { NativeAgentDirectToolsError } from "../../mcp/direct/NativeAgentDirectTools.ts";
 import { createMuseAgentAdapterV2 } from "./MuseAgentAdapterV2.ts";
 import { makeMuseAgentProjection } from "./MuseAgentAdapterV2Projection.ts";
+import { museThreadIdForSession, museThreadIdentity } from "../../museAgent/MuseAgentThreadIds.ts";
 import {
   binding,
   makeNative,
@@ -1106,43 +1109,169 @@ it.effect("ignores a delayed supersession notice without revoking the current de
   ),
 );
 
-it.effect("reattaches an idle observer after another conversation takes its native route", () =>
+it.effect(
+  "retires displaced observers so returning to a conversation restores history and live updates",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let current: Queue.Queue<MuseAgentNativeEvent, Cause.Done> | undefined;
+        const watched: string[] = [];
+        const read: string[] = [];
+        const native = makeNative({
+          resolveSession: (_, sessionId) =>
+            Effect.succeed({
+              session_id: sessionId ?? "primary",
+              status: "idle",
+              is_primary: sessionId === undefined,
+              is_thread: sessionId !== undefined,
+            }),
+          watch: ({ sessionId }) =>
+            Effect.gen(function* () {
+              if (current) {
+                yield* Queue.offer(current, { event: "transport.session_superseded" });
+                yield* Queue.end(current);
+              }
+              const frames = yield* Queue.unbounded<MuseAgentNativeEvent, Cause.Done>();
+              current = frames;
+              watched.push(sessionId);
+              return { events: Stream.fromQueue(frames), close: Queue.shutdown(frames) };
+            }),
+          read: ({ sessionId }) =>
+            Effect.sync(() => {
+              read.push(sessionId);
+              return {
+                events: [
+                  {
+                    event_name: "message.user",
+                    seq: read.length,
+                    message_id: `history-${read.length}`,
+                    occurred_at_ms: 1000 + read.length,
+                    payload: { display_text: `History ${read.length}` },
+                  },
+                ],
+                hasMore: false,
+              };
+            }),
+        });
+        const adapter = yield* createMuseAgentAdapterV2(options).pipe(
+          Effect.provideService(Native.MuseAgentNativeRuntimeService, native),
+          Effect.provideService(ProviderHost.ProviderHost, host),
+          Effect.provideService(
+            ToolsPort.MuseAgentDirectToolsPort,
+            ToolsPort.MuseAgentDirectToolsPort.of({
+              install: () => Effect.succeed({ uninstall: Effect.void }),
+              start: () => Effect.die("Observation must not register tools"),
+            }),
+          ),
+        );
+        const first = yield* adapter.openSession(sessionInput);
+        const firstEvents = yield* first.events.pipe(Stream.runCollect, Effect.forkScoped);
+        const second = yield* adapter.openSession({
+          ...sessionInput,
+          threadId: ThreadId.make(
+            museThreadIdForSession(museThreadIdentity(binding, options.instanceId), "side"),
+          ),
+          providerSessionId: ProviderSessionId.make("muse-side-session"),
+        });
+        const retiredFirst = yield* Fiber.join(firstEvents);
+        const last = retiredFirst.at(-1);
+        assert.strictEqual(last?.type, "provider_session.updated");
+        assert.strictEqual(
+          last?.type === "provider_session.updated" && last.providerSession.status,
+          "stopped",
+        );
+        const secondEvents = yield* second.events.pipe(Stream.runCollect, Effect.forkScoped);
+        const reopened = yield* adapter.openSession(sessionInput);
+        const retiredSecond = yield* Fiber.join(secondEvents);
+        assert.isTrue(
+          retiredSecond.some(
+            (event) =>
+              event.type === "provider_session.updated" &&
+              event.providerSession.status === "stopped",
+          ),
+        );
+        const resumed = yield* reopened.events.pipe(
+          Stream.filter((event) => event.type === "message.updated"),
+          Stream.take(2),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        if (!current) return yield* Effect.die("Expected a fresh native watcher");
+        yield* Queue.offer(current, {
+          event: "message.user",
+          payload: {
+            session_id: "primary",
+            message_id: "live-after-return",
+            display_text: "Live after return",
+          },
+          meta: { seq: 4, ts_ms: 1004 },
+        });
+        const updates = yield* Fiber.join(resumed);
+        assert.deepStrictEqual(
+          updates.map((event) => event.message.text),
+          ["History 3", "Live after return"],
+        );
+        assert.deepStrictEqual(watched, ["primary", "side", "primary"]);
+        assert.deepStrictEqual(read, ["primary", "side", "primary"]);
+      }),
+    ),
+);
+
+it.effect("does not restart a retired observer after waiting for turn admission", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const detached = yield* Deferred.make<void>();
+      const frames = yield* Queue.unbounded<MuseAgentNativeEvent, Cause.Done>();
+      const acquiring = yield* Deferred.make<void>();
+      const admitted = yield* Deferred.make<void>();
+      const released = yield* Deferred.make<void>();
       let watches = 0;
       let sends = 0;
+      let releases = 0;
       const native = makeNative({
         watch: () =>
-          Effect.sync(() => ({
-            events:
-              ++watches === 1
-                ? Stream.make({ event: "transport.session_superseded" }).pipe(
-                    Stream.ensuring(Deferred.succeed(detached, undefined)),
-                  )
-                : Stream.never,
-            close: Effect.void,
-          })),
+          Effect.sync(() => {
+            watches++;
+            return { events: Stream.fromQueue(frames), close: Queue.shutdown(frames) };
+          }),
+        acquireTurn: () =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(acquiring, undefined);
+            yield* Deferred.await(admitted);
+            return Effect.sync(() => {
+              releases++;
+            }).pipe(Effect.andThen(Deferred.succeed(released, undefined)));
+          }),
         send: () =>
           Effect.sync(() => {
             sends++;
             return receipt;
           }),
       });
-      const port = ToolsPort.MuseAgentDirectToolsPort.of({
-        install: () => Effect.fail(new NativeAgentDirectToolsError({ code: "already_installed" })),
-        start: () => Effect.succeed({ revoke: Effect.void, close: Effect.void }),
-      });
       const adapter = yield* createMuseAgentAdapterV2(options).pipe(
         Effect.provideService(Native.MuseAgentNativeRuntimeService, native),
         Effect.provideService(ProviderHost.ProviderHost, host),
-        Effect.provideService(ToolsPort.MuseAgentDirectToolsPort, port),
+        Effect.provideService(
+          ToolsPort.MuseAgentDirectToolsPort,
+          ToolsPort.MuseAgentDirectToolsPort.of({
+            install: () => Effect.succeed({ uninstall: Effect.void }),
+            start: () => Effect.die("Retired observers must not register tools"),
+          }),
+        ),
       );
       const runtime = yield* adapter.openSession(sessionInput);
-      yield* Deferred.await(detached);
-      yield* runtime.startTurn(yield* makeTurn);
-      assert.strictEqual(watches, 2);
-      assert.strictEqual(sends, 1);
+      const ended = yield* runtime.events.pipe(Stream.runCollect, Effect.forkScoped);
+      const start = yield* runtime.startTurn(yield* makeTurn).pipe(Effect.exit, Effect.forkScoped);
+      yield* Deferred.await(acquiring);
+      yield* Queue.offer(frames, { event: "transport.session_superseded" });
+      yield* Queue.end(frames);
+      yield* Fiber.join(ended);
+      yield* Deferred.succeed(admitted, undefined);
+      const result = yield* Fiber.join(start);
+      assert.isTrue(Exit.isFailure(result));
+      assert.strictEqual(watches, 1);
+      assert.strictEqual(sends, 0);
+      yield* Deferred.await(released);
+      assert.strictEqual(releases, 1);
     }),
   ),
 );
