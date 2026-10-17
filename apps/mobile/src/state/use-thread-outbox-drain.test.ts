@@ -8,6 +8,7 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import { AsyncResult } from "effect/reactivity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { PreparedTurnAttachments } from "../lib/attachmentUpload";
@@ -93,6 +94,19 @@ vi.mock("./git", () => ({ gitEnvironment: {} }));
 vi.mock("./threads", () => ({
   threadEnvironment: {},
 }));
+
+vi.mock("../connection/catalog", async () => {
+  const { Atom } = await import("effect/reactivity");
+  return {
+    environmentCatalog: {
+      stateAtom: Atom.family((_id: string) =>
+        Atom.make(AsyncResult.success({ phase: "connected", generation: 1 })).pipe(Atom.keepAlive),
+      ),
+    },
+  };
+});
+
+vi.mock("./museAgent", () => ({ museAgentOpenThread: vi.fn() }));
 
 vi.mock("./use-atom-command", () => ({
   useAtomCommand: () => async () => undefined,

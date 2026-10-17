@@ -11,6 +11,8 @@ import {
   museSessionForThread,
   openCachedMuseThread,
   resolveMuseAgentNativeOpenPlan,
+  resolveMuseOutboxAttachAction,
+  resolveQueuedMuseOutboxIdentity,
 } from "./museAgentThread";
 
 const identity = "a".repeat(64);
@@ -331,5 +333,144 @@ describe("museNativeAttachSendGate", () => {
     expect(send).not.toHaveBeenCalled();
     await expect(guardMuseNativeSend(null, send)).resolves.toBe("sent");
     expect(send).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("queued Muse outbox identity", () => {
+  const liveMuse = { id: main, providerInstanceId: historical };
+
+  it("treats ordinary threads as already captured without Muse identity", () => {
+    expect(
+      resolveQueuedMuseOutboxIdentity({
+        threadId: "ordinary-thread",
+        queuedProviderInstanceId: historical,
+        liveThread: liveMuse,
+        providers: museProviders,
+      }),
+    ).toEqual({ kind: "ordinary" });
+  });
+
+  it("uses the queued historical provider on a canonical Muse thread", () => {
+    expect(
+      resolveQueuedMuseOutboxIdentity({
+        threadId: side,
+        queuedProviderInstanceId: historical,
+        liveThread: { id: side, providerInstanceId: ProviderInstanceId.make("other-muse") },
+        providers: museProviders,
+      }),
+    ).toEqual({
+      kind: "muse",
+      providerInstanceId: historical,
+      sessionId: "side:chat /one",
+    });
+  });
+
+  it("infers an old row only from the exact advertised live thread", () => {
+    expect(
+      resolveQueuedMuseOutboxIdentity({
+        threadId: main,
+        liveThread: liveMuse,
+        providers: museProviders,
+      }),
+    ).toEqual({ kind: "muse", providerInstanceId: historical });
+    expect(
+      resolveQueuedMuseOutboxIdentity({
+        threadId: main,
+        liveThread: { id: main, providerInstanceId: ProviderInstanceId.make("codex") },
+        providers: museProviders,
+      }),
+    ).toEqual({ kind: "unverified" });
+    expect(
+      resolveQueuedMuseOutboxIdentity({
+        threadId: main,
+        liveThread: { id: side, providerInstanceId: historical },
+        providers: museProviders,
+      }),
+    ).toEqual({ kind: "unverified" });
+    expect(
+      resolveQueuedMuseOutboxIdentity({
+        threadId: main,
+        liveThread: null,
+        providers: null,
+      }),
+    ).toEqual({ kind: "wait" });
+  });
+});
+
+describe("resolveMuseOutboxAttachAction", () => {
+  const liveMuse = { id: main, providerInstanceId: historical };
+
+  it("lets ordinary send proceed without opening Muse", () => {
+    expect(
+      resolveMuseOutboxAttachAction({
+        threadId: "ordinary-thread",
+        queuedProviderInstanceId: ProviderInstanceId.make("codex"),
+        liveThread: { id: "ordinary-thread", providerInstanceId: ProviderInstanceId.make("codex") },
+        providers: [{ instanceId: "codex", driver: "codex" }],
+        connected: true,
+        canOpen: true,
+      }),
+    ).toEqual({ action: "proceed" });
+  });
+
+  it("parks unsupported, disconnected, unverified, and unpermitted Muse rows", () => {
+    expect(
+      resolveMuseOutboxAttachAction({
+        threadId: main,
+        queuedProviderInstanceId: historical,
+        liveThread: liveMuse,
+        providers: [{ instanceId: historical, driver: "codex" }],
+        connected: true,
+        canOpen: true,
+      }),
+    ).toEqual({ action: "park" });
+    expect(
+      resolveMuseOutboxAttachAction({
+        threadId: main,
+        queuedProviderInstanceId: historical,
+        liveThread: liveMuse,
+        providers: museProviders,
+        connected: false,
+        canOpen: true,
+      }),
+    ).toEqual({ action: "park" });
+    expect(
+      resolveMuseOutboxAttachAction({
+        threadId: main,
+        queuedProviderInstanceId: historical,
+        liveThread: liveMuse,
+        providers: museProviders,
+        connected: true,
+        canOpen: false,
+      }),
+    ).toEqual({ action: "park" });
+    expect(
+      resolveMuseOutboxAttachAction({
+        threadId: "muse-agent:not-canonical",
+        queuedProviderInstanceId: historical,
+        liveThread: liveMuse,
+        providers: museProviders,
+        connected: true,
+        canOpen: true,
+      }),
+    ).toEqual({ action: "park" });
+  });
+
+  it("opens the historical provider and expected canonical thread", () => {
+    expect(
+      resolveMuseOutboxAttachAction({
+        threadId: side,
+        queuedProviderInstanceId: historical,
+        liveThread: { id: side, providerInstanceId: historical },
+        providers: museProviders,
+        connected: true,
+        canOpen: true,
+      }),
+    ).toEqual({
+      action: "open",
+      providerInstanceId: historical,
+      sessionId: "side:chat /one",
+      expectedThreadId: side,
+    });
   });
 });

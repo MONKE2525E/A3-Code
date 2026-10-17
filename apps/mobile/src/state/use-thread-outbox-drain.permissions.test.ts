@@ -12,32 +12,47 @@ import { AsyncResult, type Atom } from "effect/reactivity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { QueuedThreadMessage } from "./thread-outbox-model";
 
-const state = vi.hoisted(() => ({
-  grantedEnvironments: new Set<string>(),
-  draftText: "Keep this draft separate",
-  cleanups: [] as Array<() => void>,
-  start: vi.fn(),
-  metadata: vi.fn(),
-  runtime: vi.fn(),
-  interaction: vi.fn(),
-  prepare: vi.fn(),
-  checkout: vi.fn(),
-  manager: null as unknown as ReturnType<
-    typeof import("./thread-outbox-manager").createThreadOutboxManager
-  >,
-  thread: {
+const state = vi.hoisted(() => {
+  const thread = {
     environmentId: "secondary",
     id: "thread",
+    providerInstanceId: "codex",
     modelSelection: { instanceId: "codex", model: "gpt-5.4" },
     runtimeMode: "full-access",
     interactionMode: "default",
     session: null,
-  },
-  config: {
-    providers: [{ instanceId: "codex", driver: "codex" }],
-    environment: { capabilities: {} },
-  },
-}));
+  };
+  return {
+    connection: { phase: "connected", generation: 1 } as {
+      phase: "connected" | "backoff";
+      generation: number;
+    },
+    grantedEnvironments: new Set<string>(),
+    draftText: "Keep this draft separate",
+    cleanups: [] as Array<() => void>,
+    start: vi.fn(),
+    metadata: vi.fn(),
+    runtime: vi.fn(),
+    interaction: vi.fn(),
+    prepare: vi.fn(),
+    checkout: vi.fn(),
+    openMuse: vi.fn(),
+    museOpenedThreadId: "thread",
+    manager: null as unknown as ReturnType<
+      typeof import("./thread-outbox-manager").createThreadOutboxManager
+    >,
+    thread,
+    threads: [thread] as Array<typeof thread>,
+    connectedEnvironments: [{ environmentId: "secondary", connectionState: "connected" }] as Array<{
+      environmentId: string;
+      connectionState: string;
+    }>,
+    config: {
+      providers: [{ instanceId: "codex", driver: "codex" }],
+      environment: { capabilities: {} },
+    },
+  };
+});
 vi.mock("react", () => ({
   useCallback: <A>(callback: A) => callback,
   useEffect: (effect: () => void | (() => void)) => {
@@ -59,7 +74,7 @@ vi.mock("./session", () => ({
 }));
 vi.mock("./entities", () => ({
   useProjects: () => [],
-  useThreadShells: () => [state.thread],
+  useThreadShells: () => state.threads,
   useServerConfigs: () => new Map([["secondary", state.config]]),
 }));
 vi.mock("./server", async () => {
@@ -77,9 +92,21 @@ vi.mock("./threads", async () => {
       setRuntimeMode: state.runtime,
       setInteractionMode: state.interaction,
     },
-    environmentThreadShells: { threadShellsAtom: Atom.make([state.thread]) },
+    environmentThreadShells: { threadShellsAtom: Atom.make(state.threads) },
   };
 });
+vi.mock("../connection/catalog", async () => {
+  const { Atom } = await import("effect/reactivity");
+  return {
+    environmentCatalog: {
+      stateAtom: Atom.family((_id: string) =>
+        Atom.make(() => AsyncResult.success(state.connection)).pipe(Atom.keepAlive),
+      ),
+    },
+  };
+});
+
+vi.mock("./museAgent", () => ({ museAgentOpenThread: state.openMuse }));
 vi.mock("./use-atom-command", () => ({ useAtomCommand: <A>(command: A) => command }));
 vi.mock("./git", () => ({ gitEnvironment: { preparePullRequestThread: state.checkout } }));
 vi.mock("../lib/modelOptions", () => ({ isModelSelectionUnavailable: () => false }));
@@ -88,7 +115,7 @@ vi.mock("../lib/attachmentUpload", () => ({ prepareTurnAttachments: state.prepar
 vi.mock("./use-remote-environment-registry", () => ({
   setPendingConnectionError: vi.fn(),
   useRemoteConnectionStatus: () => ({
-    connectedEnvironments: [{ environmentId: "secondary", connectionState: "connected" }],
+    connectedEnvironments: state.connectedEnvironments,
   }),
 }));
 vi.mock("./thread-outbox", async () => {
@@ -144,8 +171,10 @@ vi.mock("./use-composer-drafts", async () => {
   };
 });
 
+import { threadComposerErrorsAtom } from "./thread-composer-error";
 import { appAtomRegistry } from "./atom-registry";
-import { dispatchingQueuedMessageIdAtom } from "./use-thread-outbox";
+import { environmentCatalog } from "../connection/catalog";
+import { dispatchingQueuedMessageIdAtom, editingQueuedMessageIdsAtom } from "./use-thread-outbox";
 import { useThreadOutboxDrain } from "./use-thread-outbox-drain";
 
 const message = (overrides: Partial<QueuedThreadMessage> = {}): QueuedThreadMessage => ({
@@ -171,8 +200,23 @@ function runDrain() {
 }
 
 beforeEach(() => {
+  state.connection = { phase: "connected", generation: 1 };
+  appAtomRegistry.refresh(environmentCatalog.stateAtom(EnvironmentId.make("secondary")));
+  appAtomRegistry.set(editingQueuedMessageIdsAtom, {});
+  appAtomRegistry.set(threadComposerErrorsAtom, {});
   state.grantedEnvironments = new Set(["primary"]);
   state.draftText = "Keep this draft separate";
+  state.thread.environmentId = "secondary";
+  state.thread.id = "thread";
+  state.thread.providerInstanceId = "codex";
+  state.thread.modelSelection = { instanceId: "codex", model: "gpt-5.4" };
+  state.threads.splice(0, state.threads.length, state.thread);
+  state.connectedEnvironments.splice(0, state.connectedEnvironments.length, {
+    environmentId: "secondary",
+    connectionState: "connected",
+  });
+  state.config.providers = [{ instanceId: "codex", driver: "codex" }];
+  state.museOpenedThreadId = "thread";
   appAtomRegistry.set(state.manager.queuedMessagesByThreadKeyAtom, {});
   appAtomRegistry.set(dispatchingQueuedMessageIdAtom, null);
   for (const command of [
@@ -184,6 +228,9 @@ beforeEach(() => {
   ]) {
     command.mockReset().mockResolvedValue(AsyncResult.success(undefined));
   }
+  state.openMuse
+    .mockReset()
+    .mockImplementation(async () => AsyncResult.success({ threadId: state.museOpenedThreadId }));
   state.prepare.mockReset().mockImplementation(async ({ attachments }) => ({
     status: "ready",
     attachments: [],
@@ -432,4 +479,283 @@ describe("queued task operation access", () => {
       expect(remaining()).toEqual([queued]);
     },
   );
+});
+
+describe("queued Muse native attach", () => {
+  const museIdentity = "a".repeat(64);
+  const museThreadId = `muse-agent:${museIdentity}`;
+  const museProvider = ProviderInstanceId.make("historical-muse");
+
+  function configureMuseThread() {
+    state.thread.id = museThreadId;
+    state.thread.providerInstanceId = museProvider;
+    state.thread.modelSelection = { instanceId: museProvider, model: "muse" };
+    state.threads.splice(0, state.threads.length, state.thread);
+    state.config.providers = [{ instanceId: museProvider, driver: "muse-agent" }];
+    state.museOpenedThreadId = museThreadId;
+  }
+
+  function museMessage(overrides: Partial<QueuedThreadMessage> = {}) {
+    return message({
+      threadId: ThreadId.make(museThreadId),
+      modelSelection: { instanceId: museProvider, model: "muse" },
+      ...overrides,
+    });
+  }
+
+  it("does not call Muse RPC on ordinary send", async () => {
+    state.grantedEnvironments.add("secondary");
+    const queued = message();
+    await state.manager.enqueue(queued);
+    await runDrain();
+    expect(state.openMuse).not.toHaveBeenCalled();
+    expect(state.start).toHaveBeenCalledOnce();
+    expect(remaining()).toEqual([]);
+  });
+
+  it("reattaches a queued Muse message before startTurn without a route", async () => {
+    configureMuseThread();
+    state.grantedEnvironments.add("secondary");
+    const queued = museMessage();
+    await state.manager.enqueue(queued);
+    await runDrain();
+    expect(state.openMuse).toHaveBeenCalledOnce();
+    expect(state.openMuse).toHaveBeenCalledWith({
+      environmentId: "secondary",
+      input: { providerInstanceId: museProvider },
+    });
+    expect(state.start).toHaveBeenCalledOnce();
+    expect(state.start.mock.calls[0]?.[0].input.threadId).toBe(museThreadId);
+    expect(remaining()).toEqual([]);
+  });
+
+  it("opens Muse after delayed prep, then starts the turn", async () => {
+    configureMuseThread();
+    state.grantedEnvironments.add("secondary");
+    const queued = museMessage();
+    await state.manager.enqueue(queued);
+    const prepared = Promise.withResolvers<void>();
+    const finishPrep = Promise.withResolvers<{
+      status: "ready";
+      attachments: [];
+      draftAttachments: QueuedThreadMessage["attachments"];
+      pendingAttachmentIds: [];
+    }>();
+    state.prepare.mockImplementationOnce(async ({ attachments }) => {
+      prepared.resolve();
+      await finishPrep.promise;
+      return {
+        status: "ready",
+        attachments: [],
+        draftAttachments: attachments,
+        pendingAttachmentIds: [],
+      };
+    });
+    const drained = runDrain();
+    await prepared.promise;
+    expect(state.openMuse).not.toHaveBeenCalled();
+    expect(state.start).not.toHaveBeenCalled();
+    finishPrep.resolve({
+      status: "ready",
+      attachments: [],
+      draftAttachments: queued.attachments,
+      pendingAttachmentIds: [],
+    });
+    await drained;
+    expect(state.openMuse).toHaveBeenCalledOnce();
+    expect(state.start).toHaveBeenCalledOnce();
+    expect(remaining()).toEqual([]);
+  });
+
+  it("keeps a Muse entry queued when prep spans a disconnect", async () => {
+    configureMuseThread();
+    state.grantedEnvironments.add("secondary");
+    const queued = museMessage();
+    await state.manager.enqueue(queued);
+    state.prepare.mockImplementationOnce(async ({ attachments }) => {
+      state.connectedEnvironments = [
+        {
+          environmentId: "secondary",
+          connectionState: "disconnected",
+        },
+      ];
+      state.connection = { phase: "backoff", generation: 2 };
+      appAtomRegistry.refresh(environmentCatalog.stateAtom(EnvironmentId.make("secondary")));
+      return {
+        status: "ready",
+        attachments: [],
+        draftAttachments: attachments,
+        pendingAttachmentIds: [],
+      };
+    });
+    await runDrain();
+    expect(state.openMuse).not.toHaveBeenCalled();
+    expect(state.start).not.toHaveBeenCalled();
+    expect(remaining()).toEqual([queued]);
+    state.connectedEnvironments = [{ environmentId: "secondary", connectionState: "connected" }];
+    state.connection = { phase: "connected", generation: 3 };
+    appAtomRegistry.refresh(environmentCatalog.stateAtom(EnvironmentId.make("secondary")));
+    await runDrain();
+    expect(state.openMuse).toHaveBeenCalledOnce();
+    expect(state.start).toHaveBeenCalledOnce();
+    expect(remaining()).toEqual([]);
+  });
+
+  it("keeps a Muse entry queued when open returns another account", async () => {
+    configureMuseThread();
+    state.grantedEnvironments.add("secondary");
+    const queued = museMessage();
+    await state.manager.enqueue(queued);
+    state.museOpenedThreadId = `muse-agent:${"b".repeat(64)}`;
+    await runDrain();
+    expect(state.openMuse).toHaveBeenCalledOnce();
+    expect(state.start).not.toHaveBeenCalled();
+    expect(remaining()).toEqual([queued]);
+    expect(state.draftText).toBe("Keep this draft separate");
+  });
+
+  it("keeps a Muse entry queued when operate permission is lost during open", async () => {
+    configureMuseThread();
+    state.grantedEnvironments.add("secondary");
+    const queued = museMessage();
+    await state.manager.enqueue(queued);
+    state.openMuse.mockImplementationOnce(async () => {
+      state.grantedEnvironments.delete("secondary");
+      return AsyncResult.success({ threadId: museThreadId });
+    });
+    await runDrain();
+    expect(state.openMuse).toHaveBeenCalledOnce();
+    expect(state.start).not.toHaveBeenCalled();
+    expect(remaining()).toEqual([queued]);
+  });
+
+  it("parks unsupported Muse without claiming attached or dropping the entry", async () => {
+    configureMuseThread();
+    state.config.providers = [{ instanceId: museProvider, driver: "codex" }];
+    state.grantedEnvironments.add("secondary");
+    const queued = museMessage();
+    await state.manager.enqueue(queued);
+    useThreadOutboxDrain();
+    expect(state.openMuse).not.toHaveBeenCalled();
+    expect(state.start).not.toHaveBeenCalled();
+    expect(remaining()).toEqual([queued]);
+  });
+
+  it("delivers an ordinary thread while a Muse entry stays parked", async () => {
+    configureMuseThread();
+    state.config.providers = [{ instanceId: museProvider, driver: "codex" }];
+    const ordinaryThread = {
+      ...state.thread,
+      id: "thread",
+      providerInstanceId: "codex",
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+    };
+    state.threads.splice(0, state.threads.length, state.thread, ordinaryThread);
+    state.grantedEnvironments.add("secondary");
+    const museQueued = museMessage({ messageId: MessageId.make("muse-message") });
+    const ordinaryQueued = message({
+      threadId: ThreadId.make("thread"),
+      messageId: MessageId.make("ordinary-message"),
+      commandId: CommandId.make("ordinary-command"),
+    });
+    await state.manager.enqueue(museQueued);
+    await state.manager.enqueue(ordinaryQueued);
+    await runDrain();
+    expect(state.openMuse).not.toHaveBeenCalled();
+    expect(state.start).toHaveBeenCalledOnce();
+    expect(state.start.mock.calls[0]?.[0].input.threadId).toBe("thread");
+    expect(remaining()).toEqual([museQueued]);
+  });
+
+  it("does not startTurn a Muse payload edited during attach", async () => {
+    configureMuseThread();
+    state.grantedEnvironments.add("secondary");
+    const queued = museMessage();
+    await state.manager.enqueue(queued);
+    const edited = { ...queued, text: "Edited after enqueue" };
+    state.openMuse.mockImplementationOnce(async () => {
+      await state.manager.update(edited);
+      return AsyncResult.success({ threadId: museThreadId });
+    });
+    await runDrain();
+    expect(state.openMuse).toHaveBeenCalledOnce();
+    expect(state.start).not.toHaveBeenCalled();
+    expect(remaining()).toEqual([edited]);
+  });
+
+  it("retains failed Muse opens and clears their feedback after a successful retry", async () => {
+    configureMuseThread();
+    state.grantedEnvironments.add("secondary");
+    const queued = museMessage();
+    await state.manager.enqueue(queued);
+    state.openMuse.mockResolvedValueOnce(AsyncResult.failure(Cause.fail(new Error("offline"))));
+    await runDrain();
+    expect(state.start).not.toHaveBeenCalled();
+    expect(remaining()).toEqual([queued]);
+    expect(Object.values(appAtomRegistry.get(threadComposerErrorsAtom))).toEqual([
+      expect.objectContaining({
+        messageId: queued.messageId,
+        message: expect.stringContaining("reconnect"),
+      }),
+    ]);
+    await runDrain();
+    expect(state.start).toHaveBeenCalledOnce();
+    expect(remaining()).toEqual([]);
+    expect(appAtomRegistry.get(threadComposerErrorsAtom)).toEqual({});
+  });
+
+  it("does not send a message cancelled during native open", async () => {
+    configureMuseThread();
+    state.grantedEnvironments.add("secondary");
+    const queued = museMessage();
+    await state.manager.enqueue(queued);
+    state.openMuse.mockImplementationOnce(async () => {
+      await state.manager.remove(queued);
+      return AsyncResult.success({ threadId: museThreadId });
+    });
+    await runDrain();
+    expect(state.start).not.toHaveBeenCalled();
+    expect(remaining()).toEqual([]);
+  });
+
+  it("keeps a message queued when the connection changes during native open", async () => {
+    configureMuseThread();
+    state.grantedEnvironments.add("secondary");
+    const queued = museMessage();
+    await state.manager.enqueue(queued);
+    state.openMuse.mockImplementationOnce(async () => {
+      state.connectedEnvironments = [{ environmentId: "secondary", connectionState: "connected" }];
+      state.connection = { phase: "connected", generation: 2 };
+      appAtomRegistry.refresh(environmentCatalog.stateAtom(EnvironmentId.make("secondary")));
+      return AsyncResult.success({ threadId: museThreadId });
+    });
+    await runDrain();
+    expect(state.start).not.toHaveBeenCalled();
+    expect(remaining()).toEqual([queued]);
+  });
+
+  it("does not dispatch while the queue editor owns the message", async () => {
+    configureMuseThread();
+    state.grantedEnvironments.add("secondary");
+    const queued = museMessage();
+    await state.manager.enqueue(queued);
+    state.openMuse.mockImplementationOnce(async () => {
+      appAtomRegistry.set(editingQueuedMessageIdsAtom, { [queued.messageId]: true });
+      return AsyncResult.success({ threadId: museThreadId });
+    });
+    await runDrain();
+    expect(state.start).not.toHaveBeenCalled();
+    expect(remaining()).toEqual([queued]);
+  });
+
+  it("infers an old Muse row from the exact advertised live thread", async () => {
+    configureMuseThread();
+    state.grantedEnvironments.add("secondary");
+    const queued = museMessage({ modelSelection: undefined });
+    await state.manager.enqueue(queued);
+    await runDrain();
+    expect(state.openMuse).toHaveBeenCalledOnce();
+    expect(state.start).toHaveBeenCalledOnce();
+    expect(remaining()).toEqual([]);
+  });
 });

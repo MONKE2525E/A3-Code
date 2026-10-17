@@ -181,3 +181,118 @@ export function describeMuseNativeOpenFailure(cause: unknown): string {
   }
   return MUSE_NATIVE_OPEN_RETRY_MESSAGE;
 }
+
+export type QueuedMuseOutboxIdentity =
+  | { readonly kind: "ordinary" }
+  | { readonly kind: "unverified" }
+  | { readonly kind: "wait" }
+  | {
+      readonly kind: "muse";
+      readonly providerInstanceId: ProviderInstanceId;
+      readonly sessionId?: string;
+    };
+
+/**
+ * Expected Muse identity is the canonical queued thread id plus the historical
+ * provider. New outbox rows already persist `modelSelection.instanceId`; old
+ * rows may infer that provider only from the exact live thread when it is
+ * advertised as muse-agent. Anything else stays unverified so drain cannot
+ * pretend the session is attached.
+ */
+export function resolveQueuedMuseOutboxIdentity(input: {
+  readonly threadId: string;
+  readonly queuedProviderInstanceId?: ProviderInstanceId;
+  readonly liveThread: {
+    readonly id: string;
+    readonly providerInstanceId: ProviderInstanceId;
+  } | null;
+  readonly providers: ReadonlyArray<MuseAgentNativeOpenProvider> | null;
+}): QueuedMuseOutboxIdentity {
+  if (nativeAgentSourceForThread({ id: input.threadId }) !== "muse-agent") {
+    return { kind: "ordinary" };
+  }
+  const sessionId = museSessionForThread(input.threadId);
+  if (!isMuseSessionThread(input.threadId, sessionId ?? null)) {
+    return { kind: "unverified" };
+  }
+  const queuedProviderInstanceId = input.queuedProviderInstanceId;
+  if (queuedProviderInstanceId !== undefined && queuedProviderInstanceId.length > 0) {
+    return {
+      kind: "muse",
+      providerInstanceId: queuedProviderInstanceId,
+      ...(sessionId === undefined ? {} : { sessionId }),
+    };
+  }
+  if (input.providers === null) {
+    return { kind: "wait" };
+  }
+  if (
+    input.liveThread !== null &&
+    input.liveThread.id === input.threadId &&
+    input.providers.some(
+      (provider) =>
+        provider.instanceId === input.liveThread?.providerInstanceId &&
+        nativeAgentSourceForDriver(provider.driver) === "muse-agent",
+    )
+  ) {
+    return {
+      kind: "muse",
+      providerInstanceId: input.liveThread.providerInstanceId,
+      ...(sessionId === undefined ? {} : { sessionId }),
+    };
+  }
+  return { kind: "unverified" };
+}
+
+export type MuseOutboxAttachAction =
+  | { readonly action: "proceed" }
+  | { readonly action: "park" }
+  | {
+      readonly action: "open";
+      readonly providerInstanceId: ProviderInstanceId;
+      readonly sessionId?: string;
+      readonly expectedThreadId: string;
+    };
+
+/**
+ * Outbox `startTurn` may run with no mounted route. Ordinary threads proceed
+ * without Muse RPC. Muse rows open only when identity, live connection, and
+ * operate permission are present and the historical instance is advertised.
+ * Capability-absent Muse never claims attached.
+ */
+export function resolveMuseOutboxAttachAction(input: {
+  readonly threadId: string;
+  readonly queuedProviderInstanceId?: ProviderInstanceId;
+  readonly liveThread: {
+    readonly id: string;
+    readonly providerInstanceId: ProviderInstanceId;
+  } | null;
+  readonly providers: ReadonlyArray<MuseAgentNativeOpenProvider> | null;
+  readonly connected: boolean;
+  readonly canOpen: boolean;
+}): MuseOutboxAttachAction {
+  const identity = resolveQueuedMuseOutboxIdentity(input);
+  if (identity.kind === "ordinary") {
+    return { action: "proceed" };
+  }
+  if (identity.kind === "unverified" || identity.kind === "wait") {
+    return { action: "park" };
+  }
+  if (!input.connected || !input.canOpen) {
+    return { action: "park" };
+  }
+  const plan = resolveMuseAgentNativeOpenPlan({
+    threadId: input.threadId,
+    providerInstanceId: identity.providerInstanceId,
+    providers: input.providers,
+  });
+  if (plan.kind !== "open") {
+    return { action: "park" };
+  }
+  return {
+    action: "open",
+    providerInstanceId: plan.providerInstanceId,
+    ...(plan.sessionId === undefined ? {} : { sessionId: plan.sessionId }),
+    expectedThreadId: input.threadId,
+  };
+}
