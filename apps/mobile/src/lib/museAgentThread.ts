@@ -35,10 +35,11 @@ export type MuseAgentNativeOpenProvider = {
 };
 
 type MuseAgentNativeOpenPlan =
+  | { readonly kind: "unavailable"; readonly reason: "capability-absent" }
   | { readonly kind: "wait" }
   | {
       readonly kind: "skip";
-      readonly reason: "not-muse" | "malformed" | "capability-absent";
+      readonly reason: "not-muse" | "malformed";
     }
   | {
       readonly kind: "open";
@@ -48,7 +49,7 @@ type MuseAgentNativeOpenPlan =
 
 /**
  * Native `museAgents.open` is fork-only. Official nightly does not advertise a muse-agent
- * provider, so Muse threads skip the RPC and keep the generic route. Ordinary threads never
+ * provider, so cached Muse threads remain readable but cannot send. Ordinary threads never
  * reach the method.
  */
 export function resolveMuseAgentNativeOpenPlan(input: {
@@ -69,7 +70,7 @@ export function resolveMuseAgentNativeOpenPlan(input: {
       provider.instanceId === input.providerInstanceId &&
       nativeAgentSourceForDriver(provider.driver) === "muse-agent",
   );
-  if (!advertised) return { kind: "skip", reason: "capability-absent" };
+  if (!advertised) return { kind: "unavailable", reason: "capability-absent" };
   return {
     kind: "open",
     providerInstanceId: input.providerInstanceId,
@@ -118,6 +119,9 @@ export async function openCachedMuseThread(input: {
   await input.navigate({ environmentId: hit.environmentId, threadId: opened.threadId });
 }
 
+const MUSE_NATIVE_UNAVAILABLE_MESSAGE =
+  "This environment no longer provides this Muse account. Reconnect its provider to send.";
+
 const MUSE_NATIVE_OPEN_RETRY_MESSAGE = "Could not reconnect this Muse conversation.";
 const MUSE_NATIVE_CONNECTING_SEND_REASON = "Connecting Muse history…";
 const MUSE_NATIVE_PERMISSION_SEND_REASON =
@@ -131,16 +135,19 @@ export type MuseNativeAttachSendGate = {
 
 /**
  * Send is allowed only after a verified native attach, or when preflight skipped
- * the RPC (ordinary threads and non-advertised Muse). First paint before the
+ * the RPC for ordinary threads. Unsupported Muse remains blocked. First paint before the
  * open effect is blocked because `attached` starts false.
  */
 export function museNativeAttachSendGate(input: {
-  readonly planKind: "wait" | "skip" | "open";
+  readonly planKind: MuseAgentNativeOpenPlan["kind"];
   readonly connected: boolean;
   readonly canOpen: boolean;
   readonly attached: boolean;
   readonly error: string | null;
 }): MuseNativeAttachSendGate {
+  if (input.planKind === "unavailable") {
+    return { sendAllowed: false, sendBlockedReason: MUSE_NATIVE_UNAVAILABLE_MESSAGE };
+  }
   if (input.planKind === "skip") {
     return { sendAllowed: true, sendBlockedReason: null };
   }
@@ -245,6 +252,7 @@ export function resolveQueuedMuseOutboxIdentity(input: {
 }
 
 export type MuseOutboxAttachAction =
+  | { readonly action: "restore"; readonly reason: string }
   | { readonly action: "proceed" }
   | { readonly action: "park" }
   | {
@@ -275,17 +283,20 @@ export function resolveMuseOutboxAttachAction(input: {
   if (identity.kind === "ordinary") {
     return { action: "proceed" };
   }
-  if (identity.kind === "unverified" || identity.kind === "wait") {
+  if (identity.kind === "wait" || !input.connected || !input.canOpen) {
     return { action: "park" };
   }
-  if (!input.connected || !input.canOpen) {
-    return { action: "park" };
+  if (identity.kind === "unverified") {
+    return { action: "restore", reason: MUSE_NATIVE_UNAVAILABLE_MESSAGE };
   }
   const plan = resolveMuseAgentNativeOpenPlan({
     threadId: input.threadId,
     providerInstanceId: identity.providerInstanceId,
     providers: input.providers,
   });
+  if (plan.kind === "unavailable") {
+    return { action: "restore", reason: MUSE_NATIVE_UNAVAILABLE_MESSAGE };
+  }
   if (plan.kind !== "open") {
     return { action: "park" };
   }

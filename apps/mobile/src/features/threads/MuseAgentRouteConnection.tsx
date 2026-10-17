@@ -30,7 +30,7 @@ function useMuseAgentNativeAttach(input: {
   readonly gate: MuseNativeAttachSendGate;
   readonly error: string | null;
   readonly canOpen: boolean;
-  readonly planKind: "wait" | "skip" | "open";
+  readonly planKind: Parameters<typeof museNativeAttachSendGate>[0]["planKind"];
   readonly retry: () => void;
 } {
   const { environmentId, threadId, providerInstanceId, connected, providers } = input;
@@ -129,7 +129,15 @@ export function MuseAgentRouteConnection({
   });
   let status: ReactNode = null;
   if (planKind !== "skip" && connected) {
-    if (planKind === "open" && !canOpen) {
+    if (planKind === "unavailable") {
+      status = (
+        <View accessibilityRole="text" className="px-4 py-2">
+          <Text className="text-center text-xs text-foreground-muted">
+            {gate.sendBlockedReason}
+          </Text>
+        </View>
+      );
+    } else if (planKind === "open" && !canOpen) {
       status = (
         <View accessibilityRole="text" className="px-4 py-2">
           <Text className="text-center text-xs text-foreground-muted">

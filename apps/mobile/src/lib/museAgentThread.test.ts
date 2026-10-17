@@ -88,21 +88,21 @@ describe("resolveMuseAgentNativeOpenPlan", () => {
         providerInstanceId: historical,
         providers: [],
       }),
-    ).toEqual({ kind: "skip", reason: "capability-absent" });
+    ).toEqual({ kind: "unavailable", reason: "capability-absent" });
     expect(
       resolveMuseAgentNativeOpenPlan({
         threadId: main,
         providerInstanceId: historical,
         providers: [{ instanceId: historical, driver: "codex" }],
       }),
-    ).toEqual({ kind: "skip", reason: "capability-absent" });
+    ).toEqual({ kind: "unavailable", reason: "capability-absent" });
     expect(
       resolveMuseAgentNativeOpenPlan({
         threadId: main,
         providerInstanceId: historical,
         providers: [{ instanceId: "other-muse", driver: "muse-agent" }],
       }),
-    ).toEqual({ kind: "skip", reason: "capability-absent" });
+    ).toEqual({ kind: "unavailable", reason: "capability-absent" });
   });
 
   it("opens only the historical muse-agent instance for main and side chats", () => {
@@ -243,7 +243,7 @@ describe("describeMuseNativeOpenFailure", () => {
 });
 
 describe("museNativeAttachSendGate", () => {
-  it("allows ordinary and non-advertised Muse without waiting for attach", () => {
+  it("allows ordinary threads without waiting for attach", () => {
     expect(
       museNativeAttachSendGate({
         planKind: "skip",
@@ -262,6 +262,21 @@ describe("museNativeAttachSendGate", () => {
         error: "ignored",
       }),
     ).toEqual({ sendAllowed: true, sendBlockedReason: null });
+  });
+
+  it("blocks unsupported Muse even if previously attached", () => {
+    expect(
+      museNativeAttachSendGate({
+        planKind: "unavailable",
+        connected: true,
+        canOpen: true,
+        attached: true,
+        error: null,
+      }),
+    ).toEqual({
+      sendAllowed: false,
+      sendBlockedReason: expect.stringContaining("no longer provides"),
+    });
   });
 
   it("blocks wait, first paint, disconnect, permission, and error until attached", () => {
@@ -413,7 +428,7 @@ describe("resolveMuseOutboxAttachAction", () => {
     ).toEqual({ action: "proceed" });
   });
 
-  it("parks unsupported, disconnected, unverified, and unpermitted Muse rows", () => {
+  it("restores unsupported Muse and parks transiently blocked rows", () => {
     expect(
       resolveMuseOutboxAttachAction({
         threadId: main,
@@ -423,7 +438,7 @@ describe("resolveMuseOutboxAttachAction", () => {
         connected: true,
         canOpen: true,
       }),
-    ).toEqual({ action: "park" });
+    ).toEqual({ action: "restore", reason: expect.stringContaining("no longer provides") });
     expect(
       resolveMuseOutboxAttachAction({
         threadId: main,
@@ -453,7 +468,7 @@ describe("resolveMuseOutboxAttachAction", () => {
         connected: true,
         canOpen: true,
       }),
-    ).toEqual({ action: "park" });
+    ).toEqual({ action: "restore", reason: expect.stringContaining("no longer provides") });
   });
 
   it("opens the historical provider and expected canonical thread", () => {

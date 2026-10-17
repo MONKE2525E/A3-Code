@@ -629,19 +629,23 @@ describe("queued Muse native attach", () => {
     expect(remaining()).toEqual([queued]);
   });
 
-  it("parks unsupported Muse without claiming attached or dropping the entry", async () => {
-    configureMuseThread();
-    state.config.providers = [{ instanceId: museProvider, driver: "codex" }];
-    state.grantedEnvironments.add("secondary");
-    const queued = museMessage();
-    await state.manager.enqueue(queued);
-    useThreadOutboxDrain();
-    expect(state.openMuse).not.toHaveBeenCalled();
-    expect(state.start).not.toHaveBeenCalled();
-    expect(remaining()).toEqual([queued]);
-  });
+  it.each([true, false])(
+    "restores unsupported Muse to its draft (historical identity: %s)",
+    async (hasIdentity) => {
+      configureMuseThread();
+      state.config.providers = [{ instanceId: museProvider, driver: "codex" }];
+      state.grantedEnvironments.add("secondary");
+      const queued = museMessage(hasIdentity ? {} : { modelSelection: undefined });
+      await state.manager.enqueue(queued);
+      await runDrain();
+      expect(state.openMuse).not.toHaveBeenCalled();
+      expect(state.start).not.toHaveBeenCalled();
+      expect(remaining()).toEqual([]);
+      expect(state.draftText).toContain(queued.text);
+    },
+  );
 
-  it("delivers an ordinary thread while a Muse entry stays parked", async () => {
+  it("delivers an ordinary thread after recovering unsupported Muse", async () => {
     configureMuseThread();
     state.config.providers = [{ instanceId: museProvider, driver: "codex" }];
     const ordinaryThread = {
@@ -652,7 +656,10 @@ describe("queued Muse native attach", () => {
     };
     state.threads.splice(0, state.threads.length, state.thread, ordinaryThread);
     state.grantedEnvironments.add("secondary");
-    const museQueued = museMessage({ messageId: MessageId.make("muse-message") });
+    const museQueued = museMessage({
+      modelSelection: undefined,
+      messageId: MessageId.make("muse-message"),
+    });
     const ordinaryQueued = message({
       threadId: ThreadId.make("thread"),
       messageId: MessageId.make("ordinary-message"),
@@ -661,10 +668,13 @@ describe("queued Muse native attach", () => {
     await state.manager.enqueue(museQueued);
     await state.manager.enqueue(ordinaryQueued);
     await runDrain();
+    expect(state.start).not.toHaveBeenCalled();
+    await runDrain();
     expect(state.openMuse).not.toHaveBeenCalled();
     expect(state.start).toHaveBeenCalledOnce();
     expect(state.start.mock.calls[0]?.[0].input.threadId).toBe("thread");
-    expect(remaining()).toEqual([museQueued]);
+    expect(remaining()).toEqual([]);
+    expect(state.draftText).toContain(museQueued.text);
   });
 
   it("does not startTurn a Muse payload edited during attach", async () => {

@@ -946,6 +946,9 @@ export function useThreadOutboxDrain(): void {
         connected: connectedGeneration(queuedMessage.environmentId) !== null,
         canOpen: hasAccess(),
       });
+      if (museAttach.action === "restore") {
+        return restoreQueuedMessage(persistedMessage, museAttach.reason);
+      }
       if (museAttach.action === "park") {
         return true;
       }
