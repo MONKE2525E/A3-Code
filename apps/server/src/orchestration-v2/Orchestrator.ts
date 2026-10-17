@@ -2512,6 +2512,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     if (
+      (command.type === "thread.model-selection.set" || command.type === "provider.switch") &&
+      nativeAgentSourceForThread(thread) === "muse-agent"
+    ) {
+      return yield* new OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause:
+          "Muse conversations cannot change provider or model through generic thread commands.",
+      });
+    }
+    if (
       command.type === "thread.pull-request.watch" &&
       command.watching &&
       isProviderNativeSubagentThread(thread)
@@ -4589,6 +4600,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) =>
     Effect.gen(function* () {
       let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+      if (
+        nativeAgentSourceForThread(projection.thread) === "muse-agent" &&
+        command.modelSelection !== undefined &&
+        (command.modelSelection.instanceId !== projection.thread.modelSelection.instanceId ||
+          command.modelSelection.model !== projection.thread.modelSelection.model)
+      ) {
+        return yield* new OrchestratorCommandRejectedError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause:
+            "Muse conversations cannot change provider or model through generic thread commands.",
+        });
+      }
       if (command.manualContinuationOfRunId !== undefined) {
         const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
         const limited = latestRootProviderFailure(source ?? null, projection.turnItems);

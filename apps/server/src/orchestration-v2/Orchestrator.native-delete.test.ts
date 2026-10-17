@@ -1,5 +1,5 @@
 import { assert, it } from "@effect/vitest";
-import { CommandId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { CommandId, MessageId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -101,6 +101,70 @@ it.effect.each([
   }).pipe(Effect.provide(layer)),
 );
 
+it.effect.each([
+  `muse-agent:${"a".repeat(64)}`,
+  `muse-agent:${"a".repeat(64)}:side%3Achat`,
+  "muse-agent:saved-hash",
+])("rejects generic provider and model changes to %s", (id) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make(id);
+    yield* createThread(threadId);
+    const before = yield* projections.getThreadProjection(threadId);
+    const shellBefore = yield* orchestrator.getShellSnapshot();
+    for (const type of ["thread.model-selection.set", "provider.switch"] as const) {
+      const command = {
+        type,
+        commandId: CommandId.make(`${type}:${threadId}`),
+        threadId,
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+      };
+      const error = yield* Effect.flip(orchestrator.dispatch(command));
+      assert.equal(error._tag, "OrchestratorCommandRejectedError");
+      assert.equal(
+        userFacingDispatchErrorMessage(error),
+        "Muse conversations cannot change provider or model through generic thread commands.",
+      );
+      assert.deepEqual(yield* projections.getThreadProjection(threadId), before);
+      assert.deepEqual(yield* orchestrator.getShellSnapshot(), shellBefore);
+      const replay = yield* Effect.flip(orchestrator.dispatch(command));
+      assert.equal(replay._tag, "OrchestratorCommandPreviouslyRejectedError");
+    }
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each([
+  { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+  { instanceId: ProviderInstanceId.make("muse-agent"), model: "other-model" },
+])("rejects Muse provider and model overrides in message dispatch: %s", (modelSelection) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make(`muse-agent:${"a".repeat(64)}`);
+    yield* createThread(threadId);
+    const before = yield* projections.getThreadProjection(threadId);
+    const shellBefore = yield* orchestrator.getShellSnapshot();
+    const error = yield* Effect.flip(
+      orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("dispatch:override"),
+        threadId,
+        messageId: MessageId.make("override-message"),
+        text: "Hello",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "defer_start" },
+        createdBy: "user",
+        creationSource: "web",
+      }),
+    );
+    assert.equal(error._tag, "OrchestratorCommandRejectedError");
+    assert.deepEqual(yield* projections.getThreadProjection(threadId), before);
+    assert.deepEqual(yield* orchestrator.getShellSnapshot(), shellBefore);
+  }).pipe(Effect.provide(layer)),
+);
+
 it.effect.each(["thread:ordinary", "grok-bot:saved-hash"])(
   "allows deletion of %s, preserving ordinary deletion and Grok owner cleanup",
   (id) =>
@@ -185,6 +249,18 @@ it.effect("native Muse open still reopens the canonical conversation after rejec
       }),
     );
     assert.equal(rejected._tag, "OrchestratorCommandRejectedError");
+    for (const type of ["thread.model-selection.set", "provider.switch"] as const) {
+      const rejectedSelection = yield* Effect.flip(
+        orchestrator.dispatch({
+          type,
+          commandId: CommandId.make(`native-open:${type}`),
+          threadId,
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+        }),
+      );
+      assert.equal(rejectedSelection._tag, "OrchestratorCommandRejectedError");
+      assert.deepEqual(yield* service.open(reference), opened);
+    }
     assert.deepEqual(yield* service.open(reference), opened);
     assert.isNull((yield* projections.getThread(threadId)).deletedAt);
   }).pipe(Effect.provide(layer)),
