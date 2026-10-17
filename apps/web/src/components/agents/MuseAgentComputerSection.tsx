@@ -385,7 +385,7 @@ export function MuseAgentComputerSection({
       </p>
       <p className="text-xs text-muted-foreground">
         Select a task to see its latest preview. Choose Take control to drive it live; that pauses
-        Muse on the task until you release.
+        Muse on the task until the control lease expires. Closing the view does not end the lease.
       </p>
       {status.tasks.length === 0 ? (
         <p className="py-2 text-sm text-muted-foreground">No computer tasks.</p>

@@ -27,7 +27,7 @@ import { useAtomCommand } from "~/state/use-atom-command";
 
 type Lease = NonNullable<MuseAgentComputerTaskDetail["state"]["lease"]>;
 
-/** A lease this viewer took, with the exact target it was taken on so release never goes elsewhere. */
+/** A lease this viewer took, bound to its original target. */
 type HeldLease = {
   readonly takeoverId: string;
   readonly environmentId: EnvironmentId;
@@ -36,7 +36,6 @@ type HeldLease = {
   readonly taskId: string;
 };
 
-const HEARTBEAT_MS = 10_000;
 const CONFIRM_TIMEOUT_MS = 10_000;
 // The backend bounds viewer size; ask for something that fits a settings panel comfortably.
 const MAX_WIDTH = 1920;
@@ -101,27 +100,17 @@ export function MuseAgentComputerViewer({
   // The lease id the takeover receipt returned. A task refresh must show exactly this lease before
   // the view connects; no other lease is ever adopted by ID inference.
   const [receiptId, setReceiptId] = useState<string | null>(null);
-  // The confirmed lease this viewer took; release is sent once, for exactly this lease and target.
   const [held, setHeld] = useState<string | null>(null);
-  // Heartbeat receipts can precede task refreshes; stale reads must not shorten a renewed lease.
-  const [renewedLease, setRenewedLease] = useState<Lease | null>(null);
-  const effectiveExpiresAtMs =
-    renewedLease?.takeoverId === held && held !== null
-      ? renewedLease.controlExpiresAtMs === null || leaseExpiresAtMs === null
-        ? null
-        : Math.max(leaseExpiresAtMs, renewedLease.controlExpiresAtMs)
-      : leaseExpiresAtMs;
-  // Set from the receipt, before confirmation, so unmount or timeout releases exactly that lease.
+  // Capture the granted deadline. Refreshed task data cannot renew this viewer's lease.
+  const [grantedExpiresAtMs, setGrantedExpiresAtMs] = useState<number | null>(null);
   const heldRef = useRef<HeldLease | null>(null);
-  const updateRef = useRef(update);
-  const targetRef = useRef({ environmentId, providerInstanceId, sessionId, taskId });
+  const targetRef = useRef({ environmentId, providerInstanceId, sessionId, taskId, canWrite });
   const mountedRef = useRef(true);
+  const targetGenerationRef = useRef(0);
   useEffect(() => {
-    updateRef.current = update;
-  }, [update]);
-  useEffect(() => {
-    targetRef.current = { environmentId, providerInstanceId, sessionId, taskId };
-  }, [environmentId, providerInstanceId, sessionId, taskId]);
+    targetRef.current = { environmentId, providerInstanceId, sessionId, taskId, canWrite };
+    targetGenerationRef.current++;
+  }, [environmentId, providerInstanceId, sessionId, taskId, canWrite]);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -129,44 +118,15 @@ export function MuseAgentComputerViewer({
     };
   }, []);
 
-  const sendRelease = useCallback((lease: HeldLease) => {
-    void updateRef.current({
-      environmentId: lease.environmentId,
-      input: {
-        operation: "computer_action",
-        providerInstanceId: lease.providerInstanceId,
-        sessionId: lease.sessionId,
-        taskId: lease.taskId,
-        command: { action: "release", takeoverId: lease.takeoverId },
-      },
-    });
+  const endView = useCallback((why: string | null) => {
+    heldRef.current = null;
+    setHeld(null);
+    setGrantedExpiresAtMs(null);
+    setReceiptId(null);
+    setWantsView(false);
+    setPhase("idle");
+    setMessage(why);
   }, []);
-
-  /** Closes the view and, when `release` is set, gives back the lease we hold. */
-  const endView = useCallback(
-    (why: string | null, release = true) => {
-      const lease = heldRef.current;
-      heldRef.current = null;
-      if (release && lease !== null) sendRelease(lease);
-      setHeld(null);
-      setRenewedLease(null);
-      setReceiptId(null);
-      setWantsView(false);
-      setPhase("idle");
-      setMessage(why);
-    },
-    [sendRelease],
-  );
-
-  // Best-effort release of our own lease when this task's viewer goes away.
-  useEffect(
-    () => () => {
-      const lease = heldRef.current;
-      heldRef.current = null;
-      if (lease !== null) sendRelease(lease);
-    },
-    [sendRelease],
-  );
 
   const takeControl = async () => {
     if (pending) return;
@@ -174,6 +134,7 @@ export function MuseAgentComputerViewer({
     setMessage(null);
     // Captured before the await: the receipt belongs to this target and generation only.
     const target = { environmentId, providerInstanceId, sessionId, taskId };
+    const generation = targetGenerationRef.current;
     const priorTakeoverId = ownedTakeoverId;
     const result = await update({
       environmentId,
@@ -192,19 +153,22 @@ export function MuseAgentComputerViewer({
       receipt.taskId === target.taskId &&
       receipt.takeoverId !== null &&
       receipt.takeoverId !== priorTakeoverId &&
-      (receipt.controlExpiresAtMs === null || receipt.controlExpiresAtMs > Date.now())
+      receipt.controlExpiresAtMs !== null &&
+      Number.isFinite(receipt.controlExpiresAtMs) &&
+      receipt.controlExpiresAtMs > Date.now()
         ? receipt.takeoverId
         : null;
     const current = targetRef.current;
     const sameTarget =
       mountedRef.current &&
+      generation === targetGenerationRef.current &&
+      current.canWrite &&
       current.environmentId === target.environmentId &&
       current.providerInstanceId === target.providerInstanceId &&
       current.sessionId === target.sessionId &&
       current.taskId === target.taskId;
     if (!sameTarget) {
-      // The target moved on while taking over; give back exactly what was granted there.
-      if (receiptTakeoverId !== null) sendRelease({ ...target, takeoverId: receiptTakeoverId });
+      // A late receipt belongs to the old target. Its lease expires without mutation.
       if (mountedRef.current) setPending(false);
       return;
     }
@@ -229,16 +193,17 @@ export function MuseAgentComputerViewer({
       return;
     }
     heldRef.current = { ...target, takeoverId: receiptTakeoverId };
+    setGrantedExpiresAtMs(receipt?.controlExpiresAtMs ?? null);
     setReceiptId(receiptTakeoverId);
     setWantsView(true);
     onTakeover();
   };
 
-  const releaseControl = () => endView("Control released.");
+  const closeView = () =>
+    endView("Live view closed. Muse resumes when the current control lease expires.");
 
   // Connect only once a refresh shows exactly the receipt's lease. A different user lease means the
-  // receipt was replaced: close and release only the lease we were granted. A target change or lost
-  // lease drops the view the same way.
+  // receipt was replaced: close locally. A target change or lost lease drops the view the same way.
   useEffect(() => {
     const lease = heldRef.current;
     if (lease === null || receiptId === null) return;
@@ -247,7 +212,7 @@ export function MuseAgentComputerViewer({
       lease.providerInstanceId === providerInstanceId &&
       lease.sessionId === sessionId &&
       lease.taskId === taskId;
-    if (!sameTarget) {
+    if (!sameTarget || !canWrite) {
       endView("Control ended. Take control again to reconnect.");
       return;
     }
@@ -265,6 +230,7 @@ export function MuseAgentComputerViewer({
   }, [
     held,
     receiptId,
+    canWrite,
     ownedTakeoverId,
     leaseExpiresAtMs,
     environmentId,
@@ -285,56 +251,13 @@ export function MuseAgentComputerViewer({
   }, [receiptId, held, endView]);
 
   useEffect(() => {
-    if (effectiveExpiresAtMs === null || held === null) return;
+    if (grantedExpiresAtMs === null || receiptId === null) return;
     const timer = window.setTimeout(
       () => endView("Control expired. Take control again to reconnect."),
-      Math.max(0, effectiveExpiresAtMs - Date.now()),
+      Math.max(0, grantedExpiresAtMs - Date.now()),
     );
     return () => window.clearTimeout(timer);
-  }, [effectiveExpiresAtMs, held, endView]);
-
-  // Heartbeat runs only while this viewer holds the lease it took and is connected.
-  useEffect(() => {
-    if (phase !== "live" || held === null) return;
-    let stopped = false;
-    const timer = window.setInterval(async () => {
-      const result = await updateRef.current({
-        environmentId,
-        input: {
-          operation: "computer_action",
-          providerInstanceId,
-          sessionId,
-          taskId,
-          command: { action: "heartbeat", takeoverId: held },
-        },
-      });
-      if (stopped) return;
-      if (result._tag === "Success") {
-        const renewed = result.value.computerState?.lease;
-        if (
-          renewed?.controlOwner === "user" &&
-          renewed.takeoverId === held &&
-          renewed.taskId === taskId
-        ) {
-          setRenewedLease((previous) =>
-            previous?.takeoverId === held &&
-            (previous.controlExpiresAtMs === null ||
-              (renewed.controlExpiresAtMs !== null &&
-                previous.controlExpiresAtMs > renewed.controlExpiresAtMs))
-              ? previous
-              : renewed,
-          );
-        }
-        return;
-      }
-      if (isAtomCommandInterrupted(result)) return;
-      endView("Lost contact with Muse's computer. Take control again to reconnect.");
-    }, HEARTBEAT_MS);
-    return () => {
-      stopped = true;
-      window.clearInterval(timer);
-    };
-  }, [phase, held, environmentId, providerInstanceId, sessionId, taskId, endView]);
+  }, [grantedExpiresAtMs, receiptId, endView]);
 
   // noVNC connection: fresh ticket each time it opens, torn down on hide, target change, or exit.
   // It never reconnects on its own; the user takes control again.
@@ -429,7 +352,7 @@ export function MuseAgentComputerViewer({
             ) : null}
           </div>
           <p className="text-xs text-muted-foreground">
-            Live view · you are controlling this task. Muse waits until you release control.
+            Live view · you are controlling this task. Muse resumes when the control lease expires.
           </p>
         </div>
       ) : (
@@ -457,8 +380,8 @@ export function MuseAgentComputerViewer({
       ) : null}
       <div className="flex flex-wrap items-center gap-2">
         {active ? (
-          <Button size="sm" variant="outline" onClick={releaseControl}>
-            Release control
+          <Button size="sm" variant="outline" onClick={closeView}>
+            Close view
           </Button>
         ) : (
           <Button
@@ -479,8 +402,8 @@ export function MuseAgentComputerViewer({
           <AlertDialogHeader>
             <AlertDialogTitle>Take control of this task?</AlertDialogTitle>
             <AlertDialogDescription>
-              You will control “{task.title}” on Muse's computer and Muse pauses until you release
-              it. The live view is only available while you hold control, and it closes if control
+              You will control “{task.title}” on Muse's computer until the granted lease expires.
+              Closing the live view does not end that lease early. The view closes when control
               expires or the connection drops.
             </AlertDialogDescription>
           </AlertDialogHeader>

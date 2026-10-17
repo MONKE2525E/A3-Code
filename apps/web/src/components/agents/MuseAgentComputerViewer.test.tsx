@@ -47,119 +47,207 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it.each(["renewed", "older-renewal", "foreign", "no-renewal"])(
-  "expires only the held lease using heartbeat evidence: %s",
+it.each([
+  "expiry",
+  "refreshed-deadline",
+  "close",
+  "unmount",
+  "replacement",
+  "target",
+  "permission",
+])("keeps live control bounded by its receipt without lease mutations: %s", async (outcome) => {
+  vi.useFakeTimers();
+  vi.setSystemTime(0);
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const confirmed = state(25_000);
+  mocks.update.mockReset().mockResolvedValue({
+    _tag: "Success",
+    value: { computerState: confirmed },
+  });
+  mocks.stream.mockReset().mockResolvedValue({
+    _tag: "Success",
+    value: { socketUrl: "ws://synthetic.test/stream" },
+  });
+  mocks.disconnect.mockClear();
+  const ready = new Promise<void>((resolve) => {
+    mocks.ready = resolve;
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  let unmounted = false;
+  const render = (
+    lease: MuseAgentComputerState["lease"],
+    sessionId = "session-one",
+    canWrite = true,
+  ) =>
+    root.render(
+      <MuseAgentComputerViewer
+        environmentId={EnvironmentId.make("environment-one")}
+        providerInstanceId={ProviderInstanceId.make("muse-one")}
+        sessionId={sessionId}
+        task={{
+          taskId: "task-one",
+          title: "Synthetic task",
+          readOnly: false,
+          previewAvailable: true,
+        }}
+        lease={lease}
+        canWrite={canWrite}
+        onTakeover={() => {}}
+      />,
+    );
+  const click = async (label: string) =>
+    act(async () => {
+      const button = [...document.querySelectorAll("button")].findLast(
+        (button) => button.textContent === label,
+      );
+      expect(button).toBeDefined();
+      button!.click();
+    });
+  try {
+    await act(async () => render(null));
+    await click("Take control");
+    await click("Take control");
+    await act(async () => render(confirmed.lease));
+    await act(async () => {
+      await ready;
+      mocks.connect();
+    });
+    expect(container.textContent).toContain("Live view");
+    expect(mocks.stream).toHaveBeenCalledWith({
+      environmentId: "environment-one",
+      input: {
+        providerInstanceId: "muse-one",
+        sessionId: "session-one",
+        taskId: "task-one",
+        takeoverId: "lease-one",
+      },
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_001);
+    });
+    expect(container.textContent).toContain("Live view");
+    expect(mocks.disconnect).not.toHaveBeenCalled();
+    if (outcome === "close") {
+      await click("Close view");
+      expect(container.textContent).toContain(
+        "Muse resumes when the current control lease expires",
+      );
+      expect(container.textContent).not.toContain("Control released");
+    } else if (outcome === "unmount") {
+      await act(async () => root.unmount());
+      unmounted = true;
+    } else if (outcome === "replacement") {
+      await act(async () => render(state(40_000, "lease-two").lease));
+      expect(container.textContent).not.toContain("Live view");
+      expect(mocks.stream).toHaveBeenCalledTimes(1);
+    } else if (outcome === "target") {
+      await act(async () => render(confirmed.lease, "session-two"));
+      expect(container.textContent).not.toContain("Live view");
+      expect(mocks.stream).toHaveBeenCalledTimes(1);
+    } else if (outcome === "permission") {
+      await act(async () => render(confirmed.lease, "session-one", false));
+      expect(container.textContent).not.toContain("Live view");
+    } else {
+      if (outcome === "refreshed-deadline") {
+        await act(async () => render(state(60_000).lease));
+      }
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(14_998);
+      });
+      expect(container.textContent).toContain("Live view");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(container.textContent).toContain("Control expired");
+    }
+    expect(mocks.disconnect).toHaveBeenCalledTimes(1);
+    expect(mocks.update).toHaveBeenCalledTimes(1);
+    expect(mocks.update.mock.calls[0]?.[0].input.command.action).toBe("takeover");
+  } finally {
+    if (!unmounted) await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+it.each(["target-roundtrip", "unmount", "permission", "missing-expiry"])(
+  "does not attach a late or unusable takeover receipt: %s",
   async (outcome) => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const confirmed = state(15_000);
-    let finishHeartbeat: (value: unknown) => void = () => {
+    let finish: (value: unknown) => void = () => {
       throw new Error("not started");
     };
-    mocks.update.mockReset().mockImplementation((request) => {
-      if (request.input.command.action === "takeover")
-        return Promise.resolve({ _tag: "Success", value: { computerState: confirmed } });
-      if (request.input.command.action === "heartbeat")
-        return new Promise((resolve) => {
-          finishHeartbeat = resolve;
-        });
-      return Promise.resolve({ _tag: "Success", value: {} });
-    });
-    mocks.stream
-      .mockReset()
-      .mockResolvedValue({ _tag: "Success", value: { socketUrl: "ws://synthetic.test/stream" } });
+    mocks.update.mockReset().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    mocks.stream.mockReset();
     mocks.disconnect.mockClear();
-    const ready = new Promise<void>((resolve) => {
-      mocks.ready = resolve;
-    });
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
-    const render = (lease: MuseAgentComputerState["lease"]) =>
+    let unmounted = false;
+    const render = (sessionId = "session-one", canWrite = true) =>
       root.render(
         <MuseAgentComputerViewer
           environmentId={EnvironmentId.make("environment-one")}
           providerInstanceId={ProviderInstanceId.make("muse-one")}
-          sessionId="session-one"
+          sessionId={sessionId}
           task={{
             taskId: "task-one",
             title: "Synthetic task",
             readOnly: false,
             previewAvailable: true,
           }}
-          lease={lease}
-          canWrite
+          lease={state(25_000).lease}
+          canWrite={canWrite}
           onTakeover={() => {}}
         />,
       );
-    const click = async (label: string) =>
+    const click = () =>
       act(async () => {
         const button = [...document.querySelectorAll("button")].findLast(
-          (button) => button.textContent === label,
+          (button) => button.textContent === "Take control",
         );
         expect(button).toBeDefined();
         button!.click();
       });
     try {
-      await act(async () => render(null));
-      await click("Take control");
-      await click("Take control");
-      await act(async () => {
-        render(confirmed.lease);
-      });
-      await act(async () => {
-        await ready;
-        mocks.connect();
-      });
-      expect(container.textContent).toContain("Live view");
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(10_000);
-      });
+      await act(async () => render());
+      await click();
+      await click();
+      if (outcome === "target-roundtrip") {
+        await act(async () => render("session-two"));
+        await act(async () => render());
+      } else if (outcome === "unmount") {
+        await act(async () => root.unmount());
+        unmounted = true;
+      } else if (outcome === "permission") {
+        await act(async () => render("session-one", false));
+      }
+      const receipt = state(25_000, "new-lease");
       await act(async () =>
-        finishHeartbeat({
+        finish({
           _tag: "Success",
-          value:
-            outcome === "no-renewal"
-              ? {}
-              : {
-                  computerState: state(35_000, outcome === "foreign" ? "other-lease" : "lease-one"),
-                },
+          value: {
+            computerState:
+              outcome === "missing-expiry"
+                ? { ...receipt, lease: { ...receipt.lease, controlExpiresAtMs: null } }
+                : receipt,
+          },
         }),
       );
-      // The task-detail query remains stale at its original 15-second expiry.
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(5_001);
-      });
-      const releases = () =>
-        mocks.update.mock.calls.filter(([request]) => request.input.command.action === "release");
-      if (outcome === "renewed" || outcome === "older-renewal") {
-        expect(container.textContent).toContain("Live view");
-        expect(releases()).toHaveLength(0);
-        expect(mocks.disconnect).not.toHaveBeenCalled();
-        if (outcome === "older-renewal") {
-          await act(async () => {
-            await vi.advanceTimersByTimeAsync(5_000);
-          });
-          await act(async () =>
-            finishHeartbeat({ _tag: "Success", value: { computerState: state(25_000) } }),
-          );
-          await act(async () => {
-            await vi.advanceTimersByTimeAsync(5_000);
-          });
-          expect(container.textContent).toContain("Live view");
-          expect(releases()).toHaveLength(0);
-        }
-        await act(async () => {
-          await vi.advanceTimersByTimeAsync(outcome === "older-renewal" ? 10_000 : 20_000);
-        });
-      }
-      expect(container.textContent).toContain("Control expired");
-      expect(releases()).toHaveLength(1);
-      expect(releases()[0]?.[0].input.command.takeoverId).toBe("lease-one");
-      expect(mocks.disconnect).toHaveBeenCalledTimes(1);
+      expect(mocks.stream).not.toHaveBeenCalled();
+      expect(mocks.update).toHaveBeenCalledTimes(1);
+      expect(mocks.disconnect).not.toHaveBeenCalled();
+      expect(container.textContent).not.toContain("Waiting for control");
     } finally {
-      await act(async () => root.unmount());
+      if (!unmounted) await act(async () => root.unmount());
       container.remove();
     }
   },

@@ -22,7 +22,7 @@ Messages support images within a combined 10 MiB inline budget and files up to 5
 
 ### Controlling Muse's computer
 
-Choose a task, then **Take control** and confirm. Muse pauses on that task while you drive its browser in a live view; there is no view-only mode. Choose **Release control** when you are done. The view closes if control expires, the connection drops, or you hide the task, and you can take control again to reconnect. You need permission to operate on the environment, and a task Muse is using is never taken without your confirmation.
+Choose a task, then **Take control** and confirm. Muse pauses on that task while you drive its browser in a live view; there is no view-only mode. Choose **Close view** when you are done. Muse resumes when the control lease expires; closing the view does not release control early. The view also closes if control expires, the connection drops, or you hide the task. You can take control again to reconnect. You need permission to operate on the environment, and a task Muse is using is never taken without your confirmation.
 
 ## Grok Bots
 
