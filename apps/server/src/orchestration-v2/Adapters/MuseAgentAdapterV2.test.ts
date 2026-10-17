@@ -278,6 +278,119 @@ it.effect.each(["terminal", "stop"] as const)(
     ),
 );
 it.effect(
+  "bounds attachment imports without delaying terminal frames and releases failed imports",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const turn = yield* makeTurn;
+        const frames = yield* Queue.unbounded<MuseAgentNativeEvent>();
+        const otherFrames = yield* Queue.unbounded<MuseAgentNativeEvent>();
+        let watching = false;
+        const saturated = yield* Deferred.make<void>();
+        const released = yield* Deferred.make<void>();
+        const terminal = yield* Deferred.make<void>();
+        const finished = yield* Deferred.make<void>();
+        let active = 0;
+        let peak = 0;
+        let started = 0;
+        let completed = 0;
+        const native = makeNative({
+          watch: () => {
+            const queue = watching ? otherFrames : frames;
+            watching = true;
+            return Effect.succeed({ events: Stream.fromQueue(queue), close: Effect.void });
+          },
+          readAttachment: () =>
+            Effect.gen(function* () {
+              started++;
+              active++;
+              peak = Math.max(peak, active);
+              if (active === 2) yield* Deferred.succeed(saturated, undefined);
+              yield* Deferred.await(released);
+              return yield* Effect.fail(new Native.MuseAgentRuntimeError({ kind: "protocol" }));
+            }).pipe(
+              Effect.ensuring(
+                Effect.gen(function* () {
+                  active--;
+                  completed++;
+                  if (completed === 8) yield* Deferred.succeed(finished, undefined);
+                }),
+              ),
+            ),
+        });
+        const adapter = yield* createMuseAgentAdapterV2(options).pipe(
+          Effect.provideService(Native.MuseAgentNativeRuntimeService, native),
+          Effect.provideService(ProviderHost.ProviderHost, host),
+          Effect.provideService(
+            ToolsPort.MuseAgentDirectToolsPort,
+            ToolsPort.MuseAgentDirectToolsPort.of({
+              install: () => Effect.succeed({ uninstall: Effect.void }),
+              start: () => Effect.succeed({ revoke: Effect.void, close: Effect.void }),
+            }),
+          ),
+        );
+        const runtime = yield* adapter.openSession(sessionInput);
+        const otherRuntime = yield* adapter.openSession(sessionInput);
+        yield* runtime.events.pipe(
+          Stream.runForEach((event) =>
+            event.type === "turn.terminal" ? Deferred.succeed(terminal, undefined) : Effect.void,
+          ),
+          Effect.forkScoped,
+        );
+        yield* runtime.startTurn(turn);
+        yield* otherRuntime.startTurn(turn);
+        for (const queue of [frames, otherFrames]) {
+          yield* Queue.offer(queue, {
+            event: "message.assistant",
+            payload: {
+              session_id: "primary",
+              message_id: "assistant-burst",
+              reply_to_message_id: receipt.messageId,
+              display_text: "Reports",
+            },
+          });
+          for (let index = 0; index < 4; index++) {
+            yield* Queue.offer(queue, {
+              event: "delta.presentation",
+              payload: {
+                session_id: "primary",
+                message_id: `presentation-${index}`,
+                host_message_id: "assistant-burst",
+                reply_to_message_id: receipt.messageId,
+                kind: "file",
+                data: {
+                  file: {
+                    path: `sandbox://workspace/user/files/report-${index}.txt`,
+                    label: `Report ${index}`,
+                    missing: false,
+                  },
+                },
+              },
+            });
+          }
+        }
+        yield* Deferred.await(saturated);
+        yield* Queue.offer(frames, {
+          event: "delta.turn_done",
+          payload: {
+            session_id: "primary",
+            reply_to_message_id: receipt.messageId,
+            status: "completed",
+          },
+        });
+        yield* Deferred.await(terminal);
+        assert.strictEqual(started, 2);
+        assert.strictEqual(active, 2);
+        yield* Deferred.succeed(released, undefined);
+        yield* Deferred.await(finished);
+        assert.strictEqual(started, 8);
+        assert.strictEqual(active, 0);
+        assert.strictEqual(peak, 2);
+      }),
+    ),
+);
+
+it.effect(
   "imports attachments after persistence without delaying terminal or tool revocation",
   () =>
     Effect.acquireUseRelease(

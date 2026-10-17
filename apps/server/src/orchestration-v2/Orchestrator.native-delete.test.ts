@@ -165,6 +165,48 @@ it.effect.each([
   }).pipe(Effect.provide(layer)),
 );
 
+it.effect.each([
+  `muse-agent:${"a".repeat(64)}`,
+  `muse-agent:${"a".repeat(64)}:side%3Achat`,
+  "muse-agent:saved-hash",
+])("rejects generic worktree changes to %s while preserving metadata updates", (id) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make(id);
+    yield* createThread(threadId);
+    const before = yield* projections.getThreadProjection(threadId);
+    const shellBefore = yield* orchestrator.getShellSnapshot();
+    const command = {
+      type: "thread.metadata.update" as const,
+      commandId: CommandId.make("metadata:redirect"),
+      threadId,
+      title: "Must not apply",
+      worktreePath: "/unrelated-checkout",
+    };
+    const error = yield* Effect.flip(orchestrator.dispatch(command));
+    assert.equal(error._tag, "OrchestratorCommandRejectedError");
+    assert.equal(
+      userFacingDispatchErrorMessage(error),
+      "Muse conversations cannot change worktree through generic thread commands.",
+    );
+    assert.deepEqual(yield* projections.getThreadProjection(threadId), before);
+    assert.deepEqual(yield* orchestrator.getShellSnapshot(), shellBefore);
+    const replay = yield* Effect.flip(orchestrator.dispatch(command));
+    assert.equal(replay._tag, "OrchestratorCommandPreviouslyRejectedError");
+    yield* orchestrator.dispatch({
+      type: "thread.metadata.update",
+      commandId: CommandId.make("metadata:title"),
+      threadId,
+      title: "Renamed conversation",
+      worktreePath: null,
+    });
+    const updated = yield* projections.getThread(threadId);
+    assert.equal(updated.title, "Renamed conversation");
+    assert.isNull(updated.worktreePath);
+  }).pipe(Effect.provide(layer)),
+);
+
 it.effect.each(["thread:ordinary", "grok-bot:saved-hash"])(
   "allows deletion of %s, preserving ordinary deletion and Grok owner cleanup",
   (id) =>

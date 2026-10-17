@@ -2523,6 +2523,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     if (
+      command.type === "thread.metadata.update" &&
+      command.worktreePath !== undefined &&
+      command.worktreePath !== thread.worktreePath &&
+      nativeAgentSourceForThread(thread) === "muse-agent"
+    ) {
+      return yield* new OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Muse conversations cannot change worktree through generic thread commands.",
+      });
+    }
+    if (
       command.type === "thread.pull-request.watch" &&
       command.watching &&
       isProviderNativeSubagentThread(thread)

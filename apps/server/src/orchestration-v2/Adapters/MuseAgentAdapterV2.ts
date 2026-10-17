@@ -143,6 +143,7 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
   const native = yield* Native.MuseAgentNativeRuntimeService;
   const toolsPort = yield* DirectToolsPort.MuseAgentDirectToolsPort;
   const host = yield* ProviderHost.ProviderHost;
+  const attachmentImports = yield* Semaphore.make(2);
   const capabilities = MuseAgentCapabilitiesV2;
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: options.instanceId,
@@ -342,14 +343,16 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
               });
             yield* refreshOwnership();
             if (!projection.canImportPresentation(frame, captured)) return 0;
-            const imported = yield* importMuseAttachmentPresentation({
-              binding,
-              sessionId: session.session_id,
-              threadId: input.threadId,
-              attachmentsDir: host.paths.attachmentsDir,
-              frame,
-              readAttachment: native.readAttachment,
-            });
+            const imported = yield* frame.event === "delta.presentation"
+              ? importMuseAttachmentPresentation({
+                  binding,
+                  sessionId: session.session_id,
+                  threadId: input.threadId,
+                  attachmentsDir: host.paths.attachmentsDir,
+                  frame,
+                  readAttachment: native.readAttachment,
+                }).pipe(attachmentImports.withPermits(1))
+              : Effect.succeed(null);
             // Attachment IO can outlive a sibling's durable ownership write.
             if (imported) yield* refreshOwnership();
             if (!projection.canImportPresentation(frame, captured)) return 0;
