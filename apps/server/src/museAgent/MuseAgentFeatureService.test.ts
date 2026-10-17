@@ -30,6 +30,7 @@ const fixture = (
   let error: Transport.MuseAgentTransportError | undefined;
   let connectCalls = 0;
   const transport = Transport.MuseAgentTransport.of({
+    acquireTurn: () => Effect.succeed(Effect.void),
     releaseOwned: () => Effect.void,
     connect: Effect.sync(() => {
       connectCalls++;

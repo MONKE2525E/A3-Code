@@ -11,11 +11,14 @@ const request = {
 };
 const receipt = { sessionId: "primary", messageId: "user-1", replyToMessageId: "carrier-1" };
 const withStore = <A, E>(
-  test: (store: Store.MuseAgentDeliveryStore["Service"]) => Effect.Effect<A, E>,
+  test: (
+    store: Store.MuseAgentDeliveryStore["Service"],
+    db: NodeSqlite.DatabaseSync,
+  ) => Effect.Effect<A, E>,
 ) =>
   Effect.acquireUseRelease(
     Effect.sync(() => new NodeSqlite.DatabaseSync(":memory:")),
-    (db) => test(Store.makeMuseAgentDeliveryStore(db)),
+    (db) => test(Store.makeMuseAgentDeliveryStore(db), db),
     (db) => Effect.sync(() => db.close()),
   );
 
@@ -116,6 +119,42 @@ it.effect("abandons only unaccepted pre-prompt intents and preserves every admit
       yield* store.abandonBeforePrompt(request.deliveryKey);
       assert.deepStrictEqual(yield* store.begin(request), receipt);
       assert.strictEqual(yield* store.begin({ ...request, deliveryKey: "next" }), null);
+    }),
+  ),
+);
+
+it.effect.each(["intent", "accepted"] as const)(
+  "retains an account-wide %s fence across store reconstruction while allowing owner recovery",
+  (status) =>
+    withStore((store, db) =>
+      Effect.gen(function* () {
+        yield* store.begin(request);
+        if (status === "accepted") yield* store.accept(request.deliveryKey, receipt);
+        const restored = Store.makeMuseAgentDeliveryStore(db);
+        yield* restored.assertTurnAvailable(request);
+        const foreign = { ...request, sessionId: "side-chat", deliveryKey: "side-attempt" };
+        assert.strictEqual(
+          (yield* Effect.flip(restored.assertTurnAvailable(foreign))).kind,
+          "busy",
+        );
+        assert.strictEqual((yield* Effect.flip(restored.begin(foreign))).kind, "busy");
+        yield* restored.assertTurnAvailable({ ...foreign, binding: "b".repeat(64) });
+        if (status === "accepted") yield* restored.settle(request.deliveryKey);
+        else yield* restored.abandonBeforePrompt(request.deliveryKey);
+        yield* restored.assertTurnAvailable(foreign);
+        assert.strictEqual(yield* restored.begin(foreign), null);
+      }),
+    ),
+);
+
+it.effect("explicitly released ownership no longer fences another native session", () =>
+  withStore((store) =>
+    Effect.gen(function* () {
+      yield* store.begin(request);
+      yield* store.releaseLocalOwnership(request);
+      const foreign = { ...request, sessionId: "side-chat", deliveryKey: "side-attempt" };
+      yield* store.assertTurnAvailable(foreign);
+      assert.strictEqual(yield* store.begin(foreign), null);
     }),
   ),
 );

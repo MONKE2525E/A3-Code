@@ -36,6 +36,7 @@ const fixture = (privateSession = false) => {
   const exposed = new Map<string, (raw: unknown) => unknown>();
   let handleRoute: ((route: Route) => Promise<void>) | undefined;
   let sourceFingerprint = "synthetic-fingerprint";
+  let sourceRead = () => {};
   let pageAuthority: string | null = "synthetic-authority";
   let disconnectObserved = false;
   let recoveryFails = false;
@@ -123,12 +124,15 @@ const fixture = (privateSession = false) => {
   });
   const source = Source.MuseAgentSessionSource.of({
     inspect: Effect.succeed({ installed: true, sessionPresent: true }),
-    read: Effect.sync(() => ({
-      ...(privateSession ? { source: "t3-browser" as const } : {}),
-      profilePath: "/synthetic/profile",
-      cookies: [],
-      fingerprint: sourceFingerprint,
-    })),
+    read: Effect.sync(() => {
+      sourceRead();
+      return {
+        ...(privateSession ? { source: "t3-browser" as const } : {}),
+        profilePath: "/synthetic/profile",
+        cookies: [],
+        fingerprint: sourceFingerprint,
+      };
+    }),
   });
   const layer = Transport.makeMuseAgentTransportLayer({ executablePath: process.execPath }).pipe(
     Layer.provide(Layer.succeed(Source.MuseAgentSessionSource, source)),
@@ -149,6 +153,9 @@ const fixture = (privateSession = false) => {
     },
     failRecovery: () => {
       recoveryFails = true;
+    },
+    setSourceRead: (callback: () => void) => {
+      sourceRead = callback;
     },
     setFingerprint: (value: string) => {
       sourceFingerprint = value;
@@ -931,6 +938,109 @@ it.effect("serializes a pending turn registration against subscription takeover"
       assert.equal(f.calls.filter((call) => call.method === "watch").length, 1);
       yield* transport.unregisterTools(binding, registration.clientId);
       yield* owner.close;
+    }),
+  ).pipe(Effect.provide(f.layer));
+});
+
+it.effect("reserves the watch route before registration and lets same-session readers join", () => {
+  const f = fixture();
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const transport = yield* Transport.MuseAgentTransport;
+      const binding = yield* transport.connect;
+      const release = yield* transport.acquireTurn(binding, "primary");
+      const waiting = yield* transport.watch(binding, "side-chat").pipe(Effect.forkScoped);
+      const owner = yield* transport.watch(binding, "primary");
+      assert.equal(f.calls.filter((call) => call.method === "watch").length, 1);
+      assert.equal(waiting.pollUnsafe(), undefined);
+      assert.equal(
+        (yield* Effect.flip(
+          transport.registerTools(binding, { ...registration, nativeSessionId: "side-chat" }),
+        )).kind,
+        "protocol",
+      );
+      yield* release;
+      const side = yield* Fiber.join(waiting);
+      assert.equal(f.calls.filter((call) => call.method === "watch").length, 2);
+      yield* owner.close;
+      yield* side.close;
+    }),
+  ).pipe(Effect.provide(f.layer));
+});
+
+it.effect("serializes turn owners and ignores interrupted waiters and stale releases", () => {
+  const f = fixture();
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const transport = yield* Transport.MuseAgentTransport;
+      const binding = yield* transport.connect;
+      const release = yield* transport.acquireTurn(binding, "primary");
+      const cancelled = yield* transport.acquireTurn(binding, "cancelled").pipe(Effect.forkScoped);
+      yield* Fiber.interrupt(cancelled);
+      yield* release;
+      const next = yield* transport.acquireTurn(binding, "side-chat");
+      yield* release;
+      const waiting = yield* transport.acquireTurn(binding, "last-chat").pipe(Effect.forkScoped);
+      const owner = yield* transport.watch(binding, "side-chat");
+      assert.equal(waiting.pollUnsafe(), undefined);
+      yield* next;
+      const last = yield* Fiber.join(waiting);
+      yield* last;
+      yield* owner.close;
+    }),
+  ).pipe(Effect.provide(f.layer));
+});
+
+it.effect("account replacement invalidates a reservation and wakes foreign watch waiters", () => {
+  const f = fixture();
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const transport = yield* Transport.MuseAgentTransport;
+      const binding = yield* transport.connect;
+      const release = yield* transport.acquireTurn(binding, "primary");
+      const watch = yield* transport.watch(binding, "primary");
+      const waiting = yield* transport
+        .watch(binding, "side-chat")
+        .pipe(Effect.flip, Effect.forkScoped);
+      f.setAuthority("foreign-authority");
+      assert.equal((yield* Effect.flip(transport.connect)).kind, "account_changed");
+      assert.equal((yield* Fiber.join(waiting)).kind, "account_changed");
+      const replacementBinding = yield* transport.connect;
+      const replacement = yield* transport.acquireTurn(replacementBinding, "replacement");
+      yield* release;
+      const blocked = yield* transport
+        .acquireTurn(replacementBinding, "later")
+        .pipe(Effect.forkScoped);
+      const replacementWatch = yield* transport.watch(replacementBinding, "replacement");
+      assert.equal(blocked.pollUnsafe(), undefined);
+      yield* replacement;
+      yield* yield* Fiber.join(blocked);
+      yield* watch.close;
+      yield* replacementWatch.close;
+    }),
+  ).pipe(Effect.provide(f.layer));
+});
+
+it.effect("reacquires a turn reservation reset during same-account session refresh", () => {
+  const f = fixture();
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const transport = yield* Transport.MuseAgentTransport;
+      const binding = yield* transport.connect;
+      let reads = 0;
+      f.setSourceRead(() => {
+        reads++;
+        if (reads === 2) f.setFingerprint("refreshed-same-account");
+      });
+      const release = yield* transport.acquireTurn(binding, "primary");
+      const waiting = yield* transport.watch(binding, "side-chat").pipe(Effect.forkScoped);
+      const owner = yield* transport.watch(binding, "primary");
+      assert.strictEqual(waiting.pollUnsafe(), undefined);
+      assert.strictEqual(f.calls.filter((call) => call.method === "watch").length, 1);
+      yield* release;
+      const side = yield* Fiber.join(waiting);
+      yield* owner.close;
+      yield* side.close;
     }),
   ).pipe(Effect.provide(f.layer));
 });

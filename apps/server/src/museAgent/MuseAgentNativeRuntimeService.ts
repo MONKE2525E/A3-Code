@@ -202,6 +202,10 @@ export class MuseAgentNativeRuntimeService extends Context.Service<
       readonly sessionId: string;
       readonly deliveryKey: string;
     }) => Effect.Effect<void, MuseAgentError>;
+    readonly acquireTurn: (
+      binding: string,
+      sessionId: string,
+    ) => Effect.Effect<Effect.Effect<void>, MuseAgentError>;
     readonly connectionId: (binding: string) => Effect.Effect<string, MuseAgentError>;
     readonly registerTools: (
       binding: string,
@@ -634,6 +638,15 @@ const make = Effect.gen(function* () {
         yield* transport.cancelOwned(input.binding, receipt);
       }),
     connectionId: transport.connectionId,
+    acquireTurn: (binding, sessionId) =>
+      Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          const scope = { binding, sessionId };
+          const release = yield* restore(transport.acquireTurn(binding, sessionId));
+          yield* deliveries.assertTurnAvailable(scope).pipe(Effect.onError(() => release));
+          return release;
+        }),
+      ),
     registerTools: transport.registerTools,
     unregisterTools: transport.unregisterTools,
   });

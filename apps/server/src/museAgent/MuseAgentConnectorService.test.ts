@@ -28,6 +28,7 @@ const fixture = (
   let current = binding;
   const calls: { method: string; params: Record<string, unknown>; write: boolean }[] = [];
   const transport = Transport.MuseAgentTransport.of({
+    acquireTurn: () => Effect.succeed(Effect.void),
     releaseOwned: () => Effect.void,
     connect: Effect.sync(() => current),
     request: (_binding, method, params, write = false) =>

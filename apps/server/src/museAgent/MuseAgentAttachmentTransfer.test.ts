@@ -18,6 +18,7 @@ const fixture = () => {
   let invalidSize = false;
   let uncertainRename: "published" | "not_published" | undefined;
   const transport = Transport.MuseAgentTransport.of({
+    acquireTurn: () => Effect.succeed(Effect.void),
     releaseOwned: () => Effect.void,
     connect: Effect.sync(() => authority),
     request: (target, method, params, write = false) =>

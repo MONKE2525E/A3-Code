@@ -285,7 +285,7 @@ it.effect(
         const turn = yield* makeTurn;
         const frames = yield* Queue.unbounded<MuseAgentNativeEvent>();
         const otherFrames = yield* Queue.unbounded<MuseAgentNativeEvent>();
-        let watching = false;
+        let watches = 0;
         const saturated = yield* Deferred.make<void>();
         const released = yield* Deferred.make<void>();
         const terminal = yield* Deferred.make<void>();
@@ -296,8 +296,7 @@ it.effect(
         let completed = 0;
         const native = makeNative({
           watch: () => {
-            const queue = watching ? otherFrames : frames;
-            watching = true;
+            const queue = watches++ % 2 ? otherFrames : frames;
             return Effect.succeed({ events: Stream.fromQueue(queue), close: Effect.void });
           },
           readAttachment: () =>
@@ -700,9 +699,17 @@ it.effect(
         const frames = yield* Queue.unbounded<MuseAgentNativeEvent>();
         const terminal = yield* Deferred.make<void>();
         const started = yield* Deferred.make<void>();
+        const leaseReleased = yield* Deferred.make<void>();
+        const cleanupAllowed = yield* Deferred.make<void>();
         const seen: ProviderAdapterV2Event[] = [];
         const operations: string[] = [];
         const native = makeNative({
+          acquireTurn: () =>
+            Effect.succeed(
+              Effect.sync(() => {
+                operations.push("release");
+              }).pipe(Effect.andThen(Deferred.succeed(leaseReleased, undefined))),
+            ),
           watch: () => Effect.succeed({ events: Stream.fromQueue(frames), close: Effect.void }),
           registerTools: (_, input) =>
             Effect.sync(() => {
@@ -714,7 +721,7 @@ it.effect(
           unregisterTools: () =>
             Effect.sync(() => {
               operations.push("unregister");
-            }),
+            }).pipe(Effect.andThen(Deferred.await(cleanupAllowed))),
           send: (input) =>
             Effect.sync(() => {
               operations.push("send");
@@ -790,6 +797,9 @@ it.effect(
         });
         yield* Deferred.await(terminal);
         assert.deepStrictEqual(operations, ["register", "send", "settle", "unregister"]);
+        yield* Deferred.succeed(cleanupAllowed, undefined);
+        yield* Deferred.await(leaseReleased);
+        assert.deepStrictEqual(operations, ["register", "send", "settle", "unregister", "release"]);
         assert.strictEqual(seen.filter((event) => event.type === "turn.terminal").length, 1);
       }),
     ),
@@ -847,9 +857,16 @@ it.effect(
         const frames = yield* Queue.unbounded<MuseAgentNativeEvent>();
         const started = yield* Deferred.make<void>();
         const terminal = yield* Deferred.make<void>();
+        const leaseReleased = yield* Deferred.make<void>();
         const seen: ProviderAdapterV2Event[] = [];
         const operations: string[] = [];
         const native = makeNative({
+          acquireTurn: () =>
+            Effect.succeed(
+              Effect.sync(() => {
+                operations.push("release");
+              }).pipe(Effect.andThen(Deferred.succeed(leaseReleased, undefined))),
+            ),
           watch: () => Effect.succeed({ events: Stream.fromQueue(frames), close: Effect.void }),
           stop: () =>
             Effect.sync(() => {
@@ -903,6 +920,8 @@ it.effect(
           payload: { session_id: "primary", reply_to_message_id: "user-1", status: "interrupted" },
         });
         yield* Deferred.await(terminal);
+        yield* Deferred.await(leaseReleased);
+        assert.deepStrictEqual(operations, ["revoke", "stop", "release"]);
         assert.strictEqual(
           seen.find((event) => event.type === "turn.terminal")?.status,
           "interrupted",
@@ -1087,12 +1106,28 @@ it.effect("ignores a delayed supersession notice without revoking the current de
   ),
 );
 
-it.effect("a session taken over by a side chat stops cleanly instead of failing", () =>
+it.effect("reattaches an idle observer after another conversation takes its native route", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const frames = yield* Queue.unbounded<MuseAgentNativeEvent>();
+      const detached = yield* Deferred.make<void>();
+      let watches = 0;
+      let sends = 0;
       const native = makeNative({
-        watch: () => Effect.succeed({ events: Stream.fromQueue(frames), close: Effect.void }),
+        watch: () =>
+          Effect.sync(() => ({
+            events:
+              ++watches === 1
+                ? Stream.make({ event: "transport.session_superseded" }).pipe(
+                    Stream.ensuring(Deferred.succeed(detached, undefined)),
+                  )
+                : Stream.never,
+            close: Effect.void,
+          })),
+        send: () =>
+          Effect.sync(() => {
+            sends++;
+            return receipt;
+          }),
       });
       const port = ToolsPort.MuseAgentDirectToolsPort.of({
         install: () => Effect.fail(new NativeAgentDirectToolsError({ code: "already_installed" })),
@@ -1104,13 +1139,10 @@ it.effect("a session taken over by a side chat stops cleanly instead of failing"
         Effect.provideService(ToolsPort.MuseAgentDirectToolsPort, port),
       );
       const runtime = yield* adapter.openSession(sessionInput);
-      const seen = yield* runtime.events.pipe(Stream.runCollect, Effect.forkScoped);
-      yield* Queue.offer(frames, { event: "transport.session_superseded" });
-      const events = yield* Fiber.join(seen);
-      const statuses = events.flatMap((event) =>
-        event.type === "provider_session.updated" ? [event.providerSession.status] : [],
-      );
-      assert.deepStrictEqual(statuses, ["stopped"]);
+      yield* Deferred.await(detached);
+      yield* runtime.startTurn(yield* makeTurn);
+      assert.strictEqual(watches, 2);
+      assert.strictEqual(sends, 1);
     }),
   ),
 );

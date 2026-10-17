@@ -159,6 +159,7 @@ export const makeNative = (
     watch: () => Effect.succeed({ events: Stream.never, close: Effect.void }),
     settleDelivery: () => Effect.void,
     stop: () => Effect.void,
+    acquireTurn: () => Effect.succeed(Effect.void),
     connectionId: () => Effect.succeed("generation-1"),
     registerTools: (_, registration) =>
       Effect.succeed({

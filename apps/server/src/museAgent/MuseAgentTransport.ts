@@ -122,6 +122,10 @@ export class MuseAgentTransport extends Context.Service<
       write?: boolean,
       deliveryKey?: string,
     ) => Effect.Effect<unknown, MuseAgentTransportError>;
+    readonly acquireTurn: (
+      binding: string,
+      sessionId: string,
+    ) => Effect.Effect<Effect.Effect<void>, MuseAgentTransportError>;
     readonly watch: (
       binding: string,
       sessionId: string,
@@ -457,6 +461,19 @@ export const makeMuseAgentTransportLayer = (
       >();
       const watchPermit = yield* Semaphore.make(1);
       let watchedSessionId: string | undefined;
+      let turnReservation:
+        | {
+            readonly binding: string;
+            readonly sessionId: string;
+            readonly released: Promise<void>;
+            readonly release: () => void;
+          }
+        | undefined;
+      const releaseTurn = () => {
+        const current = turnReservation;
+        turnReservation = undefined;
+        current?.release();
+      };
       const reset = async (error?: MuseAgentTransportError) => {
         for (const box of mailboxes) box.close(error);
         mailboxes.clear();
@@ -464,6 +481,7 @@ export const makeMuseAgentTransportLayer = (
         computerStreams.clear();
         watchedSessionId = undefined;
         registration = undefined;
+        releaseTurn();
         authority = undefined;
         const ownedPage = page;
         page = undefined;
@@ -712,8 +730,43 @@ export const makeMuseAgentTransportLayer = (
             Effect.asVoid,
           );
         });
+      const acquireTurn = (binding: string, sessionId: string) =>
+        Effect.suspend(() => {
+          let acquired: Effect.Effect<void> | undefined;
+          return Effect.gen(function* () {
+            while (true) {
+              yield* verify(binding);
+              const result = yield* watchPermit.withPermits(1)(
+                Effect.sync(() => {
+                  if (turnReservation) return { wait: turnReservation.released };
+                  const signal = Promise.withResolvers<void>();
+                  const owner = {
+                    binding,
+                    sessionId,
+                    released: signal.promise,
+                    release: signal.resolve,
+                  };
+                  turnReservation = owner;
+                  acquired = Effect.sync(() => {
+                    if (turnReservation === owner) releaseTurn();
+                  });
+                  return { release: acquired, owner };
+                }),
+              );
+              if ("release" in result) {
+                yield* verify(binding);
+                if (turnReservation !== result.owner) continue;
+                return result.release;
+              }
+              yield* Effect.promise(() => result.wait);
+            }
+          }).pipe(
+            Effect.onExit((exit) => (Exit.isFailure(exit) && acquired ? acquired : Effect.void)),
+          );
+        });
       return MuseAgentTransport.of({
         connect,
+        acquireTurn,
         request: (binding, method, params, write = false, deliveryKey) =>
           verify(binding).pipe(
             Effect.flatMap((current) =>
@@ -742,7 +795,7 @@ export const makeMuseAgentTransportLayer = (
           ),
         watch: (binding, sessionId) =>
           Effect.gen(function* () {
-            const current = yield* verify(binding);
+            let current = yield* verify(binding);
             const box = new EventMailbox();
             const close = Effect.promise(async () => {
               if (!mailboxes.has(box)) return;
@@ -755,32 +808,44 @@ export const makeMuseAgentTransportLayer = (
             }).pipe(watchPermit.withPermits(1));
             // The observer and managed turn share one native route. Each has its
             // own queue, and only the last reader removes the page subscription.
-            yield* watchPermit
-              .withPermits(1)(
-                Effect.gen(function* () {
-                  // A turn retains the route until its registration is removed, including
-                  // reconnect recovery after native callbacks have been revoked.
-                  if (registration && registration.input.nativeSessionId !== sessionId)
-                    return yield* new MuseAgentTransportError({ kind: "protocol" });
-                  if (watchedSessionId !== sessionId) {
-                    for (const previous of mailboxes) previous.supersede();
-                    mailboxes.clear();
-                  }
-                  const subscribe = mailboxes.size === 0;
-                  watchedSessionId = sessionId;
-                  mailboxes.add(box);
-                  if (subscribe)
-                    yield* Effect.tryPromise({
-                      try: () =>
-                        callPageBridge(current.page, "watch", {
-                          authority: current.authority,
-                          session: sessionId,
-                        }),
-                      catch: (cause) => new MuseAgentTransportError({ kind: "protocol", cause }),
-                    });
-                }),
-              )
-              .pipe(Effect.onExit((exit) => (Exit.isFailure(exit) ? close : Effect.void)));
+            while (true) {
+              current = yield* verify(binding);
+              const waiting = yield* watchPermit
+                .withPermits(1)(
+                  Effect.gen(function* () {
+                    if (
+                      turnReservation &&
+                      (turnReservation.binding !== binding ||
+                        turnReservation.sessionId !== sessionId)
+                    )
+                      return { wait: turnReservation.released };
+                    // A turn retains the route until its registration is removed, including
+                    // reconnect recovery after native callbacks have been revoked.
+                    if (registration && registration.input.nativeSessionId !== sessionId)
+                      return yield* new MuseAgentTransportError({ kind: "protocol" });
+                    if (watchedSessionId !== sessionId) {
+                      for (const previous of mailboxes) previous.supersede();
+                      mailboxes.clear();
+                    }
+                    const subscribe = mailboxes.size === 0;
+                    watchedSessionId = sessionId;
+                    mailboxes.add(box);
+                    if (subscribe)
+                      yield* Effect.tryPromise({
+                        try: () =>
+                          callPageBridge(current.page, "watch", {
+                            authority: current.authority,
+                            session: sessionId,
+                          }),
+                        catch: (cause) => new MuseAgentTransportError({ kind: "protocol", cause }),
+                      });
+                    return undefined;
+                  }),
+                )
+                .pipe(Effect.onExit((exit) => (Exit.isFailure(exit) ? close : Effect.void)));
+              if (waiting === undefined) break;
+              yield* Effect.promise(() => waiting.wait);
+            }
             return {
               events: Stream.fromAsyncIterable(box, (cause) =>
                 isTransportError(cause)
@@ -961,6 +1026,9 @@ export const makeMuseAgentTransportLayer = (
             const current = yield* verify(binding);
             if (
               registration ||
+              (turnReservation &&
+                (turnReservation.binding !== binding ||
+                  turnReservation.sessionId !== input.nativeSessionId)) ||
               (watchedSessionId !== undefined && watchedSessionId !== input.nativeSessionId)
             )
               return yield* new MuseAgentTransportError({ kind: "protocol" });

@@ -29,7 +29,7 @@ export class MuseAgentDeliveryError extends Schema.TaggedError<MuseAgentDelivery
   override get message() {
     if (this.kind === "uncertain")
       return "Muse delivery is uncertain. Check the native conversation before starting another turn.";
-    if (this.kind === "busy") return "The Muse session already has an unsettled managed turn.";
+    if (this.kind === "busy") return "This Muse account already has an unsettled managed turn.";
     if (this.kind === "conflict") return "This Muse delivery identity belongs to another request.";
     return "Muse delivery state could not be saved. No message was retried.";
   }
@@ -64,6 +64,9 @@ const isDeliveryError = Schema.is(MuseAgentDeliveryError);
 export class MuseAgentDeliveryStore extends Context.Service<
   MuseAgentDeliveryStore,
   {
+    readonly assertTurnAvailable: (
+      scope: MuseAgentDeliveryScope,
+    ) => Effect.Effect<void, MuseAgentDeliveryError>;
     /** null means newly persisted intent; existing accepted receipts are returned without resending. */
     readonly begin: (input: {
       readonly binding: string;
@@ -142,7 +145,18 @@ export const makeMuseAgentDeliveryStore = (
     const row = db.prepare("SELECT * FROM muse_deliveries WHERE delivery_key = ?").get(key);
     return row ? decodeRow(row) : undefined;
   };
+  const assertTurnAvailable = (scope: MuseAgentDeliveryScope) => {
+    if (
+      db
+        .prepare(
+          "SELECT 1 FROM muse_deliveries WHERE binding = ? AND session_id != ? AND status IN ('intent', 'accepted') LIMIT 1",
+        )
+        .get(scope.binding, scope.sessionId)
+    )
+      throw new MuseAgentDeliveryError({ kind: "busy" });
+  };
   return MuseAgentDeliveryStore.of({
+    assertTurnAvailable: (scope) => operation(() => assertTurnAvailable(scope)),
     begin: (input) =>
       operation(() => {
         const requestHash = NodeCrypto.createHash("sha256")
@@ -157,6 +171,7 @@ export const makeMuseAgentDeliveryStore = (
           .digest("hex");
         db.exec("BEGIN IMMEDIATE");
         try {
+          assertTurnAvailable(input);
           const prior = find(input.deliveryKey);
           if (prior) {
             if (

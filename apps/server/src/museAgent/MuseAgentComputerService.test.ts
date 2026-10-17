@@ -77,6 +77,7 @@ const fixture = () => {
     | ((method: string) => Effect.Effect<unknown, Transport.MuseAgentTransportError> | undefined)
     | undefined;
   const transport = Transport.MuseAgentTransport.of({
+    acquireTurn: () => Effect.succeed(Effect.void),
     connect: Effect.sync(() => account),
     connectionId: () =>
       Effect.gen(function* () {

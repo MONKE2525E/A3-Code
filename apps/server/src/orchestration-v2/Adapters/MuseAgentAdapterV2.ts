@@ -10,11 +10,12 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import * as Exit from "effect/Exit";
-import type { Done } from "effect/Cause";
+import * as Cause from "effect/Cause";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
@@ -255,9 +256,11 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
         >();
         yield* Effect.addFinalizer(() => Queue.shutdown(inbox));
         yield* Queue.offerAll(inbox, projection.restore());
-        const watch = yield* native.watch({ binding, sessionId: session.session_id });
+        let watch = yield* native.watch({ binding, sessionId: session.session_id });
         const ownerScope = yield* Effect.scope;
         yield* Effect.addFinalizer(() => watch.close);
+        let turnRelease: Effect.Effect<void> | undefined;
+        let toolCleanup = Effect.void;
         let toolLifetime:
           | {
               readonly scope: Scope.Closeable;
@@ -270,13 +273,25 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
           const current = toolLifetime;
           toolLifetime = undefined;
           if (!current) return;
-          yield* current.revoke;
-          yield* current.close.pipe(
-            Effect.ensuring(Scope.close(current.scope, Exit.void)),
-            Effect.forkIn(ownerScope),
+          const cleaned = Deferred.makeUnsafe<void>();
+          toolCleanup = Deferred.await(cleaned);
+          yield* current.revoke.pipe(
+            Effect.ensuring(
+              current.close.pipe(
+                Effect.ensuring(Scope.close(current.scope, Exit.void)),
+                Effect.ensuring(Deferred.succeed(cleaned, undefined)),
+                Effect.forkDetach,
+              ),
+            ),
           );
         });
-        yield* Effect.addFinalizer(() => closeTools);
+        const releaseTurn = Effect.gen(function* () {
+          yield* closeTools;
+          const release = turnRelease;
+          turnRelease = undefined;
+          if (release) yield* toolCleanup.pipe(Effect.ensuring(release), Effect.forkDetach);
+        });
+        yield* Effect.addFinalizer(() => releaseTurn);
         const publish = (batch: readonly ProviderAdapter.ProviderAdapterV2Event[]) =>
           Effect.gen(function* () {
             for (const event of batch) {
@@ -307,7 +322,7 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
             if (batch.some((event) => event.type === "turn.terminal")) {
               const key = projection.deliveryKey();
               if (key) yield* native.settleDelivery(key);
-              yield* closeTools;
+              yield* releaseTurn;
             }
             yield* Queue.offerAll(inbox, batch);
           });
@@ -374,111 +389,105 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
             yield* publish(batch);
             return batch.filter((event) => event.type === "message.updated").length;
           });
-        // Another session took the page's subscription. This session ends as stopped, not failed.
-        let superseded = false;
-        yield* watch.events.pipe(
-          Stream.runForEach((frame) =>
-            Effect.gen(function* () {
-              if (frame.event === "transport.session_superseded") {
-                superseded = true;
-                yield* Queue.offer(inbox, {
-                  type: "provider_session.updated",
-                  driver: MUSE_AGENT_DRIVER_KIND,
-                  providerSession: {
-                    ...providerSession,
-                    status: "stopped",
-                    updatedAt: yield* DateTime.now,
-                    lastError: null,
-                  },
-                });
-                // Done ends the queue cleanly; the inbox's error channel never carries it.
-                yield* Queue.end(
-                  inbox as Queue.Enqueue<
-                    ProviderAdapter.ProviderAdapterV2Event,
-                    ProviderAdapter.ProviderAdapterV2Error | Done
-                  >,
-                );
-                return;
-              }
-              if (frame.event === "transport.turn_superseded") {
-                const batch = projection.project(frame);
-                if (!batch.some((event) => event.type === "turn.terminal")) return;
-                yield* publish(batch);
-                yield* Queue.offer(inbox, {
-                  type: "provider_session.updated",
-                  driver: MUSE_AGENT_DRIVER_KIND,
-                  providerSession: {
-                    ...providerSession,
-                    status: "waiting",
-                    updatedAt: yield* DateTime.now,
-                    lastError: "Another native Muse message interrupted this managed turn.",
-                  },
-                });
-                return;
-              }
-              if (
-                frame.event === "transport.disconnected" ||
-                frame.event === "transport.reconnected"
-              ) {
-                // Reconnecting cannot inherit an earlier connection's tool authority.
-                yield* closeTools;
-                yield* Queue.offer(inbox, {
-                  type: "provider_session.updated",
-                  driver: MUSE_AGENT_DRIVER_KIND,
-                  providerSession: {
-                    ...providerSession,
-                    status: frame.event === "transport.disconnected" ? "waiting" : "ready",
-                    updatedAt: yield* DateTime.now,
-                    lastError:
-                      frame.event === "transport.disconnected"
-                        ? "Muse connection lost. The native turn remains unsettled."
-                        : null,
-                  },
-                });
-                const receipt = projection.receipt();
-                if (
-                  frame.event === "transport.reconnected" &&
-                  receipt &&
-                  !projection.isTerminal()
-                ) {
-                  for (const raw of yield* native.replay({ binding, receipt })) {
-                    const replayed = museHistoryFrame(raw, session.session_id);
-                    if (replayed) yield* projectFrame(replayed);
-                  }
+        // Idle observers may detach when another conversation takes the native route.
+        // A managed turn reacquires that route under the account-wide turn lease.
+        const runWatch = (currentWatch: typeof watch) => {
+          let superseded = false;
+          return currentWatch.events.pipe(
+            Stream.runForEach((frame) =>
+              Effect.gen(function* () {
+                if (frame.event === "transport.session_superseded") {
+                  superseded = true;
+                  return;
                 }
-                return;
-              }
-              if (frame.event === "delta.presentation") {
-                // A file transfer must not hold up turn ownership or stop events.
-                // Imported metadata joins its stable message only after persistence.
-                yield* projectFrame(frame).pipe(
-                  Effect.catchCause(() =>
-                    Effect.logWarning("Muse attachment presentation could not be projected."),
-                  ),
-                  Effect.forkScoped,
-                );
-              } else yield* projectFrame(frame);
-            }),
-          ),
-          Effect.andThen(
-            Effect.suspend(() =>
-              superseded
-                ? Effect.void
-                : Effect.fail(new Native.MuseAgentRuntimeError({ kind: "protocol" })),
-            ),
-          ),
-          Effect.mapError(
-            (cause) =>
-              new ProviderAdapter.ProviderAdapterEventStreamError({
-                driver: MUSE_AGENT_DRIVER_KIND,
-                providerSessionId: input.providerSessionId,
-                cause,
+                if (frame.event === "transport.turn_superseded") {
+                  const batch = projection.project(frame);
+                  if (!batch.some((event) => event.type === "turn.terminal")) return;
+                  yield* publish(batch);
+                  yield* Queue.offer(inbox, {
+                    type: "provider_session.updated",
+                    driver: MUSE_AGENT_DRIVER_KIND,
+                    providerSession: {
+                      ...providerSession,
+                      status: "waiting",
+                      updatedAt: yield* DateTime.now,
+                      lastError: "Another native Muse message interrupted this managed turn.",
+                    },
+                  });
+                  return;
+                }
+                if (
+                  frame.event === "transport.disconnected" ||
+                  frame.event === "transport.reconnected"
+                ) {
+                  // Reconnecting cannot inherit an earlier connection's tool authority.
+                  yield* closeTools;
+                  yield* Queue.offer(inbox, {
+                    type: "provider_session.updated",
+                    driver: MUSE_AGENT_DRIVER_KIND,
+                    providerSession: {
+                      ...providerSession,
+                      status: frame.event === "transport.disconnected" ? "waiting" : "ready",
+                      updatedAt: yield* DateTime.now,
+                      lastError:
+                        frame.event === "transport.disconnected"
+                          ? "Muse connection lost. The native turn remains unsettled."
+                          : null,
+                    },
+                  });
+                  const receipt = projection.receipt();
+                  if (
+                    frame.event === "transport.reconnected" &&
+                    receipt &&
+                    !projection.isTerminal()
+                  ) {
+                    for (const raw of yield* native.replay({ binding, receipt })) {
+                      const replayed = museHistoryFrame(raw, session.session_id);
+                      if (replayed) yield* projectFrame(replayed);
+                    }
+                  }
+                  return;
+                }
+                if (frame.event === "delta.presentation") {
+                  // A file transfer must not hold up turn ownership or stop events.
+                  // Imported metadata joins its stable message only after persistence.
+                  yield* projectFrame(frame).pipe(
+                    Effect.catchCause(() =>
+                      Effect.logWarning("Muse attachment presentation could not be projected."),
+                    ),
+                    Effect.forkScoped,
+                  );
+                } else yield* projectFrame(frame);
               }),
-          ),
-          Effect.onExit((exit) => (Exit.isFailure(exit) ? closeTools : Effect.void)),
-          Effect.catchCause((cause) => Queue.failCause(inbox, cause)),
-          Effect.forkScoped,
-        );
+            ),
+            Effect.andThen(
+              Effect.suspend(() =>
+                superseded
+                  ? Effect.void
+                  : Effect.fail(new Native.MuseAgentRuntimeError({ kind: "protocol" })),
+              ),
+            ),
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterEventStreamError({
+                  driver: MUSE_AGENT_DRIVER_KIND,
+                  providerSessionId: input.providerSessionId,
+                  cause,
+                }),
+            ),
+            Effect.onExit((exit) =>
+              Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)
+                ? releaseTurn
+                : Effect.void,
+            ),
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause) ? Effect.void : Queue.failCause(inbox, cause),
+            ),
+            Effect.provideService(Scope.Scope, ownerScope),
+            Effect.forkIn(ownerScope),
+          );
+        };
+        let watchFiber = yield* runWatch(watch);
         // Subscribe first; history then repairs gaps without losing events between read and watch.
         const historyLock = yield* Semaphore.make(1);
         const importPage = (
@@ -589,11 +598,25 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
               yield* validateSelection(request.modelSelection, request.runtimePolicy);
               if (request.threadId !== input.threadId)
                 return yield* new Native.MuseAgentRuntimeError({ kind: "unsupported" });
+              yield* Effect.uninterruptibleMask((restore) =>
+                restore(native.acquireTurn(binding, session.session_id)).pipe(
+                  Effect.map((release) => {
+                    turnRelease = release;
+                  }),
+                ),
+              );
+              yield* Fiber.interrupt(watchFiber);
+              yield* watch.close;
+              watch = yield* native.watch({ binding, sessionId: session.session_id });
+              watchFiber = yield* runWatch(watch);
               const providerTurnId = yield* Effect.try({
                 try: () => projection.begin(request),
                 catch: (cause) => new Native.MuseAgentRuntimeError({ kind: "busy", cause }),
               });
-              if (projection.isTerminal()) return;
+              if (projection.isTerminal()) {
+                yield* releaseTurn;
+                return;
+              }
               if (!toolLifetime) {
                 const access = yield* host.settings.get.pipe(
                   Effect.map(
@@ -720,7 +743,7 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
               }
             }).pipe(
               Effect.onError(() =>
-                Effect.sync(() => projection.abandonAdmission()).pipe(Effect.andThen(closeTools)),
+                Effect.sync(() => projection.abandonAdmission()).pipe(Effect.andThen(releaseTurn)),
               ),
               Effect.mapError(
                 (cause) =>

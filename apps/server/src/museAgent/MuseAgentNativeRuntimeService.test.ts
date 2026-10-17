@@ -57,6 +57,8 @@ const fixture = () => {
   let failSend = false;
   let stageHook: Effect.Effect<void, Transport.MuseAgentTransportError> = Effect.void;
   let admissionHook: Effect.Effect<void, Transport.MuseAgentTransportError> = Effect.void;
+  let acquireTurn: Transport.MuseAgentTransport["Service"]["acquireTurn"] = () =>
+    Effect.succeed(Effect.void);
   let watch: Transport.MuseAgentTransport["Service"]["watch"] = () =>
     Effect.succeed({ events: Stream.never, close: Effect.void });
   const remoteSizes = new Map<string, number>();
@@ -69,6 +71,7 @@ const fixture = () => {
   const cancellations: Delivery.MuseAgentReceipt[] = [];
   const localReleases: string[] = [];
   const transport = Transport.MuseAgentTransport.of({
+    acquireTurn: (account, sessionId) => acquireTurn(account, sessionId),
     releaseOwned: (_, input) =>
       Effect.sync(() => {
         localReleases.push(input.deliveryKey);
@@ -162,6 +165,10 @@ const fixture = () => {
   );
   return {
     layer,
+    delivery,
+    setAcquireTurn: (next: typeof acquireTurn) => {
+      acquireTurn = next;
+    },
     calls,
     cancellations,
     localReleases,
@@ -977,3 +984,91 @@ it.effect("does not cache readiness if the session rotates during connection", (
     assert.strictEqual((yield* native.status).ready, false);
   }).pipe(Effect.provide(h.layer), Effect.ensuring(Effect.sync(h.close)), Effect.scoped);
 });
+
+it.effect(
+  "rejects a foreign unsettled delivery after acquiring and releases the native route",
+  () =>
+    withFixture((f) =>
+      Effect.gen(function* () {
+        const native = yield* Native.MuseAgentNativeRuntimeService;
+        let acquisitions = 0;
+        let releases = 0;
+        f.setAcquireTurn(() =>
+          Effect.sync(() => {
+            acquisitions++;
+            return Effect.sync(() => {
+              releases++;
+            });
+          }),
+        );
+        yield* f.delivery.begin(request);
+        const failure = yield* Effect.flip(
+          native.acquireTurn(binding, "side-chat").pipe(Effect.asVoid),
+        );
+        assert.strictEqual(failure._tag, "MuseAgentDeliveryError");
+        assert.strictEqual(failure.kind, "busy");
+        assert.strictEqual(acquisitions, 1);
+        assert.strictEqual(releases, 1);
+        yield* yield* native.acquireTurn(binding, "primary");
+        assert.strictEqual(acquisitions, 2);
+        assert.strictEqual(releases, 2);
+      }).pipe(Effect.provide(f.layer)),
+    ),
+);
+
+it.effect("rechecks persisted delivery ownership after waiting and releases a refused route", () =>
+  withFixture((f) =>
+    Effect.gen(function* () {
+      const native = yield* Native.MuseAgentNativeRuntimeService;
+      const entered = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
+      let releases = 0;
+      f.setAcquireTurn(() =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(resume);
+          return Effect.sync(() => {
+            releases++;
+          });
+        }),
+      );
+      const acquiring = yield* native
+        .acquireTurn(binding, "side-chat")
+        .pipe(Effect.asVoid, Effect.flip, Effect.forkScoped);
+      yield* Deferred.await(entered);
+      yield* f.delivery.begin(request);
+      yield* Deferred.succeed(resume, undefined);
+      const failure = yield* Fiber.join(acquiring);
+      assert.strictEqual(failure._tag, "MuseAgentDeliveryError");
+      assert.strictEqual(failure.kind, "busy");
+      assert.strictEqual(releases, 1);
+    }).pipe(Effect.provide(f.layer), Effect.scoped),
+  ),
+);
+
+it.effect("queues behind an active session and admits the next after durable settlement", () =>
+  withFixture((f) =>
+    Effect.gen(function* () {
+      const native = yield* Native.MuseAgentNativeRuntimeService;
+      const entered = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
+      f.setAcquireTurn(() =>
+        Deferred.succeed(entered, undefined).pipe(
+          Effect.andThen(Deferred.await(resume)),
+          Effect.as(Effect.void),
+        ),
+      );
+      yield* f.delivery.begin(request);
+      yield* f.delivery.accept(request.deliveryKey, {
+        sessionId: request.sessionId,
+        messageId: "accepted-user",
+        replyToMessageId: "accepted-carrier",
+      });
+      const acquiring = yield* native.acquireTurn(binding, "side-chat").pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      yield* f.delivery.settle(request.deliveryKey);
+      yield* Deferred.succeed(resume, undefined);
+      yield* yield* Fiber.join(acquiring);
+    }).pipe(Effect.provide(f.layer), Effect.scoped),
+  ),
+);
