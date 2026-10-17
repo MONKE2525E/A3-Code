@@ -1,3 +1,5 @@
+import { registerThreadDismissal } from "./thread-dismissal";
+import { scopedThreadKey } from "../../lib/scopedEntities";
 import { makeThreadShellFixture } from "../../test-fixtures";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import {
@@ -13,18 +15,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 
 const state = vi.hoisted(() => ({
   pendingOrder: null as object | null,
+  providers: [] as { instanceId: string; driver: string }[],
+  nativeFailure: false,
   dropBusy: false,
   scopes: new Map<string, Set<string>>(),
   shells: [] as EnvironmentThreadShell[],
   requests: [] as {
     action: string;
     environmentId: string;
-    input: { threadId: string; orderKey?: string };
+    input: object;
   }[],
   dialogs: [] as { onConfirm: () => void }[],
   textInputs: [] as { title: string; onConfirm: (title: string) => void }[],
   alerts: [] as {
     title: string;
+    message: string;
     buttons?: { text: string; onPress?: () => void }[];
   }[],
   prompts: [] as { title: string; callback: (title: string) => void }[],
@@ -38,7 +43,7 @@ vi.mock("react", () => ({
 vi.mock("react-native", () => ({
   Alert: {
     alert: (title: string, _message: string, buttons?: { text: string; onPress?: () => void }[]) =>
-      state.alerts.push({ title, buttons }),
+      state.alerts.push({ title, message: _message, buttons }),
     prompt: (title: string, _message: string | undefined, callback: (title: string) => void) =>
       state.prompts.push({ title, callback }),
   },
@@ -79,6 +84,7 @@ vi.mock("../../state/atom-registry", () => ({
                 [...state.scopes.keys()].map((environmentId) => [
                   environmentId,
                   {
+                    providers: state.providers,
                     environment: {
                       capabilities: {
                         threadSettlement: true,
@@ -91,6 +97,17 @@ vi.mock("../../state/atom-registry", () => ({
                   },
                 ]),
               ),
+  },
+}));
+vi.mock("../../state/museAgent", () => ({
+  museAgentFeatureUpdate: async (request: {
+    environmentId: string;
+    input: { operation: string; providerInstanceId: string; sessionId: string; archived: boolean };
+  }) => {
+    state.requests.push({ action: "muse-restore", ...request });
+    return state.nativeFailure
+      ? AsyncResult.failure(Cause.fail(new Error("private upstream failure")))
+      : AsyncResult.success({ updated: true });
   },
 }));
 vi.mock("../../state/use-atom-command", () => ({
@@ -176,6 +193,8 @@ const mutationCases = [
 ] as const;
 
 beforeEach(() => {
+  state.providers = [];
+  state.nativeFailure = false;
   state.pendingOrder = null;
   state.dropBusy = false;
   state.scopes = new Map([
@@ -301,7 +320,106 @@ describe("thread list operation permissions", () => {
     });
     await useArchivedThreadListActions(() => {}).unarchiveThread(muse);
     expect(state.requests).toEqual([]);
-    expect(state.alerts).toEqual([]);
+    await vi.waitFor(() =>
+      expect(state.alerts).toEqual([
+        expect.objectContaining({ title: "Could not unarchive thread" }),
+      ]),
+    );
+  });
+
+  it("restores canonical Muse side chats through the paired native service", async () => {
+    const providerInstanceId = ProviderInstanceId.make("historical-muse");
+    state.providers = [{ instanceId: providerInstanceId, driver: "muse-agent" }];
+    const completed = vi.fn();
+    const thread = makeThread({
+      id: ThreadId.make(`muse-agent:${"a".repeat(64)}:side%3Achat`),
+      modelSelection: { instanceId: providerInstanceId, model: "muse-agent" },
+      archivedAt: "2026-09-02T00:00:00.000Z",
+    });
+    useArchivedThreadListActions(completed).unarchiveThread(thread);
+    await vi.waitFor(() => expect(completed).toHaveBeenCalledWith(thread));
+    expect(state.requests).toEqual([
+      {
+        action: "muse-restore",
+        environmentId: primaryEnvironmentId,
+        input: {
+          operation: "session_archive",
+          providerInstanceId,
+          sessionId: "side:chat",
+          archived: false,
+        },
+      },
+    ]);
+  });
+
+  it.each([`muse-agent:${"a".repeat(64)}`, "muse-agent:main", `muse-agent:${"a".repeat(64)}:%ZZ`])(
+    "rejects restoring a non-side conversation %s",
+    async (id) => {
+      state.providers = [{ instanceId: "codex", driver: "muse-agent" }];
+      useArchivedThreadListActions(() => {}).unarchiveThread(makeThread({ id: ThreadId.make(id) }));
+      await Promise.resolve();
+      expect(state.requests).toEqual([]);
+    },
+  );
+
+  it("rechecks Muse restore permission on a retained callback and never offers delete", async () => {
+    state.providers = [{ instanceId: "codex", driver: "muse-agent" }];
+    const thread = makeThread({ id: ThreadId.make(`muse-agent:${"a".repeat(64)}:side`) });
+    const actions = useArchivedThreadListActions(() => {});
+    state.scopes.get(primaryEnvironmentId)!.clear();
+    actions.unarchiveThread(thread);
+    actions.confirmDeleteThread(thread);
+    await Promise.resolve();
+    expect(state.requests).toEqual([]);
+    expect(state.alerts.some((alert) => alert.title === "Delete thread?")).toBe(false);
+  });
+
+  it("does not send native restore to a capability-absent server", async () => {
+    const thread = makeThread({ id: ThreadId.make(`muse-agent:${"a".repeat(64)}:side`) });
+    useArchivedThreadListActions(() => {}).unarchiveThread(thread);
+    await Promise.resolve();
+    expect(state.requests).toEqual([]);
+    await vi.waitFor(() =>
+      expect(state.alerts).toEqual([
+        expect.objectContaining({ title: "Could not unarchive thread" }),
+      ]),
+    );
+  });
+
+  it("rechecks Muse availability after the archive row finishes dismissing", async () => {
+    state.providers = [{ instanceId: "codex", driver: "muse-agent" }];
+    const thread = makeThread({ id: ThreadId.make(`muse-agent:${"a".repeat(64)}:side`) });
+    const restore = vi.fn();
+    const unregister = registerThreadDismissal(
+      scopedThreadKey(thread.environmentId, thread.id),
+      () => {
+        state.providers = [];
+        return { finished: Promise.resolve(), restore };
+      },
+    );
+    try {
+      useArchivedThreadListActions(() => {}).unarchiveThread(thread);
+      await vi.waitFor(() => expect(restore).toHaveBeenCalledOnce());
+      expect(state.requests).toEqual([]);
+    } finally {
+      unregister();
+    }
+  });
+
+  it("keeps failed native restores archived and hides upstream errors", async () => {
+    state.providers = [{ instanceId: "codex", driver: "muse-agent" }];
+    state.nativeFailure = true;
+    const completed = vi.fn();
+    useArchivedThreadListActions(completed).unarchiveThread(
+      makeThread({ id: ThreadId.make(`muse-agent:${"a".repeat(64)}:side`) }),
+    );
+    await vi.waitFor(() => expect(state.alerts).toHaveLength(1));
+    expect(completed).not.toHaveBeenCalled();
+    expect(state.requests).toHaveLength(1);
+    expect(state.requests[0]?.action).toBe("muse-restore");
+    expect(state.alerts[0]?.message).toBe(
+      "The Muse conversation could not be restored. Reconnect to its Muse server and try again.",
+    );
   });
 
   it("does not open rename or regenerate-title for Muse and sends no metadata RPC", async () => {

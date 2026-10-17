@@ -15,3 +15,9 @@ export const museAgentOpenThread = createEnvironmentRpcCommand(connectionAtomRun
     key: (target) => `${target.environmentId}:muse`,
   },
 });
+
+/** Paired native archive writes keep the Muse session and its canonical shell in sync. */
+export const museAgentFeatureUpdate = createEnvironmentRpcCommand(connectionAtomRuntime, {
+  label: "environment-data:muse-agent:feature-update",
+  tag: WS_METHODS.museAgentsFeatureUpdate,
+});

@@ -20,6 +20,7 @@ function archivedSnapshotAtom(environmentId: EnvironmentId) {
 const archivedSnapshotsAtom = createArchivedThreadSnapshotsAtomFamily({
   getSnapshotAtom: archivedSnapshotAtom,
   labelPrefix: "mobile:archived-thread-snapshots",
+  includeMuseConversations: true,
 });
 
 export function refreshArchivedThreadsForEnvironment(environmentId: EnvironmentId): void {

@@ -56,6 +56,29 @@ it("round-trips environment keys in sorted order", () => {
   expect(parseArchivedThreadsEnvironmentKey(key)).toEqual([envA, envB]);
 });
 
+it("keeps Muse conversations reachable for clients with paired restore", () => {
+  const environmentId = EnvironmentId.make("mobile");
+  const codingThread = { ...v2ThreadShell, archivedAt: v2Now };
+  const museThread = { ...codingThread, id: ThreadId.make(`muse-agent:${"a".repeat(64)}:side`) };
+  const snapshot: OrchestrationV2ArchivedShellSnapshot = {
+    schemaVersion: 1,
+    snapshotSequence: 42,
+    projects: [v2Project],
+    threads: [codingThread, museThread, { ...codingThread, id: ThreadId.make("grok-bot:fixture") }],
+  };
+  const snapshotsAtom = createArchivedThreadSnapshotsAtomFamily({
+    getSnapshotAtom: () => Atom.make(AsyncResult.success(snapshot)),
+    labelPrefix: "test:mobile-archived-threads",
+    includeMuseConversations: true,
+  });
+  const registry = AtomRegistry.make();
+  expect(
+    registry.get(snapshotsAtom(makeArchivedThreadsEnvironmentKey([environmentId]))).snapshots,
+  ).toEqual([{ environmentId, snapshot: { ...snapshot, threads: [codingThread, museThread] } }]);
+  expect(snapshot.threads).toHaveLength(3);
+  registry.dispose();
+});
+
 it("does not expose an archived snapshot failure message", () => {
   const environmentId = EnvironmentId.make("env-sensitive");
   const snapshotsAtom = createArchivedThreadSnapshotsAtomFamily<Error>({
