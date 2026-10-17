@@ -174,6 +174,7 @@ const fixture = (
       failRenameSync: false,
       rotateOnRename: false,
       nativeTitle: "Research",
+      resolvedTitle: null as string | null,
       uncertainRename: false,
       renameWriteCommitted: true,
       pauseRename: false,
@@ -251,13 +252,14 @@ const fixture = (
                   status: "idle",
                   is_primary: false,
                   is_thread: true,
-                  title: "Side research",
+                  title: state.resolvedTitle ?? "Side research",
                 };
               return {
                 session_id: "primary",
                 status: "idle",
                 is_primary: !state.computerReadOnly,
                 is_thread: state.computerReadOnly,
+                ...(state.resolvedTitle === null ? {} : { title: state.resolvedTitle }),
               };
             });
           });
@@ -1357,6 +1359,24 @@ it.effect(
       assert.equal(projection.runs.length, 0);
       assert.equal(projection.messages[0]?.runId, null);
       assert.equal(h.state.reads, 1);
+      assert.equal(h.state.watches, 1);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect.each([undefined, "side-one"])(
+  "canonical reopen reconciles native titles for session %s without starting a turn",
+  (sessionId) =>
+    Effect.gen(function* () {
+      const h = yield* fixture();
+      const target = { ...reference, ...(sessionId === undefined ? {} : { sessionId }) };
+      const opened = yield* h.service.open(target);
+      h.state.resolvedTitle = "  Renamed in Muse  ";
+      assert.deepEqual(yield* h.service.open(target), opened);
+      assert.equal((yield* h.projections.getThread(opened.threadId)).title, "Renamed in Muse");
+      h.state.resolvedTitle = "   ";
+      yield* h.service.open(target);
+      assert.equal((yield* h.projections.getThread(opened.threadId)).title, "Renamed in Muse");
+      assert.equal((yield* h.orchestrator.getThreadProjection(opened.threadId)).runs.length, 0);
       assert.equal(h.state.watches, 1);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );

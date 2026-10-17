@@ -587,6 +587,28 @@ const make = Effect.gen(function* () {
                 Effect.mapError(failure("storage_failed")),
               );
           }
+          const nativeTitle = target.title?.trim();
+          if (previous && nativeTitle && previous.title !== nativeTitle) {
+            yield* check;
+            const nonce = yield* crypto.randomUUIDv4.pipe(
+              Effect.mapError(failure("storage_failed")),
+            );
+            yield* authorize ?? Effect.void;
+            yield* orchestrator
+              .dispatch({
+                type: "thread.metadata.update",
+                commandId: CommandId.make(`muse-agent:open-title:${nonce}`),
+                threadId,
+                title: nativeTitle,
+              })
+              .pipe(
+                Effect.provideService(Orchestrator.MuseThreadMutation, {
+                  threadId,
+                  operation: "rename",
+                }),
+                Effect.mapError(failure("storage_failed")),
+              );
+          }
           yield* check;
           yield* observe(threadId, selection.instanceId, authorize);
           yield* check;
