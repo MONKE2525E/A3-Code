@@ -983,12 +983,17 @@ const make = Effect.gen(function* () {
             true,
           )
           .pipe(
+            Effect.tapError((cause) =>
+              cause.kind === "uncertain" ? Effect.void : Effect.sync(target.restore),
+            ),
             Effect.mapError(
-              () =>
+              (cause) =>
                 new NativeAgentError({
                   reason: "provider_unavailable",
                   detail:
-                    "Muse could not confirm credential storage. The value was not sent again.",
+                    cause.kind === "uncertain"
+                      ? "Muse could not confirm credential storage. The value was not sent again."
+                      : "Muse did not receive the credential. Reconnect Muse and try again.",
                 }),
             ),
           );

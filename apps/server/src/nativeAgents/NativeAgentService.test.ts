@@ -110,6 +110,7 @@ const fixture = (
         params: Record<string, unknown>;
         write: boolean;
       }>,
+      credentialFailure: null as Transport.MuseAgentTransportError["kind"] | null,
       reads: 0,
       historyPages: false,
       rotateOnHistoryPage: false,
@@ -396,8 +397,12 @@ const fixture = (
           Layer.provide(
             Layer.mock(Transport.MuseAgentTransport)({
               request: (_binding, method, params, write = false) =>
-                Effect.sync(() => {
+                Effect.gen(function* () {
                   state.credentialCalls.push({ method, params, write });
+                  if (state.credentialFailure)
+                    return yield* new Transport.MuseAgentTransportError({
+                      kind: state.credentialFailure,
+                    });
                   return { id: "stored-credential" };
                 }),
               readAvatar: (account, path) =>
@@ -1979,6 +1984,56 @@ it.effect(
       yield* Effect.flip(h.service.featureUpdate(request));
       assert.equal(h.state.credentialCalls.length, 1);
       assert.equal(h.state.reads, 0);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect.each(["disconnected", "account_changed", "uncertain"] as const)(
+  "restores credential prompts only when submission is known not to have dispatched: %s",
+  (failure) =>
+    Effect.gen(function* () {
+      const h = yield* fixture();
+      h.inbox.observe(binding, {
+        event: "delta.presentation",
+        payload: {
+          session_id: "primary",
+          presentation_id: "vault-prompt",
+          kind: "internal_link_action_card",
+          data: {
+            title: "Sign in",
+            type: "credentials_vault",
+            data: {
+              capture: "sign_in",
+              page_url: "https://example.test/login",
+              capture_authorization: "synthetic-authorization",
+            },
+          },
+        },
+      });
+      const request = {
+        providerInstanceId: instanceId,
+        operation: "credential_submit" as const,
+        sessionId: "primary",
+        requestId: "vault-prompt",
+        username: "synthetic-user",
+        password: "synthetic-password",
+      };
+      h.state.credentialFailure = failure;
+      yield* Effect.flip(h.service.featureUpdate(request));
+      const retryable = failure !== "uncertain";
+      assert.lengthOf(h.inbox.pending(binding, "primary"), retryable ? 1 : 0);
+      h.state.credentialFailure = null;
+      if (retryable) {
+        yield* h.service.featureUpdate(request);
+        assert.lengthOf(h.state.credentialCalls, 2);
+        assert.equal(
+          h.state.credentialCalls[1]?.params.idempotency_key,
+          h.state.credentialCalls[0]?.params.idempotency_key,
+        );
+      } else {
+        yield* Effect.flip(h.service.featureUpdate(request));
+        assert.lengthOf(h.state.credentialCalls, 1);
+      }
+      assert.lengthOf(h.inbox.pending(binding, "primary"), 0);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );
 

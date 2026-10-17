@@ -97,6 +97,8 @@ export class MuseAgentCredentialInbox extends Context.Service<
       readonly request: CredentialRequest;
       readonly authorization?: string;
       readonly idempotencyKey: string;
+      /** Restore only when capture was definitely not dispatched. */
+      readonly restore: () => void;
     } | null;
     readonly complete: (binding: string, sessionId: string, requestId: string) => void;
   }
@@ -249,7 +251,13 @@ export const layer = Layer.sync(MuseAgentCredentialInbox, () => {
       const entry = entries.get(key(binding, sessionId, requestId));
       if (!entry || entry.state !== "pending") return null;
       entry.state = "submitting";
+      let restorable = true;
       return {
+        restore: () => {
+          if (!restorable) return;
+          restorable = false;
+          if (entry.state === "submitting") entry.state = "pending";
+        },
         idempotencyKey: entry.idempotencyKey,
         request: { ...entry.request, pageUrl: entry.targetUrl },
         ...(entry.authorization === undefined ? {} : { authorization: entry.authorization }),

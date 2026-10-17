@@ -165,3 +165,22 @@ it.effect("connector saturation and repeated cards cannot hide vault prompts", (
     expect(inbox.pending("account", "session-one")).toHaveLength(1);
   }).pipe(Effect.provide(Inbox.layer)),
 );
+
+it.effect("restores only its own submission once and preserves completed prompts", () =>
+  Effect.gen(function* () {
+    const inbox = yield* Inbox.MuseAgentCredentialInbox;
+    inbox.observe("account", frame());
+    const first = inbox.take("account", "session-one", "credential-card");
+    expect(first).not.toBeNull();
+    first?.restore();
+    expect(inbox.pending("account", "session-one")).toHaveLength(1);
+    const retry = inbox.take("account", "session-one", "credential-card");
+    expect(retry?.idempotencyKey).toBe(first?.idempotencyKey);
+    first?.restore();
+    expect(inbox.pending("account", "session-one")).toHaveLength(0);
+    inbox.complete("account", "session-one", "credential-card");
+    retry?.restore();
+    expect(inbox.pending("account", "session-one")).toHaveLength(0);
+    expect(inbox.take("account", "session-one", "credential-card")).toBeNull();
+  }).pipe(Effect.provide(Inbox.layer)),
+);
