@@ -4,7 +4,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Pressable, View } from "react-native";
 
 import { AppActivityIndicator } from "../../components/AppActivityIndicator";
@@ -26,6 +26,7 @@ function useMuseAgentNativeAttach(input: {
   readonly providerInstanceId: ProviderInstanceId;
   readonly connected: boolean;
   readonly providers: ReadonlyArray<MuseAgentNativeOpenProvider> | null;
+  readonly observerRetirement?: string | null;
 }): {
   readonly gate: MuseNativeAttachSendGate;
   readonly error: string | null;
@@ -33,7 +34,14 @@ function useMuseAgentNativeAttach(input: {
   readonly planKind: Parameters<typeof museNativeAttachSendGate>[0]["planKind"];
   readonly retry: () => void;
 } {
-  const { environmentId, threadId, providerInstanceId, connected, providers } = input;
+  const {
+    environmentId,
+    threadId,
+    providerInstanceId,
+    connected,
+    providers,
+    observerRetirement = null,
+  } = input;
   const openThread = useAtomCommand(museAgentOpenThread, { reportFailure: false });
   const canOpen = useAtomValue(museAgentOpenThread.permissionAtom(environmentId));
   const plan = useMemo(
@@ -41,18 +49,31 @@ function useMuseAgentNativeAttach(input: {
     [threadId, providerInstanceId, providers],
   );
   const [retry, setRetry] = useState(0);
-  const [error, setError] = useState<string | null>(null);
-  const [attached, setAttached] = useState(false);
+  const [openError, setError] = useState<string | null>(null);
+  const [attachment, setAttachment] = useState<{ retirement: string | null } | null>(null);
+  const retired =
+    attachment !== null &&
+    observerRetirement !== null &&
+    attachment.retirement !== observerRetirement;
+  const attached = attachment !== null && !retired;
+  const error = retired ? "Muse history disconnected. Retry to reconnect." : openError;
   const scopeKey = `${environmentId}:${threadId}:${providerInstanceId}:${plan.kind}:${connected}:${canOpen}:${retry}`;
   const [scope, setScope] = useState(scopeKey);
+  if (retired && scope === scopeKey) {
+    setAttachment(null);
+    setError("Muse history disconnected. Retry to reconnect.");
+  }
   if (scope !== scopeKey) {
     setScope(scopeKey);
-    setAttached(false);
+    setAttachment(null);
     setError(null);
   }
+  const retirementAtAttempt = useRef(observerRetirement);
+  retirementAtAttempt.current = observerRetirement;
   useEffect(() => {
     if (plan.kind !== "open" || !connected || !canOpen) return;
     let current = true;
+    const retirementAtOpen = retirementAtAttempt.current;
     setError((previous) => (previous === null ? previous : null));
     void openCachedMuseThread({
       hit: { environmentId, threadId },
@@ -68,7 +89,7 @@ function useMuseAgentNativeAttach(input: {
       navigate: async () => {},
     })
       .then(() => {
-        if (current) setAttached(true);
+        if (current) setAttachment({ retirement: retirementAtOpen });
       })
       .catch((cause: unknown) => {
         if (!current) return;
@@ -110,6 +131,7 @@ export function MuseAgentRouteConnection({
   connected,
   hasMessages,
   providers,
+  observerRetirement,
   children,
 }: {
   readonly environmentId: EnvironmentId;
@@ -118,6 +140,7 @@ export function MuseAgentRouteConnection({
   readonly connected: boolean;
   readonly hasMessages: boolean;
   readonly providers: ReadonlyArray<MuseAgentNativeOpenProvider> | null;
+  readonly observerRetirement?: string | null;
   readonly children?: (gate: MuseNativeAttachSendGate) => ReactNode;
 }) {
   const { gate, error, canOpen, planKind, retry } = useMuseAgentNativeAttach({
@@ -126,6 +149,7 @@ export function MuseAgentRouteConnection({
     providerInstanceId,
     connected,
     providers,
+    observerRetirement,
   });
   let status: ReactNode = null;
   if (planKind !== "skip" && connected) {

@@ -423,6 +423,24 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
                 ) {
                   // Reconnecting cannot inherit an earlier connection's tool authority.
                   yield* closeTools;
+                  const receipt = projection.receipt();
+                  if (
+                    frame.event === "transport.reconnected" &&
+                    receipt &&
+                    !projection.isTerminal()
+                  ) {
+                    for (const raw of yield* native.replay({ binding, receipt })) {
+                      const replayed = museHistoryFrame(raw, session.session_id);
+                      if (replayed) yield* projectFrame(replayed);
+                    }
+                    // The native bridge loses turn ownership on reconnect. Registering
+                    // tools alone cannot recover it, and resending could duplicate work.
+                    if (!projection.isTerminal())
+                      return yield* new Native.MuseAgentRuntimeError({
+                        kind: "protocol",
+                        cause: new Error("Muse reconnected before the managed turn settled."),
+                      });
+                  }
                   yield* Queue.offer(inbox, {
                     type: "provider_session.updated",
                     driver: MUSE_AGENT_DRIVER_KIND,
@@ -436,17 +454,6 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
                           : null,
                     },
                   });
-                  const receipt = projection.receipt();
-                  if (
-                    frame.event === "transport.reconnected" &&
-                    receipt &&
-                    !projection.isTerminal()
-                  ) {
-                    for (const raw of yield* native.replay({ binding, receipt })) {
-                      const replayed = museHistoryFrame(raw, session.session_id);
-                      if (replayed) yield* projectFrame(replayed);
-                    }
-                  }
                   return;
                 }
                 if (frame.event === "delta.presentation") {

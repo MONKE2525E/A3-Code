@@ -5,7 +5,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
-import { useEffect, useLayoutEffect, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "~/components/ui/button";
 import { Spinner } from "~/components/ui/spinner";
 import { museAgentOpenThread } from "~/state/museAgent";
@@ -160,6 +160,7 @@ export function MuseAgentRouteConnection({
   providerInstanceId,
   connected,
   hasMessages,
+  observerRetirement = null,
   onSendBlockedReasonChange,
   children,
 }: {
@@ -168,24 +169,38 @@ export function MuseAgentRouteConnection({
   readonly providerInstanceId: ProviderInstanceId;
   readonly connected: boolean;
   readonly hasMessages: boolean;
+  readonly observerRetirement?: string | null;
   readonly onSendBlockedReasonChange?: (reason: string | null) => void;
   readonly children?: (gate: MuseAgentAttachSendGate) => ReactNode;
 }) {
   const openThread = useAtomCommand(museAgentOpenThread, { reportFailure: false });
   const canOpen = useAtomValue(museAgentOpenThread.permissionAtom(environmentId));
   const [retry, setRetry] = useState(0);
-  const [error, setError] = useState<string | null>(null);
-  const [attached, setAttached] = useState(false);
+  const [openError, setError] = useState<string | null>(null);
+  const [attachment, setAttachment] = useState<{ retirement: string | null } | null>(null);
+  const retired =
+    attachment !== null &&
+    observerRetirement !== null &&
+    attachment.retirement !== observerRetirement;
+  const attached = attachment !== null && !retired;
+  const error = retired ? "Muse history disconnected. Retry to reconnect." : openError;
   const scopeKey = `${environmentId}:${threadId}:${providerInstanceId}:${connected}:${canOpen}:${retry}`;
   const [scope, setScope] = useState(scopeKey);
+  if (retired && scope === scopeKey) {
+    setAttachment(null);
+    setError("Muse history disconnected. Retry to reconnect.");
+  }
   if (scope !== scopeKey) {
     setScope(scopeKey);
-    setAttached(false);
+    setAttachment(null);
     setError(null);
   }
+  const retirementAtAttempt = useRef(observerRetirement);
+  retirementAtAttempt.current = observerRetirement;
   useEffect(() => {
     if (!connected || !canOpen) return;
     let current = true;
+    const retirementAtOpen = retirementAtAttempt.current;
     void openCachedMuseThread({
       hit: { environmentId, threadId },
       shells: [{ environmentId, id: threadId, providerInstanceId }],
@@ -200,7 +215,7 @@ export function MuseAgentRouteConnection({
       navigate: async () => {},
     })
       .then(() => {
-        if (current) setAttached(true);
+        if (current) setAttachment({ retirement: retirementAtOpen });
       })
       .catch((cause: unknown) => {
         if (current) setError(describeMuseAgentOpenFailure(cause));

@@ -87,6 +87,7 @@ import {
 } from "./thread-inspector-content-stack";
 import { threadRouteIsHydrating } from "./thread-route-hydration";
 import { guardMuseNativeSend } from "../../lib/museAgentThread";
+import { deriveLatestProviderSessionRetirement } from "@t3tools/client-runtime/state/thread-execution";
 import { MuseAgentRouteConnection } from "./MuseAgentRouteConnection";
 import { ThreadHeader } from "./ThreadHeader";
 
@@ -994,6 +995,7 @@ function ThreadRouteContent(
           connected={routeConnectionState === "connected"}
           hasMessages={composer.selectedThreadFeed.length > 0}
           providers={serverConfig?.providers ?? null}
+          observerRetirement={deriveLatestProviderSessionRetirement(selectedThreadDetail)}
         >
           {(museAttach) => (
             <ThreadDetailScreen

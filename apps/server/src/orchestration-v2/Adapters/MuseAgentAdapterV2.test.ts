@@ -627,6 +627,77 @@ it.effect("disconnect interrupts pending registration before it can admit a nati
 );
 
 it.effect(
+  "fails an unsettled reconnected turn instead of advertising a ready runtime without tools",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const turn = yield* makeTurn;
+        const frames = yield* Queue.unbounded<MuseAgentNativeEvent>();
+        const released = yield* Deferred.make<void>();
+        const seen: ProviderAdapterV2Event[] = [];
+        let sends = 0;
+        let revokes = 0;
+        let replays = 0;
+        const native = makeNative({
+          watch: () => Effect.succeed({ events: Stream.fromQueue(frames), close: Effect.void }),
+          acquireTurn: () =>
+            Effect.succeed(Deferred.succeed(released, undefined).pipe(Effect.asVoid)),
+          send: () =>
+            Effect.sync(() => {
+              sends++;
+              return receipt;
+            }),
+          replay: () =>
+            Effect.sync(() => {
+              replays++;
+              return [];
+            }),
+        });
+        const port = ToolsPort.MuseAgentDirectToolsPort.of({
+          install: () =>
+            Effect.fail(new NativeAgentDirectToolsError({ code: "already_installed" })),
+          start: () =>
+            Effect.succeed({
+              revoke: Effect.sync(() => {
+                revokes++;
+              }),
+              close: Effect.void,
+            }),
+        });
+        const adapter = yield* createMuseAgentAdapterV2(options).pipe(
+          Effect.provideService(Native.MuseAgentNativeRuntimeService, native),
+          Effect.provideService(ProviderHost.ProviderHost, host),
+          Effect.provideService(ToolsPort.MuseAgentDirectToolsPort, port),
+        );
+        const runtime = yield* adapter.openSession(sessionInput);
+        const events = yield* runtime.events.pipe(
+          Stream.runForEach((event) => Effect.sync(() => seen.push(event))),
+          Effect.forkScoped,
+        );
+        yield* runtime.startTurn(turn);
+        yield* Queue.offer(frames, { event: "transport.disconnected" });
+        yield* Queue.offer(frames, { event: "transport.reconnected" });
+        assert.strictEqual(Exit.isFailure(yield* Fiber.await(events)), true);
+        yield* Deferred.await(released);
+        assert.strictEqual(sends, 1);
+        assert.strictEqual(revokes, 1);
+        assert.strictEqual(replays, 1);
+        assert.strictEqual(
+          seen.some((event) => event.type === "turn.terminal"),
+          false,
+        );
+        assert.strictEqual(
+          seen.some(
+            (event) =>
+              event.type === "provider_session.updated" && event.providerSession.status === "ready",
+          ),
+          false,
+        );
+      }),
+    ),
+);
+
+it.effect(
   "reconnect revokes tools and recovers exact owned terminal evidence without resending",
   () =>
     Effect.scoped(

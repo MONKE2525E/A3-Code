@@ -119,6 +119,7 @@ import {
   deriveLatestThreadRun,
   deriveThreadRuntime,
   deriveLatestProviderSessionError,
+  deriveLatestProviderSessionRetirement,
   presentPendingBackgroundWork,
   presentProviderGoal,
 } from "@t3tools/client-runtime/state/thread-execution";
@@ -11750,6 +11751,7 @@ export default function ChatView(props: ChatViewProps) {
                   threadId={activeThread.id}
                   connected={activeEnvironmentConnectionPhase === "connected"}
                   hasMessages={displayedTimeline.entries.length > 0}
+                  observerRetirement={deriveLatestProviderSessionRetirement(serverProjection)}
                   onSendBlockedReasonChange={onMuseAttachSendBlockedReasonChange}
                 />
               ) : null}

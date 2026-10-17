@@ -617,3 +617,38 @@ it("keeps sends blocked when resolved providers do not advertise Muse", async ()
     await act(async () => root.unmount());
   }
 });
+
+it("blocks a retired observer until explicit retry without reclaiming it from another tab", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  mocks.open.mockReset().mockResolvedValue({ _tag: "Success", value: { threadId: main } });
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const render = (observerRetirement: string | null) =>
+    root.render(
+      <MuseAgentRouteConnection {...routeProps()} observerRetirement={observerRetirement}>
+        {(gate) => <button disabled={!gate.sendAllowed}>Send</button>}
+      </MuseAgentRouteConnection>,
+    );
+  const send = () =>
+    Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Send",
+    )!;
+  try {
+    await act(async () => render("old-session:stopped"));
+    expect(send().disabled).toBe(false);
+    await act(async () => render(null));
+    expect(send().disabled).toBe(false);
+    await act(async () => render("new-session:stopped"));
+    expect(send().disabled).toBe(true);
+    expect(container.textContent).toContain("Muse history disconnected");
+    expect(mocks.open).toHaveBeenCalledTimes(1);
+    // An unrelated reconnect update cannot reauthorize this route's old attach.
+    await act(async () => render(null));
+    expect(send().disabled).toBe(true);
+    await act(async () => container.querySelector("button")!.click());
+    expect(mocks.open).toHaveBeenCalledTimes(2);
+    expect(send().disabled).toBe(false);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
