@@ -49,12 +49,57 @@ function museCookieDomain(host: string): boolean {
   return domain === "muse.ai" || domain.endsWith(".muse.ai");
 }
 
+const cookieTextDecoder = new TextDecoder("utf-8", { fatal: true });
+const linuxBasicKeys = ["peanuts", ""].map((passphrase) =>
+  NodeCrypto.pbkdf2Sync(passphrase, "saltysalt", 1, 16, "sha1"),
+);
+
+/** Decodes Chromium's Linux basic store; keyring-backed formats require private-browser sign-in. */
+function readLinuxCookieValue(encrypted: Uint8Array, host: string, schemaVersion: number | null) {
+  if (schemaVersion === null) return null;
+  const bytes = Buffer.from(encrypted);
+  if (bytes.subarray(0, 3).toString("latin1") !== "v10") return null;
+  for (const key of linuxBasicKeys) {
+    try {
+      const decipher = NodeCrypto.createDecipheriv("aes-128-cbc", key, Buffer.alloc(16, 0x20));
+      const plaintext = Buffer.concat([decipher.update(bytes.subarray(3)), decipher.final()]);
+      if (schemaVersion < 24) return cookieTextDecoder.decode(plaintext);
+      const domainHash = NodeCrypto.createHash("sha256").update(host).digest();
+      if (plaintext.length >= 32 && plaintext.subarray(0, 32).equals(domainHash))
+        return cookieTextDecoder.decode(plaintext.subarray(32));
+    } catch {
+      // A missing keyring key or corrupt record must not prevent private-browser sign-in.
+    }
+  }
+  return null;
+}
+
 /** Opens the source readonly, including its WAL. No copies, checkpoints, or keychain writes. */
-export function readMuseSessionCookies(cookiePath: string, nowMs: number): MuseAgentCookie[] {
+export function readMuseSessionCookies(
+  cookiePath: string,
+  nowMs: number,
+  platform: NodeJS.Platform,
+): MuseAgentCookie[] {
   const db = new NodeSqlite.DatabaseSync(cookiePath, { readOnly: true });
   try {
+    const hasMeta = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='meta'")
+      .get();
+    const rawSchemaVersion = hasMeta
+      ? db.prepare("SELECT value FROM meta WHERE key='version'").get()?.value
+      : undefined;
+    const parsedSchemaVersion =
+      typeof rawSchemaVersion === "number"
+        ? rawSchemaVersion
+        : typeof rawSchemaVersion === "string" && /^\d+$/.test(rawSchemaVersion)
+          ? Number(rawSchemaVersion)
+          : NaN;
+    const schemaVersion =
+      Number.isSafeInteger(parsedSchemaVersion) && parsedSchemaVersion >= 0
+        ? parsedSchemaVersion
+        : null;
     const statement = db.prepare(
-      "SELECT host_key, name, value, path, CAST(expires_utc AS TEXT) AS expires_utc, is_secure, is_httponly, samesite, is_persistent FROM cookies",
+      "SELECT host_key, name, value, encrypted_value, path, CAST(expires_utc AS TEXT) AS expires_utc, is_secure, is_httponly, samesite, is_persistent FROM cookies",
     );
     const rows = statement.all();
     return rows.flatMap((row) => {
@@ -62,17 +107,23 @@ export function readMuseSessionCookies(cookiePath: string, nowMs: number): MuseA
         typeof row.host_key !== "string" ||
         !museCookieDomain(row.host_key) ||
         typeof row.name !== "string" ||
-        typeof row.value !== "string" ||
-        !row.value
+        typeof row.value !== "string"
       )
         return [];
+      const value =
+        row.encrypted_value instanceof Uint8Array && row.encrypted_value.length > 0
+          ? platform === "linux"
+            ? readLinuxCookieValue(row.encrypted_value, row.host_key, schemaVersion)
+            : null
+          : row.value;
+      if (!value) return [];
       const expires = Number(row.expires_utc) / 1_000_000 - 11_644_473_600;
       if (!Number.isFinite(expires) || (row.is_persistent === 1 && expires <= nowMs / 1000))
         return [];
       return [
         {
           name: row.name,
-          value: row.value,
+          value,
           domain: row.host_key,
           path: typeof row.path === "string" && row.path.startsWith("/") ? row.path : "/",
           expires: row.is_persistent === 1 ? expires : -1,
@@ -107,6 +158,7 @@ export const makeMuseAgentSessionSourceLayer = (
   Layer.effect(
     MuseAgentSessionSource,
     Effect.gen(function* () {
+      const platform = yield* HostProcess.Platform;
       const home = options.homeDir ?? (yield* HostProcess.HomeDirectory);
       const browser = yield* Effect.serviceOption(IntegrationBrowser.IntegrationBrowser);
       const browserCookies = Option.isSome(browser)
@@ -149,7 +201,7 @@ export const makeMuseAgentSessionSourceLayer = (
                   const cookies = browserCookies.length
                     ? [...browserCookies]
                     : source.cookiePath
-                      ? readMuseSessionCookies(source.cookiePath, nowMs)
+                      ? readMuseSessionCookies(source.cookiePath, nowMs, platform)
                       : [];
                   if (!cookies.length) throw new Error("missing_readable_session");
                   const hash = NodeCrypto.createHash("sha256");
@@ -188,7 +240,7 @@ export const makeMuseAgentSessionSourceLayer = (
                       sessionPresent:
                         browserCookies.length > 0 ||
                         (source.cookiePath !== null &&
-                          readMuseSessionCookies(source.cookiePath, nowMs).length > 0),
+                          readMuseSessionCookies(source.cookiePath, nowMs, platform).length > 0),
                     };
                   },
                   catch: (cause) => new MuseAgentSessionSourceError({ stage: "detect", cause }),

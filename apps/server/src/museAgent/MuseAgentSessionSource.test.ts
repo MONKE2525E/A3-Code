@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Native SQLite fixtures exercise the readonly Chromium cookie boundary.
 import { assert, it } from "@effect/vitest";
+import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
@@ -20,11 +21,13 @@ it.effect(
           const db = new NodeSqlite.DatabaseSync(file);
           try {
             db.exec(
-              "PRAGMA journal_mode=WAL; CREATE TABLE cookies(host_key TEXT,name TEXT,value TEXT,path TEXT,expires_utc INTEGER,is_secure INTEGER,is_httponly INTEGER,samesite INTEGER,is_persistent INTEGER)",
+              "PRAGMA journal_mode=WAL; CREATE TABLE cookies(host_key TEXT,name TEXT,value TEXT,encrypted_value BLOB DEFAULT X'',path TEXT,expires_utc INTEGER,is_secure INTEGER,is_httponly INTEGER,samesite INTEGER,is_persistent INTEGER)",
             );
             const now = 1_700_000_000_000;
             const future = BigInt(11_644_473_600 + now / 1000 + 3600) * 1_000_000n;
-            const insert = db.prepare("INSERT INTO cookies VALUES(?,?,?,?,?,?,?,?,?)");
+            const insert = db.prepare(
+              "INSERT INTO cookies(host_key,name,value,path,expires_utc,is_secure,is_httponly,samesite,is_persistent) VALUES(?,?,?,?,?,?,?,?,?)",
+            );
             insert.run(".muse.ai", "fixture", "synthetic", "/", future, 1, 1, 1, 1);
             insert.run("muse.ai", "expired", "synthetic", "/", future - 7_200_000_000n, 1, 0, 2, 1);
             insert.run("login.muse.ai", "session", "synthetic", "/", 0, 1, 0, 0, 0);
@@ -32,7 +35,7 @@ it.effect(
             insert.run("muse.ai.attacker.invalid", "foreign", "synthetic", "/", future, 1, 0, 0, 1);
             insert.run("muse.ai", "encrypted-only", "", "/", future, 1, 0, 0, 1);
             const before = yield* Effect.promise(() => NodeFSP.readFile(file));
-            const cookies = Source.readMuseSessionCookies(file, now);
+            const cookies = Source.readMuseSessionCookies(file, now, "linux");
             assert.deepStrictEqual(
               cookies.map((cookie) => [cookie.name, cookie.expires, cookie.sameSite]),
               [
@@ -101,19 +104,11 @@ it.effect.each(["current", "legacy", "both"] as const)(
             const db = new NodeSqlite.DatabaseSync(file);
             try {
               db.exec(
-                "CREATE TABLE cookies(host_key TEXT,name TEXT,value TEXT,path TEXT,expires_utc INTEGER,is_secure INTEGER,is_httponly INTEGER,samesite INTEGER,is_persistent INTEGER)",
+                "CREATE TABLE cookies(host_key TEXT,name TEXT,value TEXT,encrypted_value BLOB DEFAULT X'',path TEXT,expires_utc INTEGER,is_secure INTEGER,is_httponly INTEGER,samesite INTEGER,is_persistent INTEGER)",
               );
-              db.prepare("INSERT INTO cookies VALUES(?,?,?,?,?,?,?,?,?)").run(
-                "muse.ai",
-                "session",
-                relativePath,
-                "/",
-                0,
-                1,
-                1,
-                1,
-                0,
-              );
+              db.prepare(
+                "INSERT INTO cookies(host_key,name,value,path,expires_utc,is_secure,is_httponly,samesite,is_persistent) VALUES(?,?,?,?,?,?,?,?,?)",
+              ).run("muse.ai", "session", relativePath, "/", 0, 1, 1, 1, 0);
             } finally {
               db.close();
             }
@@ -137,4 +132,75 @@ it.effect.each(["current", "legacy", "both"] as const)(
         }),
       (directory) => Effect.promise(() => NodeFSP.rm(directory, { recursive: true, force: true })),
     ),
+);
+
+it.effect.each([23, 24])("reads encrypted Linux basic-store cookies at schema %s", (version) =>
+  Effect.acquireUseRelease(
+    Effect.promise(() =>
+      NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "muse-encrypted-cookies-")),
+    ),
+    (directory) =>
+      Effect.gen(function* () {
+        const file = NodePath.join(directory, "Cookies");
+        const db = new NodeSqlite.DatabaseSync(file);
+        try {
+          db.exec(
+            "CREATE TABLE meta(key TEXT,value TEXT); CREATE TABLE cookies(host_key TEXT,name TEXT,value TEXT,encrypted_value BLOB,path TEXT,expires_utc INTEGER,is_secure INTEGER,is_httponly INTEGER,samesite INTEGER,is_persistent INTEGER)",
+          );
+          db.prepare("INSERT INTO meta VALUES('version',?)").run(String(version));
+          const encrypt = (value: string | Uint8Array, host: string, passphrase = "peanuts") => {
+            const contents = typeof value === "string" ? Buffer.from(value) : Buffer.from(value);
+            const key = NodeCrypto.pbkdf2Sync(passphrase, "saltysalt", 1, 16, "sha1");
+            const cipher = NodeCrypto.createCipheriv("aes-128-cbc", key, Buffer.alloc(16, 0x20));
+            const plaintext =
+              version >= 24
+                ? Buffer.concat([NodeCrypto.createHash("sha256").update(host).digest(), contents])
+                : contents;
+            return Buffer.concat([Buffer.from("v10"), cipher.update(plaintext), cipher.final()]);
+          };
+          const insert = db.prepare("INSERT INTO cookies VALUES('muse.ai',?,?,?,'/',0,1,1,1,0)");
+          insert.run("encrypted", "", encrypt("synthetic-encrypted", "muse.ai"));
+          insert.run("empty-fallback", "", encrypt("synthetic-empty-key", "muse.ai", ""));
+          insert.run("keyring", "stale-plaintext", Buffer.from("v11unavailable-keyring"));
+          insert.run("corrupt", "", Buffer.from("v10corrupt"));
+          insert.run("invalid-utf8", "", encrypt(new Uint8Array([0xff, 0xff]), "muse.ai"));
+          if (version >= 24)
+            insert.run("wrong-domain", "", encrypt("synthetic-foreign", "foreign.invalid"));
+          const before = yield* Effect.promise(() => NodeFSP.readFile(file));
+          assert.deepStrictEqual(
+            Source.readMuseSessionCookies(file, 1_700_000_000_000, "linux").map(
+              ({ name, value }) => [name, value],
+            ),
+            [
+              ["encrypted", "synthetic-encrypted"],
+              ["empty-fallback", "synthetic-empty-key"],
+            ],
+          );
+          assert.deepStrictEqual(
+            Source.readMuseSessionCookies(file, 1_700_000_000_000, "win32"),
+            [],
+          );
+          assert.deepStrictEqual(
+            Source.readMuseSessionCookies(file, 1_700_000_000_000, "darwin"),
+            [],
+          );
+          assert.deepStrictEqual(yield* Effect.promise(() => NodeFSP.readFile(file)), before);
+          for (const invalidVersion of ["invalid", null, "", "  "]) {
+            db.prepare("UPDATE meta SET value=? WHERE key='version'").run(invalidVersion);
+            assert.deepStrictEqual(
+              Source.readMuseSessionCookies(file, 1_700_000_000_000, "linux"),
+              [],
+            );
+          }
+          db.exec("DROP TABLE meta");
+          assert.deepStrictEqual(
+            Source.readMuseSessionCookies(file, 1_700_000_000_000, "linux"),
+            [],
+          );
+        } finally {
+          db.close();
+        }
+      }),
+    (directory) => Effect.promise(() => NodeFSP.rm(directory, { recursive: true, force: true })),
+  ),
 );
