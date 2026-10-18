@@ -191,6 +191,17 @@ const fixture = () => {
         child: { ...fiber, child: { memoizedProps: { value: { ...value, userId } } } },
       };
     },
+    commitAlternateRoot: () => {
+      const previous = hostRoot.stateNode.current;
+      hostRoot.stateNode.current = { child: { ...fiber } };
+      return (userId: string) => {
+        previous.child = {
+          ...fiber,
+          child: { memoizedProps: { value: { ...value, userId } } },
+        };
+        hostRoot.stateNode.current = previous;
+      };
+    },
     emit: (event: string, payload: Params, seq = 1, time = 1234) =>
       handlers.get(event)?.(payload, {
         seq,
@@ -1129,4 +1140,16 @@ it("rejects streaming events immediately when the discovered React root leaves t
   f.emit("delta.text_append", { session_id: "primary", text: "stale-root" });
   expect(f.events.filter((event) => event.event === "delta.text_append")).toHaveLength(0);
   expect(() => f.bridge.connectionId({ authority: f.authority })).toThrow("disconnected");
+});
+
+it("rejects a foreign account when React reuses an alternate root with replaced auth nodes", async () => {
+  const f = fixture();
+  await f.bridge.watch({ authority: f.authority, session: "primary" });
+  f.emit("delta.text_append", { session_id: "primary", text: "original" }, 1);
+  const recommit = f.commitAlternateRoot();
+  f.emit("delta.text_append", { session_id: "primary", text: "alternate" }, 2);
+  recommit("foreign-account");
+  f.emit("delta.text_append", { session_id: "primary", text: "foreign" }, 3);
+  expect(f.events.filter((event) => event.event === "delta.text_append")).toHaveLength(2);
+  expect(() => f.bridge.connectionId({ authority: f.authority })).toThrow("account_changed");
 });
