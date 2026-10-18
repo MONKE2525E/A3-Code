@@ -75,7 +75,11 @@ const fixture = () => {
   };
   const value = { isAuthenticated: true, userId: "synthetic-account" };
   const fiber = { memoizedProps: { value: rpc }, child: { memoizedProps: { value } } };
+  const fiberTraversal = vi.fn(() => undefined);
+  Object.defineProperty(fiber.child, "child", { get: fiberTraversal });
   const hostRoot = { child: fiber, stateNode: { current: { child: fiber } } };
+  const anchor = { __reactFiber$fixture: hostRoot, isConnected: true };
+  const querySelectorAll = vi.fn(() => (anchor.isConnected ? [anchor] : []));
   const events: Params[] = [];
   const invoke = vi.fn(async (input: Params) => ({
     method: "client.invoke.result",
@@ -131,7 +135,7 @@ const fixture = () => {
   let now = 30000;
   NodeVM.runInNewContext(museAgentBrowserBridge, {
     location: { origin: "https://muse.ai" },
-    document: { querySelectorAll: () => [{ __reactFiber$fixture: hostRoot }] },
+    document: { querySelectorAll },
     window,
     crypto: { randomUUID: () => `generation-${++generation}` },
     Blob,
@@ -149,6 +153,9 @@ const fixture = () => {
   const authority = bridge.authority();
   return {
     bridge,
+    querySelectorAll,
+    anchor,
+    fiberTraversal,
     authority,
     rpc,
     value,
@@ -1097,4 +1104,29 @@ describe("native encrypted computer streams", () => {
     expect(other.computerSends).toEqual([]);
     expect(other.computerClosed()).toBe(1);
   });
+});
+
+it("reuses committed bridge discovery while streaming and still fences live account changes", async () => {
+  const f = fixture();
+  await f.bridge.watch({ authority: f.authority, session: "primary" });
+  f.querySelectorAll.mockClear();
+  f.fiberTraversal.mockClear();
+  for (let seq = 1; seq <= 100; seq++) {
+    f.emit("delta.text_append", { session_id: "primary", text: "synthetic" }, seq);
+  }
+  expect(f.events.filter((event) => event.event === "delta.text_append")).toHaveLength(100);
+  expect(f.querySelectorAll).not.toHaveBeenCalled();
+  expect(f.fiberTraversal).not.toHaveBeenCalled();
+  f.value.userId = "foreign-account";
+  f.emit("delta.text_append", { session_id: "primary", text: "foreign" }, 101);
+  expect(f.events.filter((event) => event.event === "delta.text_append")).toHaveLength(100);
+});
+
+it("rejects streaming events immediately when the discovered React root leaves the DOM", async () => {
+  const f = fixture();
+  await f.bridge.watch({ authority: f.authority, session: "primary" });
+  f.anchor.isConnected = false;
+  f.emit("delta.text_append", { session_id: "primary", text: "stale-root" });
+  expect(f.events.filter((event) => event.event === "delta.text_append")).toHaveLength(0);
+  expect(() => f.bridge.connectionId({ authority: f.authority })).toThrow("disconnected");
 });

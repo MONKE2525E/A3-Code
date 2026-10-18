@@ -20,37 +20,48 @@ export const museAgentBrowserBridge = String.raw`(() => {
   const EVENT_NAMES = ['delta.message_start','delta.text_append','delta.message_done','delta.turn_done','delta.presentation','message.assistant','message.user','task.status','agent.status','delta.tool_started','delta.tool_completed'];
   const AVATAR_PATH = new RegExp(${encodeString(museAgentAvatarPathPattern)});
   const AVATAR_MIMES = ${encodeMimes(museAgentAvatarMimes)};
-  const discover = () => {
-    let root;
-    for (const el of document.querySelectorAll('body *')) {
+  let discoveryRoot = null, discoveryAnchor = null, discoveryCache = null;
+  const discover = (refreshRoot = false) => {
+    let root = !refreshRoot && discoveryAnchor?.isConnected ? discoveryRoot : null;
+    if (!root) for (const el of document.querySelectorAll('body *')) {
       const key = Object.keys(el).find(k => k.startsWith('__reactFiber$'));
-      if (key) { root = el[key]; break; }
+      if (key) { root = el[key]; discoveryAnchor = el; break; }
     }
     if (root) {
       while (root.return) root = root.return;
       // A DOM attachment can point at React's stale alternate after a commit.
       // HostRoot's current tree owns the admitted account and gateway context.
+      discoveryRoot = root;
       root = root.stateNode?.current ?? root;
     }
     const stack = root ? [root] : [], seen = new Set();
     let rpc = null;
     const accounts = new Set();
+    const authNodes = [];
+    const inspectNodeAuth = node => {
+      inspectAuth(node.memoizedProps?.value);
+      let dependency = node.dependencies?.firstContext, count = 0;
+      while (dependency && count++ < 64) { inspectAuth(dependency.memoizedValue); dependency = dependency.next; }
+    };
     const inspectAuth = value => {
       if (value?.isAuthenticated !== true) return;
       const id = value.userId;
       if (typeof id === 'string' && id.length > 0 && id.length <= 1024) accounts.add(id);
     };
-    while (stack.length && seen.size < 30000) {
+    if (discoveryCache?.root === root) {
+      for (const node of discoveryCache.authNodes) inspectNodeAuth(node);
+      rpc = discoveryCache.rpcNode.memoizedProps?.value;
+    } else while (stack.length && seen.size < 30000) {
       const node = stack.pop(); if (!node || seen.has(node)) continue; seen.add(node);
       const value = node.memoizedProps?.value;
-      inspectAuth(value);
-      // React 19 consumers retain the admitted context value in their dependency list.
-      let dependency = node.dependencies?.firstContext, count = 0;
-      while (dependency && count++ < 64) { inspectAuth(dependency.memoizedValue); dependency = dependency.next; }
-      if (value?.isReady && value.connectionAuthority && typeof value.sendRequest === 'function' && typeof value.onEvent === 'function') rpc = value;
+      // Cache all context-bearing nodes so live auth changes remain visible.
+      if (value || node.dependencies?.firstContext) { authNodes.push(node); inspectNodeAuth(node); }
+      if (value?.isReady && value.connectionAuthority && typeof value.sendRequest === 'function' && typeof value.onEvent === 'function') {
+        rpc = value; discoveryCache = {root,authNodes,rpcNode:node};
+      }
       if (node.sibling) stack.push(node.sibling); if (node.child) stack.push(node.child);
     }
-    if (!rpc || accounts.size !== 1 || !rpc.gatewayScopeKey) return null;
+    if (!rpc?.isReady || !rpc.connectionAuthority || typeof rpc.sendRequest !== 'function' || typeof rpc.onEvent !== 'function' || accounts.size !== 1 || !rpc.gatewayScopeKey) return null;
     return {rpc, authority: JSON.stringify([[...accounts][0], rpc.gatewayScopeKey, rpc.vmName ?? null, rpc.connectionAuthority.targetKey ?? null])};
   };
   const emit = value => window.__t3MuseEvent(value).catch(() => {});
@@ -335,7 +346,7 @@ export const museAgentBrowserBridge = String.raw`(() => {
   setInterval(async () => {
     for (const current of computerStreams.values()) { try { if (connection(check(current.authority)) !== current.connectionId) endComputer(current); } catch { endComputer(current); } }
     if (!pinned || reconnecting) return;
-    const found = discover();
+    const found = discover(true);
     if (!found || found.authority !== pinned) {
       if (active) { cleanup(); generation = crypto.randomUUID(); physicalConnectionId = null; owned = null; clearTools(); emit({event:'transport.disconnected',authority:pinned}); }
       return;
