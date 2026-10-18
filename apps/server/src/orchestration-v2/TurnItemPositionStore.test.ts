@@ -225,3 +225,102 @@ it.effect(
       assert.isBelow(ordinary.ordinal, 1_000_000);
     }).pipe(Effect.provide(layer)),
 );
+
+it.effect("keeps managed slots and native sequence order across collisions and older pages", () =>
+  Effect.gen(function* () {
+    const positions = yield* Positions.TurnItemPositionStoreV2;
+    const allocate = (id: string, nativeSequence?: number) =>
+      positions.allocate({
+        threadId,
+        turnItemId: TurnItemId.make(id),
+        runId: null,
+        runOrdinal: 1,
+        ...(nativeSequence === undefined ? {} : { nativeSequence }),
+      });
+    assert.strictEqual(yield* allocate("managed"), 1_000_001);
+    assert.strictEqual(yield* allocate("native:later", 1), 1_000_003);
+    assert.strictEqual(yield* allocate("native:earlier", 0), 1_000_002);
+    assert.strictEqual(yield* allocate("native:later", 1), 1_000_003);
+    assert.strictEqual(yield* allocate("managed"), 1_000_001);
+    assert.strictEqual(yield* allocate("managed:later"), 1_000_004);
+    assert.strictEqual(yield* allocate("native:latest", 2), 1_000_005);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("allocates sequence zero past a managed item and rolls back exhausted blocks", () =>
+  Effect.gen(function* () {
+    const positions = yield* Positions.TurnItemPositionStoreV2;
+    const sql = yield* SqlClient.SqlClient;
+    yield* positions.allocate({
+      threadId,
+      turnItemId: TurnItemId.make("managed"),
+      runId: null,
+      runOrdinal: 1,
+    });
+    const input = {
+      threadId,
+      turnItemId: TurnItemId.make("native"),
+      runId: null,
+      runOrdinal: 1,
+      nativeSequence: 0,
+    };
+    assert.strictEqual(yield* positions.allocate(input), 1_000_002);
+    yield* Effect.flip(positions.allocate({ ...input, nativeSequence: 999_998 }));
+    assert.strictEqual(yield* positions.allocate(input), 1_000_002);
+    const rows = yield* sql<{
+      readonly ordinal: number;
+    }>`SELECT ordinal FROM orchestration_v2_turn_item_positions WHERE thread_id = ${threadId} ORDER BY ordinal`;
+    assert.deepEqual(
+      rows.map((row) => row.ordinal),
+      [1_000_001, 1_000_002],
+    );
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("repairs legacy native slots and promotes native ownership without collisions", () =>
+  Effect.gen(function* () {
+    const positions = yield* Positions.TurnItemPositionStoreV2;
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`INSERT INTO orchestration_v2_turn_item_positions (thread_id, turn_item_id, ordinal, native_sequence)
+      VALUES (${threadId}, 'managed', 1000001, NULL), (${threadId}, 'later', 1000002, 1)`;
+    assert.strictEqual(
+      yield* positions.allocate({
+        threadId,
+        turnItemId: TurnItemId.make("earlier"),
+        runId: null,
+        runOrdinal: 1,
+        nativeSequence: 0,
+      }),
+      1_000_002,
+    );
+    assert.strictEqual(
+      yield* positions.allocate({
+        threadId,
+        turnItemId: TurnItemId.make("later"),
+        runId: null,
+        runOrdinal: 1,
+        nativeSequence: 1,
+      }),
+      1_000_003,
+    );
+    assert.strictEqual(
+      yield* positions.allocate({
+        threadId,
+        turnItemId: TurnItemId.make("earlier"),
+        runId: RunId.make("owned"),
+        runOrdinal: 1,
+      }),
+      1_000_002,
+    );
+    assert.strictEqual(
+      yield* positions.allocate({
+        threadId,
+        turnItemId: TurnItemId.make("later"),
+        runId: null,
+        runOrdinal: 1,
+        nativeSequence: 1,
+      }),
+      1_000_004,
+    );
+  }).pipe(Effect.provide(layer)),
+);

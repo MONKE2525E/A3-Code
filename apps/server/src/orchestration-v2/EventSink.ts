@@ -479,7 +479,7 @@ const layerBase: Layer.Layer<
               : [],
           ),
         );
-        return yield* Effect.forEach(
+        const normalized = yield* Effect.forEach(
           retained,
           (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
             event.type === "turn-item.updated"
@@ -492,6 +492,50 @@ const layerBase: Layer.Layer<
               : Effect.succeed(event),
           { concurrency: 1 },
         );
+        const moved: OrchestrationV2DomainEvent[] = [];
+        const threads = new Set(
+          normalized
+            .filter((event) => event.type === "turn-item.updated")
+            .filter((event) => event.payload.nativeItemRef?.driver === "muse-agent")
+            .map((event) => event.threadId),
+        );
+        for (const threadId of threads) {
+          const itemEvents = normalized
+            .filter((event) => event.type === "turn-item.updated")
+            .filter((event) => event.threadId === threadId);
+          const trigger = itemEvents.at(-1);
+          if (trigger === undefined) continue;
+          const positions = yield* turnItemPositions.reconcile(
+            threadId,
+            itemEvents.map((event) => event.payload.id),
+          );
+          for (const { turnItemId, ordinal } of positions) {
+            let present = false;
+            for (let index = 0; index < normalized.length; index++) {
+              const event = normalized[index];
+              if (
+                event?.type === "turn-item.updated" &&
+                event.threadId === threadId &&
+                event.payload.id === turnItemId
+              ) {
+                normalized[index] = { ...event, payload: { ...event.payload, ordinal } };
+                present = true;
+              }
+            }
+            if (present) continue;
+            const item = yield* projectionStore.getTurnItem({ threadId, itemId: turnItemId });
+            if (item === null) continue;
+            moved.push({
+              ...trigger,
+              id: EventId.make(`${trigger.id}:position:${turnItemId}`),
+              type: "turn-item.updated",
+              runId: item.runId ?? undefined,
+              nodeId: item.nodeId ?? undefined,
+              payload: { ...item, ordinal },
+            });
+          }
+        }
+        return [...moved, ...normalized];
       });
 
     const applyStoredEvents = (storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>) =>

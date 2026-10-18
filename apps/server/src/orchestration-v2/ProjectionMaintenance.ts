@@ -150,27 +150,19 @@ export const layer: Layer.Layer<
               .pipe(Stream.runCollect);
             for (const stored of page) {
               yield* projectionStore.apply(stored.event);
-              if (stored.event.type === "turn-item.updated") {
-                yield* sql`
-                INSERT INTO orchestration_v2_turn_item_positions (
-                  thread_id,
-                  turn_item_id,
-                  ordinal
-                )
-                VALUES (
-                  ${stored.event.threadId},
-                  ${stored.event.payload.id},
-                  ${stored.event.payload.ordinal}
-                )
-                ON CONFLICT(thread_id, turn_item_id) DO UPDATE SET
-                  ordinal = excluded.ordinal
-                `;
-              }
               lastSequence = stored.sequence;
             }
             if (page.length < pageSize) break;
             yield* Effect.yieldNow;
           }
+          // Position updates may reuse a historical ordinal. Rebuild from final
+          // projections, rather than enforcing uniqueness on intermediate history.
+          yield* sql`INSERT INTO orchestration_v2_turn_item_positions
+            (thread_id, turn_item_id, ordinal, native_sequence)
+            SELECT thread_id, turn_item_id, ordinal,
+              CASE WHEN run_id IS NULL AND json_extract(payload_json, '$.nativeItemRef.driver') = 'muse-agent'
+                THEN json_extract(payload_json, '$.canonicalNativeSequence') ELSE NULL END
+            FROM orchestration_v2_projection_turn_items`;
           const now = DateTime.formatIso(yield* DateTime.now);
           yield* sql`
             INSERT INTO orchestration_v2_projection_metadata (
