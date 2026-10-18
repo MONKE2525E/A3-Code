@@ -377,6 +377,9 @@ const READ_OPERATIONS: ReadonlySet<PreviewAutomationRequest["operation"]> = new 
 
 const AGENT_TAB_LIMIT = 8;
 const SERVER_TAB_LIMIT = 32;
+const SIGN_IN_SESSION_TAB_LIMIT = 2;
+const SIGN_IN_SERVER_TAB_LIMIT = 8;
+const SIGN_IN_POPUP_LIMIT = 2;
 /** Agent tabs nobody watches close after this long without an agent request. */
 const AGENT_TAB_IDLE_MS = 30 * 60 * 1000;
 const IDLE_SWEEP_INTERVAL = "1 minute";
@@ -513,6 +516,7 @@ const make = Effect.gen(function* () {
   const closedPendingTabs = new Set<string>();
   /** Popup pages waiting for the tab their `opened` event creates. */
   const adoptedPages = new Map<string, { readonly page: Page; readonly openerTabId: string }>();
+  const signInPopups = new Map<Page, string>();
   /** Sessions the manager closed, so their tabs end for good. Pruned once dropped. */
   const closedSessions = new Set<string>();
   let hostConnectionId: string | null = null;
@@ -722,6 +726,10 @@ const make = Effect.gen(function* () {
     void tab.recording?.encoder.close().catch(constVoid);
     void NodeFSP.rm(downloadDir(tab), { recursive: true, force: true }).catch(constVoid);
     reportLiveTabs();
+    const signInOwner = signInThreads.get(tab.threadId);
+    if (signInOwner && tab.openerTabId === undefined) {
+      runFork(signInLock.withPermit(closeMuseUnlocked(signInOwner, tab.threadId)));
+    }
     if (closeSession) {
       runFork(
         managerFor(tab.threadId)
@@ -1174,10 +1182,21 @@ const make = Effect.gen(function* () {
 
   const adoptPopup = async (opener: ServerTab, popup: Page) => {
     const agentId = opener.control.agentId;
+    const privateSignIn = IntegrationBrowser.isIntegrationAuthThread(opener.threadId);
+    const signInAtLimit =
+      privateSignIn &&
+      (!signInThreads.has(opener.threadId) ||
+        [...signInPopups.values()].filter((threadId) => threadId === opener.threadId).length >=
+          SIGN_IN_POPUP_LIMIT);
     // A popup past an agent's limit closes; its page sees window.open return a closed window.
-    if (opener.closing || (agentId !== null && atTabLimit(agentId))) {
+    if (opener.closing || signInAtLimit || (agentId !== null && atTabLimit(agentId))) {
       await popup.close().catch(constVoid);
       return;
+    }
+    if (privateSignIn) {
+      signInPopups.set(popup, opener.threadId);
+      popup.once("close", () => signInPopups.delete(popup));
+      popup.once("crash", () => signInPopups.delete(popup));
     }
     const url = popup.url();
     // Captured now: the person whose click opened the popup gets switched to it.
@@ -1194,11 +1213,14 @@ const make = Effect.gen(function* () {
         ...(opener.control.agentId === null
           ? {}
           : { automationOwner: opener.control.agentId, reveal: false }),
-        beforePublish: (snapshot) =>
+        beforePublish: (snapshot) => {
+          if (privateSignIn && !signInThreads.has(opener.threadId))
+            throw new Error("The sign-in window has closed.");
           adoptedPages.set(tabKey(snapshot.threadId, snapshot.tabId), {
             page: popup,
             openerTabId: opener.tabId,
-          }),
+          });
+        },
       }),
     ).then(
       (snapshot) => {
@@ -1207,6 +1229,7 @@ const make = Effect.gen(function* () {
           controller?.push({ _tag: "popup", tabId: snapshot.tabId });
       },
       async () => {
+        signInPopups.delete(popup);
         await popup.close().catch(constVoid);
       },
     );
@@ -2552,6 +2575,11 @@ const make = Effect.gen(function* () {
       if (signInThreads.get(threadId) !== owner) return;
       signInThreads.delete(threadId);
       owner.threads.delete(threadId);
+      for (const [page, popupThreadId] of signInPopups) {
+        if (popupThreadId !== threadId) continue;
+        signInPopups.delete(page);
+        yield* Effect.promise(() => page.close().catch(constVoid));
+      }
       const { sessions } = yield* privateManager.list({ threadId: ThreadId.make(threadId) });
       for (const session of sessions) {
         const tab = tabs.get(tabKey(threadId, session.tabId));
@@ -2582,6 +2610,16 @@ const make = Effect.gen(function* () {
             if (!owner.active)
               return yield* new IntegrationBrowser.IntegrationBrowserError({
                 cause: new Error("The sign-in connection has closed."),
+              });
+            const sessionTabs = [...signInThreads.values()].filter(
+              (current) => current.authSessionId === owner.authSessionId,
+            ).length;
+            if (
+              sessionTabs >= SIGN_IN_SESSION_TAB_LIMIT ||
+              signInThreads.size >= SIGN_IN_SERVER_TAB_LIMIT
+            )
+              return yield* new IntegrationBrowser.IntegrationBrowserError({
+                cause: new Error("Too many sign-in windows are open. Close one and try again."),
               });
             signInThreads.set(threadId, owner);
             owner.threads.add(threadId);

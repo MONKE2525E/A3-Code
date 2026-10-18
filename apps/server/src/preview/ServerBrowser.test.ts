@@ -1756,6 +1756,93 @@ it.live("retires only the requested private page for its connection owner", () =
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("caps private OAuth popups and closes them with their sign-in flow", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const integration = yield* IntegrationBrowser.IntegrationBrowser;
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const owner = yield* integration.museSignInOwner("session", yield* Scope.Scope);
+      const signIn = yield* owner.open;
+      const viewer = yield* browser.attachViewer({
+        ...viewerInput(signIn.tabId, true),
+        threadId: signIn.threadId,
+        authSessionId: "session",
+      });
+      yield* viewer.input({ type: "takeControl" });
+      const opener = contexts[0]!.page;
+      const popups = [makeContext(), makeContext(), makeContext()];
+      for (const popup of popups) opener.emit("popup", popup.page);
+      expect(popups[2]!.page.isClosed()).toBe(true);
+      for (let shown = 0; shown < 2;) {
+        if ((yield* Queue.take(viewer.output))._tag === "popup") shown++;
+      }
+      expect(popups[0]!.page.isClosed()).toBe(false);
+      expect(popups[1]!.page.isClosed()).toBe(false);
+      yield* owner.close(signIn.threadId);
+      expect(popups.every((popup) => popup.page.isClosed())).toBe(true);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("releases sign-in capacity after native page closure and failed opens", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const integration = yield* IntegrationBrowser.IntegrationBrowser;
+      const owner = yield* integration.museSignInOwner("session", yield* Scope.Scope);
+      yield* owner.open;
+      yield* owner.open;
+      yield* Effect.promise(() => contexts[0]!.page.close());
+      yield* owner.open;
+      yield* Effect.sync(() => contexts[1]!.page.emit("crash"));
+      contextFailure = new Error("synthetic launch failure");
+      expect((yield* owner.open.pipe(Effect.flip))._tag).toBe("IntegrationBrowserError");
+      contextFailure = null;
+      yield* owner.open;
+      expect(contexts).toHaveLength(4);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("caps concurrent private sign-in pages across connections and releases capacity", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const integration = yield* IntegrationBrowser.IntegrationBrowser;
+      const scope = yield* Scope.Scope;
+      const first = yield* integration.museSignInOwner("shared-session", scope);
+      const second = yield* integration.museSignInOwner("shared-session", scope);
+      const opened = yield* Effect.all([first.open, second.open], { concurrency: "unbounded" });
+      expect((yield* second.open.pipe(Effect.flip))._tag).toBe("IntegrationBrowserError");
+      expect(contexts).toHaveLength(2);
+      yield* first.close(opened[0].threadId);
+      const replacement = yield* second.open;
+      expect(contexts).toHaveLength(3);
+      yield* second.close(replacement.threadId);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
+it.live("caps private sign-in pages across authenticated sessions", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const integration = yield* IntegrationBrowser.IntegrationBrowser;
+      const scope = yield* Scope.Scope;
+      const owners = yield* Effect.forEach(
+        Array.from({ length: 9 }, (_, i) => `session:${i}`),
+        (id) => integration.museSignInOwner(id, scope),
+      );
+      const opened = yield* Effect.forEach(owners.slice(0, 8), (owner) => owner.open, {
+        concurrency: "unbounded",
+      });
+      const last = owners[8]!;
+      expect((yield* last.open.pipe(Effect.flip))._tag).toBe("IntegrationBrowserError");
+      expect(contexts).toHaveLength(8);
+      yield* owners[0]!.close(opened[0]!.threadId);
+      yield* last.open;
+      expect(contexts).toHaveLength(9);
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("isolates sign-in dialog lifetimes within one authenticated session", () =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -1799,10 +1886,10 @@ it.live(
         expect(firstPage.isClosed()).toBe(true);
         expect(secondPage.isClosed()).toBe(false);
         yield* first.open;
-        yield* first.open;
+        expect((yield* first.open.pipe(Effect.flip))._tag).toBe("IntegrationBrowserError");
         const remainingFirstPages = contexts.slice(2).map((c) => c.page);
         yield* Scope.close(firstConnection, Exit.succeed(undefined));
-        expect(remainingFirstPages).toHaveLength(2);
+        expect(remainingFirstPages).toHaveLength(1);
         expect(remainingFirstPages.every((p) => p.isClosed())).toBe(true);
         expect(secondPage.isClosed()).toBe(false);
         expect((yield* first.open.pipe(Effect.flip))._tag).toBe("IntegrationBrowserError");
