@@ -124,9 +124,18 @@ export const makeMuseAgentSessionSourceLayer = (
               NodePath.join(home, ".config/muse-linux-dev"),
             ];
         for (const candidate of candidates) {
-          const cookiePath = NodePath.join(candidate, "Partitions/muse/Cookies");
-          if (await exists(cookiePath))
-            return { installed: true, profilePath: await NodeFSP.realpath(candidate), cookiePath };
+          for (const relativePath of [
+            "Partitions/muse/Network/Cookies",
+            "Partitions/muse/Cookies",
+          ]) {
+            const cookiePath = NodePath.join(candidate, relativePath);
+            if (await exists(cookiePath))
+              return {
+                installed: true,
+                profilePath: await NodeFSP.realpath(candidate),
+                cookiePath,
+              };
+          }
         }
         return { installed: contents.length > 0, profilePath: null, cookiePath: null };
       };

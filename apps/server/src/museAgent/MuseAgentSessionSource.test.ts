@@ -83,3 +83,58 @@ it.effect("uses the private T3 browser session without an installed Muse compani
     ),
   ),
 );
+
+it.effect.each(["current", "legacy", "both"] as const)(
+  "discovers %s Muse cookie jars and prefers the current Chromium location",
+  (layout) =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "muse-profile-"))),
+      (profilePath) =>
+        Effect.gen(function* () {
+          const paths =
+            layout === "both"
+              ? ["Cookies", "Network/Cookies"]
+              : [layout === "current" ? "Network/Cookies" : "Cookies"];
+          for (const relativePath of paths) {
+            const file = NodePath.join(profilePath, "Partitions/muse", relativePath);
+            yield* Effect.promise(() => NodeFSP.mkdir(NodePath.dirname(file), { recursive: true }));
+            const db = new NodeSqlite.DatabaseSync(file);
+            try {
+              db.exec(
+                "CREATE TABLE cookies(host_key TEXT,name TEXT,value TEXT,path TEXT,expires_utc INTEGER,is_secure INTEGER,is_httponly INTEGER,samesite INTEGER,is_persistent INTEGER)",
+              );
+              db.prepare("INSERT INTO cookies VALUES(?,?,?,?,?,?,?,?,?)").run(
+                "muse.ai",
+                "session",
+                relativePath,
+                "/",
+                0,
+                1,
+                1,
+                1,
+                0,
+              );
+            } finally {
+              db.close();
+            }
+          }
+          yield* Effect.gen(function* () {
+            const source = yield* Source.MuseAgentSessionSource;
+            assert.deepStrictEqual(yield* source.inspect, {
+              installed: true,
+              sessionPresent: true,
+            });
+            const session = yield* source.read;
+            assert.equal(
+              session.profilePath,
+              yield* Effect.promise(() => NodeFSP.realpath(profilePath)),
+            );
+            assert.equal(
+              session.cookies[0]?.value,
+              layout === "legacy" ? "Cookies" : "Network/Cookies",
+            );
+          }).pipe(Effect.provide(Source.makeMuseAgentSessionSourceLayer({ profilePath })));
+        }),
+      (directory) => Effect.promise(() => NodeFSP.rm(directory, { recursive: true, force: true })),
+    ),
+);
