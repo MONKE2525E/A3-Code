@@ -524,8 +524,6 @@ const make = Effect.gen(function* () {
                         Effect.mapError((cause) => new ProviderPromptNotSubmittedError({ cause })),
                       ),
                     );
-                    // No cleanup may abandon the intent once the native chat write is attempted.
-                    promptAttempted = true;
                     // Muse does not advertise idempotent native chat admission. A persisted intent is never replayed.
                     const response = yield* transport.request(
                       input.binding,
@@ -546,6 +544,9 @@ const make = Effect.gen(function* () {
                       },
                       true,
                       input.deliveryKey,
+                      () => {
+                        promptAttempted = true;
+                      },
                     );
                     const admission = yield* decode(response, Admission);
                     if (admission.session_id !== input.sessionId)

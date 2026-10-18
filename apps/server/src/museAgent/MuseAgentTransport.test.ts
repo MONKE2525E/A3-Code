@@ -192,6 +192,47 @@ const registration: Transport.MuseAgentToolRegistration = {
 };
 
 it.effect(
+  "marks writes attempted only after account verification and before bridge failure",
+  () => {
+    const f = fixture();
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const transport = yield* Transport.MuseAgentTransport;
+        const binding = yield* transport.connect;
+        let attempts = 0;
+        const send = () =>
+          transport.request(binding, "chat.stream", {}, true, "synthetic", () => {
+            attempts++;
+          });
+        f.setAuthority(null);
+        assert.strictEqual(
+          yield* send().pipe(
+            Effect.match({
+              onFailure: (error) => error.kind,
+              onSuccess: () => "unexpected_success",
+            }),
+          ),
+          "disconnected",
+        );
+        assert.strictEqual(attempts, 0);
+        f.setAuthority("synthetic-authority");
+        f.failRequest(new Error("synthetic lost response"));
+        assert.strictEqual(
+          yield* send().pipe(
+            Effect.match({
+              onFailure: (error) => error.kind,
+              onSuccess: () => "unexpected_success",
+            }),
+          ),
+          "uncertain",
+        );
+        assert.strictEqual(attempts, 1);
+      }),
+    ).pipe(Effect.provide(f.layer));
+  },
+);
+
+it.effect(
   "preserves safe native error codes across the page boundary for feature classification",
   () => {
     const f = fixture();

@@ -56,6 +56,7 @@ const fixture = () => {
   let rotateDuringConnect = false;
   let failSend = false;
   let stageHook: Effect.Effect<void, Transport.MuseAgentTransportError> = Effect.void;
+  let preDispatchHook: Effect.Effect<void, Transport.MuseAgentTransportError> = Effect.void;
   let admissionHook: Effect.Effect<void, Transport.MuseAgentTransportError> = Effect.void;
   let acquireTurn: Transport.MuseAgentTransport["Service"]["acquireTurn"] = () =>
     Effect.succeed(Effect.void);
@@ -80,8 +81,10 @@ const fixture = () => {
       if (rotateDuringConnect) fingerprint = "session-b";
       return authority;
     }),
-    request: (_, method, params) =>
+    request: (_, method, params, _write, _deliveryKey, onDispatch) =>
       Effect.gen(function* () {
+        if (method === "chat.stream") yield* preDispatchHook;
+        onDispatch?.();
         calls.push({ method, params });
         if (method === "sessions.list")
           return {
@@ -168,6 +171,9 @@ const fixture = () => {
     delivery,
     setAcquireTurn: (next: typeof acquireTurn) => {
       acquireTurn = next;
+    },
+    setPreDispatchHook: (next: typeof preDispatchHook) => {
+      preDispatchHook = next;
     },
     calls,
     cancellations,
@@ -769,6 +775,32 @@ it.effect("uploads large server-owned files once and refuses replay with changed
           f.calls.filter((call) => call.method === "fs.write").length,
           uploadCount,
         );
+      }).pipe(Effect.provide(f.layer)),
+    ),
+  ),
+);
+
+it.effect("account verification failure after staging abandons the undispatched intent", () =>
+  withAttachmentDirectory((directory) =>
+    withFixture((f) =>
+      Effect.gen(function* () {
+        const native = yield* Native.MuseAgentNativeRuntimeService;
+        yield* createLargeFile(directory);
+        f.setStageHook(
+          Effect.sync(() => {
+            f.setPreDispatchHook(
+              Effect.fail(new Transport.MuseAgentTransportError({ kind: "account_changed" })),
+            );
+          }),
+        );
+        const failure = yield* Effect.flip(native.send(largeAttachment(directory)));
+        assert.isTrue(isPromptNotSubmitted(failure));
+        assert.deepStrictEqual(f.deliveryRows(), []);
+        assert.deepStrictEqual(f.remotePaths(), []);
+        assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 0);
+        f.setPreDispatchHook(Effect.void);
+        f.setStageHook(Effect.void);
+        assert.strictEqual((yield* native.send(largeAttachment(directory))).replayed, false);
       }).pipe(Effect.provide(f.layer)),
     ),
   ),

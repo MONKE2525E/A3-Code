@@ -121,6 +121,8 @@ export class MuseAgentTransport extends Context.Service<
       params: Record<string, unknown>,
       write?: boolean,
       deliveryKey?: string,
+      /** Runs after account verification, immediately before the page bridge is invoked. */
+      onDispatch?: () => void,
     ) => Effect.Effect<unknown, MuseAgentTransportError>;
     readonly acquireTurn: (
       binding: string,
@@ -767,17 +769,19 @@ export const makeMuseAgentTransportLayer = (
       return MuseAgentTransport.of({
         connect,
         acquireTurn,
-        request: (binding, method, params, write = false, deliveryKey) =>
+        request: (binding, method, params, write = false, deliveryKey, onDispatch) =>
           verify(binding).pipe(
             Effect.flatMap((current) =>
               Effect.tryPromise({
-                try: () =>
-                  requestPageBridge(current.page, {
+                try: () => {
+                  onDispatch?.();
+                  return requestPageBridge(current.page, {
                     authority: current.authority,
                     method,
                     params,
                     ...(deliveryKey ? { deliveryKey } : {}),
-                  }),
+                  });
+                },
                 catch: (cause) =>
                   new MuseAgentTransportError({
                     kind: write ? "uncertain" : "disconnected",
