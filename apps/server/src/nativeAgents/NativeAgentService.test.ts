@@ -39,6 +39,7 @@ import * as RpcAuthorization from "../auth/RpcAuthorization.ts";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as Service from "./NativeAgentService.ts";
 import * as Native from "../museAgent/MuseAgentNativeRuntimeService.ts";
+import * as T3Skill from "../museAgent/MuseAgentT3Skill.ts";
 import * as Transport from "../museAgent/MuseAgentTransport.ts";
 import * as CredentialInbox from "../museAgent/MuseAgentCredentialInbox.ts";
 import * as Features from "../museAgent/MuseAgentFeatureService.ts";
@@ -103,6 +104,7 @@ const fixture = (
     const renameWritten = yield* Deferred.make<void>();
     const renameContinue = yield* Deferred.make<void>();
     const state = {
+      skillInstalls: [] as string[],
       binding,
       avatarImagePath: "workspace/avatars/synthetic/image.png",
       credentialCalls: [] as Array<{
@@ -112,6 +114,7 @@ const fixture = (
       }>,
       credentialFailure: null as Transport.MuseAgentTransportError["kind"] | null,
       reads: 0,
+      widgetEvents: [] as unknown[],
       historyPages: false,
       rotateOnHistoryPage: false,
       historyCursors: [] as Array<number | undefined>,
@@ -267,6 +270,7 @@ const fixture = (
       read: ({ beforeSeq }) =>
         Effect.sync(() => {
           state.reads++;
+          if (state.widgetEvents.length) return { events: state.widgetEvents, hasMore: false };
           state.historyCursors.push(beforeSeq);
           if (beforeSeq !== undefined && state.rotateOnHistoryPage) state.binding = "b".repeat(64);
           if (state.historyPages)
@@ -381,6 +385,14 @@ const fixture = (
     const service = yield* Service.NativeAgentService.pipe(
       Effect.provide(
         Service.layer.pipe(
+          Layer.provide(
+            Layer.mock(T3Skill.MuseAgentT3Skill)({
+              install: (binding) =>
+                Effect.sync(() => {
+                  state.skillInstalls.push(binding);
+                }),
+            }),
+          ),
           Layer.provide(Layer.succeed(CredentialInbox.MuseAgentCredentialInbox, inbox)),
           Layer.provide(Layer.succeed(Native.MuseAgentNativeRuntimeService, native)),
           Layer.provide(
@@ -1138,6 +1150,7 @@ it.effect(
         true,
       );
       assert.equal(h.state.writes, 1);
+      assert.deepEqual(h.state.skillInstalls, [binding, binding]);
       assert.deepEqual(Object.keys((yield* h.settings.getSettings).providerInstances), [
         instanceId,
       ]);
@@ -1291,6 +1304,7 @@ it.effect("setup refuses to replace an existing provider from a different native
     });
     assert.equal((yield* Effect.flip(h.service.setup)).reason, "account_changed");
     assert.equal(h.state.writes, 0);
+    assert.deepEqual(h.state.skillInstalls, []);
     assert.equal(h.state.refreshes, 0);
     assert.equal(h.state.reconciled.length, 0);
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
@@ -2585,4 +2599,69 @@ it.effect.each([false, true])(
       assert.equal(h.state.watches, watches);
       assert.equal(h.state.reads, archived ? 1 : 0);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect("reads native option definitions only for the bound Muse shell", () =>
+  Effect.gen(function* () {
+    const h = yield* fixture();
+    const opened = yield* h.service.open(reference);
+    h.state.widgetEvents = [
+      {
+        event_name: "message.assistant",
+        session_id: "primary",
+        message_id: "assistant-option",
+        payload: {
+          widgets: [
+            { kind: "option", widget_id: "widget-test", data: { options: ["Make a skill"] } },
+          ],
+        },
+      },
+    ];
+    const result = yield* h.service.featureRead({
+      providerInstanceId: instanceId,
+      operation: "option_widgets",
+      threadId: opened.threadId,
+    });
+    assert.strictEqual(result.operation, "option_widgets");
+    if (result.operation === "option_widgets") {
+      assert.strictEqual(result.data.length, 1);
+      assert.strictEqual(result.data[0]?.hostMessageId, "assistant-option");
+      assert.deepStrictEqual(result.data[0]?.options, ["Make a skill"]);
+    }
+    const optionSelection = {
+      widgetId: "widget-test",
+      hostMessageId: "assistant-option",
+      text: "Make a skill",
+      interactionId: "c3cd22b0-b756-436c-9e5a-78e78f7c5abd",
+    };
+    const forged = yield* Effect.flip(
+      h.service.featureUpdate({
+        providerInstanceId: instanceId,
+        operation: "option_select",
+        threadId: opened.threadId,
+        selection: { ...optionSelection, text: "Fake choice" },
+      }),
+    );
+    assert.strictEqual(forged.reason, "thread_changed");
+    yield* h.service.featureUpdate({
+      providerInstanceId: instanceId,
+      operation: "option_select",
+      threadId: opened.threadId,
+      selection: optionSelection,
+    });
+    const projection = yield* h.orchestrator.getThreadProjection(opened.threadId);
+    const dispatched = projection.messages.find(
+      (message) => message.id === "muse-option:c3cd22b0-b756-436c-9e5a-78e78f7c5abd",
+    );
+    assert.strictEqual(dispatched?.text, "Make a skill");
+    assert.deepStrictEqual(dispatched?.context?.museOptionSelection, optionSelection);
+    const failure = yield* Effect.flip(
+      h.service.featureRead({
+        providerInstanceId: instanceId,
+        operation: "option_widgets",
+        threadId: ThreadId.make("ordinary-thread"),
+      }),
+    );
+    assert.strictEqual(failure.reason, "thread_changed");
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );

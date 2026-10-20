@@ -2,6 +2,7 @@ import {
   MuseAgentAvatarVariant,
   MuseAgentProfile,
   type MuseAgentStatus,
+  type MuseAgentOptionSelection,
 } from "@t3tools/contracts/museAgent";
 import { ChatAttachment, PROVIDER_SEND_TURN_MAX_ATTACHMENTS } from "@t3tools/contracts";
 import { ProviderPromptNotSubmittedError } from "@t3tools/provider-core/server/ProviderAdapter";
@@ -9,6 +10,8 @@ import { ProviderPromptNotSubmittedError } from "@t3tools/provider-core/server/P
 import * as NodeFSP from "node:fs/promises";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Canonical path checks constrain attachment reads to the server-owned store.
 import * as NodePath from "node:path";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Native widget mutations require independent UUID identities at the transport boundary.
+import * as NodeCrypto from "node:crypto";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -17,9 +20,11 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Deferred from "effect/Deferred";
+import { museOptionWidgets, museSelectableOption } from "./MuseAgentOptionWidgets.ts";
 import * as Source from "./MuseAgentSessionSource.ts";
 import * as Transport from "./MuseAgentTransport.ts";
 import * as Delivery from "./MuseAgentDeliveryStore.ts";
+import * as T3Skill from "./MuseAgentT3Skill.ts";
 import * as CredentialInbox from "./MuseAgentCredentialInbox.ts";
 import { museHistoryFrame } from "../orchestration-v2/Adapters/MuseAgentAdapterV2Projection.ts";
 import type {
@@ -63,7 +68,8 @@ export class MuseAgentRuntimeError extends Schema.TaggedError<MuseAgentRuntimeEr
 export type MuseAgentError =
   | MuseAgentRuntimeError
   | Transport.MuseAgentTransportError
-  | Delivery.MuseAgentDeliveryError;
+  | Delivery.MuseAgentDeliveryError
+  | T3Skill.MuseAgentT3SkillError;
 
 export const MuseAgentNativeSession = Schema.Struct({
   session_id: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
@@ -85,6 +91,15 @@ const Admission = Schema.Struct({
   ),
   session_id: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
 });
+const decodeWidgetStateResult = Schema.decodeUnknownOption(
+  Schema.Struct({
+    applied: Schema.Boolean,
+    state: Schema.Struct({
+      version: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+      data: Schema.Record(Schema.String, Schema.Unknown),
+    }),
+  }),
+);
 const History = Schema.Struct({
   chat_events: Schema.Array(Schema.Unknown),
   has_more: Schema.optionalKey(Schema.Boolean),
@@ -150,6 +165,7 @@ export class MuseAgentNativeRuntimeService extends Context.Service<
       readonly binding: string;
       readonly sessionId: string;
       readonly deliveryKey: string;
+      readonly optionSelection?: MuseAgentOptionSelection;
       readonly text: string;
       readonly clientId?: string;
       readonly context?: MuseAgentDeliveryContext;
@@ -222,6 +238,7 @@ const make = Effect.gen(function* () {
   const source = yield* Source.MuseAgentSessionSource;
   const transport = yield* Transport.MuseAgentTransport;
   const deliveries = yield* Delivery.MuseAgentDeliveryStore;
+  const t3Skill = yield* T3Skill.MuseAgentT3Skill;
   const credentialInbox = yield* Effect.serviceOption(CredentialInbox.MuseAgentCredentialInbox);
   const admissions = new Set<{
     readonly binding: string;
@@ -509,9 +526,15 @@ const make = Effect.gen(function* () {
                   );
                 if (existing) return { ...existing, replayed: true };
                 let promptAttempted = false;
+                let revertOption: Effect.Effect<boolean> = Effect.succeed(true);
                 const stagedPaths: string[] = [];
                 return yield* restore(
                   Effect.gen(function* () {
+                    yield* t3Skill
+                      .verify(input.binding)
+                      .pipe(
+                        Effect.mapError((cause) => new ProviderPromptNotSubmittedError({ cause })),
+                      );
                     const items = yield* Effect.forEach(prepared, (attachment) =>
                       materializeMuseAttachment(input.binding, attachment).pipe(
                         Effect.provideService(Transport.MuseAgentTransport, transport),
@@ -524,6 +547,77 @@ const make = Effect.gen(function* () {
                         Effect.mapError((cause) => new ProviderPromptNotSubmittedError({ cause })),
                       ),
                     );
+                    let messageOrigin;
+                    if (input.optionSelection) {
+                      yield* resolveSession(input.binding, input.sessionId);
+                      const history = yield* transport.request(input.binding, "chat.history", {
+                        session_id: input.sessionId,
+                        limit: 80,
+                        transcript_mode: "messages",
+                      });
+                      const decoded = yield* decode(history, History);
+                      const widget = museSelectableOption(
+                        museOptionWidgets(decoded.chat_events, input.sessionId),
+                        input.optionSelection,
+                      );
+                      if (!widget)
+                        return yield* new ProviderPromptNotSubmittedError({
+                          cause: new MuseAgentRuntimeError({ kind: "unsupported" }),
+                        });
+                      yield* check(input.binding);
+                      revertOption = Effect.succeed(false);
+                      const state = yield* transport.request(
+                        input.binding,
+                        "widgets.state.set",
+                        {
+                          widget_id: widget.widgetId,
+                          base_version: widget.version,
+                          mutation_id: input.optionSelection.interactionId,
+                          state: { selectedText: input.optionSelection.text },
+                        },
+                        true,
+                      );
+                      const changed = decodeWidgetStateResult(state);
+                      if (Option.isSome(changed) && !changed.value.applied)
+                        revertOption = Effect.succeed(true);
+                      if (Option.isNone(changed) || !changed.value.applied)
+                        return yield* new ProviderPromptNotSubmittedError({
+                          cause: new MuseAgentRuntimeError({ kind: "unsupported" }),
+                        });
+                      const selectedVersion = changed.value.state.version;
+                      revertOption = check(input.binding).pipe(
+                        Effect.andThen(
+                          transport.request(
+                            input.binding,
+                            "widgets.state.set",
+                            {
+                              widget_id: widget.widgetId,
+                              base_version: selectedVersion,
+                              mutation_id: NodeCrypto.randomUUID(),
+                              state: Object.fromEntries(
+                                Object.entries(changed.value.state.data).filter(
+                                  ([key]) => key !== "selectedText",
+                                ),
+                              ),
+                            },
+                            true,
+                          ),
+                        ),
+                        Effect.map((reply) => {
+                          const reverted = decodeWidgetStateResult(reply);
+                          return Option.isSome(reverted) && reverted.value.applied;
+                        }),
+                        Effect.catchCause(() => Effect.succeed(false)),
+                      );
+                      messageOrigin = {
+                        kind: "options_widget",
+                        widget_id: widget.widgetId,
+                        message_id: widget.hostMessageId,
+                        option_index: widget.options.indexOf(input.optionSelection.text),
+                        interaction_id: input.optionSelection.interactionId,
+                      };
+                    }
+                    yield* check(input.binding);
                     // Muse does not advertise idempotent native chat admission. A persisted intent is never replayed.
                     const response = yield* transport.request(
                       input.binding,
@@ -534,6 +628,7 @@ const make = Effect.gen(function* () {
                           ...(input.text.trim() ? [{ type: "text", text: input.text }] : []),
                         ],
                         session_id: input.sessionId,
+                        ...(messageOrigin ? { message_origin: messageOrigin } : {}),
                         ...(input.clientId ? { node_id: input.clientId } : {}),
                         capabilities: [
                           "chat_cancel",
@@ -566,7 +661,14 @@ const make = Effect.gen(function* () {
                           transport
                             .request(input.binding, "fs.delete", { path, recursive: false }, true)
                             .pipe(Effect.ignore),
-                        ).pipe(Effect.andThen(deliveries.abandonBeforePrompt(input.deliveryKey)))
+                        ).pipe(
+                          Effect.andThen(revertOption),
+                          Effect.flatMap((reverted) =>
+                            reverted
+                              ? deliveries.abandonBeforePrompt(input.deliveryKey)
+                              : Effect.void,
+                          ),
+                        )
                       : Effect.void,
                   ),
                   Effect.catchCause((cause) =>

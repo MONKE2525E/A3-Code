@@ -1381,6 +1381,7 @@ export const layer: Layer.Layer<
           messageId: message.id,
           text: userText,
           attachments: message.attachments,
+          ...(message.context === undefined ? {} : { context: message.context }),
           createdBy: message.createdBy,
           creationSource: message.creationSource,
           ...(message.scheduledTaskId === undefined
@@ -1494,6 +1495,7 @@ export const layer: Layer.Layer<
             records: message.context?.records ?? [],
           }),
           attachments: message.attachments,
+          ...(message.context === undefined ? {} : { context: message.context }),
           createdBy: message.createdBy,
           creationSource: message.creationSource,
         },

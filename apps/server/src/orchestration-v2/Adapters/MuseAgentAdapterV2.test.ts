@@ -1450,7 +1450,7 @@ it.effect("sends a skill reference without changing visible or attachment-only p
         assert.strictEqual(sent.length, 1);
         assert.strictEqual(
           sent[0]?.text,
-          `${text}\n\n[T3 Code: use this message's T3 node for tools; call the user Monke.]`,
+          `${text}\n\n[T3 Code: load workspace/custom-skills/t3-code-muse/SKILL.md; use this message's T3 node.]`,
         );
         assert.strictEqual(sent[0]?.deliveryKey, turn.attemptId);
         assert.deepStrictEqual(sent[0]?.attachments, {

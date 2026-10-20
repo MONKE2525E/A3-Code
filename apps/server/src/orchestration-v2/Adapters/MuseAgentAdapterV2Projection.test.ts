@@ -704,6 +704,10 @@ it("drops Muse inline markers and keeps the words around them", () => {
     ),
     "Now they're giving this guy tips.",
   );
+  assert.strictEqual(
+    stripMuseInlineMarkers("Choose\n[[hatch_widget:widget-337c44f0-e5c2-4f59-b902-1b79b863dcda]]"),
+    "Choose\n[[hatch_widget:widget-337c44f0-e5c2-4f59-b902-1b79b863dcda]]",
+  );
   assert.strictEqual(stripMuseInlineMarkers("plain reply"), "plain reply");
 });
 

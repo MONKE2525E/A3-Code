@@ -12,6 +12,7 @@ import * as Layer from "effect/Layer";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NativeAgents from "../nativeAgents/NativeAgentService.ts";
 import * as Native from "../museAgent/MuseAgentNativeRuntimeService.ts";
+import * as T3Skill from "../museAgent/MuseAgentT3Skill.ts";
 import * as Transport from "../museAgent/MuseAgentTransport.ts";
 import * as Features from "../museAgent/MuseAgentFeatureService.ts";
 import * as Connectors from "../museAgent/MuseAgentConnectorService.ts";
@@ -303,6 +304,7 @@ it.effect("native Muse open still reopens the canonical conversation after rejec
               }),
               Layer.mock(Projects.ProjectStoreV2)({ get: () => Effect.succeedNone }),
               Layer.mock(Transport.MuseAgentTransport)({}),
+              Layer.mock(T3Skill.MuseAgentT3Skill)({}),
               Layer.mock(Features.MuseAgentFeatureService)({}),
               Layer.mock(Connectors.MuseAgentConnectorService)({}),
               Layer.mock(Computer.MuseAgentComputerService)({}),

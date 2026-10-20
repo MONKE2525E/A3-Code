@@ -1,5 +1,6 @@
 import {
   CommandId,
+  MessageId,
   NativeAgentError,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -19,6 +20,8 @@ import {
   type NativeAgentFeatureUpdateResult,
   type NativeAgentPendingDelivery,
 } from "@t3tools/contracts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import { museOptionWidgets, museSelectableOption } from "../museAgent/MuseAgentOptionWidgets.ts";
 import type { MuseAgentPendingDelivery } from "../museAgent/MuseAgentDeliveryOwnership.ts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -30,11 +33,13 @@ import type * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as Muse from "../museAgent/MuseAgentNativeRuntimeService.ts";
+import * as T3Skill from "../museAgent/MuseAgentT3Skill.ts";
 import * as MuseTransport from "../museAgent/MuseAgentTransport.ts";
 import * as CredentialInbox from "../museAgent/MuseAgentCredentialInbox.ts";
 import * as Features from "../museAgent/MuseAgentFeatureService.ts";
 import {
   museIdentityOfThread,
+  museSessionOfThread,
   museThreadIdentity,
   museThreadIdForSession,
 } from "../museAgent/MuseAgentThreadIds.ts";
@@ -130,6 +135,7 @@ const nativeFailure = (error: Muse.MuseAgentError) =>
 
 const make = Effect.gen(function* () {
   const native = yield* Muse.MuseAgentNativeRuntimeService;
+  const t3Skill = yield* T3Skill.MuseAgentT3Skill;
   const transport = yield* MuseTransport.MuseAgentTransport;
   const credentialInbox = yield* Effect.serviceOption(CredentialInbox.MuseAgentCredentialInbox);
   const features = yield* Features.MuseAgentFeatureService;
@@ -330,6 +336,7 @@ const make = Effect.gen(function* () {
       );
       if ((yield* account) !== binding)
         return yield* new NativeAgentError({ reason: "account_changed" });
+      yield* t3Skill.install(binding).pipe(Effect.mapError(nativeFailure));
       if (!matching || matching[1].enabled === false)
         yield* settings
           .updateProviderInstance({
@@ -776,10 +783,49 @@ const make = Effect.gen(function* () {
       isNativeAgentError(cause) ? cause : new NativeAgentError({ reason: "provider_unavailable" }),
     ),
   );
+  const optionWidgets = Effect.fnUntraced(function* (
+    selection: { binding: string; instanceId: ProviderInstanceId },
+    threadId: ThreadId,
+  ) {
+    const identity = yield* canonicalIdentity(selection);
+    const shell = yield* projections
+      .getThreadShell(threadId)
+      .pipe(Effect.mapError(failure("storage_failed")));
+    if (
+      museIdentityOfThread(threadId) !== identity ||
+      !shell ||
+      shell.deletedAt !== null ||
+      shell.archivedAt !== null ||
+      shell.providerInstanceId !== selection.instanceId ||
+      shell.modelSelection.instanceId !== selection.instanceId ||
+      shell.modelSelection.model !== "muse"
+    )
+      return yield* new NativeAgentError({ reason: "thread_changed" });
+    const session = yield* native
+      .resolveSession(selection.binding, museSessionOfThread(threadId))
+      .pipe(Effect.mapError(nativeFailure));
+    const history = yield* native
+      .read({ binding: selection.binding, sessionId: session.session_id })
+      .pipe(Effect.mapError(nativeFailure));
+    if ((yield* selected(selection.instanceId)).binding !== selection.binding)
+      return yield* new NativeAgentError({ reason: "account_changed" });
+    return museOptionWidgets(history.events, session.session_id).map((widget) => ({
+      ...widget,
+      messageId: IdAllocator.derive.messageFromProviderItem({
+        driver: ProviderDriverKind.make("muse-agent"),
+        nativeItemId: `${selection.binding}/${encodeURIComponent(session.session_id)}/${encodeURIComponent(widget.hostMessageId)}`,
+      }),
+    }));
+  });
   const featureRead = Effect.fnUntraced(function* (input: typeof NativeAgentFeatureReadInput.Type) {
     const selection = yield* selected(input.providerInstanceId);
     const { binding } = selection;
     switch (input.operation) {
+      case "option_widgets":
+        return {
+          operation: input.operation,
+          data: yield* optionWidgets(selection, input.threadId),
+        };
       case "credential_requests": {
         const session = yield* native
           .resolveSession(binding, input.sessionId)
@@ -944,6 +990,29 @@ const make = Effect.gen(function* () {
     const selection = yield* selected(input.providerInstanceId);
     const { binding } = selection;
     switch (input.operation) {
+      case "option_select": {
+        const widgets = yield* optionWidgets(selection, input.threadId);
+        if (!museSelectableOption(widgets, input.selection))
+          return yield* new NativeAgentError({
+            reason: "thread_changed",
+            detail: "This Muse choice is no longer available. Refresh the conversation.",
+          });
+        yield* orchestrator
+          .dispatch({
+            type: "message.dispatch",
+            createdBy: "user",
+            creationSource: "web",
+            commandId: CommandId.make(`muse-option:${input.selection.interactionId}`),
+            messageId: MessageId.make(`muse-option:${input.selection.interactionId}`),
+            threadId: input.threadId,
+            text: input.selection.text,
+            attachments: [],
+            context: { version: 1, records: [], museOptionSelection: input.selection },
+            dispatchMode: { type: "start_immediately" },
+          })
+          .pipe(Effect.mapError(failure("storage_failed")));
+        break;
+      }
       case "connector_auth":
         yield* connectors
           .authenticate(binding, input.connectorId, input.authType, input.key)

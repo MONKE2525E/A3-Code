@@ -52,3 +52,24 @@ export const MuseAgentOpenThreadResult = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
 });
 export type MuseAgentOpenThreadResult = typeof MuseAgentOpenThreadResult.Type;
+
+/** A native suggested reply; selecting it sends a normal message, not a tool action. */
+export const MuseAgentOptionSelection = Schema.Struct({
+  widgetId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
+  hostMessageId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
+  text: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8192)),
+  interactionId: Schema.String.check(
+    Schema.isPattern(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i),
+  ),
+});
+export type MuseAgentOptionSelection = typeof MuseAgentOptionSelection.Type;
+export const MuseAgentOptionWidget = Schema.Struct({
+  widgetId: Schema.String,
+  hostMessageId: Schema.String,
+  options: Schema.Array(Schema.String),
+  buttonStyle: Schema.Literals(["dotted_lines", "center_aligned_filled"]),
+  allowCustomInput: Schema.Boolean,
+  selectedText: Schema.NullOr(Schema.String),
+  version: Schema.Number,
+});
+export type MuseAgentOptionWidget = typeof MuseAgentOptionWidget.Type;

@@ -1,7 +1,12 @@
 import * as Schema from "effect/Schema";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import { ServerProvider } from "./server.ts";
-import { MuseAgentProfile, MuseAgentStatus } from "./museAgent.ts";
+import {
+  MuseAgentProfile,
+  MuseAgentStatus,
+  MuseAgentOptionWidget,
+  MuseAgentOptionSelection,
+} from "./museAgent.ts";
 import * as Features from "./museAgentFeatures.ts";
 import * as Computer from "./museAgentComputer.ts";
 import * as Dictation from "./museAgentDictation.ts";
@@ -50,6 +55,11 @@ export const NativeAgentHistoryPage = Schema.Struct({
   importedMessages: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
 });
 export const NativeAgentFeatureReadInput = Schema.Union([
+  Schema.Struct({
+    ...featureReference,
+    operation: Schema.Literal("option_widgets"),
+    threadId: ThreadId,
+  }),
   Schema.Struct({
     ...featureReference,
     operation: Schema.Literal("credential_requests"),
@@ -114,6 +124,12 @@ export const NativeAgentFeatureReadInput = Schema.Union([
   }),
 ]);
 export const NativeAgentFeatureReadResult = Schema.Union([
+  Schema.Struct({
+    operation: Schema.Literal("option_widgets"),
+    data: Schema.Array(
+      Schema.Struct({ ...MuseAgentOptionWidget.fields, messageId: Schema.String }),
+    ),
+  }),
   Schema.Struct({
     operation: Schema.Literal("credential_requests"),
     data: Schema.Struct({
@@ -183,6 +199,12 @@ export const NativeAgentFeatureReadResult = Schema.Union([
   Schema.Struct({ operation: Schema.Literal("memory_read"), data: Features.MuseAgentMemory }),
 ]);
 export const NativeAgentFeatureUpdateInput = Schema.Union([
+  Schema.Struct({
+    ...featureReference,
+    operation: Schema.Literal("option_select"),
+    threadId: ThreadId,
+    selection: MuseAgentOptionSelection,
+  }),
   Schema.Struct({
     ...featureReference,
     operation: Schema.Literal("credential_submit"),

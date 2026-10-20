@@ -1,3 +1,5 @@
+import { museOptionWidgetText } from "~/lib/museOptionWidgetText";
+import { MuseAgentOptionWidgets } from "../agents/MuseAgentOptionWidgets";
 import { ThreadFindTimelineContext } from "./ThreadFindProvider";
 import { AgentSenderAttribution, GrokBotPeerMessageLink } from "../grokBot/GrokBotPeerMessageLink";
 import { GrokBotVoiceCallMarkerLabel } from "../grokBot/GrokBotVoiceCallMarkerLabel";
@@ -3011,9 +3013,18 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
     ctx.threadRef !== null && isNativeAgentBackingThread({ id: ctx.threadRef.threadId });
   const assistantAttachments = isNativeAgentChat ? row.message.attachments : undefined;
   const hasAssistantAttachments = (assistantAttachments?.length ?? 0) > 0;
+  const musePresentation = ctx.threadRef?.threadId.startsWith("muse-agent:")
+    ? museOptionWidgetText(row.message.text)
+    : null;
+  const hasMuseOptionWidget = (musePresentation?.widgetIds.length ?? 0) > 0;
+  const visibleText = musePresentation?.text ?? row.message.text;
   const messageText =
-    row.message.text ||
-    (row.message.streaming || hasAssistantAttachments ? "" : "(empty response)");
+    visibleText ||
+    (row.message.streaming ||
+    hasAssistantAttachments ||
+    ctx.threadRef?.threadId.startsWith("muse-agent:")
+      ? ""
+      : "(empty response)");
 
   return (
     <>
@@ -3051,6 +3062,9 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
             />
           </AssistantCitationSource>
         </div>
+        {hasMuseOptionWidget && ctx.threadRef ? (
+          <MuseAgentOptionWidgets threadRef={ctx.threadRef} messageId={row.message.id} />
+        ) : null}
         {assistantAttachments && hasAssistantAttachments ? (
           <AssistantMessageAttachments attachments={assistantAttachments} />
         ) : null}

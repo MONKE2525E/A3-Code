@@ -1,4 +1,5 @@
 import * as Schema from "effect/Schema";
+import { MuseAgentOptionSelection } from "./museAgent.ts";
 
 import {
   EnvironmentId,
@@ -285,6 +286,7 @@ const COMPOSER_CONTEXT_MAX_SERIALIZED_CHARS = 16_000_000;
 
 /** Structured context riding on a user message. Undecodable records are dropped, not fatal. */
 export const OrchestrationMessageContext = Schema.Struct({
+  museOptionSelection: Schema.optionalKey(MuseAgentOptionSelection),
   version: Schema.Literal(1),
   records: Schema.Array(Schema.Unknown)
     .check(

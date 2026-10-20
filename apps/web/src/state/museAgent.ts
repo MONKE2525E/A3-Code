@@ -188,3 +188,13 @@ export const museAgentOpenThread = createEnvironmentRpcCommand(connectionAtomRun
     key: (target) => `${target.environmentId}:muse`,
   },
 });
+
+export const museAgentOptionWidgetsQuery = createEnvironmentRpcQueryAtomFamily(
+  connectionAtomRuntime,
+  {
+    label: "environment-data:muse-agent:option-widgets",
+    tag: WS_METHODS.museAgentsFeatureRead,
+    staleTimeMs: 1000,
+    idleTtlMs: 10000,
+  },
+);

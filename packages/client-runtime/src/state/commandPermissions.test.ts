@@ -93,6 +93,40 @@ describe("command permissions", () => {
       }),
     ),
   );
+  it.effect("requires operate on the destination to select a Muse option", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(false),
+            scopes: [AuthOrchestrationReadScope],
+            permissions: [AuthOrchestrationReadScope],
+          }),
+        );
+        const command = createCommandPermissions(runtime, WS_METHODS.museAgentsFeatureUpdate);
+        const input = {
+          operation: "option_select" as const,
+          providerInstanceId: ProviderInstanceId.make("muse-test"),
+          threadId: ThreadId.make("muse-agent:test"),
+          selection: {
+            widgetId: "widget-1",
+            hostMessageId: "assistant-1",
+            text: "Choice",
+            interactionId: "c3cd22b0-b756-436c-9e5a-78e78f7c5abd",
+          },
+        };
+        expect(registry.get(command.permissionAtom(env, input))).toBe(false);
+        expect((yield* command.authorize(registry, env, input).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        expect(registry.get(command.permissionAtom(env, input))).toBe(true);
+        yield* command.authorize(registry, env, input);
+      }),
+    ),
+  );
   it.effect("reads native provider status without authorizing setup", () =>
     Effect.scoped(
       Effect.gen(function* () {

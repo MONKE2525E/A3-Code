@@ -37,6 +37,7 @@ import * as Native from "./MuseAgentNativeRuntimeService.ts";
 import * as Source from "./MuseAgentSessionSource.ts";
 import * as Transport from "./MuseAgentTransport.ts";
 import * as Delivery from "./MuseAgentDeliveryStore.ts";
+import * as T3Skill from "./MuseAgentT3Skill.ts";
 
 const binding = "a".repeat(64);
 const request = {
@@ -65,6 +66,11 @@ const fixture = () => {
   const remoteSizes = new Map<string, number>();
   const remoteBytes = new Map<string, Uint8Array>();
   let inspections = 0;
+  let skillFailure = false;
+  const skillActions: string[] = [];
+  let history: unknown[] = [];
+  let widgetApplied = true;
+  let loseWidgetReply = false;
   let identity: unknown = {
     name: "Synthetic Muse",
     avatar: { image_path: "workspace/avatars/muse.webp", chat_theme_color: "#aabbcc" },
@@ -93,7 +99,24 @@ const fixture = () => {
             ],
           };
         if (method === "identity") return identity;
-        if (method === "chat.history") return { chat_events: [], has_more: false };
+        if (method === "chat.history") return { chat_events: history, has_more: false };
+        if (method === "widgets.state.set") {
+          const state = { version: Number(params.base_version) + 1, data: params.state };
+          if (widgetApplied) {
+            history = history.map((event) => ({
+              ...(event as typeof optionEvent),
+              payload: {
+                ...(event as typeof optionEvent).payload,
+                widgets: (event as typeof optionEvent).payload.widgets.map((widget) =>
+                  widget.widget_id === params.widget_id ? { ...widget, state } : widget,
+                ),
+              },
+            }));
+          }
+          if (loseWidgetReply)
+            return yield* new Transport.MuseAgentTransportError({ kind: "disconnected" });
+          return { applied: widgetApplied, state };
+        }
         if (method === "chat.stream_events") return { events: [] };
         if (method === "fs.write") {
           yield* stageHook;
@@ -163,12 +186,29 @@ const fixture = () => {
         Layer.succeed(Source.MuseAgentSessionSource, source),
         Layer.succeed(Transport.MuseAgentTransport, transport),
         Layer.succeed(Delivery.MuseAgentDeliveryStore, delivery),
+        Layer.succeed(T3Skill.MuseAgentT3Skill, {
+          install: () =>
+            Effect.sync(() => {
+              skillActions.push("install");
+            }),
+          verify: () =>
+            Effect.suspend(() => {
+              skillActions.push("verify");
+              return skillFailure
+                ? Effect.fail(new T3Skill.MuseAgentT3SkillError({ kind: "readback_failed" }))
+                : Effect.void;
+            }),
+        }),
       ),
     ),
   );
   return {
     layer,
     delivery,
+    skillActions,
+    failSkill: () => {
+      skillFailure = true;
+    },
     setAcquireTurn: (next: typeof acquireTurn) => {
       acquireTurn = next;
     },
@@ -176,6 +216,15 @@ const fixture = () => {
       preDispatchHook = next;
     },
     calls,
+    loseWidgetReply: () => {
+      loseWidgetReply = true;
+    },
+    setHistory: (events: unknown[]) => {
+      history = events;
+    },
+    refuseWidgetSelection: () => {
+      widgetApplied = false;
+    },
     cancellations,
     localReleases,
     remotePaths: () => [...remoteSizes.keys()],
@@ -1158,3 +1207,173 @@ it.effect("queues behind an active session and admits the next after durable set
     }).pipe(Effect.provide(f.layer), Effect.scoped),
   ),
 );
+
+const optionSelection = {
+  widgetId: "widget-337c44f0-e5c2-4f59-b902-1b79b863dcda",
+  hostMessageId: "assistant-1",
+  text: "Make a T3 Code skill",
+  interactionId: "c3cd22b0-b756-436c-9e5a-78e78f7c5abd",
+};
+const optionEvent = {
+  event_name: "message.assistant",
+  session_id: "primary",
+  message_id: "assistant-1",
+  payload: {
+    widgets: [
+      {
+        kind: "option",
+        widget_id: optionSelection.widgetId,
+        data: { options: [optionSelection.text] },
+        state: { version: 3, data: {} },
+      },
+    ],
+  },
+};
+it.effect("sends a native option with its versioned selection and message origin", () => {
+  const f = fixture();
+  f.setHistory([optionEvent]);
+  return Effect.gen(function* () {
+    const service = yield* Native.MuseAgentNativeRuntimeService;
+    yield* service.send({ ...request, optionSelection });
+    assert.deepStrictEqual(f.calls.find((call) => call.method === "widgets.state.set")?.params, {
+      widget_id: optionSelection.widgetId,
+      base_version: 3,
+      mutation_id: optionSelection.interactionId,
+      state: { selectedText: optionSelection.text },
+    });
+    assert.deepStrictEqual(
+      f.calls.find((call) => call.method === "chat.stream")?.params.message_origin,
+      {
+        kind: "options_widget",
+        widget_id: optionSelection.widgetId,
+        message_id: "assistant-1",
+        option_index: 0,
+        interaction_id: optionSelection.interactionId,
+      },
+    );
+  }).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)));
+});
+it.effect("does not send when native option selection loses a version conflict", () => {
+  const f = fixture();
+  f.setHistory([optionEvent]);
+  f.refuseWidgetSelection();
+  return Effect.gen(function* () {
+    const service = yield* Native.MuseAgentNativeRuntimeService;
+    const result = yield* Effect.exit(service.send({ ...request, optionSelection }));
+    assert.isTrue(Exit.isFailure(result));
+    assert.isFalse(f.calls.some((call) => call.method === "chat.stream"));
+  }).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)));
+});
+
+it.effect("restores the native option after a known pre-dispatch failure and permits retry", () => {
+  const f = fixture();
+  f.setHistory([optionEvent]);
+  f.setPreDispatchHook(
+    Effect.fail(new Transport.MuseAgentTransportError({ kind: "disconnected" })),
+  );
+  return Effect.gen(function* () {
+    const service = yield* Native.MuseAgentNativeRuntimeService;
+    assert.isTrue(
+      Exit.isFailure(yield* Effect.exit(service.send({ ...request, optionSelection }))),
+    );
+    assert.deepStrictEqual(
+      f.calls.filter((call) => call.method === "widgets.state.set").map((call) => call.params),
+      [
+        {
+          widget_id: optionSelection.widgetId,
+          base_version: 3,
+          mutation_id: optionSelection.interactionId,
+          state: { selectedText: optionSelection.text },
+        },
+        {
+          widget_id: optionSelection.widgetId,
+          base_version: 4,
+          mutation_id: f.calls.filter((call) => call.method === "widgets.state.set")[1]!.params
+            .mutation_id,
+          state: {},
+        },
+      ],
+    );
+    f.setPreDispatchHook(Effect.void);
+    yield* service.send({ ...request, optionSelection });
+    assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 1);
+  }).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)));
+});
+
+it.effect("retains the delivery intent when native selection response is lost", () => {
+  const f = fixture();
+  f.setHistory([optionEvent]);
+  f.loseWidgetReply();
+  return Effect.gen(function* () {
+    const service = yield* Native.MuseAgentNativeRuntimeService;
+    assert.isTrue(
+      Exit.isFailure(yield* Effect.exit(service.send({ ...request, optionSelection }))),
+    );
+    assert.isTrue(
+      Exit.isFailure(yield* Effect.exit(service.send({ ...request, optionSelection }))),
+    );
+    assert.isFalse(f.calls.some((call) => call.method === "chat.stream"));
+    assert.strictEqual(f.calls.filter((call) => call.method === "widgets.state.set").length, 1);
+  }).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)));
+});
+
+it.effect("retains the delivery intent when selection cleanup cannot be confirmed", () => {
+  const f = fixture();
+  f.setHistory([optionEvent]);
+  f.setPreDispatchHook(
+    Effect.gen(function* () {
+      f.refuseWidgetSelection();
+      return yield* new Transport.MuseAgentTransportError({ kind: "disconnected" });
+    }),
+  );
+  return Effect.gen(function* () {
+    const service = yield* Native.MuseAgentNativeRuntimeService;
+    assert.isTrue(
+      Exit.isFailure(yield* Effect.exit(service.send({ ...request, optionSelection }))),
+    );
+    f.setPreDispatchHook(Effect.void);
+    const retry = yield* Effect.exit(service.send({ ...request, optionSelection }));
+    assert.isTrue(Exit.isFailure(retry));
+    assert.isFalse(f.calls.some((call) => call.method === "chat.stream"));
+    assert.strictEqual(f.calls.filter((call) => call.method === "widgets.state.set").length, 2);
+  }).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)));
+});
+
+it.effect("does not restore a selected option after uncertain chat admission", () => {
+  const f = fixture();
+  f.setHistory([optionEvent]);
+  f.setAdmissionHook(Effect.fail(new Transport.MuseAgentTransportError({ kind: "disconnected" })));
+  return Effect.gen(function* () {
+    const service = yield* Native.MuseAgentNativeRuntimeService;
+    assert.isTrue(
+      Exit.isFailure(yield* Effect.exit(service.send({ ...request, optionSelection }))),
+    );
+    assert.strictEqual(f.calls.filter((call) => call.method === "widgets.state.set").length, 1);
+  }).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)));
+});
+
+it.effect("send verifies the managed skill before delivery", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const native = yield* Native.MuseAgentNativeRuntimeService;
+    f.failSkill();
+    const result = yield* native.send(request).pipe(Effect.exit);
+    assert.isTrue(Exit.isFailure(result));
+    assert.deepStrictEqual(f.skillActions, ["verify"]);
+    assert.isFalse(f.calls.some((call) => call.method === "chat.stream"));
+  }).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)));
+});
+
+it.effect("recovers an accepted receipt without requiring the skill again", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const native = yield* Native.MuseAgentNativeRuntimeService;
+    const first = yield* native.send(request);
+    f.failSkill();
+    const replay = yield* native.send(request);
+    assert.strictEqual(replay.messageId, first.messageId);
+    assert.isTrue(replay.replayed);
+    assert.deepStrictEqual(f.skillActions, ["verify"]);
+    assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 1);
+  }).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)));
+});

@@ -1,3 +1,4 @@
+import { managedMusePrompt } from "../../museAgent/MuseAgentT3Skill.ts";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Muse device-backed client IDs use the paired-device UUID format.
 import * as NodeCrypto from "node:crypto";
 import {
@@ -39,8 +40,6 @@ import {
 } from "./MuseAgentAdapterV2Projection.ts";
 
 export { MUSE_AGENT_DRIVER_KIND };
-const managedMusePrompt = (text: string) =>
-  `${text}\n\n[T3 Code: use this message's T3 node for tools; call the user Monke.]`;
 
 export type MuseAgentAdapterV2DriverEnv =
   | Native.MuseAgentNativeRuntimeService
@@ -739,6 +738,9 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
                 sessionId: session.session_id,
                 deliveryKey: request.attemptId,
                 text: managedMusePrompt(request.message.text),
+                ...(request.message.context?.museOptionSelection
+                  ? { optionSelection: request.message.context.museOptionSelection }
+                  : {}),
                 clientId: toolLifetime.clientId,
                 context: {
                   threadId: request.threadId,

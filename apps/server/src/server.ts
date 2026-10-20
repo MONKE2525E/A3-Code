@@ -1,5 +1,6 @@
 import * as MuseAgentSessionSource from "./museAgent/MuseAgentSessionSource.ts";
 import * as MuseAgentCredentialInbox from "./museAgent/MuseAgentCredentialInbox.ts";
+import * as MuseAgentT3Skill from "./museAgent/MuseAgentT3Skill.ts";
 import * as MuseAgentTransport from "./museAgent/MuseAgentTransport.ts";
 import * as MuseAgentDeliveryStore from "./museAgent/MuseAgentDeliveryStore.ts";
 import * as MuseAgentNativeRuntimeService from "./museAgent/MuseAgentNativeRuntimeService.ts";
@@ -691,6 +692,7 @@ const layerGrokBotNativeRuntime = GrokBotNativeRuntimeService.layer.pipe(
   Layer.provideMerge(GrokBotNativeService.layer.pipe(Layer.provide(ProcessRunner.layer))),
 );
 const layerMuseAgentNativeRuntime = MuseAgentNativeRuntimeService.layer.pipe(
+  Layer.provideMerge(MuseAgentT3Skill.layer),
   Layer.provideMerge(
     MuseAgentTransport.layer.pipe(Layer.provideMerge(MuseAgentSessionSource.layer)),
   ),
@@ -786,6 +788,7 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
 );
 
 const layerRuntimeDependencies = NativeAgentService.layer.pipe(
+  Layer.provide(layerMuseAgentNativeRuntime),
   Layer.provide(
     Layer.mergeAll(
       MuseAgentComputerService.layer,

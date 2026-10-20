@@ -108,6 +108,7 @@ const museFeatureUpdateScopes = {
   profile_save: AuthSettingsWriteScope,
   profile_set_theme: AuthSettingsWriteScope,
   credential_submit: AuthOrchestrationOperateScope,
+  option_select: AuthOrchestrationOperateScope,
   history_page: AuthOrchestrationOperateScope,
   computer_action: AuthOrchestrationOperateScope,
   delivery_release: AuthOrchestrationOperateScope,
