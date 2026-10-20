@@ -20,6 +20,8 @@ import * as Cause from "effect/Cause";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
+import * as Schedule from "effect/Schedule";
+import { isTransientStartCause } from "@t3tools/provider-core/server/failure";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import type { McpCapability } from "../../mcp/McpInvocationContext.ts";
 import { museAgentHistoryPage } from "../../museAgent/MuseAgentHistoryPage.ts";
@@ -640,102 +642,117 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
                 yield* releaseTurn;
                 return;
               }
-              if (!toolLifetime) {
-                const access = yield* host.settings.get.pipe(
-                  Effect.map(
-                    (all) => resolveProjectSettings(all, request.appThread.projectId).settings,
-                  ),
-                  Effect.map((effective) => ({
-                    browser: effective.enableAgentBrowserAccess,
-                    device: effective.enableAgentDeviceAccess,
-                  })),
-                  Effect.orElseSucceed(() => ({ browser: false, device: false })),
-                );
-                const toolCapabilities = new Set<McpCapability>([
-                  "orchestration",
-                  "worktree",
-                  "pull-requests",
-                ]);
-                if (access.browser) toolCapabilities.add("preview");
-                if (access.device) toolCapabilities.add("device");
-                const connectionId = yield* native.connectionId(binding);
-                const toolScope = yield* Scope.make();
-                const clientId = NodeCrypto.randomUUID();
-                const pendingLifetime = {
-                  scope: toolScope,
-                  clientId,
-                  close: Effect.void,
-                  revoke: Effect.void,
-                };
-                toolLifetime = pendingLifetime;
-                const starting = yield* toolsPort
-                  .start({
-                    threadId: input.threadId,
-                    providerInstanceId: options.instanceId,
-                    remoteRun: { runId: request.runId, attemptId: request.attemptId },
-                    accountBinding: binding,
-                    nativeSessionId: session.session_id,
-                    connectionId,
-                    browserToolsAvailable: access.browser,
-                    capabilities: toolCapabilities,
-                    isCurrent: Effect.gen(function* () {
-                      if (
-                        toolLifetime !== pendingLifetime ||
-                        !projection.matchesTurn(providerTurnId) ||
-                        (yield* native.accountBinding) !== binding
-                      )
-                        return false;
-                      const current = yield* native.resolveSession(binding, session.session_id);
-                      return (
-                        current.session_id === session.session_id &&
-                        toolLifetime === pendingLifetime &&
-                        projection.matchesTurn(providerTurnId)
-                      );
-                    }).pipe(Effect.orElseSucceed(() => false)),
-                    register: (commands, invoke) =>
-                      native
-                        .registerTools(binding, {
-                          clientId,
-                          connectionId,
-                          nativeSessionId: session.session_id,
-                          commands,
-                          invoke: (invocation) =>
-                            invoke(invocation).pipe(
-                              Effect.mapError(
-                                (cause) =>
-                                  new Transport.MuseAgentTransportError({
-                                    kind: "protocol",
-                                    cause,
-                                  }),
+              const admittedTools =
+                toolLifetime ??
+                (yield* Effect.gen(function* () {
+                  const access = yield* host.settings.get.pipe(
+                    Effect.map(
+                      (all) => resolveProjectSettings(all, request.appThread.projectId).settings,
+                    ),
+                    Effect.map((effective) => ({
+                      browser: effective.enableAgentBrowserAccess,
+                      device: effective.enableAgentDeviceAccess,
+                    })),
+                    Effect.orElseSucceed(() => ({ browser: false, device: false })),
+                  );
+                  const toolCapabilities = new Set<McpCapability>([
+                    "orchestration",
+                    "worktree",
+                    "pull-requests",
+                  ]);
+                  if (access.browser) toolCapabilities.add("preview");
+                  if (access.device) toolCapabilities.add("device");
+                  const connectionId = yield* native.connectionId(binding);
+                  const toolScope = yield* Scope.make();
+                  const clientId = NodeCrypto.randomUUID();
+                  const pendingLifetime = {
+                    scope: toolScope,
+                    clientId,
+                    close: Effect.void,
+                    revoke: Effect.void,
+                  };
+                  toolLifetime = pendingLifetime;
+                  const starting = yield* toolsPort
+                    .start({
+                      threadId: input.threadId,
+                      providerInstanceId: options.instanceId,
+                      remoteRun: { runId: request.runId, attemptId: request.attemptId },
+                      accountBinding: binding,
+                      nativeSessionId: session.session_id,
+                      connectionId,
+                      browserToolsAvailable: access.browser,
+                      capabilities: toolCapabilities,
+                      isCurrent: Effect.gen(function* () {
+                        if (
+                          toolLifetime !== pendingLifetime ||
+                          !projection.matchesTurn(providerTurnId) ||
+                          (yield* native.accountBinding) !== binding
+                        )
+                          return false;
+                        const current = yield* native.resolveSession(binding, session.session_id);
+                        return (
+                          current.session_id === session.session_id &&
+                          toolLifetime === pendingLifetime &&
+                          projection.matchesTurn(providerTurnId)
+                        );
+                      }).pipe(Effect.orElseSucceed(() => false)),
+                      register: (commands, invoke) =>
+                        native
+                          .registerTools(binding, {
+                            clientId,
+                            connectionId,
+                            nativeSessionId: session.session_id,
+                            commands,
+                            invoke: (invocation) =>
+                              invoke(invocation).pipe(
+                                Effect.mapError(
+                                  (cause) =>
+                                    new Transport.MuseAgentTransportError({
+                                      kind: "protocol",
+                                      cause,
+                                    }),
+                                ),
                               ),
+                          })
+                          .pipe(
+                            Effect.map((result) => ({
+                              ...result,
+                              close: native.unregisterTools(binding, clientId),
+                            })),
+                            Effect.mapError(
+                              (cause) =>
+                                new NativeAgentDirectToolsError({
+                                  code: "registration_failed",
+                                  cause,
+                                }),
                             ),
-                        })
-                        .pipe(
-                          Effect.map((result) => ({
-                            ...result,
-                            close: native.unregisterTools(binding, clientId),
-                          })),
-                          Effect.mapError(
-                            (cause) =>
-                              new NativeAgentDirectToolsError({
-                                code: "registration_failed",
-                                cause,
-                              }),
+                            Effect.onExit((exit) =>
+                              Exit.isFailure(exit)
+                                ? native.unregisterTools(binding, clientId)
+                                : Effect.void,
+                            ),
                           ),
-                          Effect.onExit((exit) =>
-                            Exit.isFailure(exit)
-                              ? native.unregisterTools(binding, clientId)
-                              : Effect.void,
-                          ),
-                        ),
-                  })
-                  .pipe(Effect.provideService(Scope.Scope, toolScope), Effect.forkIn(toolScope));
-                const tools = yield* Fiber.join(starting);
-                if (toolLifetime !== pendingLifetime)
-                  return yield* new Native.MuseAgentRuntimeError({ kind: "busy" });
-                pendingLifetime.close = tools.close;
-                pendingLifetime.revoke = tools.revoke;
-              }
+                    })
+                    .pipe(Effect.provideService(Scope.Scope, toolScope), Effect.forkIn(toolScope));
+                  const tools = yield* Fiber.join(starting);
+                  if (toolLifetime !== pendingLifetime)
+                    return yield* new Native.MuseAgentRuntimeError({ kind: "busy" });
+                  pendingLifetime.close = tools.close;
+                  pendingLifetime.revoke = tools.revoke;
+                  return pendingLifetime;
+                }).pipe(
+                  Effect.onError(() =>
+                    closeTools.pipe(Effect.andThen(Effect.suspend(() => toolCleanup))),
+                  ),
+                  Effect.retry({
+                    times: 2,
+                    schedule: Schedule.spaced("250 millis"),
+                    while: (cause) =>
+                      isTransientStartCause(
+                        new ProviderAdapter.ProviderPromptNotSubmittedError({ cause }),
+                      ),
+                  }),
+                ));
               admissionAttempted = true;
               const receipt = yield* native.send({
                 binding,
@@ -745,7 +762,7 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
                 ...(request.message.context?.museOptionSelection
                   ? { optionSelection: request.message.context.museOptionSelection }
                   : {}),
-                clientId: toolLifetime.clientId,
+                clientId: admittedTools.clientId,
                 context: {
                   threadId: request.threadId,
                   providerInstanceId: options.instanceId,

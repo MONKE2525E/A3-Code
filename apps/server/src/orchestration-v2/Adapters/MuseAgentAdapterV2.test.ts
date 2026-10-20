@@ -27,6 +27,7 @@ import { ProviderPromptNotSubmittedError } from "@t3tools/provider-core/server/P
 import type { ProviderAdapterV2Event } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as Native from "../../museAgent/MuseAgentNativeRuntimeService.ts";
+import { MuseAgentTransportError } from "../../museAgent/MuseAgentTransport.ts";
 import type { MuseAgentNativeEvent } from "../../museAgent/MuseAgentTransport.ts";
 import * as ToolsPort from "../../museAgent/MuseAgentDirectToolsPort.ts";
 import { NativeAgentDirectToolsError } from "../../mcp/direct/NativeAgentDirectTools.ts";
@@ -985,6 +986,56 @@ it.effect(
         installed = true;
         yield* runtime.startTurn(turn);
         assert.strictEqual(sends, 1);
+      }),
+    ),
+);
+
+it.live.each([1, 3])(
+  "rebuilds interrupted Muse tool setup with bounded retries (%s failures)",
+  (failures) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const turn = yield* makeTurn;
+        let registrations = 0;
+        let sends = 0;
+        let cleaned = 0;
+        const native = makeNative({
+          send: () =>
+            Effect.sync(() => {
+              sends++;
+              return receipt;
+            }),
+        });
+        const port = ToolsPort.MuseAgentDirectToolsPort.of({
+          install: () =>
+            Effect.fail(new NativeAgentDirectToolsError({ code: "already_installed" })),
+          start: () =>
+            Effect.gen(function* () {
+              yield* Effect.addFinalizer(() =>
+                Effect.sync(() => {
+                  cleaned++;
+                }),
+              );
+              registrations++;
+              if (registrations <= failures)
+                return yield* new NativeAgentDirectToolsError({
+                  code: "registration_failed",
+                  cause: new MuseAgentTransportError({ kind: "disconnected", stage: "register" }),
+                });
+              return { revoke: Effect.void, close: Effect.void };
+            }),
+        });
+        const adapter = yield* createMuseAgentAdapterV2(options).pipe(
+          Effect.provideService(Native.MuseAgentNativeRuntimeService, native),
+          Effect.provideService(ProviderHost.ProviderHost, host),
+          Effect.provideService(ToolsPort.MuseAgentDirectToolsPort, port),
+        );
+        const runtime = yield* adapter.openSession(sessionInput);
+        const result = yield* runtime.startTurn(turn).pipe(Effect.exit);
+        assert.strictEqual(Exit.isSuccess(result), failures === 1);
+        assert.strictEqual(registrations, failures === 1 ? 2 : 3);
+        assert.strictEqual(cleaned, failures);
+        assert.strictEqual(sends, failures === 1 ? 1 : 0);
       }),
     ),
 );

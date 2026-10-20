@@ -319,7 +319,8 @@ export const museAgentBrowserBridge = String.raw`(() => {
       }));
       try {
         const result = await rpc.sendRequest('client.register_capabilities',registrationParams(clientId,commands),{expectedGatewayTargetKey:JSON.stringify([rpc.gatewayUrl,rpc.vmName??null])});
-        if (connection(check(authority)) !== connectionId || toolRegistration !== current || result.rejected_ids?.length || result.accepted_device_commands !== Object.keys(commands).length) throw Error('capabilities_rejected:'+JSON.stringify({accepted:result.accepted_device_commands,requested:Object.keys(commands).length,rejected:result.rejected_ids}));
+        if (connection(check(authority)) !== connectionId || toolRegistration !== current) throw Error('registration_scope_changed');
+        if (result.rejected_ids?.length || result.accepted_device_commands !== Object.keys(commands).length) throw Error('capabilities_rejected:'+JSON.stringify({accepted:result.accepted_device_commands,requested:Object.keys(commands).length,rejected:result.rejected_ids}));
         await rpc.sendRequest('node.heartbeat',{node_id:clientId},{expectedGatewayTargetKey:JSON.stringify([rpc.gatewayUrl,rpc.vmName??null])});
         if (connection(check(authority)) !== connectionId || toolRegistration !== current) throw Error('heartbeat_scope_changed');
         current.lastHeartbeatAt = Date.now();

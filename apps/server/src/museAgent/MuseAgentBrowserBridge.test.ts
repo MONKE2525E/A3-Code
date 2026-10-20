@@ -746,6 +746,32 @@ describe("native direct tool callbacks", () => {
     expect(last).toBeDefined();
     expect((last!.params.capabilities as { device_commands: Params }).device_commands).toEqual({});
   });
+  it("distinguishes a connection change during accepted registration from capability rejection", async () => {
+    const f = fixture();
+    await f.bridge.watch({ authority: f.authority, session: "primary" });
+    const connectionId = f.bridge.connectionId({ authority: f.authority });
+    const original = f.send.getMockImplementation()!;
+    f.send.mockImplementation(async (method, params, options) => {
+      const result = await original(method, params, options);
+      if (method === "client.register_capabilities") {
+        f.rpc.sendRequest = vi.fn(async (method: string, params: Params, options: Params) =>
+          original(method, params, options),
+        );
+      }
+      return result;
+    });
+    await expect(
+      f.bridge.register({
+        authority: f.authority,
+        clientId: "t3-turn",
+        nativeSessionId: "primary",
+        connectionId,
+        commands: { "t3.probe": {} },
+      }),
+    ).rejects.toThrow("registration_scope_changed");
+    expect(f.invokes.size).toBe(0);
+    expect(f.calls.some((call) => call.method === "chat.stream")).toBe(false);
+  });
   it("keeps stable target identity separate from React object identity", async () => {
     const f = fixture();
     await f.bridge.watch({ authority: f.authority, session: "primary" });

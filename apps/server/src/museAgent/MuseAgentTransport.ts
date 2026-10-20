@@ -1049,7 +1049,18 @@ export const makeMuseAgentTransportLayer = (
                     commands: input.commands,
                   }),
                 ),
-              catch: (cause) => new MuseAgentTransportError({ kind: "protocol", cause }),
+              catch: (cause) =>
+                new MuseAgentTransportError({
+                  kind:
+                    cause instanceof Error &&
+                    /(?:registration_scope_changed|heartbeat_scope_changed|connection_changed|disconnected)/u.test(
+                      cause.message,
+                    )
+                      ? "disconnected"
+                      : "protocol",
+                  stage: "register",
+                  cause,
+                }),
             }).pipe(
               Effect.onExit((exit) =>
                 Exit.isFailure(exit) && registration === currentRegistration
