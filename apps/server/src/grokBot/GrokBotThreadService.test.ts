@@ -17,7 +17,6 @@ import {
   ThreadId,
   type GrokBot,
   type GrokBotOrchestratorConfig,
-  type OrchestrationV2ProviderSession,
 } from "@t3tools/contracts";
 import type { ProviderAdapterV2 } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -292,7 +291,7 @@ const create = (id: string, selected = selection) =>
   );
 
 it.effect(
-  "agent messages restart an unsettled pending Grok attempt instead of queueing indefinitely",
+  "agent messages queue behind an unsettled pending Grok attempt without steering or superseding it",
   () =>
     Effect.gen(function* () {
       yield* observing;
@@ -400,13 +399,16 @@ it.effect(
         { botId: bot.id, message: "follow up", clientRequestId: "followup" },
         caller,
       );
-      assert.equal(next.delivery, "started");
+      assert.equal(next.delivery, "queued");
       const updated = yield* orchestrator.getThreadProjection(first.threadId!);
-      assert.lengthOf(updated.runs, 1);
-      assert.notEqual(updated.runs[0]?.activeAttemptId, run.activeAttemptId);
+      assert.lengthOf(updated.runs, 2);
+      assert.equal(
+        updated.runs.find((candidate) => candidate.id === run.id)?.activeAttemptId,
+        run.activeAttemptId,
+      );
       assert.equal(
         updated.attempts.find((attempt) => attempt.id === run.activeAttemptId)?.status,
-        "superseded",
+        initial.attempts.find((attempt) => attempt.id === run.activeAttemptId)?.status,
       );
       const retry = yield* service.send(
         { botId: bot.id, message: "follow up", clientRequestId: "followup" },

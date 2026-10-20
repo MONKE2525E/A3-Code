@@ -3942,6 +3942,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly notification?: OrchestrationV2ConversationMessage["notification"];
     readonly delegatedCompletion?: OrchestrationV2ConversationMessage["delegatedCompletion"];
     readonly forceRestart: boolean;
+    readonly nativeAttentionRestart?: boolean;
   }) =>
     Effect.gen(function* () {
       const targetRun = input.projection.runs.find(
@@ -4010,7 +4011,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Provider thread ${targetRun.providerThreadId} has no active provider session for steering.`,
         });
       }
-      if (providerThread.driver === "grok-bot" || providerThread.driver === "muse-agent") {
+      const nativeAttentionRestart =
+        input.nativeAttentionRestart === true && providerThread.driver === "grok-bot";
+      if (
+        (providerThread.driver === "grok-bot" || providerThread.driver === "muse-agent") &&
+        !nativeAttentionRestart
+      ) {
         return yield* new OrchestratorDispatchError({
           commandId: input.command.commandId,
           commandType: input.command.type,
@@ -4023,7 +4029,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           (candidate) =>
             candidate.nodeId === rootNodeId &&
             candidate.providerThreadId === providerThread.id &&
-            candidate.status === "running",
+            (candidate.status === "running" ||
+              (nativeAttentionRestart && candidate.status === "pending")),
         ),
         targetRun.activeAttemptId,
       );
@@ -4179,20 +4186,23 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const selectionMustApplyNow =
         selectionChanged &&
         (providerInstanceChanged || selectionTransition?.type !== "apply_on_next_turn");
-      const steeringPolicy = yield* enforceCommandPolicy(input.command)(
-        commandPolicy.decideSteeringExecution({
-          commandId: input.command.commandId,
-          threadId: input.command.threadId,
-          providerInstanceId: targetRun.providerInstanceId,
-          capabilities: session.providerSession.capabilities,
-          forceRestart:
-            input.forceRestart ||
-            selectionMustApplyNow ||
-            (selectionChanged &&
-              turnCapabilities.supportsInterrupt &&
-              turnCapabilities.supportsSteeringByInterruptRestart),
-        }),
-      );
+      const steeringPolicy =
+        nativeAttentionRestart && turnCapabilities.supportsInterrupt
+          ? "interrupt_restart"
+          : yield* enforceCommandPolicy(input.command)(
+              commandPolicy.decideSteeringExecution({
+                commandId: input.command.commandId,
+                threadId: input.command.threadId,
+                providerInstanceId: targetRun.providerInstanceId,
+                capabilities: session.providerSession.capabilities,
+                forceRestart:
+                  input.forceRestart ||
+                  selectionMustApplyNow ||
+                  (selectionChanged &&
+                    turnCapabilities.supportsInterrupt &&
+                    turnCapabilities.supportsSteeringByInterruptRestart),
+              }),
+            );
 
       if (steeringPolicy === "active_steering") {
         // The steer's selection becomes the saved next-turn choice, even when it
@@ -4865,6 +4875,31 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         command.dispatchMode,
         command.deliveryIntent,
       );
+      // A child awaiting input cannot finish the native parent's blocking wait.
+      // Restart only this server-owned attention delivery; user follow-ups stay queued.
+      const blockedGrokRun =
+        command.createdBy === "agent" &&
+        command.creationSource === "server" &&
+        command.notification?.source.kind === "system" &&
+        command.dispatchMode.type === "queue_after_active" &&
+        command.deliveryIntent === "auto"
+          ? projection.runs.findLast(
+              (run) =>
+                run.status === "running" &&
+                projection.providerThreads.some(
+                  (thread) => thread.id === run.providerThreadId && thread.driver === "grok-bot",
+                ) &&
+                projection.subagents.some(
+                  (task) =>
+                    task.runId === run.id &&
+                    task.origin === "app_owned" &&
+                    task.status === "running" &&
+                    (task.completionWake ?? "settled_only") === "settled_only",
+                ),
+            )
+          : undefined;
+      if (blockedGrokRun !== undefined)
+        dispatchMode = { type: "restart_active", targetRunId: blockedGrokRun.id };
       if (dispatchMode.type === "steer_active") {
         const targetRunId = dispatchMode.targetRunId;
         const target = projection.runs.find((run) => run.id === targetRunId);
@@ -4894,7 +4929,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             !(
               command.dispatchMode.type === "queue_after_active" &&
               command.deliveryIntent === "auto" &&
-              dispatchMode.type === "start_immediately"
+              (dispatchMode.type === "start_immediately" || blockedGrokRun !== undefined)
             ) &&
             !(
               command.restartContinuationOfRunId !== undefined &&
@@ -5067,6 +5102,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(command.voiceRequest === undefined ? {} : { voiceRequest: command.voiceRequest }),
           ...(command.notification === undefined ? {} : { notification: command.notification }),
           forceRestart: dispatchMode.type === "restart_active",
+          nativeAttentionRestart: blockedGrokRun !== undefined,
         });
         return;
       }
