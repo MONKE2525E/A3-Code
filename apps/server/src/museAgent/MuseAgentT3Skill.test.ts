@@ -105,3 +105,16 @@ it.effect("never treats an account change as a missing skill", () => {
     expect(f.writes).toHaveLength(0);
   }).pipe(Effect.provide(f.layer));
 });
+
+it.effect("restores managed files edited by Muse before verifying them", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const service = yield* Skill.MuseAgentT3Skill;
+    yield* service.install("account");
+    for (const [path, content] of f.files) f.files.set(path, `${content}\nMuse additions`);
+    yield* service.install("account");
+    yield* service.verify("account");
+    expect(f.writes).toHaveLength(4);
+    expect(f.files.get(Skill.MUSE_T3_SKILL_PATH)).toBe(Skill.MUSE_T3_SKILL_CONTENT);
+  }).pipe(Effect.provide(f.layer));
+});

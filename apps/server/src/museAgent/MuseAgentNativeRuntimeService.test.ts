@@ -191,8 +191,11 @@ const fixture = () => {
         Layer.succeed(Delivery.MuseAgentDeliveryStore, delivery),
         Layer.succeed(T3Skill.MuseAgentT3Skill, {
           install: () =>
-            Effect.sync(() => {
+            Effect.suspend(() => {
               skillActions.push("install");
+              return skillFailure
+                ? Effect.fail(new T3Skill.MuseAgentT3SkillError({ kind: "readback_failed" }))
+                : Effect.void;
             }),
           verify: () =>
             Effect.suspend(() => {
@@ -1367,14 +1370,14 @@ it.effect("does not restore a selected option after uncertain chat admission", (
   }).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)));
 });
 
-it.effect("send verifies the managed skill before delivery", () => {
+it.effect("send refreshes and verifies the managed skill before delivery", () => {
   const f = fixture();
   return Effect.gen(function* () {
     const native = yield* Native.MuseAgentNativeRuntimeService;
     f.failSkill();
     const result = yield* native.send(request).pipe(Effect.exit);
     assert.isTrue(Exit.isFailure(result));
-    assert.deepStrictEqual(f.skillActions, ["verify"]);
+    assert.deepStrictEqual(f.skillActions, ["install"]);
     assert.isFalse(f.calls.some((call) => call.method === "chat.stream"));
   }).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)));
 });
@@ -1388,7 +1391,7 @@ it.effect("recovers an accepted receipt without requiring the skill again", () =
     const replay = yield* native.send(request);
     assert.strictEqual(replay.messageId, first.messageId);
     assert.isTrue(replay.replayed);
-    assert.deepStrictEqual(f.skillActions, ["verify"]);
+    assert.deepStrictEqual(f.skillActions, ["install"]);
     assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 1);
   }).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)));
 });

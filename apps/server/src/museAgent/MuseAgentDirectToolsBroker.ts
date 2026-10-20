@@ -153,7 +153,8 @@ export const installLayer = Layer.effectDiscard(
         const registration = yield* Effect.acquireRelease(
           register(catalog, invoke).pipe(
             Effect.mapError(
-              () => new NativeTools.NativeAgentDirectToolsError({ code: "registration_failed" }),
+              (cause) =>
+                new NativeTools.NativeAgentDirectToolsError({ code: "registration_failed", cause }),
             ),
           ),
           (registration) =>

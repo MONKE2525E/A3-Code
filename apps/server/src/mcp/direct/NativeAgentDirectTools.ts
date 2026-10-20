@@ -27,6 +27,7 @@ export const DIRECT_TOOL_LIMITS = {
 export class NativeAgentDirectToolsError extends Schema.TaggedError<NativeAgentDirectToolsError>()(
   "NativeAgentDirectToolsError",
   {
+    cause: Schema.optional(Schema.Defect()),
     code: Schema.Literals([
       "invalid_scope",
       "not_installed",

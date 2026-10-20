@@ -540,7 +540,7 @@ const make = Effect.gen(function* () {
                 return yield* restore(
                   Effect.gen(function* () {
                     yield* t3Skill
-                      .verify(input.binding)
+                      .install(input.binding)
                       .pipe(
                         Effect.mapError((cause) => new ProviderPromptNotSubmittedError({ cause })),
                       );

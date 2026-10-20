@@ -716,7 +716,11 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
                             close: native.unregisterTools(binding, clientId),
                           })),
                           Effect.mapError(
-                            () => new NativeAgentDirectToolsError({ code: "registration_failed" }),
+                            (cause) =>
+                              new NativeAgentDirectToolsError({
+                                code: "registration_failed",
+                                cause,
+                              }),
                           ),
                           Effect.onExit((exit) =>
                             Exit.isFailure(exit)
