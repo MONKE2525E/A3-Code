@@ -57,6 +57,24 @@ describe("native Muse option choices", () => {
     expect(widgets[0]?.options).toEqual([text]);
     expect(widgets[0]?.selectedText).toBe(text);
   });
+  it("keeps native choices selectable when their initial selected text is null", () => {
+    const event = row();
+    const native = event.payload.widgets[0]!;
+    const widgets = museOptionWidgets(
+      [
+        {
+          ...event,
+          payload: {
+            widgets: [{ ...native, state: { version: 2, data: { selectedText: null } } }],
+          },
+        },
+      ],
+      "primary",
+    );
+    expect(widgets[0]?.version).toBe(2);
+    expect(widgets[0]?.selectedText).toBeNull();
+    expect(museSelectableOption(widgets, selection)).toBe(widgets[0]);
+  });
   it("rejects foreign sessions, malformed widgets and subagent surfaces", () => {
     expect(museOptionWidgets([row()], "other")).toEqual([]);
     expect(

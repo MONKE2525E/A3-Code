@@ -6,7 +6,7 @@ const Id = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024));
 const Text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8192));
 const State = Schema.Struct({
   version: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
-  data: Schema.Struct({ selectedText: Schema.optionalKey(Text) }),
+  data: Schema.Struct({ selectedText: Schema.optionalKey(Schema.NullOr(Text)) }),
 });
 const Widget = Schema.Struct({
   kind: Schema.Literal("option"),

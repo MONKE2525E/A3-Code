@@ -255,7 +255,8 @@ export const layer: Layer.Layer<
         (handoff) =>
           handoff.status === "ready" &&
           (handoff.targetRunId === run.id ||
-            (handoff.toProviderThreadId === run.providerThreadId &&
+            (providerThread?.driver !== "muse-agent" &&
+              handoff.toProviderThreadId === run.providerThreadId &&
               projection.runs.some(
                 (source) =>
                   source.id === handoff.targetRunId &&
@@ -797,6 +798,8 @@ export const layer: Layer.Layer<
           }),
         );
         if (replacement === undefined) return undefined;
+        // Muse reattaches its cloud conversation; local failures are not missing native history.
+        if (session.driver === "muse-agent") return replacement;
         const transferId = yield* idAllocator.allocate.contextTransfer({
           sourceThreadId: projection.thread.id,
           targetThreadId: projection.thread.id,
@@ -1178,6 +1181,7 @@ export const layer: Layer.Layer<
       };
       const missedRuns = projection.runs.filter(
         (source) =>
+          session.driver !== "muse-agent" &&
           source.ordinal < run.ordinal &&
           source.providerThreadId === providerThread.id &&
           (source.status === "failed" || source.status === "interrupted") &&

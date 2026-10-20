@@ -33,7 +33,11 @@ import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 
-const makeHarness = (mode: "refused" | "uncertain" | "accepted") => {
+const makeHarness = (
+  mode: "refused" | "uncertain" | "accepted",
+  previousFailure = false,
+  resumeFailure = false,
+) => {
   const now = DateTime.makeUnsafe("2026-10-13T12:00:00Z");
   const threadId = ThreadId.make("muse-handoff-thread");
   const runId = RunId.make("muse-handoff-run");
@@ -117,6 +121,22 @@ const makeHarness = (mode: "refused" | "uncertain" | "accepted") => {
     checkpoints: [],
     updatedAt: now,
   } as unknown as OrchestrationV2ThreadProjection;
+  if (previousFailure) {
+    const current = projection.runs[0]!;
+    const failedId = RunId.make("muse-previous-failed-run");
+    projection = {
+      ...projection,
+      runs: [
+        { ...current, id: failedId, ordinal: 1, status: "failed" },
+        { ...current, ordinal: 2 },
+      ],
+      contextHandoffs: projection.contextHandoffs.map((handoff) => ({
+        ...handoff,
+        targetRunId: failedId,
+        strategy: "delta_since_target_last_seen",
+      })),
+    };
+  }
   const persisted: Array<OrchestrationV2DomainEvent> = [];
   const prompts: string[] = [];
   let turnResult: Result.Result<void, ProviderAdapter.ProviderAdapterV2Error> | undefined;
@@ -134,11 +154,25 @@ const makeHarness = (mode: "refused" | "uncertain" | "accepted") => {
       updatedAt: now,
       lastError: null,
     },
-    resumeThread: () => Effect.succeed(projection.providerThreads[0]!),
+    resumeThread: () =>
+      resumeFailure
+        ? Effect.fail(
+            new ProviderAdapter.ProviderAdapterTurnStartError({
+              driver,
+              threadId,
+              providerThreadId,
+              runId,
+              cause: new Error("observer disconnected"),
+            }),
+          )
+        : Effect.succeed(projection.providerThreads[0]!),
+    ensureThread: () => Effect.succeed(projection.providerThreads[0]!),
     startTurn: (input: ProviderAdapter.ProviderAdapterV2TurnInput) =>
       Effect.gen(function* () {
         // The pending intent is durable before the adapter can receive the prompt.
-        expect(projection.contextHandoffs[0]?.delivery?.status).toBe("pending");
+        expect(projection.contextHandoffs[0]?.delivery?.status).toBe(
+          previousFailure ? undefined : "pending",
+        );
         prompts.push(input.message.text);
         if (mode === "accepted") return;
         const failure = new Error(
@@ -266,5 +300,25 @@ it.effect("records an inline handoff only after Muse accepts its prompt", () =>
       status: "inline",
     });
     expect(harness.prompts).toHaveLength(1);
+  }),
+);
+
+it.effect("sends only the new message after a failed Muse turn", () =>
+  Effect.gen(function* () {
+    const harness = makeHarness("accepted", true);
+    yield* harness.start;
+    expect(harness.turnResult()?._tag).toBe("Success");
+    expect(harness.prompts).toEqual(["Continue"]);
+    expect(harness.deliveryWrites()).toEqual([]);
+  }),
+);
+
+it.effect("reattaches Muse without injecting a local recovery transcript", () =>
+  Effect.gen(function* () {
+    const harness = makeHarness("accepted", true, true);
+    yield* harness.start;
+    expect(harness.turnResult()?._tag).toBe("Success");
+    expect(harness.prompts).toEqual(["Continue"]);
+    expect(harness.deliveryWrites()).toEqual([]);
   }),
 );

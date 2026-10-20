@@ -3063,7 +3063,11 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
           </AssistantCitationSource>
         </div>
         {hasMuseOptionWidget && ctx.threadRef ? (
-          <MuseAgentOptionWidgets threadRef={ctx.threadRef} messageId={row.message.id} />
+          <MuseAgentOptionWidgets
+            threadRef={ctx.threadRef}
+            messageId={row.message.id}
+            isStreaming={Boolean(row.message.streaming)}
+          />
         ) : null}
         {assistantAttachments && hasAssistantAttachments ? (
           <AssistantMessageAttachments attachments={assistantAttachments} />

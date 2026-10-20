@@ -1,6 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { ScopedThreadRef } from "@t3tools/contracts";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { randomUUID } from "~/lib/utils";
 import { useThreadShell } from "~/state/entities";
 import { museAgentFeatureUpdate, museAgentOptionWidgetsQuery } from "~/state/museAgent";
@@ -10,16 +10,20 @@ import { useAtomCommand } from "~/state/use-atom-command";
 export function MuseAgentOptionWidgets({
   threadRef,
   messageId,
+  isStreaming,
 }: {
   readonly threadRef: ScopedThreadRef;
   readonly messageId: string;
+  readonly isStreaming: boolean;
 }) {
   const shell = useThreadShell(threadRef);
   if (!shell) return null;
   return (
     <OptionWidgets
+      key={messageId}
       threadRef={threadRef}
       messageId={messageId}
+      isStreaming={isStreaming}
       providerInstanceId={shell.modelSelection.instanceId}
     />
   );
@@ -28,10 +32,12 @@ export function MuseAgentOptionWidgets({
 function OptionWidgets({
   threadRef,
   messageId,
+  isStreaming,
   providerInstanceId,
 }: {
   readonly threadRef: ScopedThreadRef;
   readonly messageId: string;
+  readonly isStreaming: boolean;
   readonly providerInstanceId: NonNullable<
     ReturnType<typeof useThreadShell>
   >["modelSelection"]["instanceId"];
@@ -42,6 +48,11 @@ function OptionWidgets({
       input: { operation: "option_widgets", providerInstanceId, threadId: threadRef.threadId },
     }),
   );
+  const { refresh } = view;
+  useEffect(() => {
+    // Native history can acquire the widget after its marker starts streaming.
+    if (!isStreaming) refresh();
+  }, [isStreaming, refresh]);
   const canSelect = useAtomValue(
     museAgentFeatureUpdate.permissionAtom(threadRef.environmentId, { operation: "option_select" }),
   );
@@ -56,10 +67,10 @@ function OptionWidgets({
   if (!widgets.length)
     return (
       <p
-        role={view.isPending ? "status" : undefined}
+        role={view.isPending || isStreaming ? "status" : undefined}
         className="mt-2 text-sm text-muted-foreground"
       >
-        {view.isPending
+        {view.isPending || isStreaming
           ? "Loading Muse choices…"
           : view.error
             ? "Muse choices could not load. Reopen the conversation to try again."
