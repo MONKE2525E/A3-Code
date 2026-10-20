@@ -205,9 +205,13 @@ export const makeMuseAgentSessionSourceLayer = (
                       : [];
                   if (!cookies.length) throw new Error("missing_readable_session");
                   const hash = NodeCrypto.createHash("sha256");
-                  for (const cookie of [...cookies].sort((a, b) =>
-                    `${a.domain}/${a.name}`.localeCompare(`${b.domain}/${b.name}`),
-                  )) {
+                  // Muse refreshes hatch_vml on page navigation, including in the shared sign-in context.
+                  // Keep importing it, but do not treat that refresh as a different authenticated session.
+                  for (const cookie of cookies
+                    .filter((cookie) => cookie.name !== "hatch_vml")
+                    .sort((a, b) =>
+                      `${a.domain}/${a.name}`.localeCompare(`${b.domain}/${b.name}`),
+                    )) {
                     for (const field of [cookie.domain, cookie.name, cookie.path, cookie.value])
                       hash.update(field).update("\0");
                   }

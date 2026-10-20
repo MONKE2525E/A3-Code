@@ -87,6 +87,53 @@ it.effect("uses the private T3 browser session without an installed Muse compani
   ),
 );
 
+it.effect(
+  "ignores navigation cookie refreshes while detecting authenticated session changes",
+  () => {
+    let navigationValue = "navigation-a";
+    let sessionValue = "session-a";
+    return Effect.gen(function* () {
+      const source = yield* Source.MuseAgentSessionSource;
+      const before = yield* source.read;
+      navigationValue = "navigation-b";
+      const refreshed = yield* source.read;
+      assert.equal(refreshed.fingerprint, before.fingerprint);
+      assert.equal(
+        refreshed.cookies.find((cookie) => cookie.name === "hatch_vml")?.value,
+        navigationValue,
+      );
+      sessionValue = "session-b";
+      const switched = yield* source.read;
+      assert.notEqual(switched.fingerprint, before.fingerprint);
+    }).pipe(
+      Effect.provide(
+        Source.makeMuseAgentSessionSourceLayer({
+          homeDir: "/nonexistent-synthetic-muse-home",
+        }).pipe(
+          Layer.provide(
+            Layer.mock(Integration.IntegrationBrowser)({
+              museCookies: Effect.sync(() =>
+                [
+                  { name: "hatch_sess", value: sessionValue },
+                  { name: "hatch_vml", value: navigationValue },
+                ].map((cookie) => ({
+                  ...cookie,
+                  domain: "muse.ai",
+                  path: "/",
+                  expires: -1,
+                  httpOnly: true,
+                  secure: true,
+                  sameSite: "Lax" as const,
+                })),
+              ),
+            }),
+          ),
+        ),
+      ),
+    );
+  },
+);
+
 it.effect.each(["current", "legacy", "both"] as const)(
   "discovers %s Muse cookie jars and prefers the current Chromium location",
   (layout) =>
