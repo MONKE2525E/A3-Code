@@ -56,6 +56,7 @@ const fixture = () => {
   let unreadable = false;
   let rotateDuringConnect = false;
   let failSend = false;
+  let ready = true;
   let stageHook: Effect.Effect<void, Transport.MuseAgentTransportError> = Effect.void;
   let preDispatchHook: Effect.Effect<void, Transport.MuseAgentTransportError> = Effect.void;
   let admissionHook: Effect.Effect<void, Transport.MuseAgentTransportError> = Effect.void;
@@ -83,9 +84,11 @@ const fixture = () => {
       Effect.sync(() => {
         localReleases.push(input.deliveryKey);
       }),
-    connect: Effect.sync(() => {
+    connect: Effect.suspend(() => {
+      if (!ready)
+        return Effect.fail(new Transport.MuseAgentTransportError({ kind: "disconnected" }));
       if (rotateDuringConnect) fingerprint = "session-b";
-      return authority;
+      return Effect.succeed(authority);
     }),
     request: (_, method, params, _write, _deliveryKey, onDispatch) =>
       Effect.gen(function* () {
@@ -258,6 +261,9 @@ const fixture = () => {
       fingerprint = "session-b";
       authority = "b".repeat(64);
     },
+    setReady: (value: boolean) => {
+      ready = value;
+    },
     setFailSend: () => {
       failSend = true;
     },
@@ -424,6 +430,11 @@ it.effect(
                 ? Deferred.succeed(foreignObserved, undefined).pipe(Effect.asVoid)
                 : Effect.void;
             }),
+            Effect.onExit((exit) =>
+              Exit.isFailure(exit)
+                ? Deferred.complete(foreignObserved, Effect.die(exit.cause))
+                : Effect.void,
+            ),
             Effect.forkScoped,
           );
         yield* collect(observer, observerForeignObserved);
@@ -455,6 +466,10 @@ it.effect(
             meta: { seq: 1, ts_ms: 1000 },
           });
         }
+        // Native readiness can disappear while already admitted frames are
+        // waiting on local ownership. Both readers must keep projecting them.
+        f.setReady(false);
+        assert.strictEqual((yield* native.accountBinding.pipe(Effect.flip)).kind, "disconnected");
         yield* Deferred.succeed(release, undefined);
         yield* Fiber.join(sending);
         yield* Deferred.await(observerForeignObserved);

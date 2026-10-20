@@ -247,6 +247,7 @@ const make = Effect.gen(function* () {
     readonly completed: Deferred.Deferred<void>;
   }>();
   let connected: { binding: string; fingerprint: string } | undefined;
+  let verifiedAccount: typeof connected;
   const sessionSnapshot = source.read.pipe(
     Effect.mapError(
       (cause) =>
@@ -260,6 +261,7 @@ const make = Effect.gen(function* () {
     if (before.fingerprint !== after.fingerprint)
       return yield* new MuseAgentRuntimeError({ kind: "account_changed" });
     connected = { binding, fingerprint: after.fingerprint };
+    verifiedAccount = connected;
     return binding;
   }).pipe(
     Effect.tapError(() =>
@@ -270,6 +272,13 @@ const make = Effect.gen(function* () {
   );
   const check = Effect.fnUntraced(function* (binding: string) {
     if ((yield* accountBinding) !== binding)
+      return yield* new MuseAgentRuntimeError({ kind: "account_changed" });
+  });
+  const checkOwnershipAccount = Effect.fnUntraced(function* (binding: string) {
+    const current = yield* sessionSnapshot;
+    // Stream frames are already authority-fenced. Local receipts need the same
+    // verified session, not a ready native socket during reconnects.
+    if (verifiedAccount?.binding !== binding || verifiedAccount.fingerprint !== current.fingerprint)
       return yield* new MuseAgentRuntimeError({ kind: "account_changed" });
   });
   const decode = <A>(value: unknown, codec: Schema.Codec<A, unknown>) =>
@@ -706,7 +715,7 @@ const make = Effect.gen(function* () {
     settleDelivery: deliveries.settle,
     historyOwnership: (scope, options) =>
       Effect.gen(function* () {
-        yield* check(scope.binding);
+        yield* checkOwnershipAccount(scope.binding);
         if (options?.awaitAdmissions) {
           const pending = [...admissions].filter(
             (entry) =>
@@ -718,7 +727,7 @@ const make = Effect.gen(function* () {
           yield* Effect.forEach(pending, (entry) => Deferred.await(entry.completed), {
             discard: true,
           });
-          yield* check(scope.binding);
+          yield* checkOwnershipAccount(scope.binding);
         }
         return yield* deliveries.historyOwnership(scope, {
           receiptsOnly: options?.receiptsOnly ?? false,
