@@ -218,7 +218,7 @@ import {
   findLatestProposedPlan,
   hasActionableProposedPlan,
   isLatestRunSettled,
-  resolveGrokBotSendDispatchMode,
+  resolveNativeAgentSendDispatchMode,
 } from "../session-logic";
 import { type LegendListRef } from "@legendapp/list/react";
 import {
@@ -9544,9 +9544,9 @@ export default function ChatView(props: ChatViewProps) {
       resumeCompactionTokens !== null &&
       !keepFullHistory &&
       messageTextForSend.toLowerCase() !== "/compact";
-    // Once setup finishes, a GrokBot send restarts an active run or starts an idle turn.
-    const sendDispatchMode = resolveGrokBotSendDispatchMode({
-      isGrokBotThread,
+    // Native agents queue follow-ups; neither supports steering or restart-based steering.
+    const sendDispatchMode = resolveNativeAgentSendDispatchMode({
+      isNativeAgentThread: isNativeAgentComposerThread,
       phase,
       dispatchMode,
     });
@@ -12043,7 +12043,7 @@ export default function ChatView(props: ChatViewProps) {
                               }
                               isPreparingWorktree={isPreparingWorktree && !sendQueuesBehindSetup}
                               queuedRunsControl={
-                                isServerThread && activeThread && !isGrokBotThread ? (
+                                isServerThread && activeThread ? (
                                   <QueuedRunsControl
                                     ref={queuedRunsControlRef}
                                     steerShortcutLabel={shortcutLabelForCommand(

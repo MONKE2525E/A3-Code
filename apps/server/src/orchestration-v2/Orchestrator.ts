@@ -4010,16 +4010,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Provider thread ${targetRun.providerThreadId} has no active provider session for steering.`,
         });
       }
+      if (providerThread.driver === "grok-bot" || providerThread.driver === "muse-agent") {
+        return yield* new OrchestratorDispatchError({
+          commandId: input.command.commandId,
+          commandType: input.command.type,
+          cause: "Native agents do not support steering. Queue the message for their next turn.",
+        });
+      }
       const providerSessionId = providerThread.providerSessionId;
-      // Grok has no turn-start event: an accepted native turn remains pending until explicit
-      // completion. A follow-up can interrupt/restart that exact attempt, never mark it done.
       const providerTurn = latestProviderTurnForAttempt(
         input.projection.providerTurns.filter(
           (candidate) =>
             candidate.nodeId === rootNodeId &&
             candidate.providerThreadId === providerThread.id &&
-            (candidate.status === "running" ||
-              (providerThread.driver === "grok-bot" && candidate.status === "pending")),
+            candidate.status === "running",
         ),
         targetRun.activeAttemptId,
       );
@@ -4861,25 +4865,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         command.dispatchMode,
         command.deliveryIntent,
       );
-      const targetRunId =
-        dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active"
-          ? dispatchMode.targetRunId
-          : undefined;
-      const grokTarget =
-        dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active"
-          ? projection.runs.find((run) => run.id === targetRunId)
-          : command.deliveryIntent === "auto"
-            ? projection.runs.findLast((run) => run.status === "running")
-            : undefined;
-      const restartGrokTurn =
-        grokTarget?.status === "running" &&
-        projection.providerThreads.some(
-          (thread) => thread.id === grokTarget.providerThreadId && thread.driver === "grok-bot",
-        ) &&
-        (dispatchMode.type === "steer_active" || command.deliveryIntent === "auto");
-      if (restartGrokTurn) {
-        dispatchMode = { type: "restart_active", targetRunId: grokTarget.id };
-      }
       if (dispatchMode.type === "steer_active") {
         const targetRunId = dispatchMode.targetRunId;
         const target = projection.runs.find((run) => run.id === targetRunId);
@@ -4899,8 +4884,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           dispatchMode = { type: "start_immediately" };
         }
       }
-      // Automatic child-attention delivery can release a native Grok wait.
-      // If that run settled before dispatch, the queued intent starts a new turn.
+      // If the active run settled before dispatch, automatic queued intent starts a new turn.
       // Restart continuations also start immediately.
       if (
         command.notification !== undefined &&
@@ -4910,7 +4894,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             !(
               command.dispatchMode.type === "queue_after_active" &&
               command.deliveryIntent === "auto" &&
-              (dispatchMode.type === "start_immediately" || restartGrokTurn)
+              dispatchMode.type === "start_immediately"
             ) &&
             !(
               command.restartContinuationOfRunId !== undefined &&

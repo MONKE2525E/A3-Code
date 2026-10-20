@@ -83,7 +83,7 @@ export const GrokBotCapabilitiesV2 = {
     emitsTurnCompleted: true,
     supportsInterrupt: true,
     supportsActiveSteering: false,
-    supportsSteeringByInterruptRestart: true,
+    supportsSteeringByInterruptRestart: false,
     supportsQueuedMessages: true,
     terminalStatusQuality: "weak",
   },

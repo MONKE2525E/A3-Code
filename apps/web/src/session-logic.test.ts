@@ -33,7 +33,7 @@ import {
   derivePhase,
   findLatestProposedPlan,
   isLatestRunSettled,
-  resolveGrokBotSendDispatchMode,
+  resolveNativeAgentSendDispatchMode,
   selectHandoffImageResources,
   selectMessageImageResources,
   createMessageAttachmentPreviewProjector,
@@ -2032,81 +2032,34 @@ it("renders automatic completion as a work entry instead of a user bubble", () =
   ).toBe("message");
 });
 
-describe("Grok Bot send dispatch", () => {
-  it("restarts a Grok Bot run for a send while it is in flight, whatever the native turn state", () => {
-    // Running with no active provider turn (stale or native-idle-unsettled) still restarts.
-    expect(
-      resolveGrokBotSendDispatchMode({
-        isGrokBotThread: true,
-        phase: "running",
-        dispatchMode: "auto",
-      }),
-    ).toBe("restart");
-    expect(
-      resolveGrokBotSendDispatchMode({
-        isGrokBotThread: true,
-        phase: "running",
-        dispatchMode: "queue",
-      }),
-    ).toBe("restart");
-  });
+describe("native agent send dispatch", () => {
+  it.each(["auto", "queue", "steer", "restart"] as const)(
+    "queues %s input behind a running native agent instead of steering or restarting it",
+    (dispatchMode) => {
+      expect(
+        resolveNativeAgentSendDispatchMode({
+          isNativeAgentThread: true,
+          phase: "running",
+          dispatchMode,
+        }),
+      ).toBe("queue");
+    },
+  );
 
-  it("restarts when the run is awaiting native completion, since the phase stays running", () => {
-    const awaitingCompletion = deriveGrokBotAwaitingCompletion({
-      isGrokBotThread: true,
-      phase: "running",
-      hasPendingInput: false,
-      runStartedAtMs: 1_000,
-      nowMs: 2_000,
-      nativeActivity: {
-        source: "native",
-        isRunning: false,
-        isComposingMessage: false,
-        awaitingUserResponse: null,
-        observedAtMs: 1_500,
-      },
-    });
-    expect(awaitingCompletion).toBe(true);
+  it("keeps idle native sends and other providers on their configured dispatch", () => {
     expect(
-      resolveGrokBotSendDispatchMode({
-        isGrokBotThread: true,
-        phase: "running",
-        dispatchMode: "auto",
-      }),
-    ).toBe("restart");
-  });
-
-  it("keeps the caller's dispatch for an idle Grok Bot send", () => {
-    expect(
-      resolveGrokBotSendDispatchMode({
-        isGrokBotThread: true,
+      resolveNativeAgentSendDispatchMode({
+        isNativeAgentThread: true,
         phase: "ready",
         dispatchMode: "auto",
       }),
     ).toBe("auto");
     expect(
-      resolveGrokBotSendDispatchMode({
-        isGrokBotThread: true,
-        phase: "disconnected",
-        dispatchMode: "auto",
-      }),
-    ).toBe("auto");
-  });
-
-  it("leaves other providers' running sends on their configured dispatch", () => {
-    expect(
-      resolveGrokBotSendDispatchMode({
-        isGrokBotThread: false,
+      resolveNativeAgentSendDispatchMode({
+        isNativeAgentThread: false,
         phase: "running",
         dispatchMode: "steer",
       }),
     ).toBe("steer");
-    expect(
-      resolveGrokBotSendDispatchMode({
-        isGrokBotThread: false,
-        phase: "running",
-        dispatchMode: "queue",
-      }),
-    ).toBe("queue");
   });
 });
