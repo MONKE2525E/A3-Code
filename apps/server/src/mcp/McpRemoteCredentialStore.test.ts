@@ -10,7 +10,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
-import migration from "../persistence/Migrations/062_GrokBotManagedRuntime.ts";
+import migration from "../persistence/Migrations/068_GrokBotManagedRuntime.ts";
 import * as Store from "./McpRemoteCredentialStore.ts";
 
 const database = Layer.effectDiscard(migration).pipe(

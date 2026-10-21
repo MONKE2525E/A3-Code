@@ -358,7 +358,7 @@ const make = Effect.gen(function* () {
           yield* dispatch({
             type: "grok-bot.thread.rebind",
             commandId: CommandId.make(
-              `grok-bot:rebind:${yield* crypto.randomUUIDv4.pipe(Effect.mapError(storageError))}`,
+              `grok-bot:rebind:${yield* crypto.randomUUIDv4().pipe(Effect.mapError(storageError))}`,
             ),
             threadId: thread.id,
             projectId,
@@ -369,7 +369,7 @@ const make = Effect.gen(function* () {
           yield* dispatch({
             type: "thread.unarchive",
             commandId: CommandId.make(
-              `grok-bot:unarchive:${yield* crypto.randomUUIDv4.pipe(Effect.mapError(storageError))}`,
+              `grok-bot:unarchive:${yield* crypto.randomUUIDv4().pipe(Effect.mapError(storageError))}`,
             ),
             threadId: thread.id,
           });
@@ -414,7 +414,7 @@ const make = Effect.gen(function* () {
       .getThread(target.threadId)
       .pipe(Effect.mapError(storageError));
     const key =
-      input.clientRequestId ?? (yield* crypto.randomUUIDv4.pipe(Effect.mapError(storageError)));
+      input.clientRequestId ?? (yield* crypto.randomUUIDv4().pipe(Effect.mapError(storageError)));
     const identity = yield* digestIdentity([
       caller.requestNamespace,
       binding,

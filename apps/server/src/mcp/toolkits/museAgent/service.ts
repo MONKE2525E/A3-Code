@@ -60,35 +60,33 @@ const make = Effect.gen(function* () {
             },
     })),
   );
-  const send = <R = never>(
+  const send = Effect.fn("MuseAgentMcpService.send")(function* <R = never>(
     scope: McpInvocationScope,
     input: Parameters<MuseAgentMcpService["Service"]["send"]>[1],
     authorize?: Effect.Effect<void, OrchestratorMcpFailure, R>,
-  ): Effect.Effect<OrchestratorMcpThreadSendResult, NativeAgentError | OrchestratorMcpFailure, R> =>
-    Effect.gen(function* () {
-      const target = yield* native.openAuthorized(
-        {
-          source: "muse-agent",
-          agentId: "muse",
-          providerInstanceId: input.providerInstanceId,
-          ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
-        },
-        authorize ?? Effect.void,
-      );
-      if (scope.thread?.threadId === target.threadId || scope.call?.threadId === target.threadId)
-        return yield* new OrchestratorMcpFailure({
-          code: "invalid_request",
-          message:
-            "Use the current Muse conversation for this response instead of messaging itself.",
-        });
-      // The shared service validates caller liveness, mode ceilings and idempotency before dispatch.
-      return yield* orchestration.sendToThread(scope, {
-        threadId: target.threadId,
-        message: input.message,
-        mode: "queue",
-        clientRequestId: input.clientRequestId,
+  ) {
+    const target = yield* native.openAuthorized(
+      {
+        source: "muse-agent",
+        agentId: "muse",
+        providerInstanceId: input.providerInstanceId,
+        ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
+      },
+      authorize ?? Effect.void,
+    );
+    if (scope.thread?.threadId === target.threadId || scope.call?.threadId === target.threadId)
+      return yield* new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message: "Use the current Muse conversation for this response instead of messaging itself.",
       });
+    // The shared service validates caller liveness, mode ceilings and idempotency before dispatch.
+    return yield* orchestration.sendToThread(scope, {
+      threadId: target.threadId,
+      message: input.message,
+      mode: "queue",
+      clientRequestId: input.clientRequestId,
     });
+  });
   return MuseAgentMcpService.of({ discover, send });
 });
 export const layer = Layer.effect(MuseAgentMcpService, make);

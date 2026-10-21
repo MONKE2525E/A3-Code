@@ -31,8 +31,8 @@ import {
   makeTurn,
   nativeSession,
 } from "../orchestration-v2/Adapters/GrokBotProvider.testkit.ts";
-import migration from "../persistence/Migrations/062_GrokBotManagedRuntime.ts";
-import completionMigration from "../persistence/Migrations/063_GrokBotManagedCompletion.ts";
+import migration from "../persistence/Migrations/068_GrokBotManagedRuntime.ts";
+import completionMigration from "../persistence/Migrations/069_GrokBotManagedCompletion.ts";
 import * as Authority from "./GrokBotMcpAuthority.ts";
 import * as Native from "./GrokBotNativeRuntimeService.ts";
 import * as Store from "./GrokBotManagedStateStore.ts";

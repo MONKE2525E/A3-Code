@@ -1,3 +1,6 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import { expect, it } from "@effect/vitest";
 import {
   ContextHandoffId,
@@ -204,6 +207,7 @@ const makeHarness = (
     Layer.mock(ProviderAuthService.ProviderAuthService)({}),
     Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({}),
     Layer.mock(ProjectionStore.ProjectionStoreV2)({
+      getThreadRecords: () => Effect.sync(() => projection),
       getTurnStartContext: () => Effect.sync(() => ({ ...projection, hasConversation: true })),
       getRuntimeRecoveryProjection: () => Effect.sync(() => projection),
     }),
@@ -251,7 +255,22 @@ const makeHarness = (
   return {
     start: Effect.gen(function* () {
       yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2).start({ threadId, runId });
-    }).pipe(Effect.provide(ProviderTurnStart.layer.pipe(Layer.provide(dependencies)))),
+    }).pipe(
+      Effect.provide(
+        ProviderTurnStart.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              dependencies,
+              ServerSettings.layerTest(),
+              ServerConfig.layerTest("/repo", "/tmp/t3-muse-turn-start").pipe(
+                Layer.provide(NodeServices.layer),
+              ),
+              NodeServices.layer,
+            ),
+          ),
+        ),
+      ),
+    ),
     handoff: () => projection.contextHandoffs[0]!,
     deliveryWrites: () =>
       persisted.flatMap((event) =>

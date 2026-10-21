@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const mocks = vi.hoisted(() => ({
   dispatch: vi.fn(),
+  resetWorkspace: vi.fn(),
+  platform: { OS: "ios" },
   external: vi.fn().mockResolvedValue(true),
   projects: [
     {
@@ -21,6 +23,10 @@ const mocks = vi.hoisted(() => ({
       },
     },
   ],
+}));
+vi.mock("react-native", () => ({ Platform: mocks.platform }));
+vi.mock("../../lib/android-workspace-navigation", () => ({
+  resetAndroidWorkspace: mocks.resetWorkspace,
 }));
 vi.mock("react", () => ({ useCallback: (callback: unknown) => callback }));
 vi.mock("@react-navigation/native", () => ({
@@ -45,7 +51,10 @@ vi.mock("../../state/atom-registry", () => ({
 import { useOpenPullRequest } from "./useOpenPullRequest";
 
 describe("opening a PR from chat", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.platform.OS = "ios";
+  });
   it("opens only the detail route with the originating thread, without opening GitHub", async () => {
     const open = useOpenPullRequest();
     expect(
@@ -82,5 +91,30 @@ describe("opening a PR from chat", () => {
     await open("https://example.com/docs", "env-a", "pull-request", "thread-a");
     expect(mocks.dispatch).not.toHaveBeenCalled();
     expect(mocks.external).toHaveBeenCalledWith("https://example.com/docs", "pull-request");
+  });
+  it("opens a stand-alone Android PR in the workspace", async () => {
+    mocks.platform.OS = "android";
+    await useOpenPullRequest()("https://github.com/example/app/pull/42", "env-a");
+    expect(mocks.resetWorkspace).toHaveBeenCalledWith(expect.anything(), {
+      name: "PullRequest",
+      params: expect.objectContaining({ number: 42, projectId: "project-a" }),
+    });
+    expect(mocks.dispatch).not.toHaveBeenCalled();
+  });
+  it("preserves the originating Android thread beneath its PR", async () => {
+    mocks.platform.OS = "android";
+    await useOpenPullRequest()(
+      "https://github.com/example/app/pull/42",
+      "env-a",
+      "pull-request",
+      "thread-a",
+    );
+    expect(mocks.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "PUSH",
+        params: expect.objectContaining({ threadId: "thread-a" }),
+      }),
+    );
+    expect(mocks.resetWorkspace).not.toHaveBeenCalled();
   });
 });

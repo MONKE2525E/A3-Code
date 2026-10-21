@@ -1,3 +1,4 @@
+import { PullRequestGlyph } from "./pullRequestGlyphs";
 import type {
   PullRequestAction,
   PullRequestDetail,
@@ -10,7 +11,7 @@ import {
   resolvePullRequestPrimaryControl,
 } from "@t3tools/shared/pullRequestHandoff";
 
-import type { AppSymbolName } from "../../components/AppSymbol";
+import type { AppSymbolName } from "../../components/ui/AppSymbol";
 import { summarizePullRequestChecks, type PullRequestChecksTone } from "./pull-request-model";
 
 /** The desktop's checks rollup: failures first, then anything still waiting, then a pass. */
@@ -312,7 +313,7 @@ export function pullRequestMergeBox(input: PullRequestMenuInput): PullRequestMer
     primaryControl === "merge"
       ? {
           label: methodLabel,
-          icon: "arrow.triangle.merge",
+          icon: PullRequestGlyph.merged,
           command: { kind: "merge", method },
           disabled: busy,
         }
@@ -347,7 +348,7 @@ export function pullRequestMergeBox(input: PullRequestMenuInput): PullRequestMer
         id: `method:${option}`,
         title: PULL_REQUEST_MERGE_METHOD_LABELS[option],
         subtitle: MERGE_METHOD_SUBTITLES[option],
-        icon: "arrow.triangle.merge",
+        icon: PullRequestGlyph.merged,
         checked: option === method,
         command: { kind: "select-merge-method", method: option },
       });
@@ -358,7 +359,7 @@ export function pullRequestMergeBox(input: PullRequestMenuInput): PullRequestMer
       id: "merge-now",
       title: "Merge now",
       subtitle: `${methodLabel}, without waiting for checks.`,
-      icon: "arrow.triangle.merge",
+      icon: PullRequestGlyph.merged,
       disabled: busy,
       command: { kind: "merge", method },
     });

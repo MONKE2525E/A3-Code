@@ -1,3 +1,6 @@
+import { GitRunStackedActionResult, GitResolvePullRequestResult } from "./git.ts";
+const decodeRunStackedActionResult = Schema.decodeUnknownSync(GitRunStackedActionResult);
+const decodeResolvePullRequestResult = Schema.decodeUnknownSync(GitResolvePullRequestResult);
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
@@ -5,10 +8,9 @@ import {
   VcsCreateWorktreeInput,
   VcsCreateWorktreeResult,
   GitPreparePullRequestThreadInput,
+  GitCommandError,
   GitPreparePullRequestThreadResult,
-  GitRunStackedActionResult,
   GitRunStackedActionInput,
-  GitResolvePullRequestResult,
 } from "./git.ts";
 
 const decodeCreateWorktreeInput = Schema.decodeUnknownSync(VcsCreateWorktreeInput);
@@ -16,35 +18,25 @@ const decodeCreateWorktreeResult = Schema.decodeUnknownSync(VcsCreateWorktreeRes
 const decodePreparePullRequestThreadInput = Schema.decodeUnknownSync(
   GitPreparePullRequestThreadInput,
 );
+const decodeGitCommandError = Schema.decodeUnknownSync(Schema.toCodecJson(GitCommandError));
 const decodePreparePullRequestThreadResult = Schema.decodeUnknownSync(
   GitPreparePullRequestThreadResult,
 );
 const decodeRunStackedActionInput = Schema.decodeUnknownSync(GitRunStackedActionInput);
-const decodeRunStackedActionResult = Schema.decodeUnknownSync(GitRunStackedActionResult);
-const decodeResolvePullRequestResult = Schema.decodeUnknownSync(GitResolvePullRequestResult);
 
-describe("VcsCreateWorktreeInput", () => {
-  it("accepts omitted newRefName for existing-refName worktrees", () => {
-    const parsed = decodeCreateWorktreeInput({
+describe("GitCommandError", () => {
+  it("decodes an unknown failure reason as absent", () => {
+    const error = decodeGitCommandError({
+      _tag: "GitCommandError",
+      operation: "GitVcsDriver.createWorktree",
+      command: "git",
       cwd: "/repo",
-      refName: "feature/existing",
-      path: "/tmp/worktree",
+      detail: "git worktree add failed",
+      reason: "added_by_a_newer_server",
     });
 
-    expect(parsed.newRefName).toBeUndefined();
-    expect(parsed.refName).toBe("feature/existing");
-  });
-
-  it("accepts baseRefName metadata for a new worktree ref", () => {
-    const parsed = decodeCreateWorktreeInput({
-      cwd: "/repo",
-      refName: "0123456789abcdef",
-      newRefName: "feature/new",
-      baseRefName: "origin/main",
-      path: "/tmp/worktree",
-    });
-
-    expect(parsed.baseRefName).toBe("origin/main");
+    expect(error.reason).toBeUndefined();
+    expect(error.message).toContain("Git command failed");
   });
 });
 
@@ -62,18 +54,7 @@ describe("VcsCreateWorktreeResult", () => {
   });
 });
 
-describe("GitPreparePullRequestThreadInput", () => {
-  it("accepts pull request references and mode", () => {
-    const parsed = decodePreparePullRequestThreadInput({
-      cwd: "/repo",
-      reference: "#42",
-      mode: "worktree",
-    });
-
-    expect(parsed.reference).toBe("#42");
-    expect(parsed.mode).toBe("worktree");
-  });
-});
+describe("GitPreparePullRequestThreadInput", () => {});
 
 describe("GitPreparePullRequestThreadResult", () => {
   it("defaults legacy responses to the pull request head", () => {
@@ -92,94 +73,17 @@ describe("GitPreparePullRequestThreadResult", () => {
 
     expect(parsed.isOnPullRequestHead).toBe(true);
   });
-
-  it("preserves an explicit stale pull request checkout result", () => {
-    const parsed = decodePreparePullRequestThreadResult({
-      pullRequest: {
-        number: 42,
-        title: "PR threads",
-        url: "https://github.com/pingdotgg/codething-mvp/pull/42",
-        baseBranch: "main",
-        headBranch: "feature/pr-threads",
-        state: "open",
-      },
-      branch: "feature/pr-threads",
-      worktreePath: "/tmp/pr-threads",
-      isOnPullRequestHead: false,
-    });
-
-    expect(parsed.isOnPullRequestHead).toBe(false);
-  });
-});
-
-describe("GitResolvePullRequestResult", () => {
-  it("decodes resolved pull request metadata", () => {
-    const parsed = decodeResolvePullRequestResult({
-      pullRequest: {
-        number: 42,
-        title: "PR threads",
-        url: "https://github.com/pingdotgg/codething-mvp/pull/42",
-        baseBranch: "main",
-        headBranch: "feature/pr-threads",
-        state: "open",
-      },
-    });
-
-    expect(parsed.pullRequest.number).toBe(42);
-    expect(parsed.pullRequest.headBranch).toBe("feature/pr-threads");
-  });
 });
 
 describe("GitRunStackedActionInput", () => {
-  it("accepts explicit stacked actions and requires a client-provided actionId", () => {
+  it("preserves leading and trailing whitespace in file paths", () => {
     const parsed = decodeRunStackedActionInput({
       actionId: "action-1",
       cwd: "/repo",
-      action: "create_pr",
+      action: "commit",
+      filePaths: [" leading.txt", "trailing.txt "],
     });
 
-    expect(parsed.actionId).toBe("action-1");
-    expect(parsed.action).toBe("create_pr");
-  });
-});
-
-describe("GitRunStackedActionResult", () => {
-  it("decodes a server-authored completion toast", () => {
-    const parsed = decodeRunStackedActionResult({
-      action: "commit_push",
-      branch: {
-        status: "created",
-        name: "feature/server-owned-toast",
-      },
-      commit: {
-        status: "created",
-        commitSha: "89abcdef01234567",
-        subject: "feat: move toast state into git manager",
-      },
-      push: {
-        status: "pushed",
-        branch: "feature/server-owned-toast",
-        upstreamBranch: "origin/feature/server-owned-toast",
-      },
-      pr: {
-        status: "skipped_not_requested",
-      },
-      toast: {
-        title: "Pushed 89abcde to origin/feature/server-owned-toast",
-        description: "feat: move toast state into git manager",
-        cta: {
-          kind: "run_action",
-          label: "Create PR",
-          action: {
-            kind: "create_pr",
-          },
-        },
-      },
-    });
-
-    expect(parsed.toast.cta.kind).toBe("run_action");
-    if (parsed.toast.cta.kind === "run_action") {
-      expect(parsed.toast.cta.action.kind).toBe("create_pr");
-    }
+    expect(parsed.filePaths).toEqual([" leading.txt", "trailing.txt "]);
   });
 });

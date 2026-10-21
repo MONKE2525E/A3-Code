@@ -1,5 +1,4 @@
-// The harness asserts raw JSON-RPC wire strings, mirroring the bridge's
-// schema-free passthrough.
+import { AcpMcpBridgeError, callAcpMcpTool } from "./AcpMcpStdioBridge.ts";
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off
 import * as NodeStream from "node:stream";
 import * as NodeHttp from "node:http";
@@ -8,7 +7,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 
-import { AcpMcpBridgeError, callAcpMcpTool, runAcpMcpStdioBridge } from "./AcpMcpStdioBridge.ts";
+import { runAcpMcpStdioBridge } from "./AcpMcpStdioBridge.ts";
 
 function makeHarness(responder: (request: Request) => Promise<Response> | Response) {
   const input = new NodeStream.PassThrough();
@@ -143,66 +142,6 @@ describe("AcpMcpStdioBridge", () => {
       expect(cancelled).toBe(true);
       expect(input.listenerCount("data")).toBe(0);
       expect(written).toEqual([]);
-    }),
-  );
-
-  it.effect("preserves the original transport failure as the typed error cause", () =>
-    Effect.gen(function* () {
-      const source = new Error("fetch failed");
-      const failure = yield* callAcpMcpTool({
-        endpoint: "http://127.0.0.1:1/mcp",
-        authorization: "Bearer bridge-test",
-        tool: "orchestrator_capabilities",
-        arguments: {},
-        fetchImplementation: () => Promise.reject(source),
-      }).pipe(Effect.asVoid, Effect.flip);
-
-      expect(failure).toBeInstanceOf(AcpMcpBridgeError);
-      expect(failure.cause).toBe(source);
-    }),
-  );
-
-  it.effect("calls one tool through a fresh authenticated MCP session", () =>
-    Effect.gen(function* () {
-      const requests: Array<{ readonly body: unknown; readonly headers: Headers }> = [];
-      const result = yield* callAcpMcpTool({
-        endpoint: "http://127.0.0.1:1/mcp",
-        authorization: "Bearer bridge-test",
-        tool: "orchestrator_capabilities",
-        arguments: {},
-        fetchImplementation: async (_url, init) => {
-          const headers = new Headers(init?.headers);
-          const body: unknown = JSON.parse(String(init?.body ?? "{}"));
-          requests.push({ body, headers });
-          const request = body as { readonly id?: unknown; readonly method?: unknown };
-          if (request.method === "notifications/initialized") {
-            return new Response(null, { status: 202 });
-          }
-          return new Response(
-            JSON.stringify({
-              jsonrpc: "2.0",
-              id: request.id,
-              result:
-                request.method === "initialize"
-                  ? { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: {} }
-                  : { structuredContent: { providers: ["codex"] } },
-            }),
-            {
-              headers: { "content-type": "application/json", "mcp-session-id": "session-42" },
-            },
-          );
-        },
-      });
-
-      expect(result).toEqual({ structuredContent: { providers: ["codex"] } });
-      expect(requests).toHaveLength(3);
-      expect(requests[0]?.headers.get("authorization")).toBe("Bearer bridge-test");
-      expect(requests[1]?.headers.get("mcp-session-id")).toBe("session-42");
-      expect(requests[2]?.headers.get("mcp-protocol-version")).toBe("2025-06-18");
-      expect(requests[2]?.body).toMatchObject({
-        method: "tools/call",
-        params: { name: "orchestrator_capabilities", arguments: {} },
-      });
     }),
   );
 

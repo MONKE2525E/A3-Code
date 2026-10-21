@@ -157,14 +157,9 @@ export class ProjectService extends Context.Service<
       options?: { readonly includeDeleted?: boolean },
     ) => Effect.Effect<Option.Option<Project>, ProjectOperationError>;
     readonly snapshot: Effect.Effect<ProjectSnapshot, ProjectOperationError>;
-    /**
-     * An active project's shell with its immediately available repository
-     * identity; missing identity resolves in the background.
-     */
     readonly getShell: (
       projectId: ProjectId,
     ) => Effect.Effect<Option.Option<OrchestrationProjectShell>, ProjectOperationError>;
-    /** Active project shells, enriched like `getShell`, in creation order. */
     readonly listShells: (options?: {
       readonly projectIds?: ReadonlyArray<ProjectId>;
     }) => Effect.Effect<ReadonlyArray<OrchestrationProjectShell>, ProjectOperationError>;
@@ -300,10 +295,6 @@ export const make = Effect.gen(function* () {
         ),
       );
 
-  /**
-   * Plan one command against rows read under its locks, then commit its event or
-   * its rejection. A reused command id resolves to the receipt it already has.
-   */
   const commit = Effect.fn("ProjectService.commit")(function* (command: ProjectCommand) {
     const { projectId } = command;
     const dispatchError = (cause: unknown) =>
@@ -589,12 +580,10 @@ export const make = Effect.gen(function* () {
     }
   });
 
-  /** Refuse a non-empty project without force, else delete its live threads first. */
   const deleteChildThreads = Effect.fn("ProjectService.deleteChildThreads")(function* (
     input: ProjectDeleteInput,
   ) {
     const { projectId } = input;
-    // The V2 shell is the only record of which threads are live.
     const snapshot = yield* threadProjections
       .getShellSnapshot()
       .pipe(

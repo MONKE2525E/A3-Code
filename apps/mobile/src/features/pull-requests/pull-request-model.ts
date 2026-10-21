@@ -1,3 +1,4 @@
+import { PullRequestGlyph } from "./pullRequestGlyphs";
 import type {
   PullRequestCheck,
   PullRequestInvolvement,
@@ -9,7 +10,7 @@ import type {
 
 import { isPullRequestNotFound, readableFailure } from "@t3tools/shared/pullRequestFailure";
 
-import type { AppSymbolName } from "../../components/AppSymbol";
+import type { AppSymbolName } from "../../components/ui/AppSymbol";
 
 /** What the list asks the hosts for, plus the local ordering of what came back. */
 export interface PullRequestFilters {
@@ -166,7 +167,7 @@ export function resolvePullRequestPresentation(
       icon: "exclamationmark.triangle",
     };
   }
-  return { label: "Open", color: STATE_COLORS.open[scheme], icon: "arrow.triangle.pull" };
+  return { label: "Open", color: STATE_COLORS.open[scheme], icon: PullRequestGlyph.pullRequest };
 }
 
 export type PullRequestChecksTone = "none" | "success" | "failure" | "pending";

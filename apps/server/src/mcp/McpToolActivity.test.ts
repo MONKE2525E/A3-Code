@@ -1,3 +1,4 @@
+import * as MergeGit from "../vcs/GitVcsDriver.ts";
 import { assert, it } from "@effect/vitest";
 import { EnvironmentId, EventId, RunAttemptId, RunId, NodeId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -26,7 +27,9 @@ const stores = Layer.mergeAll(EventStore.layer, ProjectionStore.layer, ManagedSt
 );
 const sink = EventSink.layer.pipe(Layer.provideMerge(stores));
 const dependencies = Layer.mergeAll(sink, stores, IdAllocator.layer, ThreadCommandExecutor.layer);
-const ingestor = Ingestor.layer.pipe(Layer.provideMerge(dependencies));
+const ingestor = Ingestor.layer
+  .pipe(Layer.provide(Layer.mock(MergeGit.GitVcsDriver)({})))
+  .pipe(Layer.provideMerge(dependencies));
 const authority = Authority.layer.pipe(
   Layer.provideMerge(stores),
   Layer.provide(Layer.succeed(Native.GrokBotNativeRuntimeService, makeNative())),

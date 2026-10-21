@@ -1,3 +1,4 @@
+import { useStableCallback } from "../../hooks/useStableCallback";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -8,7 +9,7 @@ import type {
   MuseAgentComputerTaskDetail,
   ProviderInstanceId,
 } from "@t3tools/contracts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import {
   AlertDialog,
@@ -118,7 +119,7 @@ export function MuseAgentComputerViewer({
     };
   }, []);
 
-  const endView = useCallback((why: string | null) => {
+  const endView = useStableCallback((why: string | null) => {
     heldRef.current = null;
     setHeld(null);
     setGrantedExpiresAtMs(null);
@@ -126,7 +127,7 @@ export function MuseAgentComputerViewer({
     setWantsView(false);
     setPhase("idle");
     setMessage(why);
-  }, []);
+  });
 
   const takeControl = async () => {
     if (pending) return;
@@ -202,6 +203,8 @@ export function MuseAgentComputerViewer({
   const closeView = () =>
     endView("Live view closed. Muse resumes when the current control lease expires.");
 
+  const onLeaseConfirmed = useEffectEvent(setHeld);
+  const onLeaseEnded = useEffectEvent(endView);
   // Connect only once a refresh shows exactly the receipt's lease. A different user lease means the
   // receipt was replaced: close locally. A target change or lost lease drops the view the same way.
   useEffect(() => {
@@ -213,19 +216,19 @@ export function MuseAgentComputerViewer({
       lease.sessionId === sessionId &&
       lease.taskId === taskId;
     if (!sameTarget || !canWrite) {
-      endView("Control ended. Take control again to reconnect.");
+      onLeaseEnded("Control ended. Take control again to reconnect.");
       return;
     }
     if (held !== null) {
-      if (ownedTakeoverId !== held) endView("Control ended. Take control again to reconnect.");
+      if (ownedTakeoverId !== held) onLeaseEnded("Control ended. Take control again to reconnect.");
       return;
     }
     if (ownedTakeoverId === receiptId) {
       if (leaseExpiresAtMs !== null && leaseExpiresAtMs <= Date.now()) return;
-      setHeld(receiptId);
+      onLeaseConfirmed(receiptId);
     } else if (ownedTakeoverId !== null) {
       // A user lease other than ours is visible; our receipt no longer matches the task.
-      endView("Control of this task changed hands. Take control again to reconnect.");
+      onLeaseEnded("Control of this task changed hands. Take control again to reconnect.");
     }
   }, [
     held,
@@ -237,7 +240,6 @@ export function MuseAgentComputerViewer({
     providerInstanceId,
     sessionId,
     taskId,
-    endView,
   ]);
 
   // The task refresh must confirm the receipt promptly; never wait on it forever.

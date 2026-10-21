@@ -1,3 +1,4 @@
+import * as MergeGit from "../vcs/GitVcsDriver.ts";
 import { assert, it } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -508,9 +509,11 @@ it.effect.each([
           authority,
           projection,
           ThreadCommandExecutor.layer,
-          Ingestor.layer.pipe(
-            Layer.provide([replay, projection, IdAllocator.layer, ThreadCommandExecutor.layer]),
-          ),
+          Ingestor.layer
+            .pipe(Layer.provide(Layer.mock(MergeGit.GitVcsDriver)({})))
+            .pipe(
+              Layer.provide([replay, projection, IdAllocator.layer, ThreadCommandExecutor.layer]),
+            ),
         ]),
         Layer.provide(NodeCrypto.layer),
       );

@@ -1,4 +1,4 @@
-import { WS_METHODS, type ProviderInstanceId } from "@t3tools/contracts";
+import { WS_METHODS, type EnvironmentId, type ProviderInstanceId } from "@t3tools/contracts";
 import { museAgentComputerStreamPath } from "@t3tools/contracts/museAgentComputer";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -6,7 +6,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { HttpClient } from "effect/http";
-import type { Atom } from "effect/reactivity";
+import type { Atom, AtomRegistry } from "effect/reactivity";
 
 import * as RemoteAuthorization from "../authorization/service.ts";
 import type { PreparedConnection } from "../connection/model.ts";
@@ -89,18 +89,21 @@ export function createMuseAgentComputerStreamCommand<R, ER>(
   const permissions = createCommandPermissions(runtime, WS_METHODS.museAgentsOpenThread);
   const command = createEnvironmentCommand(runtime, {
     label: "environment-command:muse-agent:computer-stream",
-    execute: (input: MuseAgentComputerStreamReference, registry, environmentId) =>
-      Effect.gen(function* () {
-        yield* permissions.authorize(registry, environmentId, input);
-        const supervisor = yield* Supervisor.EnvironmentSupervisor;
-        const client = yield* MuseAgentComputerStreamClient;
-        const prepared = yield* SubscriptionRef.get(supervisor.prepared);
-        if (Option.isNone(prepared))
-          return yield* new EnvironmentHttpConnectionNotReadyError({
-            message: "The environment HTTP connection is not ready.",
-          });
-        return yield* client.prepare(prepared.value, input);
-      }),
+    execute: Effect.fn("museAgentComputerStream.execute")(function* (
+      input: MuseAgentComputerStreamReference,
+      registry: AtomRegistry.AtomRegistry,
+      environmentId: EnvironmentId,
+    ) {
+      yield* permissions.authorize(registry, environmentId, input);
+      const supervisor = yield* Supervisor.EnvironmentSupervisor;
+      const client = yield* MuseAgentComputerStreamClient;
+      const prepared = yield* SubscriptionRef.get(supervisor.prepared);
+      if (Option.isNone(prepared))
+        return yield* new EnvironmentHttpConnectionNotReadyError({
+          message: "The environment HTTP connection is not ready.",
+        });
+      return yield* client.prepare(prepared.value, input);
+    }),
   });
   return {
     ...command,

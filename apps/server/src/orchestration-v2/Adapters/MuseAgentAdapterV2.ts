@@ -162,8 +162,8 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
               reason: "A native Muse conversation cannot change account or accept model options.",
             },
       ),
-    openSession: (input) =>
-      Effect.gen(function* () {
+    openSession: Effect.fn("MuseAgentAdapterV2.openSession")(
+      function* (input) {
         const binding = options.config.accountBinding;
         const validateSelection = (
           selection: typeof input.modelSelection,
@@ -293,103 +293,98 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
           if (release) yield* toolCleanup.pipe(Effect.ensuring(release), Effect.forkDetach);
         });
         yield* Effect.addFinalizer(() => releaseTurn);
-        const publish = (batch: readonly ProviderAdapter.ProviderAdapterV2Event[]) =>
-          Effect.gen(function* () {
-            for (const event of batch) {
-              if (
-                event.type === "turn_item.updated" &&
-                event.turnItem.type === "assistant_message" &&
-                event.turnItem.nativeItemRef?.driver === MUSE_AGENT_DRIVER_KIND &&
-                event.turnItem.nativeItemRef.nativeId
-              ) {
-                const key = projection.deliveryForMessage(event.turnItem.nativeItemRef.nativeId);
-                if (!key) continue;
-                const item = event.turnItem;
-                const message = batch.find(
-                  (candidate) =>
-                    candidate.type === "message.updated" && candidate.message.id === item.messageId,
-                );
-                if (message?.type === "message.updated")
-                  yield* native.recordManagedMessage({
-                    binding,
-                    sessionId: session.session_id,
-                    deliveryKey: key,
-                    nativeMessageId: event.turnItem.nativeItemRef.nativeId,
-                    snapshot: { message: message.message, turnItem: event.turnItem },
-                  });
-              }
-            }
-            // Native terminal proof is persisted before publishing terminal to orchestration.
-            if (batch.some((event) => event.type === "turn.terminal")) {
-              const key = projection.deliveryKey();
-              if (key) yield* native.settleDelivery(key);
-              yield* releaseTurn;
-            }
-            yield* Queue.offerAll(inbox, batch);
-          });
-        const projectFrame = (
-          frame: Transport.MuseAgentNativeEvent,
-          captured = projection.capturePresentation(frame),
-        ) =>
-          Effect.gen(function* () {
-            const refreshOwnership = () =>
-              Effect.gen(function* () {
-                const nativeMessageId = projection.unknownAssistantIdentity(frame);
-                if (frame.event !== "message.user" && nativeMessageId === undefined) return;
-                const fresh = yield* native.historyOwnership(
-                  {
-                    binding,
-                    sessionId: session.session_id,
-                    threadId: input.threadId,
-                    providerInstanceId: options.instanceId,
-                  },
-                  {
-                    awaitAdmissions: true,
-                    ...(nativeMessageId === undefined
-                      ? { receiptsOnly: true }
-                      : { nativeMessageId }),
-                  },
-                );
-                yield* Effect.try({
-                  try: () => projection.retainOwnedAssistantAssociations(fresh),
-                  catch: (cause) => new Native.MuseAgentRuntimeError({ kind: "protocol", cause }),
-                });
-                // Receipts can precede the sibling's first assistant snapshot.
-                projection.unknownAssistantIdentity(frame);
-              });
-            yield* refreshOwnership();
-            if (!projection.canImportPresentation(frame, captured)) return 0;
-            const imported = yield* frame.event === "delta.presentation"
-              ? importMuseAttachmentPresentation({
+        const publish = Effect.fn("MuseAgentAdapterV2.publish")(function* (
+          batch: readonly ProviderAdapter.ProviderAdapterV2Event[],
+        ) {
+          for (const event of batch) {
+            if (
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "assistant_message" &&
+              event.turnItem.nativeItemRef?.driver === MUSE_AGENT_DRIVER_KIND &&
+              event.turnItem.nativeItemRef.nativeId
+            ) {
+              const key = projection.deliveryForMessage(event.turnItem.nativeItemRef.nativeId);
+              if (!key) continue;
+              const item = event.turnItem;
+              const message = batch.find(
+                (candidate) =>
+                  candidate.type === "message.updated" && candidate.message.id === item.messageId,
+              );
+              if (message?.type === "message.updated")
+                yield* native.recordManagedMessage({
                   binding,
                   sessionId: session.session_id,
-                  threadId: input.threadId,
-                  attachmentsDir: host.paths.attachmentsDir,
-                  frame,
-                  readAttachment: native.readAttachment,
-                }).pipe(attachmentImports.withPermits(1))
-              : Effect.succeed(null);
-            // Attachment IO can outlive a sibling's durable ownership write.
-            if (imported) yield* refreshOwnership();
-            if (!projection.canImportPresentation(frame, captured)) return 0;
-            const batch = yield* Effect.try({
-              try: () => {
-                const attached = imported
-                  ? projection.attach(imported.nativeMessageId, imported.attachments)
-                  : [];
-                return [
-                  ...attached,
-                  ...projection.project(frame, captured),
-                  ...(imported?.failed
-                    ? projection.attachmentFailed(imported.nativeMessageId)
-                    : []),
-                ];
+                  deliveryKey: key,
+                  nativeMessageId: event.turnItem.nativeItemRef.nativeId,
+                  snapshot: { message: message.message, turnItem: event.turnItem },
+                });
+            }
+          }
+          // Native terminal proof is persisted before publishing terminal to orchestration.
+          if (batch.some((event) => event.type === "turn.terminal")) {
+            const key = projection.deliveryKey();
+            if (key) yield* native.settleDelivery(key);
+            yield* releaseTurn;
+          }
+          yield* Queue.offerAll(inbox, batch);
+        });
+        const projectFrame = Effect.fn("MuseAgentAdapterV2.projectFrame")(function* (
+          frame: Transport.MuseAgentNativeEvent,
+          captured = projection.capturePresentation(frame),
+        ) {
+          const refreshOwnership = Effect.fn("MuseAgentAdapterV2.refreshOwnership")(function* () {
+            const nativeMessageId = projection.unknownAssistantIdentity(frame);
+            if (frame.event !== "message.user" && nativeMessageId === undefined) return;
+            const fresh = yield* native.historyOwnership(
+              {
+                binding,
+                sessionId: session.session_id,
+                threadId: input.threadId,
+                providerInstanceId: options.instanceId,
               },
+              {
+                awaitAdmissions: true,
+                ...(nativeMessageId === undefined ? { receiptsOnly: true } : { nativeMessageId }),
+              },
+            );
+            yield* Effect.try({
+              try: () => projection.retainOwnedAssistantAssociations(fresh),
               catch: (cause) => new Native.MuseAgentRuntimeError({ kind: "protocol", cause }),
             });
-            yield* publish(batch);
-            return batch.filter((event) => event.type === "message.updated").length;
+            // Receipts can precede the sibling's first assistant snapshot.
+            projection.unknownAssistantIdentity(frame);
           });
+          yield* refreshOwnership();
+          if (!projection.canImportPresentation(frame, captured)) return 0;
+          const imported = yield* frame.event === "delta.presentation"
+            ? importMuseAttachmentPresentation({
+                binding,
+                sessionId: session.session_id,
+                threadId: input.threadId,
+                attachmentsDir: host.paths.attachmentsDir,
+                frame,
+                readAttachment: native.readAttachment,
+              }).pipe(attachmentImports.withPermits(1))
+            : Effect.succeed(null);
+          // Attachment IO can outlive a sibling's durable ownership write.
+          if (imported) yield* refreshOwnership();
+          if (!projection.canImportPresentation(frame, captured)) return 0;
+          const batch = yield* Effect.try({
+            try: () => {
+              const attached = imported
+                ? projection.attach(imported.nativeMessageId, imported.attachments)
+                : [];
+              return [
+                ...attached,
+                ...projection.project(frame, captured),
+                ...(imported?.failed ? projection.attachmentFailed(imported.nativeMessageId) : []),
+              ];
+            },
+            catch: (cause) => new Native.MuseAgentRuntimeError({ kind: "protocol", cause }),
+          });
+          yield* publish(batch);
+          return batch.filter((event) => event.type === "message.updated").length;
+        });
         // The native route has one observer. Retire displaced runtimes so reopening
         // their conversation subscribes again and repairs history through a fresh session.
         let retired = false;
@@ -512,23 +507,22 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
         let watchFiber = yield* runWatch(watch);
         // Subscribe first; history then repairs gaps without losing events between read and watch.
         const historyLock = yield* Semaphore.make(1);
-        const importPage = (
+        const importPage = Effect.fn("MuseAgentAdapterV2.importPage")(function* (
           page: { readonly events: readonly unknown[]; readonly hasMore: boolean },
           beforeSeq?: number,
-        ) =>
-          Effect.gen(function* () {
-            const parsed = yield* Effect.try({
-              try: () => museAgentHistoryPage(page, session.session_id, beforeSeq),
-              catch: (cause) => new Native.MuseAgentRuntimeError({ kind: "protocol", cause }),
-            });
-            let importedMessages = 0;
-            for (const frame of parsed.frames) importedMessages += yield* projectFrame(frame);
-            return {
-              nextBeforeSeq: parsed.nextBeforeSeq,
-              hasMore: parsed.hasMore,
-              importedMessages,
-            };
+        ) {
+          const parsed = yield* Effect.try({
+            try: () => museAgentHistoryPage(page, session.session_id, beforeSeq),
+            catch: (cause) => new Native.MuseAgentRuntimeError({ kind: "protocol", cause }),
           });
+          let importedMessages = 0;
+          for (const frame of parsed.frames) importedMessages += yield* projectFrame(frame);
+          return {
+            nextBeforeSeq: parsed.nextBeforeSeq,
+            hasMore: parsed.hasMore,
+            importedMessages,
+          };
+        });
         let historyCursor = yield* importPage(
           yield* native.read({ binding, sessionId: session.session_id }),
         );
@@ -573,8 +567,8 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
                     }),
                 ),
               ),
-          ensureThread: (request) =>
-            Effect.gen(function* () {
+          ensureThread: Effect.fn("MuseAgentAdapterV2.ensureThread")(
+            function* (request) {
               if (request.threadId !== input.threadId)
                 return yield* new Native.MuseAgentRuntimeError({ kind: "account_changed" });
               const existing = request.existingProviderThread;
@@ -589,16 +583,19 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
                 return { ...thread, id: existing.id };
               yield* assertThread(existing);
               return { ...existing, providerSessionId: input.providerSessionId };
-            }).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterEnsureThreadError({
-                    driver: MUSE_AGENT_DRIVER_KIND,
-                    threadId: request.threadId,
-                    cause,
-                  }),
+            },
+            (effect, request) =>
+              effect.pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterEnsureThreadError({
+                      driver: MUSE_AGENT_DRIVER_KIND,
+                      threadId: request.threadId,
+                      cause,
+                    }),
+                ),
               ),
-            ),
+          ),
           resumeThread: (request) =>
             assertThread(request.providerThread).pipe(
               Effect.as({ ...request.providerThread, providerSessionId: input.providerSessionId }),
@@ -833,25 +830,28 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
                 providerThreadId: request.providerThread.id,
               }),
             ),
-          interruptTurn: (request) =>
-            Effect.gen(function* () {
+          interruptTurn: Effect.fn("MuseAgentAdapterV2.interruptTurn")(
+            function* (request) {
               yield* assertThread(request.providerThread);
               const deliveryKey = projection.deliveryKey();
               if (!deliveryKey || !projection.matchesTurn(request.providerTurnId))
                 return yield* new Native.MuseAgentRuntimeError({ kind: "unsupported" });
               yield* closeTools;
               yield* native.stop({ binding, sessionId: session.session_id, deliveryKey });
-            }).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterInterruptError({
-                    driver: MUSE_AGENT_DRIVER_KIND,
-                    providerThreadId: request.providerThread.id,
-                    providerTurnId: request.providerTurnId,
-                    cause,
-                  }),
+            },
+            (effect, request) =>
+              effect.pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterInterruptError({
+                      driver: MUSE_AGENT_DRIVER_KIND,
+                      providerThreadId: request.providerThread.id,
+                      providerTurnId: request.providerTurnId,
+                      cause,
+                    }),
+                ),
               ),
-            ),
+          ),
           respondToRuntimeRequest: (request) =>
             Effect.fail(
               new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
@@ -881,15 +881,18 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
               }),
             ),
         } satisfies ProviderAdapter.ProviderAdapterV2SessionRuntime;
-      }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProviderAdapter.ProviderAdapterOpenSessionError({
-              driver: MUSE_AGENT_DRIVER_KIND,
-              providerSessionId: input.providerSessionId,
-              cause,
-            }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapter.ProviderAdapterOpenSessionError({
+                driver: MUSE_AGENT_DRIVER_KIND,
+                providerSessionId: input.providerSessionId,
+                cause,
+              }),
+          ),
         ),
-      ),
+    ),
   });
 });

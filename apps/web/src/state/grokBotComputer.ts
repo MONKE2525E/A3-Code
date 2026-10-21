@@ -16,16 +16,15 @@ const readComputer = createEnvironmentRpcCommand(connectionAtomRuntime, {
 });
 export const grokBotComputerQuery = createEnvironmentQueryAtomFamily(connectionAtomRuntime, {
   label: "environment-data:grok-bot:computer",
-  execute: (input: { readonly botId: string }) =>
-    Effect.gen(function* () {
-      const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
-      const registry = yield* AtomRegistry.AtomRegistry;
-      const result = yield* Effect.promise(() =>
-        readComputer.run(registry, { environmentId: supervisor.target.environmentId, input }),
-      );
-      if (result._tag === "Failure") return yield* Effect.failCause(result.cause);
-      return result.value;
-    }),
+  execute: Effect.fn("GrokBotComputer.read")(function* (input: { readonly botId: string }) {
+    const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+    const registry = yield* AtomRegistry.AtomRegistry;
+    const result = yield* Effect.promise(() =>
+      readComputer.run(registry, { environmentId: supervisor.target.environmentId, input }),
+    );
+    if (result._tag === "Failure") return yield* Effect.failCause(result.cause);
+    return result.value;
+  }),
   staleTimeMs: 5_000,
   refreshIntervalMs: 5_000,
   idleTtlMs: 0,
@@ -71,16 +70,15 @@ const readTeaching = createEnvironmentRpcCommand(connectionAtomRuntime, {
 });
 export const grokBotTeachQuery = createEnvironmentQueryAtomFamily(connectionAtomRuntime, {
   label: "environment-data:grok-bot:teach",
-  execute: (input: { readonly botId: string }) =>
-    Effect.gen(function* () {
-      const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
-      const registry = yield* AtomRegistry.AtomRegistry;
-      const result = yield* Effect.promise(() =>
-        readTeaching.run(registry, { environmentId: supervisor.target.environmentId, input }),
-      );
-      if (result._tag === "Failure") return yield* Effect.failCause(result.cause);
-      return result.value;
-    }),
+  execute: Effect.fn("GrokBotTeach.read")(function* (input: { readonly botId: string }) {
+    const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+    const registry = yield* AtomRegistry.AtomRegistry;
+    const result = yield* Effect.promise(() =>
+      readTeaching.run(registry, { environmentId: supervisor.target.environmentId, input }),
+    );
+    if (result._tag === "Failure") return yield* Effect.failCause(result.cause);
+    return result.value;
+  }),
   staleTimeMs: 2_000,
   refreshIntervalMs: 2_000,
   idleTtlMs: 0,

@@ -8,7 +8,7 @@ import { type EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { BotIcon, ChevronLeftIcon, ClockIcon, ListChecksIcon, ShieldCheckIcon } from "lucide-react";
-import { useCallback, useMemo, useRef, useState, type RefObject } from "react";
+import { useRef, useState, type RefObject } from "react";
 
 import { MenuItem } from "~/components/ui/menu";
 import { Button } from "~/components/ui/button";
@@ -159,21 +159,18 @@ function MuseAgentRoster({
   // Pinning is a browser-local layout choice; Muse has one personal agent per machine.
   const [pinned, setPinned] = useLocalStorage(MUSE_PINNED_STORAGE_KEY, false, Schema.Boolean);
 
-  const thread = useMemo(
-    () => findCachedMuseAgentThread(threads, instanceId),
-    [instanceId, threads],
-  );
+  const thread = findCachedMuseAgentThread(threads, instanceId);
 
-  const selected = useMemo(() => {
+  const selected = (() => {
     if (routeThreadId === null || routeEnvironmentId !== environmentId) return false;
     return thread !== null && thread.id === routeThreadId;
-  }, [environmentId, routeEnvironmentId, routeThreadId, thread]);
+  })();
 
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
   const [failedSubChat, setFailedSubChat] = useState<MuseSubChatEntry | null>(null);
 
-  const open = useCallback(async () => {
+  const open = async () => {
     if (opening) return;
     if (isMobile) setOpenMobile(false);
     setOpenError(null);
@@ -213,7 +210,7 @@ function MuseAgentRoster({
       params: { section: "chat" },
       search: { environmentId },
     });
-  }, [environmentId, instanceId, isMobile, navigate, opening, openThread, setOpenMobile, threads]);
+  };
 
   // Working comes from the canonical thread's run, never from the selected route.
   const avatarState = museAvatarStateForStatus(thread?.status);
@@ -281,10 +278,11 @@ function MuseAgentRoster({
       }
     />
   );
-  const subChats = useMemo(
-    () => resolveMuseSubChatList({ threads, providerInstanceId: instanceId, routeThreadId }),
-    [instanceId, routeThreadId, threads],
-  );
+  const subChats = resolveMuseSubChatList({
+    threads,
+    providerInstanceId: instanceId,
+    routeThreadId,
+  });
   const rosterRef = useRef<HTMLDivElement | null>(null);
   const avatarRef = useRef<HTMLSpanElement | null>(null);
   const subChatLabelRef = useRef<HTMLSpanElement | null>(null);
@@ -298,7 +296,7 @@ function MuseAgentRoster({
       search: { environmentId },
     });
   };
-  const openSubChat = async (entry: MuseSubChatEntry) => {
+  async function openSubChat(entry: MuseSubChatEntry) {
     if (!canOpen || opening) return;
     if (isMobile) setOpenMobile(false);
     setOpening(true);
@@ -326,7 +324,7 @@ function MuseAgentRoster({
     } finally {
       setOpening(false);
     }
-  };
+  }
   const avatarNode = (size: "lg" | "tall" | "xl") => (
     <MuseAgentAvatar
       name={name}

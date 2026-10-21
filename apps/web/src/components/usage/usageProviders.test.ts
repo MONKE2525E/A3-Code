@@ -4,8 +4,8 @@ import { limitsOnlyDrivers } from "./usageProviders";
 
 const config = (drivers: string[], accounts: string[] = []) =>
   ({
+    providers: drivers.map((driver) => ({ driver, usageLimits: {} })),
     serverConfig: {
-      providers: drivers.map((driver) => ({ driver, usageLimits: {} })),
       usageLimitSources: [{ accounts: accounts.map((driver) => ({ driver })) }],
     },
   }) as never;

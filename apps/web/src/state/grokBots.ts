@@ -66,18 +66,17 @@ export const grokBotAvatarEngineQuery = createEnvironmentQueryAtomFamily(connect
   label: "environment-data:grok-bots:avatar-engine",
   staleTimeMs: 60 * 60_000,
   idleTtlMs: 5 * 60_000,
-  execute: () =>
-    Effect.gen(function* () {
-      const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
-      const loader = yield* GrokBotAvatarEngineHttp.GrokBotAvatarEngineLoader;
-      const prepared = yield* SubscriptionRef.get(supervisor.prepared);
-      if (Option.isNone(prepared)) {
-        return yield* new EnvironmentHttpConnectionNotReadyError({
-          message: "The environment HTTP connection is not ready.",
-        });
-      }
-      return yield* loader.load(prepared.value);
-    }),
+  execute: Effect.fn("GrokBotAvatarEngine.load")(function* () {
+    const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+    const loader = yield* GrokBotAvatarEngineHttp.GrokBotAvatarEngineLoader;
+    const prepared = yield* SubscriptionRef.get(supervisor.prepared);
+    if (Option.isNone(prepared)) {
+      return yield* new EnvironmentHttpConnectionNotReadyError({
+        message: "The environment HTTP connection is not ready.",
+      });
+    }
+    return yield* loader.load(prepared.value);
+  }),
 });
 
 const readQuery = createEnvironmentRpcQueryAtomFamily(connectionAtomRuntime, {

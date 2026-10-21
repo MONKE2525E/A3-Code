@@ -8,7 +8,7 @@ import type {
   MuseAgentComputerTaskDetail,
   ProviderInstanceId,
 } from "@t3tools/contracts";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useEffectEvent, useState, type ReactNode } from "react";
 
 import {
   AlertDialog,
@@ -81,16 +81,17 @@ function TaskPreview({
   );
   const loaded = query.data;
   const [url, setUrl] = useState<string | null>(null);
+  const onUrlChanged = useEffectEvent(setUrl);
   useEffect(() => {
     if (loaded?._tag !== "Available") {
-      setUrl(null);
+      onUrlChanged(null);
       return;
     }
     // Copy into an owned ArrayBuffer so the Blob never aliases a SharedArrayBuffer-backed view.
     const next = URL.createObjectURL(
       new Blob([new Uint8Array(loaded.bytes)], { type: loaded.contentType }),
     );
-    setUrl(next);
+    onUrlChanged(next);
     return () => URL.revokeObjectURL(next);
   }, [loaded]);
 

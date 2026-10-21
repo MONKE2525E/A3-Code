@@ -6,7 +6,7 @@ import type {
   MuseCredentialRequest,
   ProviderInstanceId,
 } from "@t3tools/contracts";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import {
@@ -74,10 +74,10 @@ export function MuseAgentCredentialPanel({
   const connectorRequests = data?.connectorRequests ?? [];
   const connectors =
     connectorsView.data?.operation === "connectors" ? connectorsView.data.data : [];
-  const refreshInbox = useCallback(() => {
+  const refreshInbox = () => {
     view.refresh();
     connectorsView.refresh();
-  }, [connectorsView, view]);
+  };
   if (vaultRequests.length === 0 && connectorRequests.length === 0) return null;
   return (
     <div className="grid gap-3 px-4 pb-3">
@@ -128,9 +128,9 @@ function CredentialForm({
     reportFailure: false,
     reportDefect: false,
   });
-  const clear = useCallback(() => {
+  const clear = () => {
     for (const field of [username, password, code]) if (field.current) field.current.value = "";
-  }, []);
+  };
   useEffect(() => () => clear(), [clear]);
   return (
     <form
@@ -219,7 +219,7 @@ function ConnectorRequestCard({
   readonly onRecheck: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  const presentation = useMemo(() => describeMuseConnector(connector), [connector]);
+  const presentation = describeMuseConnector(connector);
   return (
     <div className="grid gap-3 rounded-lg border p-4">
       <div>

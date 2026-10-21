@@ -10,7 +10,7 @@ import {
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { CheckIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Input } from "~/components/ui/input";
 
 import {
@@ -854,15 +854,15 @@ export function MuseAgentConnectionsSection({
       : (connectors?.find((connector) => connector.id === panel.connector.id) ?? panel.connector);
 
   const needle = search.trim().toLowerCase();
-  const presentCategories = useMemo(() => {
+  const presentCategories = (() => {
     const present = new Set<BrowseCategory>();
     for (const connector of connectors ?? []) present.add(browseCategory(connector));
     return CATEGORY_ORDER.filter((key) => present.has(key));
-  }, [connectors]);
+  })();
   const selectedCategory: "all" | BrowseCategory =
     category === "all" || presentCategories.includes(category) ? category : "all";
   if (connectors !== null && category !== selectedCategory) setCategory(selectedCategory);
-  const sections = useMemo(() => {
+  const sections = (() => {
     if (connectors === null) return [];
     const buckets = new Map<BrowseCategory, MuseAgentConnector[]>();
     for (const connector of connectors) {
@@ -884,7 +884,7 @@ export function MuseAgentConnectionsSection({
         },
       ];
     });
-  }, [connectors, needle, selectedCategory]);
+  })();
   const searching = needle !== "";
 
   if (connectors === null) {

@@ -53,11 +53,11 @@ export class DirectTool {
 const json = Schema.decodeUnknownEffect(Schema.Json);
 
 /** Builds an in-process dispatcher only from the nominally checked handler layer. */
-export const toolkitRegistration = <Tools extends Record<string, Tool.Any>, EX, RX>(
-  toolkit: Toolkit.Toolkit<Tools>,
-  handlers: McpToolAccess.HandlersLayer<Tools, EX, RX>,
-) =>
-  Effect.gen(function* () {
+export const toolkitRegistration = Effect.fn("toolkit.toolkitRegistration")(
+  function* <Tools extends Record<string, Tool.Any>, EX, RX>(
+    toolkit: Toolkit.Toolkit<Tools>,
+    handlers: McpToolAccess.HandlersLayer<Tools, EX, RX>,
+  ) {
     const built = yield* toolkit;
     // Handler services are captured once, but invocation authority is supplied afresh below.
     const services =
@@ -116,4 +116,7 @@ export const toolkitRegistration = <Tools extends Record<string, Tool.Any>, EX, 
         });
       }),
     );
-  }).pipe(Effect.provide(McpToolAccess.HandlersLayer.layer(handlers)));
+  },
+  (effect, toolkit, handlers) =>
+    effect.pipe(Effect.provide(McpToolAccess.HandlersLayer.layer(handlers))),
+);

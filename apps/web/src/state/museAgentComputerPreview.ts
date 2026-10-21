@@ -20,26 +20,25 @@ export const museAgentComputerPreviewQuery = createEnvironmentQueryAtomFamily(
     label: "environment-data:muse-agent:computer-preview",
     staleTimeMs: 5_000,
     idleTtlMs: 60_000,
-    execute: (input: {
+    execute: Effect.fn("MuseAgentComputerPreview.load")(function* (input: {
       readonly providerInstanceId: string;
       readonly sessionId: string;
       readonly taskId: string;
       readonly revision: string;
-    }) =>
-      Effect.gen(function* () {
-        const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
-        const loader = yield* MuseAgentComputerPreviewHttp.MuseAgentComputerPreviewLoader;
-        const prepared = yield* SubscriptionRef.get(supervisor.prepared);
-        if (Option.isNone(prepared)) {
-          return yield* new EnvironmentHttpConnectionNotReadyError({
-            message: "The environment HTTP connection is not ready.",
-          });
-        }
-        return yield* loader.load(prepared.value, {
-          providerInstanceId: ProviderInstanceId.make(input.providerInstanceId),
-          sessionId: input.sessionId,
-          taskId: input.taskId,
+    }) {
+      const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+      const loader = yield* MuseAgentComputerPreviewHttp.MuseAgentComputerPreviewLoader;
+      const prepared = yield* SubscriptionRef.get(supervisor.prepared);
+      if (Option.isNone(prepared)) {
+        return yield* new EnvironmentHttpConnectionNotReadyError({
+          message: "The environment HTTP connection is not ready.",
         });
-      }),
+      }
+      return yield* loader.load(prepared.value, {
+        providerInstanceId: ProviderInstanceId.make(input.providerInstanceId),
+        sessionId: input.sessionId,
+        taskId: input.taskId,
+      });
+    }),
   },
 );

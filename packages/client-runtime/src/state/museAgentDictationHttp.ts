@@ -1,6 +1,7 @@
 import {
   WS_METHODS,
   MuseAgentDictationRequestError,
+  type EnvironmentId,
   type ProviderInstanceId,
   type MuseAgentDictationLanguage,
 } from "@t3tools/contracts";
@@ -11,7 +12,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { HttpClient } from "effect/http";
-import type { Atom } from "effect/reactivity";
+import type { Atom, AtomRegistry } from "effect/reactivity";
 
 import * as RemoteEnvironmentAuthorization from "../authorization/service.ts";
 import type { PreparedConnection } from "../connection/model.ts";
@@ -99,18 +100,21 @@ export function createMuseAgentDictationCommand<R, ER>(
   const permissions = createCommandPermissions(runtime, WS_METHODS.museAgentsOpenThread);
   const command = createEnvironmentCommand(runtime, {
     label: "environment-command:muse-agent:dictation",
-    execute: (input: MuseAgentDictationInput, registry, environmentId) =>
-      Effect.gen(function* () {
-        yield* permissions.authorize(registry, environmentId, input);
-        const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
-        const client = yield* MuseAgentDictationClient;
-        const prepared = yield* SubscriptionRef.get(supervisor.prepared);
-        if (Option.isNone(prepared))
-          return yield* new EnvironmentHttpConnectionNotReadyError({
-            message: "The environment HTTP connection is not ready.",
-          });
-        return yield* client.transcribe(prepared.value, input);
-      }),
+    execute: Effect.fn("museAgentDictationHttp.execute")(function* (
+      input: MuseAgentDictationInput,
+      registry: AtomRegistry.AtomRegistry,
+      environmentId: EnvironmentId,
+    ) {
+      yield* permissions.authorize(registry, environmentId, input);
+      const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+      const client = yield* MuseAgentDictationClient;
+      const prepared = yield* SubscriptionRef.get(supervisor.prepared);
+      if (Option.isNone(prepared))
+        return yield* new EnvironmentHttpConnectionNotReadyError({
+          message: "The environment HTTP connection is not ready.",
+        });
+      return yield* client.transcribe(prepared.value, input);
+    }),
   });
   return {
     ...command,

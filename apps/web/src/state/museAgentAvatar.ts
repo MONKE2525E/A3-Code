@@ -18,24 +18,23 @@ export const museAgentAvatarQuery = createEnvironmentQueryAtomFamily(connectionA
   label: "environment-data:muse-agent:avatar",
   staleTimeMs: 24 * 60 * 60_000,
   idleTtlMs: 5 * 60_000,
-  execute: (input: {
+  execute: Effect.fn("MuseAgentAvatar.load")(function* (input: {
     readonly providerInstanceId: string;
     readonly variant: string;
     readonly revision: string;
-  }) =>
-    Effect.gen(function* () {
-      const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
-      const loader = yield* MuseAgentAvatarHttp.MuseAgentAvatarLoader;
-      const prepared = yield* SubscriptionRef.get(supervisor.prepared);
-      if (Option.isNone(prepared)) {
-        return yield* new EnvironmentHttpConnectionNotReadyError({
-          message: "The environment HTTP connection is not ready.",
-        });
-      }
-      return yield* loader.load(prepared.value, {
-        providerInstanceId: ProviderInstanceId.make(input.providerInstanceId),
-        variant: input.variant,
-        revision: input.revision,
+  }) {
+    const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+    const loader = yield* MuseAgentAvatarHttp.MuseAgentAvatarLoader;
+    const prepared = yield* SubscriptionRef.get(supervisor.prepared);
+    if (Option.isNone(prepared)) {
+      return yield* new EnvironmentHttpConnectionNotReadyError({
+        message: "The environment HTTP connection is not ready.",
       });
-    }),
+    }
+    return yield* loader.load(prepared.value, {
+      providerInstanceId: ProviderInstanceId.make(input.providerInstanceId),
+      variant: input.variant,
+      revision: input.revision,
+    });
+  }),
 });

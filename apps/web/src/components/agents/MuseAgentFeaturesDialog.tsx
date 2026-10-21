@@ -1,3 +1,4 @@
+import { useNowMinute } from "../../hooks/useNowMinute";
 import { useAtomValue } from "@effect/atom-react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
@@ -24,9 +25,9 @@ import {
 } from "lucide-react";
 import {
   useEffect,
+  useEffectEvent,
   useImperativeHandle,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -189,15 +190,12 @@ export function MuseAgentSkillsSection({ environmentId, providerInstanceId }: Ta
   const [category, setCategory] = useState("all");
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const needle = search.trim().toLowerCase();
-  const presentCategories = useMemo(
-    () => (skills ? groupMuseSkills(skills).map((group) => group.category) : []),
-    [skills],
-  );
-  const sections = useMemo(() => {
+  const presentCategories = skills ? groupMuseSkills(skills).map((group) => group.category) : [];
+  const sections = (() => {
     if (skills === null) return [];
     const grouped = groupMuseSkills(skills.filter((skill) => museSkillMatches(skill, needle)));
     return category === "all" ? grouped : grouped.filter((group) => group.category === category);
-  }, [category, needle, skills]);
+  })();
   const searching = needle !== "";
   // Loaded catalog is authoritative. Skip null/loading so a refresh does not wipe a still-valid chip.
   if (skills !== null && category !== "all" && !presentCategories.includes(category)) {
@@ -353,8 +351,8 @@ function RoutinesSection({
 }: Target & { readonly threadId?: string }) {
   const view = useFeatureRead(environmentId, { operation: "tasks", providerInstanceId });
   const tasks = view.data?.operation === "tasks" ? view.data.data : null;
-  const groups = useMemo(() => (tasks ? groupMuseRoutines(tasks) : []), [tasks]);
-  const now = Date.now();
+  const groups = tasks ? groupMuseRoutines(tasks) : [];
+  const now = Date.parse(useNowMinute());
   return (
     <div className="grid gap-6">
       <p className="text-xs text-muted-foreground">
@@ -823,40 +821,39 @@ export function MuseAgentChatEntry({ environmentId, providerInstanceId }: Target
   );
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
-  const shellsRef = useRef(shells);
-  shellsRef.current = shells;
-  const openThreadRef = useRef(openThread);
-  openThreadRef.current = openThread;
-  const navigateRef = useRef(navigate);
-  navigateRef.current = navigate;
+  const readShells = useEffectEvent(() => shells);
+  const runOpenThread = useEffectEvent(
+    (target: Parameters<typeof openThread>[0], _attempt: number) => openThread(target),
+  );
+  const navigateToThread = useEffectEvent(navigate);
+  const reportError = useEffectEvent(setError);
+  const [intent] = useState(peekMuseChatOpen);
+  const wrongAccount =
+    intent !== null &&
+    (intent.environmentId !== environmentId || intent.providerInstanceId !== providerInstanceId);
+  const displayError = wrongAccount
+    ? "This conversation belongs to a different Muse account. Reconnect that account to open it."
+    : error;
   // One open per environment/account/retry. Shell writes and callback identity must not abort it.
   useEffect(() => {
-    const intent = peekMuseChatOpen();
-    if (
-      intent !== null &&
-      (intent.environmentId !== environmentId || intent.providerInstanceId !== providerInstanceId)
-    ) {
+    if (wrongAccount) {
       clearMuseChatOpen();
-      setError(
-        "This conversation belongs to a different Muse account. Reconnect that account to open it.",
-      );
       return;
     }
     if (!canOpen) return;
     let current = true;
-    setError((previous) => (previous === null ? previous : null));
     void (async () => {
       try {
         if (intent?.kind === "session") {
           await openCachedMuseThread({
             hit: { environmentId, threadId: intent.threadId },
-            shells: shellsRef.current.map((thread) => ({
+            shells: readShells().map((thread) => ({
               environmentId,
               id: thread.id,
               providerInstanceId: thread.providerInstanceId,
             })),
             openThread: async (target) => {
-              const result = await openThreadRef.current(target);
+              const result = await runOpenThread(target, retry);
               if (result._tag === "Success") return result.value;
               if (isAtomCommandInterrupted(result)) return null;
               throw squashAtomCommandFailure(result);
@@ -864,7 +861,7 @@ export function MuseAgentChatEntry({ environmentId, providerInstanceId }: Target
             navigate: async (target) => {
               if (!current) return;
               clearMuseChatOpen();
-              await navigateRef.current({
+              await navigateToThread({
                 to: "/$environmentId/$threadId",
                 params: buildThreadRouteParams(
                   scopeThreadRef(target.environmentId, target.threadId),
@@ -875,33 +872,36 @@ export function MuseAgentChatEntry({ environmentId, providerInstanceId }: Target
           });
           return;
         }
-        const result = await openThreadRef.current({
-          environmentId,
-          input: { providerInstanceId },
-        });
+        const result = await runOpenThread(
+          {
+            environmentId,
+            input: { providerInstanceId },
+          },
+          retry,
+        );
         if (!current) return;
         if (result._tag !== "Success") {
           if (!isAtomCommandInterrupted(result)) {
-            setError(
+            reportError(
               shortOpenError(squashAtomCommandFailure(result), "Could not open Muse. Try again."),
             );
           }
           return;
         }
         clearMuseChatOpen();
-        await navigateRef.current({
+        await navigateToThread({
           to: "/$environmentId/$threadId",
           params: buildThreadRouteParams(scopeThreadRef(environmentId, result.value.threadId)),
           replace: true,
         });
       } catch (cause: unknown) {
-        if (current) setError(shortOpenError(cause, "Could not open Muse. Try again."));
+        if (current) reportError(shortOpenError(cause, "Could not open Muse. Try again."));
       }
     })();
     return () => {
       current = false;
     };
-  }, [canOpen, environmentId, providerInstanceId, retry]);
+  }, [canOpen, environmentId, providerInstanceId, retry, wrongAccount, intent]);
   if (!canOpen) {
     return (
       <p
@@ -912,14 +912,21 @@ export function MuseAgentChatEntry({ environmentId, providerInstanceId }: Target
       </p>
     );
   }
-  if (error !== null) {
+  if (displayError !== null) {
     return (
       <div
         role="alert"
         className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-6 text-center"
       >
-        <p className="text-sm text-destructive">{error}</p>
-        <Button size="sm" variant="outline" onClick={() => setRetry((value) => value + 1)}>
+        <p className="text-sm text-destructive">{displayError}</p>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            setError(null);
+            setRetry((value) => value + 1);
+          }}
+        >
           Try again
         </Button>
       </div>

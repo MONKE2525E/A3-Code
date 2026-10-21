@@ -2,7 +2,7 @@ import { useAtomRefresh, useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { useEffect, useState } from "react";
+import { useEffect, useEffectEvent, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -70,6 +70,7 @@ export function GrokBotSetupAuthorize({
   const config = useEnvironmentQuery(grokBotsOrchestratorConfigQuery({ environmentId, input: {} }));
   const [busy, setBusy] = useState(false);
   const [flow, setFlow] = useState<Flow | null>(null);
+  const [completedFlow, setCompletedFlow] = useState<Flow | null>(null);
   const [callbackUrl, setCallbackUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -91,26 +92,31 @@ export function GrokBotSetupAuthorize({
       : EMPTY_CONNECTION;
   const connection = useAtomValue(connectionAtom);
   const refreshConnection = useAtomRefresh(connectionAtom);
+  const connectedFlow =
+    flow !== null &&
+    !connection.waiting &&
+    Option.getOrNull(AsyncResult.value(connection))?.servers.some(
+      (server) =>
+        server.id === serverId &&
+        server.accounts.some(
+          (account) => account.accountKey === "default" && account.authenticated,
+        ),
+    );
+  if (connectedFlow) {
+    setCompletedFlow(flow);
+    setFlow(null);
+  }
+  const refreshAfterConnection = useEffectEvent(refresh);
+  useEffect(() => {
+    if (completedFlow === null) return;
+    clearStoredFlow(completedFlow.stateId);
+    refreshAfterConnection();
+  }, [completedFlow]);
   useEffect(() => {
     if (flow === null || connection.waiting) return;
-    if (
-      Option.getOrNull(AsyncResult.value(connection))?.servers.some(
-        (server) =>
-          server.id === serverId &&
-          server.accounts.some(
-            (account) => account.accountKey === "default" && account.authenticated,
-          ),
-      )
-    ) {
-      clearStoredFlow(flow.stateId);
-      setFlow(null);
-      refresh();
-      return;
-    }
-    // Depend on the settled result, including failures that retain the previous success.
     const timer = window.setTimeout(refreshConnection, 5_000);
     return () => window.clearTimeout(timer);
-  }, [flow, connection, refreshConnection, serverId, refresh]);
+  }, [flow, connection, refreshConnection]);
 
   const start = async () => {
     const redirectUri = resolveGrokBotOAuthRedirect(

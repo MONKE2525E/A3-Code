@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as McpRemoteRunValidator from "../mcp/McpRemoteRunValidator.ts";
 import * as GrokBotMcpAuthority from "../grokBot/GrokBotMcpAuthority.ts";
+import { museIdentityOfThread, museThreadIdentity } from "../museAgent/MuseAgentThreadIds.ts";
 import * as Muse from "../museAgent/MuseAgentNativeRuntimeService.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as Settings from "../serverSettings.ts";
@@ -18,8 +19,8 @@ export const layer = Layer.effect(
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const settings = yield* Settings.ServerSettingsService;
     return McpRemoteRunValidator.McpRemoteRunValidator.of({
-      validate: (scope) =>
-        Effect.gen(function* () {
+      validate: Effect.fn("NativeAgentMcpAuthority.validate")(
+        function* (scope) {
           const remote = scope.thread.remoteRun;
           if (!remote) return false;
           const config = (yield* settings.getSettings).providerInstances[
@@ -37,7 +38,8 @@ export const layer = Layer.effect(
           const thread = yield* projections.getThreadShell(scope.thread.threadId);
           if (
             !thread ||
-            !thread.id.startsWith("muse-agent:") ||
+            museIdentityOfThread(thread.id) !==
+              museThreadIdentity(binding.value.accountBinding, scope.thread.providerInstanceId) ||
             thread.deletedAt !== null ||
             thread.archivedAt !== null ||
             thread.providerInstanceId !== scope.thread.providerInstanceId ||
@@ -64,7 +66,9 @@ export const layer = Layer.effect(
             ["starting", "running", "waiting"].includes(run.status) &&
             binding.value.accountBinding === (yield* native.accountBinding)
           );
-        }).pipe(Effect.orElseSucceed(() => false)),
+        },
+        Effect.orElseSucceed(() => false),
+      ),
     });
   }),
 ).pipe(Layer.provide(GrokBotMcpAuthority.layer));

@@ -55,7 +55,7 @@ const make = Effect.gen(function* () {
           }),
       ),
     );
-    const commandId = CommandId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie));
+    const commandId = CommandId.make(yield* crypto.randomUUIDv4().pipe(Effect.orDie));
     const result = yield* threads
       .dispatch({
         type: modelSelectionCommandType(thread.providerInstanceId, input.modelSelection),

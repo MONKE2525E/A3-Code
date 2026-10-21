@@ -133,10 +133,16 @@ const make = Effect.gen(function* () {
       ? `'${value.replaceAll("'", "''")}'`
       : `'${value.replaceAll("'", "'\\''")}'`;
   const pairingArgs = `auth pairing create --base-dir ${quote(config.baseDir)} --ttl 5m --label ${quote("GrokBot MCP setup")}`;
-  const hostCommand = yield* resolveHostCliCommand(
-    pairingArgs,
-    platform === "win32" ? "powershell" : "posix",
-  );
+  const hostCommand = yield* resolveHostCliCommand("auth", [
+    "pairing",
+    "create",
+    "--base-dir",
+    config.baseDir,
+    "--ttl",
+    "5m",
+    "--label",
+    "GrokBot MCP setup",
+  ]);
   const terminalCommand =
     config.stateDir !== path.join(config.baseDir, "userdata")
       ? null
@@ -155,12 +161,14 @@ const make = Effect.gen(function* () {
     Effect.catchTags({ SchemaError: () => Effect.succeed(null) }),
     Effect.mapError(() => new GrokBotSetupError({ stage: "read" })),
   );
-  const write = (value: typeof Saved.Type) =>
-    Effect.gen(function* () {
+  const write = Effect.fn("GrokBotSetupService.write")(
+    function* (value: typeof Saved.Type) {
       yield* fs.makeDirectory(config.stateDir, { recursive: true });
       yield* fs.writeFileString(statePath + ".tmp", yield* encodeSaved(value), { mode: 0o600 });
       yield* fs.rename(statePath + ".tmp", statePath);
-    }).pipe(Effect.mapError(() => new GrokBotSetupError({ stage: "write" })));
+    },
+    Effect.mapError(() => new GrokBotSetupError({ stage: "write" })),
+  );
   const current = Effect.gen(function* () {
     const binding = yield* accountBinding;
     const raw = yield* native.runtimeRequest(binding, "GetGrokBotUserRuntimeSettings", {});
@@ -376,36 +384,37 @@ const make = Effect.gen(function* () {
       }),
     );
   });
-  const verify = (input: typeof GrokBotSetupVerificationInput.Type) =>
-    Effect.gen(function* () {
-      const value = yield* current;
-      return yield* lock.withPermits(1)(
-        Effect.gen(function* () {
-          if ((yield* accountBinding) !== value.binding)
-            return yield* new GrokBotSetupError({ stage: "account" });
-          const saved = yield* read;
-          const now = yield* Clock.currentTimeMillis;
-          if (
-            !saved ||
-            !matches(saved, value) ||
-            saved.nonce !== input.nonce ||
-            saved.skillHash !== input.managedSkillHash ||
-            (!saved.status.complete && now - saved.startedAtMs >= SETUP_TIMEOUT_MS)
-          )
-            return yield* new GrokBotSetupError({ stage: "verification" });
-          saved.status = {
-            ...saved.status,
-            phase: "complete",
-            complete: true,
-            authorizationUrl: null,
-            error: null,
-            updatedAtMs: now,
-          };
-          yield* write(saved);
-          return { verified: true as const };
-        }),
-      );
-    });
+  const verify = Effect.fn("GrokBotSetupService.verify")(function* (
+    input: typeof GrokBotSetupVerificationInput.Type,
+  ) {
+    const value = yield* current;
+    return yield* lock.withPermits(1)(
+      Effect.gen(function* () {
+        if ((yield* accountBinding) !== value.binding)
+          return yield* new GrokBotSetupError({ stage: "account" });
+        const saved = yield* read;
+        const now = yield* Clock.currentTimeMillis;
+        if (
+          !saved ||
+          !matches(saved, value) ||
+          saved.nonce !== input.nonce ||
+          saved.skillHash !== input.managedSkillHash ||
+          (!saved.status.complete && now - saved.startedAtMs >= SETUP_TIMEOUT_MS)
+        )
+          return yield* new GrokBotSetupError({ stage: "verification" });
+        saved.status = {
+          ...saved.status,
+          phase: "complete",
+          complete: true,
+          authorizationUrl: null,
+          error: null,
+          updatedAtMs: now,
+        };
+        yield* write(saved);
+        return { verified: true as const };
+      }),
+    );
+  });
   return GrokBotSetupService.of({
     status,
     send: send.pipe(

@@ -7,8 +7,8 @@ import type { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contr
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Pressable, View } from "react-native";
 
-import { AppActivityIndicator } from "../../components/AppActivityIndicator";
-import { AppText as Text } from "../../components/AppText";
+import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
+import { AppText as Text } from "../../components/ui/AppText";
 import {
   describeMuseNativeOpenFailure,
   museNativeAttachSendGate,

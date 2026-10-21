@@ -12,7 +12,7 @@ import {
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { ArrowUpIcon, InfoIcon, SettingsIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { ComposerSurface } from "~/components/chat/ComposerSurface";
@@ -349,11 +349,13 @@ function GrokBotMessageList({
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   const roster = useEnvironmentQuery(grokBotsListQuery({ environmentId, input: {} })).data ?? [];
-  const timeline = useMemo(() => groupGrokBotTimeline(messages, bot.id), [messages, bot.id]);
-  const peerCounts = useMemo(() => groupGrokBotPeerCounts(messages, bot.id), [messages, bot.id]);
+  const timeline = groupGrokBotTimeline(messages, bot.id);
+  const peerCounts = groupGrokBotPeerCounts(messages, bot.id);
+  const latestMessage = messages.at(-1);
   useEffect(() => {
+    if (!latestMessage && pending.length === 0) return;
     endRef.current?.scrollIntoView({ block: "end" });
-  }, [messages.at(-1)?.id, messages.at(-1)?.text, messages.at(-1)?.streaming, pending.length]);
+  }, [latestMessage, pending.length]);
 
   if (messages.length === 0 && pending.length === 0) {
     return (
@@ -623,15 +625,21 @@ function GrokBotComposer({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [uncertain, setUncertain] = useState<GrokBotSentMessage | null>(null);
+  const [deliveredSend, setDeliveredSend] = useState<{
+    readonly message: GrokBotSentMessage;
+    readonly identity: string;
+  } | null>(null);
   const disabled = !canSend || sending;
 
-  // An uncertain send resolves when the transcript shows it; until then the draft waits for the user.
-  useEffect(() => {
-    if (uncertain === null || !isGrokBotSendDelivered(messages, uncertain)) return;
+  const delivered = uncertain !== null && isGrokBotSendDelivered(messages, uncertain);
+  if (delivered) {
+    setDeliveredSend({ message: uncertain, identity });
     setUncertain(null);
-    setDraft((current) => (current.trim() === uncertain.text ? "" : current));
-    setGrokBotActivity(identity, "thinking", THINKING_TIMEOUT_MS);
-  }, [identity, messages, uncertain]);
+    if (draft.trim() === uncertain.text) setDraft("");
+  }
+  useEffect(() => {
+    if (deliveredSend) setGrokBotActivity(deliveredSend.identity, "thinking", THINKING_TIMEOUT_MS);
+  }, [deliveredSend]);
 
   const submit = async () => {
     const message = draft.trim();

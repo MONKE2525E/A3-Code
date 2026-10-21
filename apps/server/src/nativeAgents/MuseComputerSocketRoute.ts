@@ -32,11 +32,11 @@ const decodeReference = Schema.decodeUnknownOption(
   }),
 );
 
-const makeHandler = (
-  agents: Agents.NativeAgentService["Service"],
-  sessions: SessionStore.SessionStore["Service"],
-) =>
-  Effect.gen(function* () {
+const makeHandler = Effect.fn("MuseComputerSocketRoute.makeHandler")(
+  function* (
+    agents: Agents.NativeAgentService["Service"],
+    sessions: SessionStore.SessionStore["Service"],
+  ) {
     const request = yield* HttpServerRequest.HttpServerRequest;
     if (request.headers.upgrade?.toLowerCase() !== "websocket")
       return HttpServerResponse.text("Not Found", { status: 404 });
@@ -114,13 +114,13 @@ const makeHandler = (
         SocketError: () => Effect.succeed(HttpServerResponse.empty()),
       }),
     );
-  }).pipe(
-    Effect.catchTags({
-      EnvironmentAuthInvalidError: HttpServerRespondable.toResponse,
-      EnvironmentScopeRequiredError: HttpServerRespondable.toResponse,
-      EnvironmentInternalError: HttpServerRespondable.toResponse,
-    }),
-  );
+  },
+  Effect.catchTags({
+    EnvironmentAuthInvalidError: HttpServerRespondable.toResponse,
+    EnvironmentScopeRequiredError: HttpServerRespondable.toResponse,
+    EnvironmentInternalError: HttpServerRespondable.toResponse,
+  }),
+);
 
 export const routeLayer = HttpRouter.use((router) =>
   Effect.gen(function* () {

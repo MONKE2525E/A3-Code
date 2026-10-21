@@ -100,8 +100,8 @@ export const MuseAgentDriver: ProviderDriver<MuseAgentProviderSettings, MuseAgen
   metadata: { displayName: "Muse", supportsMultipleInstances: false, hasDefaultInstance: false },
   configSchema: MuseAgentProviderSettings,
   defaultConfig: () => decodeSettings({}),
-  create: (options) =>
-    Effect.gen(function* () {
+  create: Effect.fn("MuseAgentDriver.create")(
+    function* (options) {
       const native = yield* Native.MuseAgentNativeRuntimeService;
       const orchestrationAdapter = yield* createMuseAgentAdapterV2(options);
       const check = checkMuseAgentProvider(options).pipe(
@@ -136,15 +136,18 @@ export const MuseAgentDriver: ProviderDriver<MuseAgentProviderSettings, MuseAgen
           generateThreadTitle: () => unsupportedGeneration("generateThreadTitle"),
         },
       } satisfies ProviderInstance;
-    }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new ProviderDriverError({
-            driver: MUSE_AGENT_DRIVER_KIND,
-            instanceId: options.instanceId,
-            detail: "Failed to build the native Muse provider.",
-            cause,
-          }),
+    },
+    (effect, options) =>
+      effect.pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderDriverError({
+              driver: MUSE_AGENT_DRIVER_KIND,
+              instanceId: options.instanceId,
+              detail: "Failed to build the native Muse provider.",
+              cause,
+            }),
+        ),
       ),
-    ),
+  ),
 };

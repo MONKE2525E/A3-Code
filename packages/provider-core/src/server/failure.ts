@@ -14,9 +14,9 @@ import * as DateTime from "effect/DateTime";
 import * as Cause from "effect/Cause";
 
 import * as IdAllocator from "./IdAllocator.ts";
+import type { ProviderAdapterFailureReason } from "./ProviderAdapter.ts";
 import * as Schema from "effect/Schema";
 
-/** Raised when portable history does not fit the target provider's context window. */
 export class ContextHandoffBudgetError extends Schema.TaggedError<ContextHandoffBudgetError>()(
   "ContextHandoffBudgetError",
   {},
@@ -27,22 +27,54 @@ export class ContextHandoffBudgetError extends Schema.TaggedError<ContextHandoff
 }
 
 export const MAX_PROVIDER_FAILURE_MESSAGE_LENGTH = 4_096;
-export const MAX_PROVIDER_FAILURE_CODE_LENGTH = 128;
+const MAX_PROVIDER_FAILURE_CODE_LENGTH = 128;
 
 const DEFAULT_PROVIDER_FAILURE_MESSAGE = "Provider turn failed.";
 
+const PROVIDER_FAILURE_CATEGORIES: Partial<
+  Record<string, { readonly summary: string; readonly guidance: string }>
+> = {
+  ProviderAdapterTurnStartError: {
+    summary: "The provider could not start this turn",
+    guidance: "Retry the turn; if it keeps failing, check the provider setup and server logs.",
+  },
+  ProviderAdapterEventStreamError: {
+    summary: "The provider event stream closed unexpectedly",
+    guidance: "Retry the turn; if it keeps failing, check the provider and server logs.",
+  },
+  ProviderAdapterOpenSessionError: {
+    summary: "The provider session could not be opened",
+    guidance: "Check that the provider is installed and signed in, then retry the turn.",
+  },
+  ProviderAdapterResumeThreadError: {
+    summary: "The provider conversation could not be resumed",
+    guidance: "Retry the turn; if it keeps failing, check the provider and server logs.",
+  },
+};
+
+const PROVIDER_FAILURE_REASONS: Record<ProviderAdapterFailureReason, string> = {
+  previous_turn_active: "the previous turn is still running",
+  attachment_unreadable: "an attachment could not be read",
+};
+
 /**
- * Translate known categories without exposing arbitrary provider defect text.
- * `retryable` is true only when a cause in the chain proves the turn never started
- * and sending it again later is safe.
+ * Walks a cause chain for curated text without reading arbitrary provider
+ * defect text. `known` is the message of a domain error T3 raised itself;
+ * `category` is the generic message of the innermost provider wrapper seen.
  */
-function causeDetails(cause: unknown): {
-  readonly message: string | undefined;
-  readonly retryable: boolean;
+function curatedCauseMessages(cause: unknown): {
+  readonly known: string | undefined;
+  readonly category: string | undefined;
 } {
   const seen = new Set<unknown>();
-  let message: string | undefined;
-  let retryable = false;
+  let category: (typeof PROVIDER_FAILURE_CATEGORIES)[string];
+  let reason: string | undefined;
+  const categoryMessage = () => {
+    if (category === undefined) return undefined;
+    return reason
+      ? `${category.summary}: ${reason}. ${category.guidance}`
+      : `${category.summary}. ${category.guidance}`;
+  };
   let promptNotSubmitted = false;
   for (let depth = 0; depth < 16 && cause != null && !seen.has(cause); depth++) {
     seen.add(cause);
@@ -52,7 +84,8 @@ function causeDetails(cause: unknown): {
         continue;
       }
       if (typeof cause !== "object") break;
-      switch ((cause as Record<string, unknown>)._tag) {
+      const tag = (cause as Record<string, unknown>)._tag;
+      switch (tag) {
         case "ProviderPromptNotSubmittedError":
           promptNotSubmitted = true;
           break;
@@ -60,84 +93,113 @@ function causeDetails(cause: unknown): {
           const kind = stringField(cause, "kind");
           if (kind === "disconnected" || kind === "unavailable")
             return {
-              message: promptNotSubmitted
+              known: promptNotSubmitted
                 ? "Muse disconnected before setup completed. T3 could not restore the connection; check Muse in Settings → Providers and retry."
                 : "Muse disconnected. Check the conversation in Muse before retrying; reconnect Muse in Settings → Providers if needed.",
-              retryable: promptNotSubmitted,
+              category: categoryMessage(),
             };
           if (kind === "account_changed")
             return {
-              message:
+              known:
                 "The Muse account or workspace changed. Reconnect Muse in Settings → Providers.",
-              retryable: false,
+              category: categoryMessage(),
             };
           if (kind === "uncertain")
             return {
-              message:
+              known:
                 "Muse may have received this message. T3 did not resend it. Check the conversation in Muse before retrying.",
-              retryable: false,
+              category: categoryMessage(),
             };
           break;
         }
         case "MuseAgentDeliveryError":
           if (stringField(cause, "kind") === "busy")
             return {
-              message:
+              known:
                 "Muse still has an earlier message awaiting confirmation. Open Muse’s Pending deliveries and refresh; if that turn has ended, use Release local tracking. This message was not sent.",
-              retryable: false,
+              category: categoryMessage(),
             };
           break;
         case "ContextHandoffBudgetError":
-          return { message: new ContextHandoffBudgetError().message, retryable: false };
-        case "ClaudeBackgroundWorkBlocksQueryReplacementError":
-          return { message: stringField(cause, "message"), retryable: false };
-        case "ContextHandoffDeliveryUncertainError":
-          return {
-            message:
-              "T3 could not confirm whether conversation history reached the provider. Retry the turn to recover the session.",
-            retryable: false,
-          };
-        // Grok Bot start failures carry their own bounded, credential-free reason, which names
-        // the stage that failed (attachment upload, account binding, native delivery).
+          return { known: new ContextHandoffBudgetError().message, category: categoryMessage() };
         case "GrokBotNativeAttachmentError":
-          if ((cause as { transient?: unknown }).transient === true) retryable = true;
-          return { message: stringField(cause, "message") ?? message, retryable };
         case "GrokBotBindingError":
         case "GrokBotNativeRuntimeError":
         case "GrokBotNativeReadError":
         case "GrokBotNativeSignedOutError":
-          return { message: stringField(cause, "message") ?? message, retryable };
-        case "ProviderAdapterTurnStartError":
-          message =
-            "The provider could not start this turn. Retry the turn; if it keeps failing, check the provider setup and server logs.";
+        case "AcpModelSelectionError":
+        case "ClaudeBackgroundWorkBlocksQueryReplacementError":
+        case "ClaudeAppendSystemPromptFileError":
+        case "ClaudeAppendSystemPromptMissingValueError":
+        case "CursorModelUnavailableError":
+          return { known: stringField(cause, "message"), category: categoryMessage() };
+        case "ContextHandoffDeliveryUncertainError":
+          return {
+            known:
+              "T3 could not confirm whether conversation history reached the provider. Retry the turn to recover the session.",
+            category: categoryMessage(),
+          };
+        case "ProviderAdapterProtocolError": {
+          const typedReason = (cause as Record<string, unknown>).reason;
+          if (
+            category !== undefined &&
+            typeof typedReason === "string" &&
+            Object.hasOwn(PROVIDER_FAILURE_REASONS, typedReason)
+          ) {
+            reason ??= PROVIDER_FAILURE_REASONS[typedReason as ProviderAdapterFailureReason];
+          }
           break;
-        case "ProviderAdapterEventStreamError":
-          message =
-            "The provider event stream closed unexpectedly. Retry the turn; if it keeps failing, check the provider and server logs.";
-          break;
-        case "ProviderAdapterOpenSessionError":
-          message =
-            "The provider session could not be opened. Check that the provider is installed and signed in, then retry the turn.";
-          break;
-        case "ProviderAdapterResumeThreadError":
-          message =
-            "The provider conversation could not be resumed. Retry the turn; if it keeps failing, check the provider and server logs.";
-          break;
+        }
+      }
+      if (typeof tag === "string" && Object.hasOwn(PROVIDER_FAILURE_CATEGORIES, tag)) {
+        category = PROVIDER_FAILURE_CATEGORIES[tag];
+        reason = undefined;
       }
       cause = (cause as Record<string, unknown>).cause;
     } catch {
       break;
     }
   }
-  return { message, retryable };
+  return { known: undefined, category: categoryMessage() };
 }
 
 /**
- * True when the cause proves the turn never reached the provider and failed for a transient
- * reason, so starting it again later is safe and cannot duplicate the message.
+ * The curated message of a domain error in a failure's cause chain, if any.
+ * Callers that pass their own `message` to `makeProviderFailure` check it
+ * first, so a known reason is not hidden behind a wrapper's text.
  */
+export function knownProviderFailureMessage(cause: unknown): string | undefined {
+  return curatedCauseMessages(cause).known;
+}
+
 export function isTransientStartCause(cause: unknown): boolean {
-  return causeDetails(cause).retryable;
+  const seen = new Set<unknown>();
+  let promptNotSubmitted = false;
+  for (let depth = 0; depth < 16 && cause != null && !seen.has(cause); depth++) {
+    seen.add(cause);
+    try {
+      if (Cause.isCause(cause)) {
+        cause = Cause.squash(cause);
+        continue;
+      }
+      if (typeof cause !== "object") return false;
+      if ("_tag" in cause && cause._tag === "ProviderPromptNotSubmittedError") {
+        promptNotSubmitted = true;
+      }
+      if ("_tag" in cause && cause._tag === "MuseAgentTransportError") {
+        const kind = stringField(cause, "kind");
+        return promptNotSubmitted && (kind === "disconnected" || kind === "unavailable");
+      }
+      if ("_tag" in cause && cause._tag === "MuseAgentDeliveryError") return false;
+      if ("_tag" in cause && cause._tag === "GrokBotNativeAttachmentError") {
+        return "transient" in cause && cause.transient === true;
+      }
+      cause = "cause" in cause ? cause.cause : undefined;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 function stringField(value: unknown, key: "message" | "code" | "kind"): string | undefined {
@@ -181,7 +243,6 @@ function replaceUnsafeControlCharacters(value: string): string {
   return sanitized.join("");
 }
 
-/** Removes common credential forms before provider text crosses a transport boundary. */
 function redactProviderFailureText(value: string): string {
   return replaceUnsafeControlCharacters(value)
     .replace(/\bhttps?:\/\/[^\s<>"']+/giu, redactUrl)
@@ -217,8 +278,9 @@ export function makeProviderFailure(input: {
   readonly retryable?: boolean | null;
   readonly resetAt?: string | null;
 }): OrchestrationV2ProviderFailure {
-  const details = causeDetails(input.cause);
-  const rawMessage = input.message ?? details.message ?? DEFAULT_PROVIDER_FAILURE_MESSAGE;
+  const curated = curatedCauseMessages(input.cause);
+  const rawMessage =
+    input.message ?? curated.known ?? curated.category ?? DEFAULT_PROVIDER_FAILURE_MESSAGE;
   const message = boundedText(rawMessage, MAX_PROVIDER_FAILURE_MESSAGE_LENGTH);
   const rawCode = input.code ?? stringField(input.cause, "code") ?? null;
   const code =
@@ -228,7 +290,7 @@ export function makeProviderFailure(input: {
     class: input.class ?? "unknown",
     message: message || DEFAULT_PROVIDER_FAILURE_MESSAGE,
     code,
-    retryable: input.retryable ?? (details.retryable ? true : null),
+    retryable: input.retryable ?? (isTransientStartCause(input.cause) ? true : null),
     ...(input.class === "usage_limit" &&
     input.resetAt != null &&
     Number.isFinite(Date.parse(input.resetAt))

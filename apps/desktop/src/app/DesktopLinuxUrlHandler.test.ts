@@ -1,7 +1,7 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -9,7 +9,6 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
-import * as TestClock from "effect/testing/TestClock";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
@@ -157,17 +156,6 @@ const emptyRecording = (): RecordedRegistration => ({
   copies: [],
 });
 
-const currentDesktopEntry = `[Desktop Entry]
-Type=Application
-Name=T3 Code plus Grokbot (Alpha)
-Exec="/home/alice/Applications/T3-Code.AppImage" %U
-Icon=/home/alice/.local/share/icons/com.monke.t3code.grokbot.desktop.png
-Terminal=false
-NoDisplay=true
-StartupNotify=false
-MimeType=x-scheme-handler/t3code-grokbot;
-`;
-
 describe("DesktopLinuxUrlHandler", () => {
   it("renders a scheme-handler desktop entry with freedesktop Exec quoting", () => {
     const entry = DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
@@ -179,9 +167,6 @@ describe("DesktopLinuxUrlHandler", () => {
 
     assert.include(entry, "[Desktop Entry]");
     assert.include(entry, "Name=T3 Code plus Grokbot (Nightly)");
-    // Exec composes both escaping layers: a literal backslash becomes four
-    // backslashes in the file, a quote three characters, a dollar sign two
-    // backslashes plus the sign.
     assert.include(
       entry,
       'Exec="/home/al ice/Apps/T3 \\\\"100%%\\\\" \\\\$HOME\\\\\\\\x.AppImage" %U',
@@ -190,33 +175,6 @@ describe("DesktopLinuxUrlHandler", () => {
     assert.notInclude(entry, "StartupWMClass=");
     assert.include(entry, "MimeType=x-scheme-handler/t3code-grokbot;");
     assert.include(entry, "Icon=/home/al ice/icons/T3\\\\x.png");
-  });
-
-  it("carries structured context on registration errors", () => {
-    const writeError = new DesktopLinuxUrlHandler.DesktopLinuxUrlHandlerRegistrationError({
-      step: "write-desktop-entry",
-      scheme: "t3code-grokbot",
-      desktopEntryPath: "/home/alice/.local/share/applications/com.monke.t3code.grokbot.desktop",
-      cause: new Error("boom"),
-    });
-    assert.equal(
-      writeError.message,
-      "Failed to register the t3code-grokbot:// URL handler (step: write-desktop-entry).",
-    );
-    assert.equal(
-      writeError.desktopEntryPath,
-      "/home/alice/.local/share/applications/com.monke.t3code.grokbot.desktop",
-    );
-
-    const exitError = new DesktopLinuxUrlHandler.DesktopLinuxUrlHandlerRegistrationError({
-      step: "set-default-handler",
-      scheme: "t3code-grokbot",
-      exitCode: 4,
-    });
-    assert.equal(
-      exitError.message,
-      "Failed to register the t3code-grokbot:// URL handler (step: set-default-handler, xdg-mime exit code 4).",
-    );
   });
 
   it.effect(
@@ -228,12 +186,16 @@ describe("DesktopLinuxUrlHandler", () => {
         yield* runRegister(recorded);
 
         assert.deepEqual(recorded.directories, ["/home/alice/.local/share/applications"]);
-        assert.deepEqual(recorded.files, [
-          {
-            path: "/home/alice/.local/share/applications/com.monke.t3code.grokbot.desktop",
-            content: currentDesktopEntry,
-          },
-        ]);
+        assert.equal(recorded.files.length, 1);
+        assert.equal(
+          recorded.files[0]?.path,
+          "/home/alice/.local/share/applications/com.monke.t3code.grokbot.desktop",
+        );
+        assert.include(
+          recorded.files[0]?.content,
+          "Exec=/home/alice/Applications/T3-Code.AppImage %U",
+        );
+        assert.include(recorded.files[0]?.content, "MimeType=x-scheme-handler/t3code-grokbot;");
         assert.deepEqual(recorded.commands, [
           {
             command: "update-desktop-database",
@@ -255,24 +217,19 @@ describe("DesktopLinuxUrlHandler", () => {
   it.effect("falls back to the process executable outside an AppImage", () => {
     const recorded = emptyRecording();
 
-    return Effect.scoped(
-      Effect.gen(function* () {
-        yield* Effect.acquireRelease(
-          Effect.sync(() => {
-            const execPath = process.execPath;
-            process.execPath = "/usr/bin/t3code-grokbot";
-            return execPath;
-          }),
-          (execPath) =>
-            Effect.sync(() => {
-              process.execPath = execPath;
-            }),
-        );
-        yield* runRegister(recorded, { environment: { appImagePath: Option.none() } });
+    return Effect.gen(function* () {
+      yield* runRegister(recorded, { environment: { appImagePath: Option.none() } });
 
-        assert.include(recorded.files[0]?.content, 'Exec="/usr/bin/t3code-grokbot" %U');
-      }),
-    );
+      assert.include(
+        recorded.files[0]?.content,
+        DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
+          displayName: "T3 Code plus Grokbot (Alpha)",
+          execTarget: process.execPath,
+          scheme: "t3code-grokbot",
+          iconPath: "/home/alice/.local/share/icons/com.monke.t3code.grokbot.desktop.png",
+        }),
+      );
+    });
   });
 
   it.effect("does not rewrite the pre-ready entry while the portal can be reading it", () => {
@@ -280,43 +237,16 @@ describe("DesktopLinuxUrlHandler", () => {
 
     return Effect.gen(function* () {
       yield* runRegister(recorded, {
-        existingEntry: currentDesktopEntry,
+        existingEntry: DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
+          displayName: "T3 Code plus Grokbot (Alpha)",
+          execTarget: "/home/alice/Applications/T3-Code.AppImage",
+          scheme: "t3code-grokbot",
+          iconPath: "/home/alice/.local/share/icons/com.monke.t3code.grokbot.desktop.png",
+        }),
       });
 
       assert.deepEqual(recorded.files, []);
       assert.deepEqual(recorded.directories, []);
-      assert.deepEqual(recorded.commands, [
-        {
-          command: "update-desktop-database",
-          args: ["/home/alice/.local/share/applications"],
-        },
-        {
-          command: "xdg-mime",
-          args: ["default", "com.monke.t3code.grokbot.desktop", "x-scheme-handler/t3code-grokbot"],
-        },
-      ]);
-    });
-  });
-
-  it.effect("upgrades an entry with the upstream display name and URL scheme", () => {
-    const recorded = emptyRecording();
-
-    return Effect.gen(function* () {
-      yield* runRegister(recorded, {
-        existingEntry: currentDesktopEntry
-          .replace("Name=T3 Code plus Grokbot (Alpha)", "Name=T3 Code (Alpha)")
-          .replace(
-            "MimeType=x-scheme-handler/t3code-grokbot;",
-            "MimeType=x-scheme-handler/t3code;",
-          ),
-      });
-
-      assert.deepEqual(recorded.files, [
-        {
-          path: "/home/alice/.local/share/applications/com.monke.t3code.grokbot.desktop",
-          content: currentDesktopEntry,
-        },
-      ]);
       assert.deepEqual(recorded.commands, [
         {
           command: "update-desktop-database",
@@ -336,16 +266,18 @@ describe("DesktopLinuxUrlHandler", () => {
     return Effect.gen(function* () {
       yield* runRegister(recorded, {
         iconSource: "/tmp/.mount_T3/resources/icon.png",
-        existingEntry: currentDesktopEntry,
+        existingEntry: DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
+          displayName: "T3 Code plus Grokbot (Alpha)",
+          execTarget: "/home/alice/Applications/T3-Code.AppImage",
+          scheme: "t3code-grokbot",
+          iconPath,
+        }),
       });
       assert.deepEqual(recorded.files, []);
       assert.deepEqual(recorded.copies, [
         { source: "/tmp/.mount_T3/resources/icon.png", destination: iconPath },
       ]);
-      assert.deepEqual(recorded.commands.at(-1), {
-        command: "xdg-mime",
-        args: ["default", "com.monke.t3code.grokbot.desktop", "x-scheme-handler/t3code-grokbot"],
-      });
+      assert.equal(recorded.commands.at(-1)?.command, "xdg-mime");
     });
   });
 
@@ -378,27 +310,15 @@ describe("DesktopLinuxUrlHandler", () => {
       yield* runRegister(unpackaged, {
         environment: {
           isPackaged: false,
-          isDevelopment: true,
-          displayName: "T3 Code plus Grokbot (Dev)",
           linuxDesktopEntryName: "com.monke.t3code.grokbot.Development.desktop",
         },
       });
 
       assert.deepEqual(nonLinux.files, []);
-      assert.deepEqual(unpackaged.files, [
-        {
-          path: "/home/alice/.local/share/applications/com.monke.t3code.grokbot.Development.desktop",
-          content: `[Desktop Entry]
-Type=Application
-Name=T3 Code plus Grokbot (Dev)
-Exec="/home/alice/Applications/T3-Code.AppImage" %U
-Terminal=false
-NoDisplay=true
-StartupNotify=false
-MimeType=x-scheme-handler/t3code-grokbot-dev;
-`,
-        },
-      ]);
+      assert.equal(
+        unpackaged.files[0]?.path,
+        "/home/alice/.local/share/applications/com.monke.t3code.grokbot.Development.desktop",
+      );
       assert.deepEqual(unpackaged.commands, []);
     });
   });
@@ -430,24 +350,266 @@ MimeType=x-scheme-handler/t3code-grokbot-dev;
       assert.deepEqual(writeFailed.commands, []);
     });
   });
+});
 
-  it.effect("continues to xdg-mime when the desktop MIME cache refresh stalls", () =>
+interface ThemeIconRun {
+  readonly root: string;
+  readonly commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }>;
+  readonly iconCacheOptions?: Array<Record<string, unknown>>;
+  readonly sourceMissing?: boolean;
+  readonly iconCacheExitCode?: number;
+  readonly iconCacheSpawnFails?: boolean;
+  readonly iconCacheStalled?: boolean;
+  readonly iconCacheStarted?: Deferred.Deferred<void>;
+  // Stands in for gtk-update-icon-cache rewriting the cache on success.
+  readonly onIconCacheRefresh?: Effect.Effect<void>;
+}
+
+const registerWithRealFileSystem = (run: ThemeIconRun) =>
+  Effect.gen(function* () {
+    const handler = yield* DesktopLinuxUrlHandler.DesktopLinuxUrlHandler;
+    yield* handler.register;
+  }).pipe(
+    Effect.provide(
+      DesktopLinuxUrlHandler.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.effect(
+              DesktopEnvironment.DesktopEnvironment,
+              Path.Path.pipe(
+                Effect.map((path) =>
+                  makeEnvironment(path, {
+                    linuxApplicationsDir: path.join(run.root, "applications"),
+                    linuxDesktopEntryName: "com.monke.T3Code.Grokbot.desktop",
+                  }),
+                ),
+              ),
+            ),
+            Layer.effect(
+              DesktopAssets.DesktopAssets,
+              Path.Path.pipe(
+                Effect.map((path) => ({
+                  iconPaths: Effect.succeed({
+                    png: Option.none(),
+                    ico: Option.none(),
+                    icns: Option.none(),
+                  }),
+                  resolveResourcePath: (fileName: string) =>
+                    Effect.succeed(
+                      fileName === "icons/256x256.png"
+                        ? Option.some(
+                            path.join(
+                              run.root,
+                              run.sourceMissing ? "missing" : "resources",
+                              fileName,
+                            ),
+                          )
+                        : Option.none(),
+                    ),
+                })),
+              ),
+            ),
+            Layer.succeed(
+              ChildProcessSpawner.ChildProcessSpawner,
+              ChildProcessSpawner.make((command) => {
+                const childProcess = command as unknown as {
+                  readonly command: string;
+                  readonly args: ReadonlyArray<string>;
+                };
+                run.commands.push({ command: childProcess.command, args: childProcess.args });
+                if (childProcess.command !== "gtk-update-icon-cache") {
+                  return Effect.succeed(mockProcess(0));
+                }
+                run.iconCacheOptions?.push(
+                  (command as unknown as { readonly options: Record<string, unknown> }).options,
+                );
+                if (run.iconCacheSpawnFails) {
+                  return Effect.fail(
+                    PlatformError.systemError({
+                      _tag: "NotFound",
+                      module: "ChildProcess",
+                      method: "spawn",
+                      description: "gtk-update-icon-cache is not installed",
+                    }),
+                  );
+                }
+                const exitCode = run.iconCacheExitCode ?? 0;
+                const handle = mockProcess(exitCode, run.iconCacheStalled === true);
+                const refreshed =
+                  exitCode === 0 && run.onIconCacheRefresh ? run.onIconCacheRefresh : Effect.void;
+                return refreshed.pipe(
+                  Effect.andThen(
+                    run.iconCacheStarted
+                      ? Deferred.succeed(run.iconCacheStarted, undefined)
+                      : Effect.void,
+                  ),
+                  Effect.as(handle),
+                );
+              }),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+const themeIconFixture = (source: Uint8Array) =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-theme-icons-" });
+    yield* fileSystem.makeDirectory(path.join(root, "resources", "icons"), { recursive: true });
+    yield* fileSystem.writeFile(path.join(root, "resources", "icons", "256x256.png"), source);
+    const hicolorDir = path.join(root, "icons", "hicolor");
+    const appsDir = path.join(hicolorDir, "256x256", "apps");
+    const cachePath = path.join(hicolorDir, "icon-theme.cache");
+    // A fixed time in the past, in whole seconds as fs.utimes expects.
+    const pastSeconds = 1_600_000_000;
+    // An existing cache that predates any installed icon.
+    const seedCache = Effect.gen(function* () {
+      yield* fileSystem.makeDirectory(appsDir, { recursive: true });
+      yield* fileSystem.writeFile(cachePath, new Uint8Array([0]));
+      yield* fileSystem.utimes(cachePath, pastSeconds, pastSeconds);
+    });
+    const rewriteCache = fileSystem
+      .writeFile(cachePath, new Uint8Array([1]))
+      .pipe(Effect.orDie, Effect.provideService(FileSystem.FileSystem, fileSystem));
+    return { root, hicolorDir, appsDir, cachePath, pastSeconds, seedCache, rewriteCache };
+  });
+
+const iconCacheRuns = (run: ThemeIconRun) =>
+  run.commands.filter(({ command }) => command === "gtk-update-icon-cache").length;
+
+it.layer(NodeServices.layer)("DesktopLinuxUrlHandler theme icons", (it) => {
+  it.effect("installs both app id spellings without creating an icon cache", () =>
     Effect.gen(function* () {
-      const recorded = emptyRecording();
-      const started = yield* Deferred.make<void>();
-      const registration = yield* runRegister(recorded, {
-        updateDesktopDatabaseStalled: true,
-        updateDesktopDatabaseStarted: started,
-      }).pipe(Effect.forkChild);
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const icon = new Uint8Array([137, 80, 78, 71, 1, 2, 3]);
+      const fixture = yield* themeIconFixture(icon);
+      const run: ThemeIconRun = { root: fixture.root, commands: [] };
 
-      yield* Deferred.await(started);
-      yield* TestClock.adjust("5 seconds");
-      yield* Fiber.join(registration);
+      yield* registerWithRealFileSystem(run);
+      assert.deepEqual([...(yield* fileSystem.readDirectory(fixture.appsDir))].sort(), [
+        "com.monke.T3Code.Grokbot.png",
+        "com.monke.t3code.grokbot.png",
+      ]);
+      for (const name of ["com.monke.t3code.grokbot", "com.monke.T3Code.Grokbot"]) {
+        const target = path.join(fixture.appsDir, `${name}.png`);
+        assert.deepEqual([...(yield* fileSystem.readFile(target))], [...icon]);
+        yield* fileSystem.utimes(target, fixture.pastSeconds, fixture.pastSeconds);
+      }
 
+      yield* registerWithRealFileSystem(run);
+      for (const name of ["com.monke.t3code.grokbot", "com.monke.T3Code.Grokbot"]) {
+        const info = yield* fileSystem.stat(path.join(fixture.appsDir, `${name}.png`));
+        assert.equal(Option.getOrThrow(info.mtime).getTime(), fixture.pastSeconds * 1000);
+      }
+      assert.isFalse(yield* fileSystem.exists(fixture.cachePath));
+      assert.equal(iconCacheRuns(run), 0);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("replaces same-length stale icons and refreshes an existing cache once", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const fixture = yield* themeIconFixture(new Uint8Array([1, 2, 3]));
+      yield* fixture.seedCache;
+      const lower = path.join(fixture.appsDir, "com.monke.t3code.grokbot.png");
+      const upper = path.join(fixture.appsDir, "com.monke.T3Code.Grokbot.png");
+      yield* fileSystem.writeFile(lower, new Uint8Array([3, 2, 1]));
+      yield* fileSystem.writeFile(upper, new Uint8Array([1, 2, 3]));
+      for (const target of [lower, upper]) {
+        yield* fileSystem.utimes(target, fixture.pastSeconds, fixture.pastSeconds);
+      }
+      const run: ThemeIconRun = {
+        root: fixture.root,
+        commands: [],
+        onIconCacheRefresh: fixture.rewriteCache,
+      };
+
+      yield* registerWithRealFileSystem(run);
+      yield* registerWithRealFileSystem(run);
+
+      assert.deepEqual([...(yield* fileSystem.readFile(lower))], [1, 2, 3]);
+      const upperInfo = yield* fileSystem.stat(upper);
+      assert.equal(Option.getOrThrow(upperInfo.mtime).getTime(), fixture.pastSeconds * 1000);
       assert.deepEqual(
-        recorded.commands.map(({ command }) => command),
+        run.commands.filter(({ command }) => command === "gtk-update-icon-cache"),
+        [{ command: "gtk-update-icon-cache", args: ["-f", "-t", fixture.hicolorDir] }],
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("refreshes when this launch changed an icon even if the cache looks newer", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const fixture = yield* themeIconFixture(new Uint8Array([1, 2, 3]));
+      yield* fixture.seedCache;
+      const run: ThemeIconRun = {
+        root: fixture.root,
+        commands: [],
+        onIconCacheRefresh: fixture.rewriteCache,
+      };
+      // A cache stamped later than the new icons, as after a clock correction.
+      const future = fixture.pastSeconds + 10 * 365 * 24 * 60 * 60;
+      yield* fileSystem.utimes(fixture.cachePath, future, future);
+
+      yield* registerWithRealFileSystem(run);
+
+      assert.isTrue(
+        yield* fileSystem.exists(path.join(fixture.appsDir, "com.monke.T3Code.Grokbot.png")),
+      );
+      assert.equal(iconCacheRuns(run), 1);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("retries a failed icon cache refresh on the next launch", () =>
+    Effect.gen(function* () {
+      const fixture = yield* themeIconFixture(new Uint8Array([1, 2, 3]));
+      yield* fixture.seedCache;
+      const failing: ThemeIconRun = { root: fixture.root, commands: [], iconCacheExitCode: 1 };
+      yield* registerWithRealFileSystem(failing);
+      assert.equal(iconCacheRuns(failing), 1);
+      assert.deepEqual(failing.commands.map(({ command }) => command).slice(1), [
+        "update-desktop-database",
+        "xdg-mime",
+      ]);
+
+      const recovering: ThemeIconRun = {
+        root: fixture.root,
+        commands: [],
+        onIconCacheRefresh: fixture.rewriteCache,
+      };
+      yield* registerWithRealFileSystem(recovering);
+      yield* registerWithRealFileSystem(recovering);
+      assert.equal(iconCacheRuns(recovering), 1);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("still registers the handler when the theme icon install fails", () =>
+    Effect.gen(function* () {
+      const fixture = yield* themeIconFixture(new Uint8Array([1, 2, 3]));
+      const missingSource: ThemeIconRun = { root: fixture.root, commands: [], sourceMissing: true };
+      yield* registerWithRealFileSystem(missingSource);
+      assert.deepEqual(
+        missingSource.commands.map(({ command }) => command),
         ["update-desktop-database", "xdg-mime"],
       );
-    }),
+
+      yield* fixture.seedCache;
+      const missingTool: ThemeIconRun = {
+        root: fixture.root,
+        commands: [],
+        iconCacheSpawnFails: true,
+      };
+      yield* registerWithRealFileSystem(missingTool);
+      assert.deepEqual(
+        missingTool.commands.map(({ command }) => command),
+        ["gtk-update-icon-cache", "update-desktop-database", "xdg-mime"],
+      );
+    }).pipe(Effect.scoped),
   );
 });

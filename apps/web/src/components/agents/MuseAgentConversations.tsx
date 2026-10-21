@@ -12,7 +12,7 @@ import type {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import {
@@ -71,9 +71,8 @@ export function MuseAgentConversations({
     }),
   );
   const sessions = read.data?.operation === "sessions" ? read.data.data : null;
-  const conversations = useMemo(
-    () => (sessions ?? []).filter((session) => session.isThread && !session.isPrimary),
-    [sessions],
+  const conversations = (sessions ?? []).filter(
+    (session) => session.isThread && !session.isPrimary,
   );
   if (read.error !== null && sessions === null) {
     return (

@@ -1,6 +1,6 @@
 import { type EnvironmentId, MuseAgentAvatarVariant } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useEffectEvent, useState } from "react";
 
 import { museAgentAvatarQuery } from "~/state/museAgentAvatar";
 import { useEnvironmentQuery } from "~/state/query";
@@ -44,12 +44,13 @@ export function pickVideoVariant(
  */
 function useObjectUrl(media: { bytes: Uint8Array; contentType: string } | null): string | null {
   const [made, setMade] = useState<{ media: object; url: string } | null>(null);
+  const onCreated = useEffectEvent(setMade);
   useEffect(() => {
     if (!media) return;
     const url = URL.createObjectURL(
       new Blob([media.bytes as Uint8Array<ArrayBuffer>], { type: media.contentType }),
     );
-    setMade({ media, url });
+    onCreated({ media, url });
     return () => URL.revokeObjectURL(url);
   }, [media]);
   return media && made?.media === media ? made.url : null;
@@ -81,7 +82,7 @@ export function useMuseAgentAvatar(
 
   const image = useEnvironmentQuery(profile?.avatarImageUrl ? target("image") : null).data;
   const video = useEnvironmentQuery(state !== "idle" ? target(videoVariant) : null).data;
-  const imageMedia = useMemo(() => (image?._tag === "Available" ? image : null), [image]);
-  const videoMedia = useMemo(() => (video?._tag === "Available" ? video : null), [video]);
+  const imageMedia = image?._tag === "Available" ? image : null;
+  const videoMedia = video?._tag === "Available" ? video : null;
   return { imageUrl: useObjectUrl(imageMedia), videoUrl: useObjectUrl(videoMedia) };
 }

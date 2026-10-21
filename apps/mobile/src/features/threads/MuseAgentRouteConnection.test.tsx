@@ -1,4 +1,3 @@
-// @vitest-environment jsdom
 import { EnvironmentRpcUnavailableError } from "@t3tools/client-runtime/rpc";
 import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -21,10 +20,10 @@ vi.mock("react-native", () => ({
   ),
   ActivityIndicator: () => <span>spinner</span>,
 }));
-vi.mock("../../components/AppText", () => ({
+vi.mock("../../components/ui/AppText", () => ({
   AppText: ({ children, ...props }: { children?: ReactNode }) => <span {...props}>{children}</span>,
 }));
-vi.mock("../../components/AppActivityIndicator", () => ({
+vi.mock("../../components/ui/AppActivityIndicator", () => ({
   AppActivityIndicator: () => <span>spinner</span>,
 }));
 

@@ -66,8 +66,8 @@ const make = Effect.gen(function* () {
     options: NativeTools.DirectToolSessionOptions,
   ) {
     const session = yield* nativeTools.open(options);
-    const invoke: MuseDirectToolSession["invoke"] = (connectionId, payload) =>
-      Effect.gen(function* () {
+    const invoke: MuseDirectToolSession["invoke"] = Effect.fn("MuseAgentDirectTools.invoke")(
+      function* (connectionId, payload) {
         const request = yield* decodeEnvelope(payload).pipe(
           Effect.mapError(
             () => new NativeTools.NativeAgentDirectToolsError({ code: "invalid_request" }),
@@ -113,7 +113,8 @@ const make = Effect.gen(function* () {
           // Reply only to the connection validated for this invocation, never the current reconnect.
           options: { expectedConnectionId: connectionId },
         };
-      });
+      },
+    );
     return {
       catalog: session.catalog,
       acceptRegistration: session.acceptRegistration,

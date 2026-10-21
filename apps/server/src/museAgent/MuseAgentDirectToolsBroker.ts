@@ -112,13 +112,12 @@ export const installLayer = Layer.effectDiscard(
         const session = yield* tools.open({
           scope,
           ...(options.connectionId === undefined ? {} : { connectionId: options.connectionId }),
-          validate: (captured) =>
-            Effect.gen(function* () {
-              if (!active || !(yield* isCurrent)) return false;
-              // resolve invokes the single server-owned McpRemoteRunValidator for every execution.
-              const current = yield* registry.resolve(token);
-              return current !== undefined && sameAuthority(captured, current);
-            }),
+          validate: Effect.fn("MuseAgentDirectToolsBroker.validate")(function* (captured) {
+            if (!active || !(yield* isCurrent)) return false;
+            // resolve invokes the single server-owned McpRemoteRunValidator for every execution.
+            const current = yield* registry.resolve(token);
+            return current !== undefined && sameAuthority(captured, current);
+          }),
         });
         yield* Effect.addFinalizer(() => session.revoke);
         const catalog = yield* session.catalog;
@@ -128,28 +127,26 @@ export const installLayer = Layer.effectDiscard(
           yield* registry.revokeProviderSession(credential.config.providerSessionId);
           yield* session.revoke.pipe(Effect.forkIn(lifetime));
         });
-        const invoke: Parameters<Port.MuseDirectToolTurnOptions["register"]>[1] = (input) =>
-          Effect.gen(function* () {
-            if (!ready)
-              return yield* new NativeTools.NativeAgentDirectToolsError({ code: "session_closed" });
-            if (
-              input.accountBinding !== accountBinding ||
-              input.nativeSessionId !== nativeSessionId
-            )
-              return yield* new NativeTools.NativeAgentDirectToolsError({
-                code: "stale_authority",
-              });
-            const request = yield* decodeCommand(input.payload).pipe(
-              Effect.mapError(
-                () => new NativeTools.NativeAgentDirectToolsError({ code: "invalid_request" }),
-              ),
-            );
-            if (request.command_id !== input.commandId)
-              return yield* new NativeTools.NativeAgentDirectToolsError({
-                code: "invalid_request",
-              });
-            return yield* session.invoke(input.connectionId, input.payload);
-          });
+        const invoke: Parameters<Port.MuseDirectToolTurnOptions["register"]>[1] = Effect.fn(
+          "MuseAgentDirectToolsBroker.invoke",
+        )(function* (input) {
+          if (!ready)
+            return yield* new NativeTools.NativeAgentDirectToolsError({ code: "session_closed" });
+          if (input.accountBinding !== accountBinding || input.nativeSessionId !== nativeSessionId)
+            return yield* new NativeTools.NativeAgentDirectToolsError({
+              code: "stale_authority",
+            });
+          const request = yield* decodeCommand(input.payload).pipe(
+            Effect.mapError(
+              () => new NativeTools.NativeAgentDirectToolsError({ code: "invalid_request" }),
+            ),
+          );
+          if (request.command_id !== input.commandId)
+            return yield* new NativeTools.NativeAgentDirectToolsError({
+              code: "invalid_request",
+            });
+          return yield* session.invoke(input.connectionId, input.payload);
+        });
         const registration = yield* Effect.acquireRelease(
           register(catalog, invoke).pipe(
             Effect.mapError(

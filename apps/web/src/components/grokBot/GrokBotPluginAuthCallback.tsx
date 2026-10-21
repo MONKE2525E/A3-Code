@@ -1,7 +1,7 @@
 import { EnvironmentId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import { useConnectedEnvironmentIds, usePrimaryEnvironmentId } from "~/state/environments";
@@ -58,14 +58,9 @@ export function GrokBotPluginAuthCallback() {
   const [callback] = useState(readCallback);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const storedFlow = callback?.flow ?? null;
-  const flow = useMemo(
-    () =>
-      storedFlow ??
-      (primaryEnvironmentId === null
-        ? null
-        : { environmentId: primaryEnvironmentId, pluginId: "" }),
-    [storedFlow, primaryEnvironmentId],
-  );
+  const flow =
+    storedFlow ??
+    (primaryEnvironmentId === null ? null : { environmentId: primaryEnvironmentId, pluginId: "" });
   const [message, setMessage] = useState(() =>
     callback?.result === "connected"
       ? connectedMessage

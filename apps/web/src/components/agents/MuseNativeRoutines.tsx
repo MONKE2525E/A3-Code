@@ -1,3 +1,4 @@
+import { useNowMinute } from "../../hooks/useNowMinute";
 import { useAtomValue } from "@effect/atom-react";
 import {
   AuthOrchestrationOperateScope,
@@ -111,7 +112,7 @@ function MuseRoutineRow({
   const [busy, setBusy] = useState(false);
   const update = useAtomCommand(museAgentFeatureUpdate, { label: "muse routine deleted" });
   const name = routine.title?.trim() || "Untitled routine";
-  const nextRun = formatMuseNextRun(routine.nextRunAtUtc, Date.now());
+  const nextRun = formatMuseNextRun(routine.nextRunAtUtc, Date.parse(useNowMinute()));
   const remove = async () => {
     if (busy || !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return;
     const confirmed = await requestConfirmDialog(

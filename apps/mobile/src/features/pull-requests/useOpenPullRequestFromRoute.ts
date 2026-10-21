@@ -32,3 +32,22 @@ export function useOpenPullRequest(options?: {
     [environmentId, threadId, openResolved],
   );
 }
+
+// Workspace sidebars have no route; callers supply the originating environment explicitly.
+export function useNavigateToPullRequest(options?: { readonly replace?: boolean }) {
+  const openResolved = useResolvedPullRequest(options);
+  return useCallback(
+    (
+      url: string,
+      context: {
+        readonly environmentId: string;
+        readonly projectId: string;
+        readonly threadId?: string;
+      } | null,
+    ) =>
+      context
+        ? openResolved(url, context.environmentId, "pull-request", context.threadId)
+        : tryOpenExternalUrl(url, "pull-request"),
+    [openResolved],
+  );
+}

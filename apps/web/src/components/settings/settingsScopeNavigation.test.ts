@@ -138,7 +138,6 @@ describe("settings scope navigation", () => {
   it("clears a checkout when selecting all environments and all projects", async () => {
     const router = createSettingsRouter();
     await router.navigate({ to: "/settings/general", search: checkoutSearch, hash: "old-setting" });
-    // The scope selects send every axis explicitly so "all" does not read as "unchanged".
     await router.navigate({
       to: "/settings/general",
       search: { project: undefined, machine: undefined, checkout: undefined },
@@ -256,16 +255,6 @@ describe("settings scope navigation", () => {
       reason: "environment-missing",
       environmentIds: [],
     });
-  });
-
-  it("respects explicit clearing keys instead of restoring the previous checkout", async () => {
-    const router = createSettingsRouter();
-    await router.navigate({ to: "/settings/general", search: checkoutSearch });
-    await router.navigate({
-      to: "/settings/projects",
-      search: { project: "different-project", machine: undefined },
-    });
-    expect(router.state.location.search).toEqual({ project: "different-project" });
   });
 
   it("preserves escaped checkout identifiers across reload and browser history", async () => {

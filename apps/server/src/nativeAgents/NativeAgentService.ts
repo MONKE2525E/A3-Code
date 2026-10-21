@@ -420,209 +420,205 @@ const make = Effect.gen(function* () {
       detail:
         "Could not connect to this Muse conversation. Wait for any active Muse turn to finish, then try again.",
     });
-  const observe = <E = never, R = never>(
+  const observe = Effect.fn("NativeAgentService.observe")(function* <E = never, R = never>(
     threadId: ThreadId,
     instanceId: ProviderInstanceId,
     authorize?: Effect.Effect<void, E, R>,
-  ): Effect.Effect<void, NativeAgentError | E, R> =>
-    Effect.gen(function* () {
-      const thread = yield* projections
-        .getThreadShell(threadId)
-        .pipe(Effect.mapError(attachFailure));
-      if (
-        !thread ||
-        thread.deletedAt !== null ||
-        thread.archivedAt !== null ||
-        thread.providerInstanceId !== instanceId ||
-        thread.modelSelection.instanceId !== instanceId ||
-        thread.modelSelection.model !== "muse"
-      )
-        return;
-      const records = yield* projections
-        .getThreadRecords(threadId, ["providerThreads", "providerSessions"])
-        .pipe(Effect.mapError(attachFailure));
-      const bound = records.providerThreads.find(
-        (candidate) =>
-          candidate.driver === "muse-agent" &&
-          candidate.providerInstanceId === instanceId &&
-          candidate.providerSessionId !== null,
-      );
-      const boundId = bound?.providerSessionId ?? null;
-      const live =
-        boundId === null
-          ? Option.none()
-          : yield* providerSessions.get(boundId).pipe(
-              Effect.catchTags({
-                ProviderSessionLookupError: () => Effect.succeed(Option.none()),
-              }),
-              Effect.mapError(attachFailure),
-            );
-      const providerSessionId =
-        boundId !== null && Option.isSome(live)
-          ? boundId
-          : ProviderSessionId.make(`provider-session:muse-agent-observe:${threadId}`);
-      const project = yield* projects.get(thread.projectId).pipe(Effect.mapError(attachFailure));
-      if (Option.isNone(project)) return;
-      const previous = observed.get(threadId);
-      yield* authorize ?? Effect.void;
-      if (previous !== undefined && previous !== providerSessionId)
-        yield* providerSessions.close(previous).pipe(Effect.mapError(attachFailure));
-      const persisted = records.providerSessions.find(
-        (candidate) =>
-          candidate.id === providerSessionId &&
-          candidate.status !== "stopped" &&
-          candidate.status !== "error",
-      );
-      // Attaching a session imports native history without admitting a provider turn.
-      yield* authorize ?? Effect.void;
-      yield* providerSessions
-        .open({
-          threadId,
-          providerSessionId,
-          modelSelection: thread.modelSelection,
-          runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
-            runtimeMode: "full-access",
-            interactionMode: "default",
-            cwd: thread.worktreePath ?? project.value.workspaceRoot,
-          }),
-          ...(persisted === undefined ? {} : { resumeFromSession: persisted }),
-          ...(bound?.nativeThreadRef?.nativeId == null
-            ? {}
-            : { initialNativeThreadId: bound.nativeThreadRef.nativeId }),
-        })
-        .pipe(Effect.mapError(attachFailure));
-      observed.set(threadId, providerSessionId);
-    });
-  const openAuthorized = <E, R>(
+  ) {
+    const thread = yield* projections.getThreadShell(threadId).pipe(Effect.mapError(attachFailure));
+    if (
+      !thread ||
+      thread.deletedAt !== null ||
+      thread.archivedAt !== null ||
+      thread.providerInstanceId !== instanceId ||
+      thread.modelSelection.instanceId !== instanceId ||
+      thread.modelSelection.model !== "muse"
+    )
+      return;
+    const records = yield* projections
+      .getThreadRecords(threadId, ["providerThreads", "providerSessions"])
+      .pipe(Effect.mapError(attachFailure));
+    const bound = records.providerThreads.find(
+      (candidate) =>
+        candidate.driver === "muse-agent" &&
+        candidate.providerInstanceId === instanceId &&
+        candidate.providerSessionId !== null,
+    );
+    const boundId = bound?.providerSessionId ?? null;
+    const live =
+      boundId === null
+        ? Option.none()
+        : yield* providerSessions.get(boundId).pipe(
+            Effect.catchTags({
+              ProviderSessionLookupError: () => Effect.succeed(Option.none()),
+            }),
+            Effect.mapError(attachFailure),
+          );
+    const providerSessionId =
+      boundId !== null && Option.isSome(live)
+        ? boundId
+        : ProviderSessionId.make(`provider-session:muse-agent-observe:${threadId}`);
+    const project = yield* projects.get(thread.projectId).pipe(Effect.mapError(attachFailure));
+    if (Option.isNone(project)) return;
+    const previous = observed.get(threadId);
+    yield* authorize ?? Effect.void;
+    if (previous !== undefined && previous !== providerSessionId)
+      yield* providerSessions.close(previous).pipe(Effect.mapError(attachFailure));
+    const persisted = records.providerSessions.find(
+      (candidate) =>
+        candidate.id === providerSessionId &&
+        candidate.status !== "stopped" &&
+        candidate.status !== "error",
+    );
+    // Attaching a session imports native history without admitting a provider turn.
+    yield* authorize ?? Effect.void;
+    yield* providerSessions
+      .open({
+        threadId,
+        providerSessionId,
+        modelSelection: thread.modelSelection,
+        runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: thread.worktreePath ?? project.value.workspaceRoot,
+        }),
+        ...(persisted === undefined ? {} : { resumeFromSession: persisted }),
+        ...(bound?.nativeThreadRef?.nativeId == null
+          ? {}
+          : { initialNativeThreadId: bound.nativeThreadRef.nativeId }),
+      })
+      .pipe(Effect.mapError(attachFailure));
+    observed.set(threadId, providerSessionId);
+  });
+  const openAuthorized = Effect.fn("NativeAgentService.openAuthorized")(function* <E, R>(
     reference: NativeAgentOpenThreadInput,
     authorize: Effect.Effect<void, E, R>,
-  ): Effect.Effect<typeof NativeAgentOpenThreadResult.Type, NativeAgentError | E, R> =>
-    Effect.gen(function* () {
-      yield* authorize ?? Effect.void;
-      if (reference.source === "grok-bot") {
-        const snapshot = (yield* providers.getProviders).find(
-          (item) => item.instanceId === reference.providerInstanceId,
-        );
-        if (snapshot?.driver !== "grok-bot")
-          return yield* new NativeAgentError({ reason: "provider_unavailable" });
-        const result = yield* grok
-          .open({ botId: reference.agentId })
-          .pipe(Effect.mapError(failure("provider_not_ready")));
-        if (result.providerInstanceId !== reference.providerInstanceId)
-          return yield* new NativeAgentError({ reason: "account_changed" });
-        return result;
-      }
-      if (reference.agentId !== "muse")
-        return yield* new NativeAgentError({ reason: "provider_unavailable" });
-      return yield* lock.withPermits(1)(
-        Effect.gen(function* () {
-          yield* authorize ?? Effect.void;
-          const selection = yield* selected(reference.providerInstanceId);
-          // Main chat is the primary session; a side chat opens its own session and its own thread.
-          const target = yield* native
-            .resolveSession(selection.binding, reference.sessionId)
-            .pipe(Effect.mapError(nativeFailure));
-          const identity = yield* canonicalIdentity(selection);
-          const threadId = ThreadId.make(
-            museThreadIdForSession(identity, target.is_primary ? undefined : target.session_id),
-          );
-          const previous = yield* projections
-            .getThread(threadId)
-            .pipe(
-              Effect.catchTags({
-                ProjectionStoreThreadNotFoundError: () => Effect.succeed(undefined),
-              }),
-            )
-            .pipe(Effect.mapError(failure("storage_failed")));
-          if (previous?.deletedAt) return yield* new NativeAgentError({ reason: "thread_deleted" });
-          if (
-            previous &&
-            (previous.providerInstanceId !== selection.instanceId ||
-              previous.modelSelection.instanceId !== selection.instanceId ||
-              previous.modelSelection.model !== "muse")
-          )
-            return yield* new NativeAgentError({ reason: "thread_changed" });
-          const check = Effect.gen(function* () {
-            const current = yield* selected(selection.instanceId);
-            if (current.binding !== selection.binding)
-              return yield* new NativeAgentError({ reason: "account_changed" });
-          });
-          if (!previous) {
-            yield* authorize ?? Effect.void;
-            const { projectId } = yield* folders.ensureNativeAgentProject.pipe(
-              Effect.mapError(failure("scratch_unavailable")),
-            );
-            const assistant = yield* profile(selection.instanceId);
-            yield* check;
-            yield* authorize ?? Effect.void;
-            yield* orchestrator
-              .dispatch({
-                type: "thread.create",
-                commandId: CommandId.make(`muse-agent:open:${threadId}`),
-                threadId,
-                projectId,
-                title: target.is_primary ? assistant.name : target.title?.trim() || assistant.name,
-                modelSelection: { instanceId: selection.instanceId, model: "muse" },
-                runtimeMode: "full-access",
-                interactionMode: "default",
-                branch: null,
-                worktreePath: null,
-                createdBy: "user",
-                creationSource: "server",
-              })
-              .pipe(
-                Effect.provideService(Orchestrator.MuseThreadCreation, threadId),
-                Effect.mapError(failure("storage_failed")),
-              );
-          } else if (previous.archivedAt !== null) {
-            yield* check;
-            const nonce = yield* crypto.randomUUIDv4.pipe(
-              Effect.mapError(failure("storage_failed")),
-            );
-            yield* authorize ?? Effect.void;
-            yield* orchestrator
-              .dispatch({
-                type: "thread.unarchive",
-                commandId: CommandId.make(`muse-agent:unarchive:${nonce}`),
-                threadId,
-              })
-              .pipe(
-                Effect.provideService(Orchestrator.MuseThreadMutation, {
-                  threadId,
-                  operation: "archive",
-                }),
-                Effect.mapError(failure("storage_failed")),
-              );
-          }
-          const nativeTitle = target.title?.trim();
-          if (previous && nativeTitle && previous.title !== nativeTitle) {
-            yield* check;
-            const nonce = yield* crypto.randomUUIDv4.pipe(
-              Effect.mapError(failure("storage_failed")),
-            );
-            yield* authorize ?? Effect.void;
-            yield* orchestrator
-              .dispatch({
-                type: "thread.metadata.update",
-                commandId: CommandId.make(`muse-agent:open-title:${nonce}`),
-                threadId,
-                title: nativeTitle,
-              })
-              .pipe(
-                Effect.provideService(Orchestrator.MuseThreadMutation, {
-                  threadId,
-                  operation: "rename",
-                }),
-                Effect.mapError(failure("storage_failed")),
-              );
-          }
-          yield* check;
-          yield* observe(threadId, selection.instanceId, authorize);
-          yield* check;
-          return { threadId, providerInstanceId: selection.instanceId };
-        }),
+  ) {
+    yield* authorize ?? Effect.void;
+    if (reference.source === "grok-bot") {
+      const snapshot = (yield* providers.getProviders).find(
+        (item) => item.instanceId === reference.providerInstanceId,
       );
-    });
+      if (snapshot?.driver !== "grok-bot")
+        return yield* new NativeAgentError({ reason: "provider_unavailable" });
+      const result = yield* grok
+        .open({ botId: reference.agentId })
+        .pipe(Effect.mapError(failure("provider_not_ready")));
+      if (result.providerInstanceId !== reference.providerInstanceId)
+        return yield* new NativeAgentError({ reason: "account_changed" });
+      return result;
+    }
+    if (reference.agentId !== "muse")
+      return yield* new NativeAgentError({ reason: "provider_unavailable" });
+    return yield* lock.withPermits(1)(
+      Effect.gen(function* () {
+        yield* authorize ?? Effect.void;
+        const selection = yield* selected(reference.providerInstanceId);
+        // Main chat is the primary session; a side chat opens its own session and its own thread.
+        const target = yield* native
+          .resolveSession(selection.binding, reference.sessionId)
+          .pipe(Effect.mapError(nativeFailure));
+        const identity = yield* canonicalIdentity(selection);
+        const threadId = ThreadId.make(
+          museThreadIdForSession(identity, target.is_primary ? undefined : target.session_id),
+        );
+        const previous = yield* projections
+          .getThread(threadId)
+          .pipe(
+            Effect.catchTags({
+              ProjectionStoreThreadNotFoundError: () => Effect.succeed(undefined),
+            }),
+          )
+          .pipe(Effect.mapError(failure("storage_failed")));
+        if (previous?.deletedAt) return yield* new NativeAgentError({ reason: "thread_deleted" });
+        if (
+          previous &&
+          (previous.providerInstanceId !== selection.instanceId ||
+            previous.modelSelection.instanceId !== selection.instanceId ||
+            previous.modelSelection.model !== "muse")
+        )
+          return yield* new NativeAgentError({ reason: "thread_changed" });
+        const check = Effect.gen(function* () {
+          const current = yield* selected(selection.instanceId);
+          if (current.binding !== selection.binding)
+            return yield* new NativeAgentError({ reason: "account_changed" });
+        });
+        if (!previous) {
+          yield* authorize ?? Effect.void;
+          const { projectId } = yield* folders.ensureNativeAgentProject.pipe(
+            Effect.mapError(failure("scratch_unavailable")),
+          );
+          const assistant = yield* profile(selection.instanceId);
+          yield* check;
+          yield* authorize ?? Effect.void;
+          yield* orchestrator
+            .dispatch({
+              type: "thread.create",
+              commandId: CommandId.make(`muse-agent:open:${threadId}`),
+              threadId,
+              projectId,
+              title: target.is_primary ? assistant.name : target.title?.trim() || assistant.name,
+              modelSelection: { instanceId: selection.instanceId, model: "muse" },
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+              createdBy: "user",
+              creationSource: "server",
+            })
+            .pipe(
+              Effect.provideService(Orchestrator.MuseThreadCreation, threadId),
+              Effect.mapError(failure("storage_failed")),
+            );
+        } else if (previous.archivedAt !== null) {
+          yield* check;
+          const nonce = yield* crypto
+            .randomUUIDv4()
+            .pipe(Effect.mapError(failure("storage_failed")));
+          yield* authorize ?? Effect.void;
+          yield* orchestrator
+            .dispatch({
+              type: "thread.unarchive",
+              commandId: CommandId.make(`muse-agent:unarchive:${nonce}`),
+              threadId,
+            })
+            .pipe(
+              Effect.provideService(Orchestrator.MuseThreadMutation, {
+                threadId,
+                operation: "archive",
+              }),
+              Effect.mapError(failure("storage_failed")),
+            );
+        }
+        const nativeTitle = target.title?.trim();
+        if (previous && nativeTitle && previous.title !== nativeTitle) {
+          yield* check;
+          const nonce = yield* crypto
+            .randomUUIDv4()
+            .pipe(Effect.mapError(failure("storage_failed")));
+          yield* authorize ?? Effect.void;
+          yield* orchestrator
+            .dispatch({
+              type: "thread.metadata.update",
+              commandId: CommandId.make(`muse-agent:open-title:${nonce}`),
+              threadId,
+              title: nativeTitle,
+            })
+            .pipe(
+              Effect.provideService(Orchestrator.MuseThreadMutation, {
+                threadId,
+                operation: "rename",
+              }),
+              Effect.mapError(failure("storage_failed")),
+            );
+        }
+        yield* check;
+        yield* observe(threadId, selection.instanceId, authorize);
+        yield* check;
+        return { threadId, providerInstanceId: selection.instanceId };
+      }),
+    );
+  });
   const open = (reference: NativeAgentOpenThreadInput) => openAuthorized(reference, Effect.void);
   const featureFailure = (error: Features.MuseAgentFeatureError) =>
     new NativeAgentError({
@@ -689,12 +685,11 @@ const make = Effect.gen(function* () {
       return yield* new NativeAgentError({ reason: "account_changed" });
     return {
       events: stream.events.pipe(Stream.mapError(computerFailure)),
-      send: (data: Uint8Array) =>
-        Effect.gen(function* () {
-          if ((yield* selected(input.providerInstanceId)).binding !== selection.binding)
-            return yield* new NativeAgentError({ reason: "account_changed" });
-          yield* stream.send(data).pipe(Effect.mapError(computerFailure));
-        }),
+      send: Effect.fn("NativeAgentService.send")(function* (data: Uint8Array) {
+        if ((yield* selected(input.providerInstanceId)).binding !== selection.binding)
+          return yield* new NativeAgentError({ reason: "account_changed" });
+        yield* stream.send(data).pipe(Effect.mapError(computerFailure));
+      }),
       close: stream.close,
     };
   });
@@ -1302,9 +1297,9 @@ const make = Effect.gen(function* () {
                 if (!assertOwned(shell))
                   return yield* new NativeAgentError({ reason: "thread_changed" });
                 if (shell !== null && (shell.archivedAt !== null) !== input.archived) {
-                  const nonce = yield* crypto.randomUUIDv4.pipe(
-                    Effect.mapError(failure("storage_failed")),
-                  );
+                  const nonce = yield* crypto
+                    .randomUUIDv4()
+                    .pipe(Effect.mapError(failure("storage_failed")));
                   yield* orchestrator
                     .dispatch({
                       type: input.archived ? "thread.archive" : "thread.unarchive",
@@ -1388,9 +1383,9 @@ const make = Effect.gen(function* () {
                   shell.modelSelection.instanceId === selection.instanceId &&
                   shell.modelSelection.model === "muse"
                 ) {
-                  const nonce = yield* crypto.randomUUIDv4.pipe(
-                    Effect.mapError(failure("storage_failed")),
-                  );
+                  const nonce = yield* crypto
+                    .randomUUIDv4()
+                    .pipe(Effect.mapError(failure("storage_failed")));
                   yield* orchestrator
                     .dispatch({
                       type: "thread.metadata.update",

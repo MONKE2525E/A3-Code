@@ -55,24 +55,26 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
 
-    const allocate: TurnItemPositionStoreV2Shape["allocate"] = ({
-      threadId,
-      turnItemId,
-      runId,
-      runOrdinal: suppliedRunOrdinal,
-      advanceNativePosition = false,
-      nativeSequence,
-    }) =>
-      Effect.gen(function* () {
+    const allocate: TurnItemPositionStoreV2Shape["allocate"] = Effect.fn(
+      "TurnItemPositionStore.allocate",
+    )(
+      function* ({
+        threadId,
+        turnItemId,
+        runId,
+        runOrdinal: suppliedRunOrdinal,
+        advanceNativePosition = false,
+        nativeSequence,
+      }) {
         const runRows =
           runId === null
             ? []
             : yield* sql<{ readonly ordinal: number }>`
-                SELECT ordinal
+          SELECT ordinal
                 FROM orchestration_v2_projection_runs
                 WHERE thread_id = ${threadId} AND run_id = ${runId}
-                LIMIT 1
-              `;
+                  LIMIT 1
+        `;
         const runOrdinal = suppliedRunOrdinal ?? runRows[0]?.ordinal ?? null;
         const lowerBound = runOrdinal === null ? 0 : runOrdinal * 1_000_000;
         const upperBound = runOrdinal === null ? 999_999 : lowerBound + 999_999;
@@ -99,7 +101,7 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
           const maximum = yield* sql<{
             readonly ordinal: number | null;
           }>`SELECT MAX(ordinal) AS ordinal
-            FROM orchestration_v2_turn_item_positions
+          FROM orchestration_v2_turn_item_positions
             WHERE thread_id = ${threadId} AND ordinal BETWEEN ${lowerBound} AND ${upperBound}`;
           const ordinal = (maximum[0]?.ordinal ?? lowerBound) + 1;
           if (ordinal > upperBound)
@@ -202,7 +204,7 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
           SELECT ordinal
           FROM orchestration_v2_turn_item_positions
           WHERE thread_id = ${threadId} AND turn_item_id = ${turnItemId}
-          LIMIT 1
+                  LIMIT 1
         `;
         const ordinal = rows[0]?.ordinal;
         if (ordinal === undefined) {
@@ -213,14 +215,17 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
           });
         }
         return ordinal;
-      }).pipe(
-        sql.withTransaction,
-        Effect.mapError((cause) =>
-          isTurnItemPositionStoreError(cause)
-            ? cause
-            : new TurnItemPositionStoreError({ threadId, turnItemId, cause }),
+      },
+      (effect, { threadId, turnItemId }) =>
+        effect.pipe(
+          sql.withTransaction,
+          Effect.mapError((cause) =>
+            isTurnItemPositionStoreError(cause)
+              ? cause
+              : new TurnItemPositionStoreError({ threadId, turnItemId, cause }),
+          ),
         ),
-      );
+    );
 
     return TurnItemPositionStoreV2.of({
       allocate,
@@ -242,8 +247,8 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
               }),
           ),
         ),
-      normalize: (item, runOrdinal) =>
-        Effect.gen(function* () {
+      normalize: Effect.fn("TurnItemPositionStore.normalize")(
+        function* (item, runOrdinal) {
           const nativeMessage =
             item.nativeItemRef?.driver !== undefined &&
             nativeAgentSourceForDriver(item.nativeItemRef.driver) !== undefined &&
@@ -292,17 +297,20 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
               : {}),
           });
           return item.ordinal === ordinal ? item : { ...item, ordinal };
-        }).pipe(
-          Effect.mapError((cause) =>
-            isTurnItemPositionStoreError(cause)
-              ? cause
-              : new TurnItemPositionStoreError({
-                  threadId: item.threadId,
-                  turnItemId: item.id,
-                  cause,
-                }),
+        },
+        (effect, item) =>
+          effect.pipe(
+            Effect.mapError((cause) =>
+              isTurnItemPositionStoreError(cause)
+                ? cause
+                : new TurnItemPositionStoreError({
+                    threadId: item.threadId,
+                    turnItemId: item.id,
+                    cause,
+                  }),
+            ),
           ),
-        ),
+      ),
     });
   }),
 );

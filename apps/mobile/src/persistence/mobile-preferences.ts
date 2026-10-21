@@ -5,17 +5,21 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
-import type {
-  ProviderInstanceId,
-  PullRequestMergeMethod,
-  SidebarProjectGroupingMode,
+import {
+  EnvironmentId,
+  PullRequestInvolvement,
+  PullRequestListFilters,
+  PullRequestListState,
+  type ProviderInstanceId,
+  type PullRequestMergeMethod,
+  type SidebarProjectGroupingMode,
 } from "@t3tools/contracts";
 import type { ComposerEnterBehavior } from "../lib/composerEnterBehavior";
 import type { FollowUpBehavior } from "../lib/followUpBehavior";
 import { isMicrophoneKind, type MicrophoneEntry } from "../lib/microphonePriority";
 import {
   sanitizePullRequestListPreferences,
-  type PullRequestListPreferences,
+  type PullRequestListPreferences as LegacyPullRequestListPreferences,
 } from "../lib/pullRequestListPreferences";
 import { MOBILE_THEME_IDS, type MobileThemeId, type MobileThemeMode } from "../lib/mobileTheme";
 import * as MobileDatabase from "./mobile-database";
@@ -25,10 +29,35 @@ import { MobileStorageDecodeError, MobileStorageEncodeError } from "./mobile-sto
 const PREFERENCES_KEY = "t3code.preferences";
 const PREFERENCES_FALLBACK_KEY = "t3code.preferences.fallback";
 
+export const PullRequestListControls = Schema.Struct({
+  state: PullRequestListState,
+  involvement: PullRequestInvolvement,
+  filters: PullRequestListFilters,
+  projectId: Schema.optional(Schema.String),
+  projectEnvironmentId: Schema.optional(Schema.String),
+  sort: Schema.Literals(["updated", "created", "oldest"]),
+});
+export type PullRequestListControls = typeof PullRequestListControls.Type;
+
+const ThreadListFilters = Schema.Struct({
+  environmentId: Schema.NullOr(EnvironmentId),
+  projectKey: Schema.NullOr(Schema.String),
+});
+export type ThreadListFilters = typeof ThreadListFilters.Type;
+
+const PullRequestListPreferences = Schema.Struct({
+  environmentId: Schema.NullOr(Schema.String),
+  controls: Schema.Record(Schema.String, PullRequestListControls),
+});
+export type PullRequestListPreferences = typeof PullRequestListPreferences.Type;
+
+const isThreadListFilters = Schema.is(ThreadListFilters);
+const isPullRequestListPreferences = Schema.is(PullRequestListPreferences);
+
 export interface Preferences {
   readonly pullRequestHideTestFiles?: boolean;
   readonly pullRequestMergeMethod?: PullRequestMergeMethod;
-  readonly pullRequestList?: PullRequestListPreferences;
+  readonly pullRequestList?: LegacyPullRequestListPreferences;
   readonly liveActivitiesEnabled?: boolean;
   readonly themeId?: MobileThemeId;
   readonly lightThemeId?: MobileThemeId;
@@ -39,33 +68,28 @@ export interface Preferences {
   readonly markdownFontSize?: number;
   readonly codeFontSize?: number | null;
   readonly codeWordBreak?: boolean;
+  readonly mathRenderingEnabled?: boolean;
   readonly connectOnboardingOptOutAccounts?: ReadonlyArray<string>;
   readonly collapsedProjectGroups?: readonly string[];
+  /** Environments whose "reclaim database space" notice was dismissed. */
+  readonly dismissedDatabaseStorageNotices?: readonly string[];
   /** What the Return key does in the composer on a hardware keyboard. iOS only. */
   readonly composerEnterBehavior?: ComposerEnterBehavior;
-  /**
-   * Device-local mirror of the web `followUpBehavior` client setting: whether a
-   * message sent during a running turn queues behind it or steers it.
-   */
   readonly followUpBehavior?: FollowUpBehavior;
-  /** Microphone kinds and remembered devices, most preferred first. iOS only. */
   readonly microphones?: ReadonlyArray<MicrophoneEntry>;
-  /** @deprecated Kept temporarily so older OTA bundles retain the selected mode. */
   readonly projectGroupingEnabled?: boolean;
   readonly projectGroupingMode?: SidebarProjectGroupingMode;
-  /** Device-local counterpart of desktop's `planModeEnabled` legacy flag. */
   readonly planModeEnabled?: boolean;
-  /** Device-local counterpart of web's `sidebarWorkingShelfEnabled` beta. */
   readonly workingShelfEnabled?: boolean;
-  /** @deprecated Retained to migrate favorites to the connected environment. */
   readonly modelFavorites?: ReadonlyArray<{
     readonly provider: ProviderInstanceId;
     readonly model: string;
   }>;
-  /** Fresh keys reset both shelves to collapsed when users update. */
   readonly threadListSettledShelfExpanded?: boolean;
   readonly threadListSnoozedShelfExpanded?: boolean;
   readonly threadListWorkingShelfExpanded?: boolean;
+  readonly threadListFilters?: ThreadListFilters;
+  readonly pullRequestListFilters?: PullRequestListPreferences;
 }
 
 export class MobilePreferencesLoadError extends Schema.TaggedError<MobilePreferencesLoadError>()(
@@ -109,7 +133,7 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   const preferences: {
     pullRequestHideTestFiles?: boolean;
     pullRequestMergeMethod?: PullRequestMergeMethod;
-    pullRequestList?: PullRequestListPreferences;
+    pullRequestList?: LegacyPullRequestListPreferences;
     liveActivitiesEnabled?: boolean;
     themeId?: MobileThemeId;
     lightThemeId?: MobileThemeId;
@@ -120,8 +144,10 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     markdownFontSize?: number;
     codeFontSize?: number | null;
     codeWordBreak?: boolean;
+    mathRenderingEnabled?: boolean;
     connectOnboardingOptOutAccounts?: ReadonlyArray<string>;
     collapsedProjectGroups?: readonly string[];
+    dismissedDatabaseStorageNotices?: readonly string[];
     composerEnterBehavior?: ComposerEnterBehavior;
     followUpBehavior?: FollowUpBehavior;
     microphones?: ReadonlyArray<MicrophoneEntry>;
@@ -133,6 +159,8 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     threadListSettledShelfExpanded?: boolean;
     threadListSnoozedShelfExpanded?: boolean;
     threadListWorkingShelfExpanded?: boolean;
+    threadListFilters?: ThreadListFilters;
+    pullRequestListFilters?: PullRequestListPreferences;
   } = {};
 
   if (typeof parsed.pullRequestHideTestFiles === "boolean") {
@@ -190,6 +218,8 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     preferences.codeFontSize = parsed.codeFontSize;
   }
   if (typeof parsed.codeWordBreak === "boolean") preferences.codeWordBreak = parsed.codeWordBreak;
+  if (typeof parsed.mathRenderingEnabled === "boolean")
+    preferences.mathRenderingEnabled = parsed.mathRenderingEnabled;
   if (Array.isArray(parsed.connectOnboardingOptOutAccounts)) {
     preferences.connectOnboardingOptOutAccounts = parsed.connectOnboardingOptOutAccounts.filter(
       (account): account is string => typeof account === "string",
@@ -198,6 +228,11 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   if (Array.isArray(parsed.collapsedProjectGroups)) {
     preferences.collapsedProjectGroups = parsed.collapsedProjectGroups.filter(
       (key): key is string => typeof key === "string",
+    );
+  }
+  if (Array.isArray(parsed.dismissedDatabaseStorageNotices)) {
+    preferences.dismissedDatabaseStorageNotices = parsed.dismissedDatabaseStorageNotices.filter(
+      (value): value is string => typeof value === "string",
     );
   }
   if (parsed.composerEnterBehavior === "send" || parsed.composerEnterBehavior === "newline") {
@@ -250,6 +285,30 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (typeof parsed.threadListWorkingShelfExpanded === "boolean") {
     preferences.threadListWorkingShelfExpanded = parsed.threadListWorkingShelfExpanded;
+  }
+  if (isThreadListFilters(parsed.threadListFilters)) {
+    preferences.threadListFilters = parsed.threadListFilters;
+  }
+  if (isPullRequestListPreferences(parsed.pullRequestListFilters)) {
+    preferences.pullRequestListFilters = parsed.pullRequestListFilters;
+  } else if (preferences.pullRequestList) {
+    const legacy = preferences.pullRequestList;
+    const environmentId = legacy.environmentId ?? null;
+    preferences.pullRequestListFilters = {
+      environmentId,
+      controls: {
+        [environmentId ?? ""]: {
+          state: legacy.state ?? "open",
+          involvement: legacy.involvement ?? "all",
+          filters: {},
+          sort:
+            legacy.sort === "newest" ? "created" : legacy.sort === "oldest" ? "oldest" : "updated",
+          ...(legacy.projectId
+            ? { projectId: legacy.projectId, projectEnvironmentId: legacy.environmentId }
+            : {}),
+        },
+      },
+    };
   }
   return preferences;
 }

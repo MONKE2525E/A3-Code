@@ -79,17 +79,16 @@ export const layer = Layer.sync(MuseAgentDirectToolsPort, () => {
           ? Effect.fail(new NativeTools.NativeAgentDirectToolsError({ code: "not_installed" }))
           : implementation(options),
       ),
-    install: (start) =>
-      Effect.gen(function* () {
-        if (installed)
-          return yield* new NativeTools.NativeAgentDirectToolsError({ code: "already_installed" });
-        installed = true;
-        implementation = start;
-        return {
-          uninstall: Effect.sync(() => {
-            implementation = undefined;
-          }),
-        };
-      }),
+    install: Effect.fn("MuseAgentDirectToolsPort.install")(function* (start) {
+      if (installed)
+        return yield* new NativeTools.NativeAgentDirectToolsError({ code: "already_installed" });
+      installed = true;
+      implementation = start;
+      return {
+        uninstall: Effect.sync(() => {
+          implementation = undefined;
+        }),
+      };
+    }),
   });
 });

@@ -14,7 +14,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { HttpServer } from "effect/http";
 import * as NetAddress from "effect/net/NetAddress";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
-import migration from "../persistence/Migrations/062_GrokBotManagedRuntime.ts";
+import migration from "../persistence/Migrations/068_GrokBotManagedRuntime.ts";
 import * as Store from "./McpRemoteCredentialStore.ts";
 import * as Validator from "./McpRemoteRunValidator.ts";
 import * as Registry from "./McpSessionRegistry.ts";

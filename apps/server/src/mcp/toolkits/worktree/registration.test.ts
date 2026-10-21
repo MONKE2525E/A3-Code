@@ -1,3 +1,4 @@
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as GuidedSetup from "../../../grokBot/GrokBotSetupService.ts";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../../../orchestration-v2/ProjectionStore.ts";
@@ -42,6 +43,7 @@ import * as GrokBotThreadService from "../../../grokBot/GrokBotThreadService.ts"
 import * as GrokBotTurnCompletion from "../../../grokBot/GrokBotTurnCompletion.ts";
 
 const layerStubServices = Layer.mergeAll(
+  Layer.mock(McpProviderSessions.McpProviderSessions)({}),
   Layer.mock(NativeAgentService.NativeAgentService)({}),
   Layer.mock(GuidedSetup.GrokBotSetupService)({}),
   Layer.mock(GrokBotService.GrokBotService)({}),
@@ -95,7 +97,7 @@ const decodeToolsListPayload = Schema.decodeUnknownEffect(ToolsListPayload);
 it.effect("production mcp layer lists worktree tools over http", () =>
   Effect.scoped(
     Effect.gen(function* () {
-      const layerRoutes = McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer));
+      const layerRoutes = McpHttpServer.layer;
       yield* HttpRouter.serve(layerRoutes, {
         disableListenLog: true,
         disableLogger: true,
@@ -111,7 +113,7 @@ it.effect("production mcp layer lists worktree tools over http", () =>
         Layer.build,
       );
 
-      const registry = McpSessionRegistry.issueActiveMcpCredential({
+      const registry = (yield* McpSessionRegistry.McpSessionRegistry).issue({
         threadId: ThreadId.make("thread-scratch"),
         providerInstanceId: ProviderInstanceId.make("claudeAgent"),
       });
@@ -186,6 +188,20 @@ it.effect("production mcp layer lists worktree tools over http", () =>
       Layer.mergeAll(
         NodeHttpServer.layerTest,
         ServerConfig.layerTest(process.cwd(), { prefix: "t3-worktree-mcp-" }).pipe(
+          Layer.provide(NodeServices.layer),
+        ),
+        McpSessionRegistry.layer.pipe(
+          Layer.provide(NodeHttpServer.layerTest),
+          Layer.provide(
+            Layer.mock(ServerEnvironment.ServerEnvironment)({
+              getEnvironmentId: Effect.succeed("environment-scratch" as never),
+            }),
+          ),
+          Layer.provide(
+            ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-registry-" }).pipe(
+              Layer.provide(NodeServices.layer),
+            ),
+          ),
           Layer.provide(NodeServices.layer),
         ),
         NodeServices.layer,

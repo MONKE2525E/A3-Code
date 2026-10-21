@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
     },
   ],
 }));
+vi.mock("react-native", () => ({ Platform: { OS: "ios" } }));
 vi.mock("react", () => ({ useCallback: (callback: unknown) => callback }));
 vi.mock("@react-navigation/native", () => ({
   useNavigation: () => ({ dispatch: mocks.dispatch }),

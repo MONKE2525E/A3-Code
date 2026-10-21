@@ -6,7 +6,7 @@ import {
 import type { EnvironmentId } from "@t3tools/contracts";
 import { Link } from "@tanstack/react-router";
 import { RefreshCwIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
@@ -89,7 +89,7 @@ function GrokBotSettingsBody({
   const setupProvider = useAtomCommand(grokBotsOrchestratorSetup, { reportFailure: false });
   const [providerPending, setProviderPending] = useState(false);
   const [providerError, setProviderError] = useState<string | null>(null);
-  const bots = useMemo(() => sortGrokBotsForEditor(roster.data ?? []), [roster.data]);
+  const bots = sortGrokBotsForEditor(roster.data ?? []);
   const [drafting, setDrafting] = useState(false);
   // Creating a bot goes through the gateway CLI, so it keeps the CLI check.
   const canStartDraft = status.data?.installed === true && status.data.sessionPresent === true;

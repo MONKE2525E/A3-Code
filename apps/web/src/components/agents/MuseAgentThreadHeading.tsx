@@ -1,6 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
-import { useMemo } from "react";
 
 import { museAgentProfileQuery } from "~/state/museAgent";
 import { useEnvironmentQuery } from "~/state/query";
@@ -31,10 +30,7 @@ export function MuseAgentThreadHeading({
       : null,
   ).data;
   const threads = useAtomValue(environmentThreadShells.environmentThreadsAtom(environmentId));
-  const status = useMemo(
-    () => threads.find((thread) => thread.id === threadId)?.status,
-    [threadId, threads],
-  );
+  const status = threads.find((thread) => thread.id === threadId)?.status;
   const state = museAvatarStateForStatus(status);
   const avatar = useMuseAgentAvatar(environmentId, profile, { state });
   const name = profile?.name?.trim() || fallbackTitle || "Muse";

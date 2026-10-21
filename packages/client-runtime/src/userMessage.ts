@@ -9,10 +9,6 @@ const LEGACY_AUTOMATION_MESSAGE_ID = /^scheduled-task-message:(.+):\d+:(?:schedu
 /** The opening line the voice bridge wrote before it recorded `voiceRequest`. */
 const LEGACY_VOICE_REQUEST_PREFIX = "[From a voice call]";
 
-/**
- * Text and sender label for a user-role message. Older scheduled messages
- * stored their attribution in the prompt itself.
- */
 export function resolveUserMessagePresentation(message: {
   readonly id?: string;
   readonly role: string;
@@ -56,7 +52,6 @@ export function resolveUserMessagePresentation(message: {
   }
   return {
     text: message.text,
-    // Restart continuations were sent as the agent before they became notices.
     attribution:
       message.createdBy !== "agent"
         ? null

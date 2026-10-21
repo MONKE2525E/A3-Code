@@ -5,7 +5,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useEffectEvent, useLayoutEffect, useState, type ReactNode } from "react";
 import { Button } from "~/components/ui/button";
 import { Spinner } from "~/components/ui/spinner";
 import { museAgentOpenThread } from "~/state/museAgent";
@@ -195,12 +195,11 @@ export function MuseAgentRouteConnection({
     setAttachment(null);
     setError(null);
   }
-  const retirementAtAttempt = useRef(observerRetirement);
-  retirementAtAttempt.current = observerRetirement;
+  const retirementAtAttempt = useEffectEvent((_retry: number) => observerRetirement);
   useEffect(() => {
     if (!connected || !canOpen) return;
     let current = true;
-    const retirementAtOpen = retirementAtAttempt.current;
+    const retirementAtOpen = retirementAtAttempt(retry);
     void openCachedMuseThread({
       hit: { environmentId, threadId },
       shells: [{ environmentId, id: threadId, providerInstanceId }],

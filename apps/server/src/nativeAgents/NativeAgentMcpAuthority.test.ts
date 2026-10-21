@@ -28,12 +28,21 @@ import {
 import * as GrokFixture from "../orchestration-v2/Adapters/GrokBotProvider.testkit.ts";
 import { grokBotTurnIdentity } from "../orchestration-v2/Adapters/GrokBotSettlementProjection.ts";
 
-const fixture = (grok = false) =>
+import { museThreadIdForSession, museThreadIdentity } from "../museAgent/MuseAgentThreadIds.ts";
+
+const fixture = (grok = false, sessionId?: string) =>
   Effect.gen(function* () {
     const museTurn = yield* makeTurn;
     const grokTurn = yield* GrokFixture.makeTurn;
     const turn = grok ? grokTurn.input : museTurn;
-    const id = grok ? turn.threadId : ThreadId.make("muse-agent:authority-fixture");
+    const id = grok
+      ? turn.threadId
+      : ThreadId.make(
+          museThreadIdForSession(
+            museThreadIdentity(binding, turn.modelSelection.instanceId),
+            sessionId,
+          ),
+        );
     const thread = {
       ...turn.appThread,
       id,
@@ -364,4 +373,27 @@ it.effect("the shared validator preserves Grok managed-delivery and account fenc
     assert.equal(yield* h.validator.validate(h.scope), false);
     assert.equal(h.state.grokLookups, lookups);
   }),
+);
+
+it.effect.each([undefined, "side:session/42"])(
+  "rebinding native and provider accounts cannot revive an old Muse grant (%s)",
+  (sessionId) =>
+    Effect.gen(function* () {
+      const h = yield* fixture(false, sessionId);
+      assert.equal(yield* h.validator.validate(h.scope), true);
+      h.state.binding = "b".repeat(64);
+      yield* h.settings.updateProviderInstance({
+        operation: "upsert",
+        instanceId,
+        instance: {
+          driver: ProviderDriverKind.make("muse-agent"),
+          enabled: true,
+          config: { accountBinding: h.state.binding },
+        },
+      });
+      for (const status of ["running", "waiting"] as const) {
+        yield* h.updateRun({ status });
+        assert.equal(yield* h.validator.validate(h.scope), false);
+      }
+    }),
 );

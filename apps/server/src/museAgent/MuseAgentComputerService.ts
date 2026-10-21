@@ -287,142 +287,142 @@ const make = Effect.gen(function* () {
     ...(selected.control_owner ? { controlOwner: selected.control_owner } : {}),
     ...(selected.owner_kind ? { ownerKind: selected.owner_kind } : {}),
   });
-  const readTask: MuseAgentComputerService["Service"]["readTask"] = (input) =>
-    Effect.gen(function* () {
-      const current = yield* authorize(input);
-      return yield* decode(MuseAgentComputerTask, {
-        task: task(current.selected, current.scope),
-        state: current.state,
-        preview: preview(current.selected, current.scope.taskId),
-      });
+  const readTask: MuseAgentComputerService["Service"]["readTask"] = Effect.fn(
+    "MuseAgentComputerService.readTask",
+  )(function* (input) {
+    const current = yield* authorize(input);
+    return yield* decode(MuseAgentComputerTask, {
+      task: task(current.selected, current.scope),
+      state: current.state,
+      preview: preview(current.selected, current.scope.taskId),
     });
-  const readPreview: MuseAgentComputerService["Service"]["preview"] = (input) =>
-    Effect.gen(function* () {
-      const current = yield* authorize(input);
-      const image = preview(current.selected, current.scope.taskId);
-      if (!image) return yield* new MuseAgentComputerError({ code: "preview_unavailable" });
-      const result = yield* transport
-        .readComputerPreview(current.scope.binding, image)
-        .pipe(Effect.mapError(failure));
-      if ((yield* connection(current.scope.binding)) !== current.connectionId)
-        return yield* new MuseAgentComputerError({ code: "connection_changed" });
-      return result;
+  });
+  const readPreview: MuseAgentComputerService["Service"]["preview"] = Effect.fn(
+    "MuseAgentComputerService.readPreview",
+  )(function* (input) {
+    const current = yield* authorize(input);
+    const image = preview(current.selected, current.scope.taskId);
+    if (!image) return yield* new MuseAgentComputerError({ code: "preview_unavailable" });
+    const result = yield* transport
+      .readComputerPreview(current.scope.binding, image)
+      .pipe(Effect.mapError(failure));
+    if ((yield* connection(current.scope.binding)) !== current.connectionId)
+      return yield* new MuseAgentComputerError({ code: "connection_changed" });
+    return result;
+  });
+  const operate: MuseAgentComputerService["Service"]["operate"] = Effect.fn(
+    "MuseAgentComputerService.operate",
+  )(function* (input, action) {
+    const command = yield* decode(MuseAgentComputerAction, action, "invalid_request");
+    if (
+      command.action === "release" ||
+      command.action === "heartbeat" ||
+      command.action === "viewer"
+    )
+      return yield* new MuseAgentComputerError({ code: "lease_mutation_unsupported" });
+    let viewer: { width: number; height: number; device_pixel_ratio: number } | undefined;
+    if ("viewer" in command && command.viewer) {
+      const { width, height, devicePixelRatio } = command.viewer;
+      const scale = Math.max(1 / devicePixelRatio, 500 / width);
+      const scaledWidth = Math.round(width * scale),
+        scaledHeight = Math.max(32, Math.round(height * scale));
+      if (scaledWidth > 16384 || scaledHeight > 16384 || scaledWidth * scaledHeight > 8388608)
+        return yield* new MuseAgentComputerError({ code: "invalid_request" });
+      viewer = { width, height, device_pixel_ratio: devicePixelRatio };
+    }
+    const current = yield* authorize(input),
+      { scope } = current;
+    const result = yield* request(
+      scope.binding,
+      `browser_task.${command.action}`,
+      {
+        task_id: scope.taskId,
+        ...(viewer ? { viewer } : {}),
+        ...(command.action === "refresh_environment"
+          ? { requested_egress_profile: "residential" }
+          : {}),
+      },
+      true,
+    );
+    if ((yield* connection(scope.binding)) !== current.connectionId)
+      return yield* new MuseAgentComputerError({ code: "write_uncertain" });
+    if (command.action === "close" || command.action === "stop") return { action: command.action };
+    if (command.action === "refresh_environment")
+      return { action: command.action, environment: yield* decode(Refresh, result) };
+    const next = state(yield* decode(NativeState, result));
+    if (next.sessionId !== scope.sessionId)
+      return yield* new MuseAgentComputerError({ code: "invalid_response" });
+    if (
+      (command.action === "present" || command.action === "takeover") &&
+      next.presentedTaskId !== scope.taskId
+    )
+      return yield* new MuseAgentComputerError({ code: "control_conflict" });
+    if (
+      command.action === "takeover" &&
+      (next.lease?.controlOwner !== "user" || next.lease.taskId !== scope.taskId)
+    )
+      return yield* new MuseAgentComputerError({ code: "control_conflict" });
+    return { action: command.action, state: next };
+  }, permit.withPermits(1));
+  const openStream: MuseAgentComputerService["Service"]["openStream"] = Effect.fn(
+    "MuseAgentComputerService.openStream",
+  )(function* (input, expectedTakeoverId) {
+    const current = yield* authorize(input),
+      { scope } = current,
+      lease = current.state.lease;
+    const now = yield* Clock.currentTimeMillis;
+    const expected = yield* decode(Id, expectedTakeoverId, "invalid_request");
+    if (
+      current.state.presentedTaskId !== scope.taskId ||
+      lease?.controlOwner !== "user" ||
+      lease.taskId !== scope.taskId ||
+      !lease.takeoverId ||
+      lease.takeoverId !== expected ||
+      lease.controlExpiresAtMs === null ||
+      lease.controlExpiresAtMs <= now
+    )
+      return yield* new MuseAgentComputerError({ code: "control_conflict" });
+    const takeoverId = lease.takeoverId;
+    const expiresAt = lease.controlExpiresAtMs;
+    let closed = false;
+    let closeNative = Effect.void;
+    const close = Effect.suspend(() => {
+      if (closed) return Effect.void;
+      closed = true;
+      // The shipped protocol provides no takeover-bound release. Closing this stream
+      // must leave any replacement takeover untouched; the captured lease expires.
+      return closeNative;
     });
-  const operate: MuseAgentComputerService["Service"]["operate"] = (input, action) =>
-    Effect.gen(function* () {
-      const command = yield* decode(MuseAgentComputerAction, action, "invalid_request");
-      if (
-        command.action === "release" ||
-        command.action === "heartbeat" ||
-        command.action === "viewer"
-      )
-        return yield* new MuseAgentComputerError({ code: "lease_mutation_unsupported" });
-      let viewer: { width: number; height: number; device_pixel_ratio: number } | undefined;
-      if ("viewer" in command && command.viewer) {
-        const { width, height, devicePixelRatio } = command.viewer;
-        const scale = Math.max(1 / devicePixelRatio, 500 / width);
-        const scaledWidth = Math.round(width * scale),
-          scaledHeight = Math.max(32, Math.round(height * scale));
-        if (scaledWidth > 16384 || scaledHeight > 16384 || scaledWidth * scaledHeight > 8388608)
-          return yield* new MuseAgentComputerError({ code: "invalid_request" });
-        viewer = { width, height, device_pixel_ratio: devicePixelRatio };
-      }
-      const current = yield* authorize(input),
-        { scope } = current;
-      const result = yield* request(
-        scope.binding,
-        `browser_task.${command.action}`,
-        {
-          task_id: scope.taskId,
-          ...(viewer ? { viewer } : {}),
-          ...(command.action === "refresh_environment"
-            ? { requested_egress_profile: "residential" }
-            : {}),
-        },
-        true,
+    yield* Effect.addFinalizer(() => close);
+    const native = yield* transport
+      .openComputerStream(scope.binding, {
+        taskId: scope.taskId,
+        sessionId: scope.sessionId,
+        takeoverId,
+      })
+      .pipe(
+        Effect.mapError(failure),
+        Effect.onError(() => close),
       );
-      if ((yield* connection(scope.binding)) !== current.connectionId)
-        return yield* new MuseAgentComputerError({ code: "write_uncertain" });
-      if (command.action === "close" || command.action === "stop")
-        return { action: command.action };
-      if (command.action === "refresh_environment")
-        return { action: command.action, environment: yield* decode(Refresh, result) };
-      const next = state(yield* decode(NativeState, result));
-      if (next.sessionId !== scope.sessionId)
-        return yield* new MuseAgentComputerError({ code: "invalid_response" });
-      if (
-        (command.action === "present" || command.action === "takeover") &&
-        next.presentedTaskId !== scope.taskId
-      )
-        return yield* new MuseAgentComputerError({ code: "control_conflict" });
-      if (
-        command.action === "takeover" &&
-        (next.lease?.controlOwner !== "user" || next.lease.taskId !== scope.taskId)
-      )
-        return yield* new MuseAgentComputerError({ code: "control_conflict" });
-      return { action: command.action, state: next };
-    }).pipe(permit.withPermits(1));
-  const openStream: MuseAgentComputerService["Service"]["openStream"] = (
-    input,
-    expectedTakeoverId,
-  ) =>
-    Effect.gen(function* () {
-      const current = yield* authorize(input),
-        { scope } = current,
-        lease = current.state.lease;
-      const now = yield* Clock.currentTimeMillis;
-      const expected = yield* decode(Id, expectedTakeoverId, "invalid_request");
-      if (
-        current.state.presentedTaskId !== scope.taskId ||
-        lease?.controlOwner !== "user" ||
-        lease.taskId !== scope.taskId ||
-        !lease.takeoverId ||
-        lease.takeoverId !== expected ||
-        lease.controlExpiresAtMs === null ||
-        lease.controlExpiresAtMs <= now
-      )
-        return yield* new MuseAgentComputerError({ code: "control_conflict" });
-      const takeoverId = lease.takeoverId;
-      const expiresAt = lease.controlExpiresAtMs;
-      let closed = false;
-      let closeNative = Effect.void;
-      const close = Effect.suspend(() => {
-        if (closed) return Effect.void;
-        closed = true;
-        // The shipped protocol provides no takeover-bound release. Closing this stream
-        // must leave any replacement takeover untouched; the captured lease expires.
-        return closeNative;
-      });
-      yield* Effect.addFinalizer(() => close);
-      const native = yield* transport
-        .openComputerStream(scope.binding, {
-          taskId: scope.taskId,
-          sessionId: scope.sessionId,
-          takeoverId,
-        })
-        .pipe(
-          Effect.mapError(failure),
-          Effect.onError(() => close),
-        );
-      closeNative = native.close;
-      yield* Effect.sleep(Math.max(0, expiresAt - (yield* Clock.currentTimeMillis))).pipe(
-        Effect.andThen(close),
-        Effect.forkScoped,
-      );
-      return {
-        events: native.events.pipe(Stream.mapError(failure), Stream.ensuring(close)),
-        send: (data: Uint8Array) =>
-          Effect.suspend(() =>
-            closed
-              ? Effect.fail(new MuseAgentComputerError({ code: "control_conflict" }))
-              : native.send(data).pipe(
-                  Effect.mapError(failure),
-                  Effect.onError(() => close),
-                ),
-          ),
-        close,
-      };
-    });
+    closeNative = native.close;
+    yield* Effect.sleep(Math.max(0, expiresAt - (yield* Clock.currentTimeMillis))).pipe(
+      Effect.andThen(close),
+      Effect.forkScoped,
+    );
+    return {
+      events: native.events.pipe(Stream.mapError(failure), Stream.ensuring(close)),
+      send: (data: Uint8Array) =>
+        Effect.suspend(() =>
+          closed
+            ? Effect.fail(new MuseAgentComputerError({ code: "control_conflict" }))
+            : native.send(data).pipe(
+                Effect.mapError(failure),
+                Effect.onError(() => close),
+              ),
+        ),
+      close,
+    };
+  });
   return MuseAgentComputerService.of({ readTask, preview: readPreview, operate, openStream });
 });
 export const layer = Layer.effect(MuseAgentComputerService, make);

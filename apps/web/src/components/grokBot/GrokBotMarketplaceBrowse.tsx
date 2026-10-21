@@ -1,6 +1,6 @@
 import { ArrowLeftIcon, CheckIcon, PlusIcon } from "lucide-react";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -49,10 +49,7 @@ export function GrokBotMarketplaceBrowse({
   const installedQuery = useEnvironmentQuery(
     grokBotsInstalledPluginsQuery({ environmentId, input: {} }),
   );
-  const installed = useMemo(
-    () => new Set(installedQuery.data?.pluginIds ?? []),
-    [installedQuery.data],
-  );
+  const installed = new Set(installedQuery.data?.pluginIds ?? []);
   return (
     <MarketplaceViews
       environmentId={environmentId}
@@ -148,32 +145,21 @@ function MarketplaceHome({
   const searching = search.trim() !== "";
 
   // Featured listings are sent separately and may be missing from the main list.
-  const allListings = useMemo(
-    () =>
-      botData === null
-        ? []
-        : [
-            ...new Map(
-              [...botData.featured, ...botData.listings].map(
-                (listing) => [listing.shareId, listing] as const,
-              ),
-            ).values(),
-          ],
-    [botData],
-  );
-  const botSections = useMemo(
-    () => (botData === null ? [] : groupListingsByCategory(allListings, botData.categories)),
-    [allListings, botData],
-  );
-  const pluginSections = useMemo(
-    () => (plugins === undefined ? [] : groupPluginsByCategory(plugins)),
-    [plugins],
-  );
-  const results = useMemo(
-    () =>
-      searching && botData !== null ? searchMarketplace(search, allListings, plugins ?? []) : null,
-    [searching, search, botData, allListings, plugins],
-  );
+  const allListings =
+    botData === null
+      ? []
+      : [
+          ...new Map(
+            [...botData.featured, ...botData.listings].map(
+              (listing) => [listing.shareId, listing] as const,
+            ),
+          ).values(),
+        ];
+  const botSections =
+    botData === null ? [] : groupListingsByCategory(allListings, botData.categories);
+  const pluginSections = plugins === undefined ? [] : groupPluginsByCategory(plugins);
+  const results =
+    searching && botData !== null ? searchMarketplace(search, allListings, plugins ?? []) : null;
 
   const openBot = (listing: MarketplaceListing) => setView({ kind: "bot", listing });
   const openPlugin = (plugin: MarketplacePlugin) => setView({ kind: "plugin", plugin });

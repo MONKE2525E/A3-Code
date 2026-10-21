@@ -2,7 +2,7 @@ import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { environmentCatalog } from "~/connection/catalog";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
@@ -21,7 +21,6 @@ import { openBrowserVoiceSocket } from "./grokBotVoiceSocket";
 import {
   GrokBotVoiceCallContext,
   type GrokBotVoiceCallTarget,
-  type GrokBotVoiceCallValue,
   type PinnedGrokBotVoiceCall,
 } from "./useGrokBotVoiceCall";
 
@@ -51,55 +50,52 @@ export function GrokBotVoiceCallProvider({ children }: { readonly children: Reac
   // The controller's state is read synchronously, so a second start cannot slip in during the first.
   const controllerRef = useRef<ReturnType<typeof createGrokBotVoiceCall> | null>(null);
 
-  const value = useMemo<GrokBotVoiceCallValue>(
-    () => ({
-      call,
-      start: (target: GrokBotVoiceCallTarget) => {
-        const live = controllerRef.current;
-        if (live !== null && live.state.phase !== "idle") return;
-        const { environmentId } = target;
-        const controller = createGrokBotVoiceCall({
-          botId: target.botId,
-          ports: {
-            startCall: async (botId) =>
-              unwrap(await startCommand({ environmentId, input: { botId } })),
-            refreshCredential: async (callId) =>
-              unwrap(await refreshCommand({ environmentId, input: { callId } })),
-            runTool: async (input) => unwrap(await toolCommand({ environmentId, input })),
-            connectedCall: async (callId) =>
-              unwrap(await connectedCommand({ environmentId, input: { callId } })),
-            endCall: async (input) => unwrap(await endCommand({ environmentId, input })),
-            openAudio: (onFrame) => openVoiceAudio({ onFrame }),
-            openSocket: openBrowserVoiceSocket,
-            subscribeEnvironmentRecovery: (onRecovery) => {
-              const connectionAtom = environmentCatalog.stateAtom(environmentId);
-              const connectedGeneration = () =>
-                Option.getOrNull(
-                  Option.flatMap(AsyncResult.value(appAtomRegistry.get(connectionAtom)), (state) =>
-                    state.phase === "connected" ? Option.some(state.generation) : Option.none(),
-                  ),
-                );
-              let previous = connectedGeneration();
-              return appAtomRegistry.subscribe(connectionAtom, () => {
-                const generation = connectedGeneration();
-                const recovered = generation !== null && generation !== previous;
-                previous = generation;
-                if (recovered) onRecovery();
-              });
-            },
+  const value = {
+    call,
+    start: (target: GrokBotVoiceCallTarget) => {
+      const live = controllerRef.current;
+      if (live !== null && live.state.phase !== "idle") return;
+      const { environmentId } = target;
+      const controller = createGrokBotVoiceCall({
+        botId: target.botId,
+        ports: {
+          startCall: async (botId) =>
+            unwrap(await startCommand({ environmentId, input: { botId } })),
+          refreshCredential: async (callId) =>
+            unwrap(await refreshCommand({ environmentId, input: { callId } })),
+          runTool: async (input) => unwrap(await toolCommand({ environmentId, input })),
+          connectedCall: async (callId) =>
+            unwrap(await connectedCommand({ environmentId, input: { callId } })),
+          endCall: async (input) => unwrap(await endCommand({ environmentId, input })),
+          openAudio: (onFrame) => openVoiceAudio({ onFrame }),
+          openSocket: openBrowserVoiceSocket,
+          subscribeEnvironmentRecovery: (onRecovery) => {
+            const connectionAtom = environmentCatalog.stateAtom(environmentId);
+            const connectedGeneration = () =>
+              Option.getOrNull(
+                Option.flatMap(AsyncResult.value(appAtomRegistry.get(connectionAtom)), (state) =>
+                  state.phase === "connected" ? Option.some(state.generation) : Option.none(),
+                ),
+              );
+            let previous = connectedGeneration();
+            return appAtomRegistry.subscribe(connectionAtom, () => {
+              const generation = connectedGeneration();
+              const recovered = generation !== null && generation !== previous;
+              previous = generation;
+              if (recovered) onRecovery();
+            });
           },
-          onState: (state: GrokBotVoiceCallState) => {
-            if (controllerRef.current === controller) setCall({ ...target, state });
-          },
-        });
-        controllerRef.current = controller;
-        void controller.start();
-      },
-      hangUp: () => controllerRef.current?.hangUp(),
-      setMuted: (muted: boolean) => controllerRef.current?.setMuted(muted),
-    }),
-    [call, endCommand, refreshCommand, startCommand, toolCommand],
-  );
+        },
+        onState: (state: GrokBotVoiceCallState) => {
+          if (controllerRef.current === controller) setCall({ ...target, state });
+        },
+      });
+      controllerRef.current = controller;
+      void controller.start();
+    },
+    hangUp: () => controllerRef.current?.hangUp(),
+    setMuted: (muted: boolean) => controllerRef.current?.setMuted(muted),
+  };
 
   // StrictMode runs this cleanup once before the real mount; `dispose` is safe to repeat.
   useEffect(

@@ -819,8 +819,8 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
               reason: "A bound Grok Bot session cannot switch bots or accept model options.",
             },
       ),
-    openSession: (input) =>
-      Effect.gen(function* () {
+    openSession: Effect.fn("GrokBotAdapterV2.openSession")(
+      function* (input) {
         if (!options.enabled || options.config.accountBinding === null)
           return yield* new GrokBotBindingError({
             reason: "Choose the native account before enabling this provider.",
@@ -970,15 +970,16 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
         yield* Effect.addFinalizer(() => Queue.shutdown(inbox));
         // This projection starts empty on each attachment. Replaying native history repairs
         // previously imported rows when support for their media or metadata changes.
-        const projectFrame = (frame: RuntimeFrame) =>
-          Effect.gen(function* () {
-            watchdog.observeFrame(frame, yield* Clock.currentTimeMillis);
-            return yield* Effect.zipWith(
-              projection.project(frame),
-              approvals.project(frame),
-              (a, b) => [...a, ...b],
-            );
-          });
+        const projectFrame = Effect.fn("GrokBotAdapterV2.projectFrame")(function* (
+          frame: RuntimeFrame,
+        ) {
+          watchdog.observeFrame(frame, yield* Clock.currentTimeMillis);
+          return yield* Effect.zipWith(
+            projection.project(frame),
+            approvals.project(frame),
+            (a, b) => [...a, ...b],
+          );
+        });
         const assertAccount = Effect.gen(function* () {
           if ((yield* native.accountBinding) !== owned.binding)
             return yield* new GrokBotBindingError({
@@ -1180,8 +1181,8 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
           // Native phone history arrives on this watch, including with no T3 turn.
           // Keep the session through idle; the manager still enforces its pin cap.
           hasPendingBackgroundWork: Effect.succeed(true),
-          ensureThread: (request) =>
-            Effect.gen(function* () {
+          ensureThread: Effect.fn("GrokBotAdapterV2.ensureThread")(
+            function* (request) {
               if (
                 request.threadId !== owned.threadId ||
                 request.modelSelection.model !== owned.botId
@@ -1204,16 +1205,19 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
                 ...request.existingProviderThread,
                 providerSessionId: input.providerSessionId,
               };
-            }).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterEnsureThreadError({
-                    driver: GROK_BOT_DRIVER_KIND,
-                    threadId: request.threadId,
-                    cause,
-                  }),
+            },
+            (effect, request) =>
+              effect.pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterEnsureThreadError({
+                      driver: GROK_BOT_DRIVER_KIND,
+                      threadId: request.threadId,
+                      cause,
+                    }),
+                ),
               ),
-            ),
+          ),
           resumeThread: (request) =>
             assertThread(request.providerThread).pipe(
               Effect.as({ ...request.providerThread, providerSessionId: input.providerSessionId }),
@@ -1228,8 +1232,8 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
               ),
             ),
           injectHistory: () => Effect.succeed(false),
-          startTurn: (request) =>
-            Effect.gen(function* () {
+          startTurn: Effect.fn("GrokBotAdapterV2.startTurn")(
+            function* (request) {
               yield* assertThread(request.providerThread);
               if (
                 request.threadId !== owned.threadId ||
@@ -1361,18 +1365,21 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
                     ),
                 ),
               );
-            }).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterTurnStartError({
-                    driver: GROK_BOT_DRIVER_KIND,
-                    threadId: request.threadId,
-                    providerThreadId: request.providerThread.id,
-                    runId: request.runId,
-                    cause,
-                  }),
+            },
+            (effect, request) =>
+              effect.pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterTurnStartError({
+                      driver: GROK_BOT_DRIVER_KIND,
+                      threadId: request.threadId,
+                      providerThreadId: request.providerThread.id,
+                      runId: request.runId,
+                      cause,
+                    }),
+                ),
               ),
-            ),
+          ),
           steerTurn: (request) =>
             Effect.fail(
               new ProviderAdapter.ProviderAdapterSteerRunUnsupportedError({
@@ -1380,8 +1387,8 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
                 providerThreadId: request.providerThread.id,
               }),
             ),
-          interruptTurn: (request) =>
-            Effect.gen(function* () {
+          interruptTurn: Effect.fn("GrokBotAdapterV2.interruptTurn")(
+            function* (request) {
               yield* assertThread(request.providerThread);
               yield* bindings.verifyInterrupt({
                 native: owned,
@@ -1407,19 +1414,22 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
                   );
                   watchdog.forget(identity.messageId);
                 }
-            }).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterInterruptError({
-                    driver: GROK_BOT_DRIVER_KIND,
-                    providerThreadId: request.providerThread.id,
-                    providerTurnId: request.providerTurnId,
-                    cause,
-                  }),
+            },
+            (effect, request) =>
+              effect.pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterInterruptError({
+                      driver: GROK_BOT_DRIVER_KIND,
+                      providerThreadId: request.providerThread.id,
+                      providerTurnId: request.providerTurnId,
+                      cause,
+                    }),
+                ),
               ),
-            ),
-          respondToRuntimeRequest: (request) =>
-            Effect.gen(function* () {
+          ),
+          respondToRuntimeRequest: Effect.fn("GrokBotAdapterV2.respondToRuntimeRequest")(
+            function* (request) {
               // Widget questions arrive as answers; approvals and dismissals arrive as a decision.
               const settled =
                 request.answers !== undefined
@@ -1431,16 +1441,19 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
                       });
               // Offered only after native confirmed dispatch; the request never shows a fake success.
               yield* Queue.offerAll(inbox, settled);
-            }).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
-                    driver: GROK_BOT_DRIVER_KIND,
-                    requestId: request.requestId,
-                    cause,
-                  }),
+            },
+            (effect, request) =>
+              effect.pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
+                      driver: GROK_BOT_DRIVER_KIND,
+                      requestId: request.requestId,
+                      cause,
+                    }),
+                ),
               ),
-            ),
+          ),
           readThreadSnapshot: (request) =>
             Effect.fail(
               new ProviderAdapter.ProviderAdapterReadThreadSnapshotError({
@@ -1466,15 +1479,18 @@ export const createGrokBotAdapterV2 = Effect.fnUntraced(function* (
               }),
             ),
         } satisfies ProviderAdapter.ProviderAdapterV2SessionRuntime;
-      }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProviderAdapter.ProviderAdapterOpenSessionError({
-              driver: GROK_BOT_DRIVER_KIND,
-              providerSessionId: input.providerSessionId,
-              cause,
-            }),
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapter.ProviderAdapterOpenSessionError({
+                driver: GROK_BOT_DRIVER_KIND,
+                providerSessionId: input.providerSessionId,
+                cause,
+              }),
+          ),
         ),
-      ),
+    ),
   });
 });

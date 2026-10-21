@@ -40,8 +40,8 @@ import {
   providerSessionId,
 } from "../orchestration-v2/Adapters/GrokBotProvider.testkit.ts";
 import { PersistenceSqlError } from "../persistence/Errors.ts";
-import migration from "../persistence/Migrations/062_GrokBotManagedRuntime.ts";
-import completionMigration from "../persistence/Migrations/063_GrokBotManagedCompletion.ts";
+import migration from "../persistence/Migrations/068_GrokBotManagedRuntime.ts";
+import completionMigration from "../persistence/Migrations/069_GrokBotManagedCompletion.ts";
 import * as Live from "./GrokBotManagedBindingLive.ts";
 import * as Native from "./GrokBotNativeRuntimeService.ts";
 import * as Store from "./GrokBotManagedStateStore.ts";

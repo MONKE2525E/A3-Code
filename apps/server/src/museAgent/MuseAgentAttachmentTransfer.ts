@@ -181,105 +181,96 @@ const safeFilename = (filename: string) =>
     .slice(0, 128) || "attachment.bin";
 
 /** Publish staged bytes once. Ambiguous append/write operations are never retried. */
-export const materializeMuseAttachment = (
-  binding: string,
-  attachment: PreparedMuseAttachment,
-): Effect.Effect<
-  MuseNativeAttachmentItem,
-  MuseAgentAttachmentTransferError,
-  Transport.MuseAgentTransport
-> =>
-  Effect.gen(function* () {
-    if (attachment._tag === "Inline") return attachment.item;
-    const transport = yield* Transport.MuseAgentTransport;
-    const path = `workspace/uploads/t3-muse/${NodeCrypto.randomUUID()}/${safeFilename(attachment.filename)}`;
-    const destination = `/${path}`;
-    const temp = `${destination}.part`;
-    const stat = (path: string) =>
-      transport
-        .request(binding, "fs.stat", { path })
-        .pipe(
-          Effect.flatMap((value) =>
-            decodeStat(value).pipe(
-              Effect.mapError(
-                () => new MuseAgentAttachmentTransferError({ kind: "size_mismatch" }),
-              ),
-            ),
+export const materializeMuseAttachment = Effect.fn(
+  "MuseAgentAttachmentTransfer.materializeMuseAttachment",
+)(function* (binding: string, attachment: PreparedMuseAttachment) {
+  if (attachment._tag === "Inline") return attachment.item;
+  const transport = yield* Transport.MuseAgentTransport;
+  const path = `workspace/uploads/t3-muse/${NodeCrypto.randomUUID()}/${safeFilename(attachment.filename)}`;
+  const destination = `/${path}`;
+  const temp = `${destination}.part`;
+  const stat = (path: string) =>
+    transport
+      .request(binding, "fs.stat", { path })
+      .pipe(
+        Effect.flatMap((value) =>
+          decodeStat(value).pipe(
+            Effect.mapError(() => new MuseAgentAttachmentTransferError({ kind: "size_mismatch" })),
           ),
-        );
-    const exact = (value: typeof FileStat.Type) =>
-      value.size === attachment.byteLength
-        ? Effect.void
-        : Effect.fail(new MuseAgentAttachmentTransferError({ kind: "size_mismatch" }));
-    return yield* Effect.acquireUseRelease(
-      Effect.void,
-      () =>
-        Effect.gen(function* () {
-          for (
-            let offset = 0;
-            offset < attachment.byteLength;
-            offset += MUSE_ATTACHMENT_LIMITS.chunkBytes
-          ) {
-            yield* transport.request(
-              binding,
-              "fs.write",
-              {
-                path: temp,
-                data_base64: Buffer.from(
-                  attachment.bytes.subarray(offset, offset + MUSE_ATTACHMENT_LIMITS.chunkBytes),
-                ).toString("base64"),
-                overwrite: offset === 0,
-                append: offset !== 0,
-                create_parent: offset === 0,
-              },
-              true,
-            );
-          }
-          yield* exact(yield* stat(temp));
-          yield* transport
-            .request(
-              binding,
-              "fs.rename",
-              { source: temp, destination, create_parent: true, overwrite: true },
-              true,
-            )
-            .pipe(
-              Effect.catch((error) =>
-                Effect.gen(function* () {
-                  if (error.kind !== "uncertain") return yield* error;
-                  // Official recovery requires the stage to be absent and the published file to have exact size.
-                  const staged = yield* transport
-                    .request(binding, "fs.stat", { path: temp })
-                    .pipe(Effect.exit);
-                  if (Exit.isSuccess(staged)) return yield* error;
-                  const failure = Cause.findErrorOption(staged.cause);
-                  if (Option.isNone(failure) || !isNotFound(failure.value.cause))
-                    return yield* error;
-                  yield* exact(yield* stat(destination));
-                }),
-              ),
-            );
-          return {
-            type: "file_ref" as const,
-            mime_type: attachment.mimeType,
-            filename: attachment.filename,
-            path,
-          };
-        }),
-      (_, exit) =>
-        Exit.isFailure(exit)
-          ? Effect.forEach([destination, temp], (path) =>
-              transport
-                .request(binding, "fs.delete", { path, recursive: false }, true)
-                .pipe(Effect.ignore),
-            )
-          : Effect.void,
-    ).pipe(
-      Effect.catchTags({
-        MuseAgentTransportError: (error) => Effect.fail(mapTransportError(error)),
+        ),
+      );
+  const exact = (value: typeof FileStat.Type) =>
+    value.size === attachment.byteLength
+      ? Effect.void
+      : Effect.fail(new MuseAgentAttachmentTransferError({ kind: "size_mismatch" }));
+  return yield* Effect.acquireUseRelease(
+    Effect.void,
+    () =>
+      Effect.gen(function* () {
+        for (
+          let offset = 0;
+          offset < attachment.byteLength;
+          offset += MUSE_ATTACHMENT_LIMITS.chunkBytes
+        ) {
+          yield* transport.request(
+            binding,
+            "fs.write",
+            {
+              path: temp,
+              data_base64: Buffer.from(
+                attachment.bytes.subarray(offset, offset + MUSE_ATTACHMENT_LIMITS.chunkBytes),
+              ).toString("base64"),
+              overwrite: offset === 0,
+              append: offset !== 0,
+              create_parent: offset === 0,
+            },
+            true,
+          );
+        }
+        yield* exact(yield* stat(temp));
+        yield* transport
+          .request(
+            binding,
+            "fs.rename",
+            { source: temp, destination, create_parent: true, overwrite: true },
+            true,
+          )
+          .pipe(
+            Effect.catch((error) =>
+              Effect.gen(function* () {
+                if (error.kind !== "uncertain") return yield* error;
+                // Official recovery requires the stage to be absent and the published file to have exact size.
+                const staged = yield* transport
+                  .request(binding, "fs.stat", { path: temp })
+                  .pipe(Effect.exit);
+                if (Exit.isSuccess(staged)) return yield* error;
+                const failure = Cause.findErrorOption(staged.cause);
+                if (Option.isNone(failure) || !isNotFound(failure.value.cause)) return yield* error;
+                yield* exact(yield* stat(destination));
+              }),
+            ),
+          );
+        return {
+          type: "file_ref" as const,
+          mime_type: attachment.mimeType,
+          filename: attachment.filename,
+          path,
+        };
       }),
-    );
-  });
+    (_, exit) =>
+      Exit.isFailure(exit)
+        ? Effect.forEach([destination, temp], (path) =>
+            transport
+              .request(binding, "fs.delete", { path, recursive: false }, true)
+              .pipe(Effect.ignore),
+          )
+        : Effect.void,
+  ).pipe(
+    Effect.catchTags({
+      MuseAgentTransportError: (error) => Effect.fail(mapTransportError(error)),
+    }),
+  );
+});
 
 /** Accept only one decoded workspace segment sequence; URLs never become native filesystem paths. */
 export const parseMuseSandboxAttachmentPath = (value: string): string | null => {
@@ -317,16 +308,12 @@ const ReadChunk = Schema.Struct({
 const decodeReadChunk = Schema.decodeUnknownEffect(ReadChunk);
 
 /** Download into bounded memory; the caller commits bytes to the existing T3 attachment store. */
-export const readMuseAttachment = (input: {
-  readonly binding: string;
-  readonly sandboxPath: string;
-  readonly maxBytes?: number;
-}): Effect.Effect<
-  { readonly bytes: Uint8Array; readonly sha256: string },
-  MuseAgentAttachmentTransferError,
-  Transport.MuseAgentTransport
-> =>
-  Effect.gen(function* () {
+export const readMuseAttachment = Effect.fn("MuseAgentAttachmentTransfer.readMuseAttachment")(
+  function* (input: {
+    readonly binding: string;
+    readonly sandboxPath: string;
+    readonly maxBytes?: number;
+  }) {
     const path = parseMuseSandboxAttachmentPath(input.sandboxPath);
     const limit = input.maxBytes ?? MUSE_ATTACHMENT_LIMITS.fileBytes;
     if (
@@ -377,6 +364,6 @@ export const readMuseAttachment = (input: {
         return { bytes, sha256: digest(bytes) };
       }
     }
-  }).pipe(
-    Effect.catchTags({ MuseAgentTransportError: (error) => Effect.fail(mapTransportError(error)) }),
-  );
+  },
+  Effect.catchTags({ MuseAgentTransportError: (error) => Effect.fail(mapTransportError(error)) }),
+);

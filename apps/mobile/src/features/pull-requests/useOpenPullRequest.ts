@@ -1,6 +1,8 @@
 import { EnvironmentId } from "@t3tools/contracts";
 import { StackActions, useNavigation } from "@react-navigation/native";
 import { useCallback } from "react";
+import { Platform } from "react-native";
+import { resetAndroidWorkspace } from "../../lib/android-workspace-navigation";
 
 import { type ExternalUrlTarget, tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import { appAtomRegistry } from "../../state/atom-registry";
@@ -37,12 +39,13 @@ export function useOpenPullRequest(options?: { readonly replace?: boolean }) {
       if (target) {
         // A push, not a navigate: a link inside one pull request opens another on top of it, and
         // Back returns to the first.
-        navigation.dispatch(
-          (options?.replace ? StackActions.replace : StackActions.push)("PullRequest", {
-            ...target,
-            ...(threadId ? { threadId } : {}),
-          }),
-        );
+        const params = { ...target, ...(threadId ? { threadId } : {}) };
+        if (Platform.OS === "android" && !threadId)
+          resetAndroidWorkspace(navigation, { name: "PullRequest", params });
+        else
+          navigation.dispatch(
+            (options?.replace ? StackActions.replace : StackActions.push)("PullRequest", params),
+          );
         return true;
       }
       return tryOpenExternalUrl(url, external);

@@ -10,7 +10,7 @@ import {
   type ProviderInstanceId,
 } from "@t3tools/contracts";
 import { HistoryIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import { Spinner } from "~/components/ui/spinner";
@@ -69,7 +69,12 @@ export function MuseAgentHistoryPagination({
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
   // A failed import belongs to the thread it was started on.
-  useEffect(() => setFailed(false), [environmentId, threadId, providerInstanceId]);
+  const target = `${environmentId}:${threadId}:${providerInstanceId}`;
+  const [failureTarget, setFailureTarget] = useState(target);
+  if (failureTarget !== target) {
+    setFailureTarget(target);
+    setFailed(false);
+  }
 
   if (!canRead || providerInstanceId === null) return null;
   const page = inspect.data?.operation === "history_page" ? inspect.data.data : null;

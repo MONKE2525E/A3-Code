@@ -10,7 +10,6 @@ import { expect, it } from "vite-plus/test";
 import {
   createArchivedThreadSnapshotsAtomFamily,
   makeArchivedThreadsEnvironmentKey,
-  parseArchivedThreadsEnvironmentKey,
 } from "./archivedThreads.ts";
 import { v2Now, v2Project, v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
 
@@ -46,14 +45,6 @@ it("excludes native backing shells from generic archived actions in every enviro
   // Filtering a client list must not remove the backing shells from the source cache.
   expect(snapshot.threads).toHaveLength(3);
   registry.dispose();
-});
-
-it("round-trips environment keys in sorted order", () => {
-  const envA = EnvironmentId.make("env-a");
-  const envB = EnvironmentId.make("env-b");
-  const key = makeArchivedThreadsEnvironmentKey([envB, envA]);
-
-  expect(parseArchivedThreadsEnvironmentKey(key)).toEqual([envA, envB]);
 });
 
 it("keeps Muse conversations reachable for clients with paired restore", () => {

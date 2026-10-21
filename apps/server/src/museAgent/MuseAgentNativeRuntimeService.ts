@@ -351,55 +351,53 @@ const make = Effect.gen(function* () {
         accountBinding: binding,
       };
     }),
-    profile: (binding) =>
-      Effect.gen(function* () {
-        yield* check(binding);
-        const identity = yield* decode(yield* transport.request(binding, "identity", {}), Identity);
-        const variants = Object.fromEntries(
-          Object.entries(identity.avatar?.video_variants ?? {}).flatMap(([key, value]) => {
-            const valuePath = avatarPath(value);
-            return valuePath && isAvatarVariant(key) ? [[key, valuePath]] : [];
-          }),
-        );
-        const profile = {
-          id: "muse" as const,
-          name: safeText(identity.name, 128) || "Muse",
-          creature: safeText(identity.creature, 256),
-          vibe: safeText(identity.vibe, 256),
-          emoji: safeText(identity.emoji, 32),
-          tagline: safeText(identity.tagline, 1024),
-          description: safeText(identity.description, 4096),
-          avatarPath: avatarPath(identity.avatar?.canonical_path),
-          avatarImagePath: avatarPath(identity.avatar?.image_path),
-          avatarVideoVariants: variants,
-          chatThemeColor:
-            identity.avatar?.chat_theme_color &&
-            /^#[0-9a-fA-F]{6}$/.test(identity.avatar.chat_theme_color)
-              ? identity.avatar.chat_theme_color
-              : undefined,
-        };
-        return yield* decode(
-          Object.fromEntries(Object.entries(profile).filter(([, value]) => value !== undefined)),
-          MuseAgentProfile,
-        );
-      }),
-    read: (input) =>
-      Effect.gen(function* () {
-        yield* resolveSession(input.binding, input.sessionId);
-        const value = yield* transport.request(input.binding, "chat.history", {
-          session_id: input.sessionId,
-          limit: 80,
-          transcript_mode: "messages",
-          ...(input.beforeSeq === undefined ? {} : { before_seq: input.beforeSeq }),
-        });
-        const history = yield* decode(value, History);
-        if (Option.isSome(credentialInbox))
-          for (const raw of history.chat_events) {
-            const frame = museHistoryFrame(raw, input.sessionId);
-            if (frame) credentialInbox.value.observe(input.binding, frame);
-          }
-        return { events: history.chat_events, hasMore: history.has_more === true };
-      }),
+    profile: Effect.fn("MuseAgentNativeRuntimeService.profile")(function* (binding) {
+      yield* check(binding);
+      const identity = yield* decode(yield* transport.request(binding, "identity", {}), Identity);
+      const variants = Object.fromEntries(
+        Object.entries(identity.avatar?.video_variants ?? {}).flatMap(([key, value]) => {
+          const valuePath = avatarPath(value);
+          return valuePath && isAvatarVariant(key) ? [[key, valuePath]] : [];
+        }),
+      );
+      const profile = {
+        id: "muse" as const,
+        name: safeText(identity.name, 128) || "Muse",
+        creature: safeText(identity.creature, 256),
+        vibe: safeText(identity.vibe, 256),
+        emoji: safeText(identity.emoji, 32),
+        tagline: safeText(identity.tagline, 1024),
+        description: safeText(identity.description, 4096),
+        avatarPath: avatarPath(identity.avatar?.canonical_path),
+        avatarImagePath: avatarPath(identity.avatar?.image_path),
+        avatarVideoVariants: variants,
+        chatThemeColor:
+          identity.avatar?.chat_theme_color &&
+          /^#[0-9a-fA-F]{6}$/.test(identity.avatar.chat_theme_color)
+            ? identity.avatar.chat_theme_color
+            : undefined,
+      };
+      return yield* decode(
+        Object.fromEntries(Object.entries(profile).filter(([, value]) => value !== undefined)),
+        MuseAgentProfile,
+      );
+    }),
+    read: Effect.fn("MuseAgentNativeRuntimeService.read")(function* (input) {
+      yield* resolveSession(input.binding, input.sessionId);
+      const value = yield* transport.request(input.binding, "chat.history", {
+        session_id: input.sessionId,
+        limit: 80,
+        transcript_mode: "messages",
+        ...(input.beforeSeq === undefined ? {} : { before_seq: input.beforeSeq }),
+      });
+      const history = yield* decode(value, History);
+      if (Option.isSome(credentialInbox))
+        for (const raw of history.chat_events) {
+          const frame = museHistoryFrame(raw, input.sessionId);
+          if (frame) credentialInbox.value.observe(input.binding, frame);
+        }
+      return { events: history.chat_events, hasMore: history.has_more === true };
+    }),
     readAttachment: (input) =>
       check(input.binding).pipe(
         Effect.andThen(
@@ -415,306 +413,298 @@ const make = Effect.gen(function* () {
           ),
         ),
       ),
-    send: (input) =>
-      Effect.gen(function* () {
-        const prepared = yield* Effect.gen(function* () {
+    send: Effect.fn("MuseAgentNativeRuntimeService.send")(function* (input) {
+      const prepared = yield* Effect.gen(function* () {
+        if ((!input.text.trim() && !input.attachments?.items.length) || input.text.length > 262144)
+          return yield* new MuseAgentRuntimeError({ kind: "unsupported" });
+        yield* resolveSession(input.binding, input.sessionId);
+        const prepared: PreparedMuseAttachment[] = [];
+        if (input.attachments?.items.length) {
+          const attachments = yield* decode(input.attachments.items, Schema.Array(ChatAttachment));
+          const imageBytes = attachments.reduce(
+            (total, item) => total + (item.type === "image" ? item.sizeBytes : 0),
+            0,
+          );
           if (
-            (!input.text.trim() && !input.attachments?.items.length) ||
-            input.text.length > 262144
+            attachments.length > PROVIDER_SEND_TURN_MAX_ATTACHMENTS ||
+            attachments.some(
+              (item) =>
+                (item.type !== "image" && item.type !== "file") ||
+                !Number.isSafeInteger(item.sizeBytes) ||
+                item.sizeBytes <= 0 ||
+                item.sizeBytes > MUSE_ATTACHMENT_LIMITS.fileBytes,
+            ) ||
+            imageBytes > MUSE_ATTACHMENT_LIMITS.inlineBytes ||
+            attachments.reduce((total, item) => total + item.sizeBytes, 0) >
+              MUSE_ATTACHMENT_LIMITS.totalBytes
           )
             return yield* new MuseAgentRuntimeError({ kind: "unsupported" });
-          yield* resolveSession(input.binding, input.sessionId);
-          const prepared: PreparedMuseAttachment[] = [];
-          if (input.attachments?.items.length) {
-            const attachments = yield* decode(
-              input.attachments.items,
-              Schema.Array(ChatAttachment),
-            );
-            const imageBytes = attachments.reduce(
-              (total, item) => total + (item.type === "image" ? item.sizeBytes : 0),
-              0,
-            );
-            if (
-              attachments.length > PROVIDER_SEND_TURN_MAX_ATTACHMENTS ||
-              attachments.some(
-                (item) =>
-                  (item.type !== "image" && item.type !== "file") ||
-                  !Number.isSafeInteger(item.sizeBytes) ||
-                  item.sizeBytes <= 0 ||
-                  item.sizeBytes > MUSE_ATTACHMENT_LIMITS.fileBytes,
-              ) ||
-              imageBytes > MUSE_ATTACHMENT_LIMITS.inlineBytes ||
-              attachments.reduce((total, item) => total + item.sizeBytes, 0) >
-                MUSE_ATTACHMENT_LIMITS.totalBytes
-            )
-              return yield* new MuseAgentRuntimeError({ kind: "unsupported" });
-            const directory = input.attachments.directory;
-            const snapshots = yield* Effect.tryPromise({
-              try: async () => {
-                const root = await NodeFSP.realpath(directory);
-                const snapshots: Uint8Array[] = [];
-                for (const attachment of attachments) {
-                  const path = resolveAttachmentPath({ attachmentsDir: root, attachment });
-                  if (!path) throw new Error("attachment_path_refused");
-                  const canonical = await NodeFSP.realpath(path);
-                  if (!canonical.startsWith(root + NodePath.sep))
-                    throw new Error("attachment_path_refused");
-                  const file = await NodeFSP.open(canonical, "r");
-                  try {
-                    const stat = await file.stat();
-                    if (!stat.isFile() || stat.size !== attachment.sizeBytes)
-                      throw new Error("attachment_size_changed");
-                    const bytes = Buffer.alloc(attachment.sizeBytes + 1);
-                    let bytesRead = 0;
-                    while (bytesRead < bytes.length) {
-                      const next = await file.read(
-                        bytes,
-                        bytesRead,
-                        bytes.length - bytesRead,
-                        bytesRead,
-                      );
-                      if (!next.bytesRead) break;
-                      bytesRead += next.bytesRead;
-                    }
-                    if (bytesRead !== attachment.sizeBytes)
-                      throw new Error("attachment_size_changed");
-                    snapshots.push(bytes.subarray(0, bytesRead));
-                  } finally {
-                    await file.close();
-                  }
-                }
-                return snapshots;
-              },
-              catch: (cause) => new MuseAgentRuntimeError({ kind: "unsupported", cause }),
-            });
-            // Reserve images first, since they have no file_ref fallback. Preserve item order.
-            let fileBudget = MUSE_ATTACHMENT_LIMITS.inlineBytes - imageBytes;
-            for (let index = 0; index < attachments.length; index++) {
-              const attachment = attachments[index]!;
-              const snapshot = yield* prepareMuseAttachment({
-                attachment,
-                bytes: snapshots[index]!,
-                inlineBudget: attachment.type === "image" ? attachment.sizeBytes : fileBudget,
-              });
-              prepared.push(snapshot);
-              if (attachment.type === "file" && snapshot._tag === "Inline")
-                fileBudget -= snapshot.byteLength;
-            }
-          }
-          return prepared;
-        }).pipe(Effect.mapError((cause) => new ProviderPromptNotSubmittedError({ cause })));
-        const attachmentIdentity = prepared.length
-          ? museAttachmentContentIdentity(prepared)
-          : undefined;
-        return yield* Effect.acquireUseRelease(
-          Effect.sync(() => {
-            const pending = {
-              binding: input.binding,
-              sessionId: input.sessionId,
-              context: input.context,
-              completed: Deferred.makeUnsafe<void>(),
-            };
-            admissions.add(pending);
-            return pending;
-          }),
-          () =>
-            Effect.uninterruptibleMask((restore) =>
-              Effect.gen(function* () {
-                const existing = yield* deliveries
-                  .begin({
-                    ...input,
-                    ...(attachmentIdentity ? { attachmentIdentity } : {}),
-                  })
-                  .pipe(
-                    Effect.catchTags({
-                      MuseAgentDeliveryError: (cause) =>
-                        cause.kind === "busy" || cause.kind === "conflict"
-                          ? Effect.fail(new ProviderPromptNotSubmittedError({ cause }))
-                          : Effect.fail(cause),
-                    }),
-                  );
-                if (existing) return { ...existing, replayed: true };
-                let promptAttempted = false;
-                let revertOption: Effect.Effect<boolean> = Effect.succeed(true);
-                const stagedPaths: string[] = [];
-                return yield* restore(
-                  Effect.gen(function* () {
-                    yield* t3Skill
-                      .install(input.binding)
-                      .pipe(
-                        Effect.mapError((cause) => new ProviderPromptNotSubmittedError({ cause })),
-                      );
-                    const items = yield* Effect.forEach(prepared, (attachment) =>
-                      materializeMuseAttachment(input.binding, attachment).pipe(
-                        Effect.provideService(Transport.MuseAgentTransport, transport),
-                        Effect.onExit((exit) =>
-                          Effect.sync(() => {
-                            if (Exit.isSuccess(exit) && exit.value.type === "file_ref")
-                              stagedPaths.push(`/${exit.value.path}`);
-                          }),
-                        ),
-                        Effect.mapError((cause) => new ProviderPromptNotSubmittedError({ cause })),
-                      ),
+          const directory = input.attachments.directory;
+          const snapshots = yield* Effect.tryPromise({
+            try: async () => {
+              const root = await NodeFSP.realpath(directory);
+              const snapshots: Uint8Array[] = [];
+              for (const attachment of attachments) {
+                const path = resolveAttachmentPath({ attachmentsDir: root, attachment });
+                if (!path) throw new Error("attachment_path_refused");
+                const canonical = await NodeFSP.realpath(path);
+                if (!canonical.startsWith(root + NodePath.sep))
+                  throw new Error("attachment_path_refused");
+                const file = await NodeFSP.open(canonical, "r");
+                try {
+                  const stat = await file.stat();
+                  if (!stat.isFile() || stat.size !== attachment.sizeBytes)
+                    throw new Error("attachment_size_changed");
+                  const bytes = Buffer.alloc(attachment.sizeBytes + 1);
+                  let bytesRead = 0;
+                  while (bytesRead < bytes.length) {
+                    const next = await file.read(
+                      bytes,
+                      bytesRead,
+                      bytes.length - bytesRead,
+                      bytesRead,
                     );
-                    let messageOrigin;
-                    if (input.optionSelection) {
-                      yield* resolveSession(input.binding, input.sessionId);
-                      const history = yield* transport.request(input.binding, "chat.history", {
-                        session_id: input.sessionId,
-                        limit: 80,
-                        transcript_mode: "messages",
-                      });
-                      const decoded = yield* decode(history, History);
-                      const widget = museSelectableOption(
-                        museOptionWidgets(decoded.chat_events, input.sessionId),
-                        input.optionSelection,
-                      );
-                      if (!widget)
-                        return yield* new ProviderPromptNotSubmittedError({
-                          cause: new MuseAgentRuntimeError({ kind: "unsupported" }),
-                        });
-                      yield* check(input.binding);
-                      revertOption = Effect.succeed(false);
-                      const state = yield* transport.request(
-                        input.binding,
-                        "widgets.state.set",
-                        {
-                          widget_id: widget.widgetId,
-                          base_version: widget.version,
-                          mutation_id: input.optionSelection.interactionId,
-                          state: { selectedText: input.optionSelection.text },
-                        },
-                        true,
-                      );
-                      const changed = decodeWidgetStateResult(state);
-                      if (Option.isSome(changed) && !changed.value.applied)
-                        revertOption = Effect.succeed(true);
-                      if (Option.isNone(changed) || !changed.value.applied)
-                        return yield* new ProviderPromptNotSubmittedError({
-                          cause: new MuseAgentRuntimeError({ kind: "unsupported" }),
-                        });
-                      const selectedVersion = changed.value.state.version;
-                      revertOption = check(input.binding).pipe(
-                        Effect.andThen(
-                          transport.request(
-                            input.binding,
-                            "widgets.state.set",
-                            {
-                              widget_id: widget.widgetId,
-                              base_version: selectedVersion,
-                              mutation_id: NodeCrypto.randomUUID(),
-                              state: Object.fromEntries(
-                                Object.entries(changed.value.state.data).filter(
-                                  ([key]) => key !== "selectedText",
-                                ),
-                              ),
-                            },
-                            true,
-                          ),
-                        ),
-                        Effect.map((reply) => {
-                          const reverted = decodeWidgetStateResult(reply);
-                          return Option.isSome(reverted) && reverted.value.applied;
+                    if (!next.bytesRead) break;
+                    bytesRead += next.bytesRead;
+                  }
+                  if (bytesRead !== attachment.sizeBytes)
+                    throw new Error("attachment_size_changed");
+                  snapshots.push(bytes.subarray(0, bytesRead));
+                } finally {
+                  await file.close();
+                }
+              }
+              return snapshots;
+            },
+            catch: (cause) => new MuseAgentRuntimeError({ kind: "unsupported", cause }),
+          });
+          // Reserve images first, since they have no file_ref fallback. Preserve item order.
+          let fileBudget = MUSE_ATTACHMENT_LIMITS.inlineBytes - imageBytes;
+          for (let index = 0; index < attachments.length; index++) {
+            const attachment = attachments[index]!;
+            const snapshot = yield* prepareMuseAttachment({
+              attachment,
+              bytes: snapshots[index]!,
+              inlineBudget: attachment.type === "image" ? attachment.sizeBytes : fileBudget,
+            });
+            prepared.push(snapshot);
+            if (attachment.type === "file" && snapshot._tag === "Inline")
+              fileBudget -= snapshot.byteLength;
+          }
+        }
+        return prepared;
+      }).pipe(Effect.mapError((cause) => new ProviderPromptNotSubmittedError({ cause })));
+      const attachmentIdentity = prepared.length
+        ? museAttachmentContentIdentity(prepared)
+        : undefined;
+      return yield* Effect.acquireUseRelease(
+        Effect.sync(() => {
+          const pending = {
+            binding: input.binding,
+            sessionId: input.sessionId,
+            context: input.context,
+            completed: Deferred.makeUnsafe<void>(),
+          };
+          admissions.add(pending);
+          return pending;
+        }),
+        () =>
+          Effect.uninterruptibleMask((restore) =>
+            Effect.gen(function* () {
+              const existing = yield* deliveries
+                .begin({
+                  ...input,
+                  ...(attachmentIdentity ? { attachmentIdentity } : {}),
+                })
+                .pipe(
+                  Effect.catchTags({
+                    MuseAgentDeliveryError: (cause) =>
+                      cause.kind === "busy" || cause.kind === "conflict"
+                        ? Effect.fail(new ProviderPromptNotSubmittedError({ cause }))
+                        : Effect.fail(cause),
+                  }),
+                );
+              if (existing) return { ...existing, replayed: true };
+              let promptAttempted = false;
+              let revertOption: Effect.Effect<boolean> = Effect.succeed(true);
+              const stagedPaths: string[] = [];
+              return yield* restore(
+                Effect.gen(function* () {
+                  yield* t3Skill
+                    .install(input.binding)
+                    .pipe(
+                      Effect.mapError((cause) => new ProviderPromptNotSubmittedError({ cause })),
+                    );
+                  const items = yield* Effect.forEach(prepared, (attachment) =>
+                    materializeMuseAttachment(input.binding, attachment).pipe(
+                      Effect.provideService(Transport.MuseAgentTransport, transport),
+                      Effect.onExit((exit) =>
+                        Effect.sync(() => {
+                          if (Exit.isSuccess(exit) && exit.value.type === "file_ref")
+                            stagedPaths.push(`/${exit.value.path}`);
                         }),
-                        Effect.catchCause(() => Effect.succeed(false)),
-                      );
-                      messageOrigin = {
-                        kind: "options_widget",
-                        widget_id: widget.widgetId,
-                        message_id: widget.hostMessageId,
-                        option_index: widget.options.indexOf(input.optionSelection.text),
-                        interaction_id: input.optionSelection.interactionId,
-                      };
-                    }
+                      ),
+                      Effect.mapError((cause) => new ProviderPromptNotSubmittedError({ cause })),
+                    ),
+                  );
+                  let messageOrigin;
+                  if (input.optionSelection) {
+                    yield* resolveSession(input.binding, input.sessionId);
+                    const history = yield* transport.request(input.binding, "chat.history", {
+                      session_id: input.sessionId,
+                      limit: 80,
+                      transcript_mode: "messages",
+                    });
+                    const decoded = yield* decode(history, History);
+                    const widget = museSelectableOption(
+                      museOptionWidgets(decoded.chat_events, input.sessionId),
+                      input.optionSelection,
+                    );
+                    if (!widget)
+                      return yield* new ProviderPromptNotSubmittedError({
+                        cause: new MuseAgentRuntimeError({ kind: "unsupported" }),
+                      });
                     yield* check(input.binding);
-                    // Muse does not advertise idempotent native chat admission. A persisted intent is never replayed.
-                    const response = yield* transport.request(
+                    revertOption = Effect.succeed(false);
+                    const state = yield* transport.request(
                       input.binding,
-                      "chat.stream",
+                      "widgets.state.set",
                       {
-                        items: [
-                          ...items,
-                          ...(input.text.trim() ? [{ type: "text", text: input.text }] : []),
-                        ],
-                        session_id: input.sessionId,
-                        ...(messageOrigin ? { message_origin: messageOrigin } : {}),
-                        ...(input.clientId ? { node_id: input.clientId } : {}),
-                        capabilities: [
-                          "chat_cancel",
-                          "delta_stream",
-                          "custom_reactions",
-                          "custom_reactions_facebook_thumbs_up_v1",
-                        ],
+                        widget_id: widget.widgetId,
+                        base_version: widget.version,
+                        mutation_id: input.optionSelection.interactionId,
+                        state: { selectedText: input.optionSelection.text },
                       },
                       true,
-                      input.deliveryKey,
-                      () => {
-                        promptAttempted = true;
-                      },
                     );
-                    const admission = yield* decode(response, Admission);
-                    if (admission.session_id !== input.sessionId)
-                      return yield* new MuseAgentRuntimeError({ kind: "protocol" });
-                    const receipt = {
-                      messageId: admission.message_id,
-                      replyToMessageId: admission.reply_to_message_id ?? admission.message_id,
-                      sessionId: admission.session_id,
+                    const changed = decodeWidgetStateResult(state);
+                    if (Option.isSome(changed) && !changed.value.applied)
+                      revertOption = Effect.succeed(true);
+                    if (Option.isNone(changed) || !changed.value.applied)
+                      return yield* new ProviderPromptNotSubmittedError({
+                        cause: new MuseAgentRuntimeError({ kind: "unsupported" }),
+                      });
+                    const selectedVersion = changed.value.state.version;
+                    revertOption = check(input.binding).pipe(
+                      Effect.andThen(
+                        transport.request(
+                          input.binding,
+                          "widgets.state.set",
+                          {
+                            widget_id: widget.widgetId,
+                            base_version: selectedVersion,
+                            mutation_id: NodeCrypto.randomUUID(),
+                            state: Object.fromEntries(
+                              Object.entries(changed.value.state.data).filter(
+                                ([key]) => key !== "selectedText",
+                              ),
+                            ),
+                          },
+                          true,
+                        ),
+                      ),
+                      Effect.map((reply) => {
+                        const reverted = decodeWidgetStateResult(reply);
+                        return Option.isSome(reverted) && reverted.value.applied;
+                      }),
+                      Effect.catchCause(() => Effect.succeed(false)),
+                    );
+                    messageOrigin = {
+                      kind: "options_widget",
+                      widget_id: widget.widgetId,
+                      message_id: widget.hostMessageId,
+                      option_index: widget.options.indexOf(input.optionSelection.text),
+                      interaction_id: input.optionSelection.interactionId,
                     };
-                    yield* deliveries.accept(input.deliveryKey, receipt);
-                    return { ...receipt, replayed: false };
-                  }),
-                ).pipe(
-                  Effect.onExit((exit) =>
-                    !promptAttempted && Exit.isFailure(exit)
-                      ? Effect.forEach(stagedPaths, (path) =>
-                          transport
-                            .request(input.binding, "fs.delete", { path, recursive: false }, true)
-                            .pipe(Effect.ignore),
-                        ).pipe(
-                          Effect.andThen(revertOption),
-                          Effect.flatMap((reverted) =>
-                            reverted
-                              ? deliveries.abandonBeforePrompt(input.deliveryKey)
-                              : Effect.void,
-                          ),
-                        )
-                      : Effect.void,
-                  ),
-                  Effect.catchCause((cause) =>
-                    promptAttempted
-                      ? Effect.failCause(cause)
-                      : Effect.fail(new ProviderPromptNotSubmittedError({ cause })),
-                  ),
-                );
-              }),
-            ),
-          (pending) =>
-            Effect.sync(() => {
-              admissions.delete(pending);
-            }).pipe(Effect.andThen(Deferred.succeed(pending.completed, undefined)), Effect.asVoid),
-        );
-      }),
-    replay: (input) =>
-      Effect.gen(function* () {
-        yield* check(input.binding);
-        const result = yield* decode(
-          yield* transport.request(input.binding, "chat.stream_events", {
-            reply_to_message_id: input.receipt.replyToMessageId,
-            session_id: input.receipt.sessionId,
-            stream_lane: "all",
-            limit: 4096,
-          }),
-          StreamHistory,
-        );
-        return result.events;
-      }),
+                  }
+                  yield* check(input.binding);
+                  // Muse does not advertise idempotent native chat admission. A persisted intent is never replayed.
+                  const response = yield* transport.request(
+                    input.binding,
+                    "chat.stream",
+                    {
+                      items: [
+                        ...items,
+                        ...(input.text.trim() ? [{ type: "text", text: input.text }] : []),
+                      ],
+                      session_id: input.sessionId,
+                      ...(messageOrigin ? { message_origin: messageOrigin } : {}),
+                      ...(input.clientId ? { node_id: input.clientId } : {}),
+                      capabilities: [
+                        "chat_cancel",
+                        "delta_stream",
+                        "custom_reactions",
+                        "custom_reactions_facebook_thumbs_up_v1",
+                      ],
+                    },
+                    true,
+                    input.deliveryKey,
+                    () => {
+                      promptAttempted = true;
+                    },
+                  );
+                  const admission = yield* decode(response, Admission);
+                  if (admission.session_id !== input.sessionId)
+                    return yield* new MuseAgentRuntimeError({ kind: "protocol" });
+                  const receipt = {
+                    messageId: admission.message_id,
+                    replyToMessageId: admission.reply_to_message_id ?? admission.message_id,
+                    sessionId: admission.session_id,
+                  };
+                  yield* deliveries.accept(input.deliveryKey, receipt);
+                  return { ...receipt, replayed: false };
+                }),
+              ).pipe(
+                Effect.onExit((exit) =>
+                  !promptAttempted && Exit.isFailure(exit)
+                    ? Effect.forEach(stagedPaths, (path) =>
+                        transport
+                          .request(input.binding, "fs.delete", { path, recursive: false }, true)
+                          .pipe(Effect.ignore),
+                      ).pipe(
+                        Effect.andThen(revertOption),
+                        Effect.flatMap((reverted) =>
+                          reverted
+                            ? deliveries.abandonBeforePrompt(input.deliveryKey)
+                            : Effect.void,
+                        ),
+                      )
+                    : Effect.void,
+                ),
+                Effect.catchCause((cause) =>
+                  promptAttempted
+                    ? Effect.failCause(cause)
+                    : Effect.fail(new ProviderPromptNotSubmittedError({ cause })),
+                ),
+              );
+            }),
+          ),
+        (pending) =>
+          Effect.sync(() => {
+            admissions.delete(pending);
+          }).pipe(Effect.andThen(Deferred.succeed(pending.completed, undefined)), Effect.asVoid),
+      );
+    }),
+    replay: Effect.fn("MuseAgentNativeRuntimeService.replay")(function* (input) {
+      yield* check(input.binding);
+      const result = yield* decode(
+        yield* transport.request(input.binding, "chat.stream_events", {
+          reply_to_message_id: input.receipt.replyToMessageId,
+          session_id: input.receipt.sessionId,
+          stream_lane: "all",
+          limit: 4096,
+        }),
+        StreamHistory,
+      );
+      return result.events;
+    }),
     watch: (input) =>
       resolveSession(input.binding, input.sessionId).pipe(
         Effect.andThen(transport.watch(input.binding, input.sessionId)),
       ),
     settleDelivery: deliveries.settle,
-    historyOwnership: (scope, options) =>
-      Effect.gen(function* () {
+    historyOwnership: Effect.fn("MuseAgentNativeRuntimeService.historyOwnership")(
+      function* (scope, options) {
         yield* checkOwnershipAccount(scope.binding);
         if (options?.awaitAdmissions) {
           const pending = [...admissions].filter(
@@ -735,12 +725,13 @@ const make = Effect.gen(function* () {
             ? {}
             : { nativeMessageId: options.nativeMessageId }),
         });
-      }),
+      },
+    ),
     recordManagedMessage: deliveries.recordManagedMessage,
     pendingDeliveries: (scope) =>
       check(scope.binding).pipe(Effect.andThen(deliveries.pendingDeliveries(scope))),
-    releaseLocalOwnership: (input) =>
-      Effect.gen(function* () {
+    releaseLocalOwnership: Effect.fn("MuseAgentNativeRuntimeService.releaseLocalOwnership")(
+      function* (input) {
         yield* resolveSession(input.binding, input.sessionId);
         const receipt = yield* deliveries.receipt(input.deliveryKey, input);
         yield* transport.releaseOwned(input.binding, {
@@ -749,17 +740,17 @@ const make = Effect.gen(function* () {
           receipt,
         });
         yield* deliveries.releaseLocalOwnership(input);
-      }),
-    stop: (input) =>
-      Effect.gen(function* () {
-        yield* check(input.binding);
-        const receipt = yield* deliveries.receipt(input.deliveryKey);
-        if (!receipt || receipt.sessionId !== input.sessionId)
-          return yield* new MuseAgentRuntimeError({ kind: "unsupported" });
-        // The page checks the exact admission and connection generation immediately before
-        // dispatch. Session-wide cancellation is refused after native ownership changes.
-        yield* transport.cancelOwned(input.binding, receipt);
-      }),
+      },
+    ),
+    stop: Effect.fn("MuseAgentNativeRuntimeService.stop")(function* (input) {
+      yield* check(input.binding);
+      const receipt = yield* deliveries.receipt(input.deliveryKey);
+      if (!receipt || receipt.sessionId !== input.sessionId)
+        return yield* new MuseAgentRuntimeError({ kind: "unsupported" });
+      // The page checks the exact admission and connection generation immediately before
+      // dispatch. Session-wide cancellation is refused after native ownership changes.
+      yield* transport.cancelOwned(input.binding, receipt);
+    }),
     connectionId: transport.connectionId,
     acquireTurn: (binding, sessionId) =>
       Effect.uninterruptibleMask((restore) =>

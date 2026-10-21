@@ -455,35 +455,39 @@ const make = Effect.gen(function* () {
   });
   return MuseAgentFeatureService.of({
     readProfileDocument,
-    saveProfileDocument: (binding, document, content, expectedRevision) =>
-      Effect.gen(function* () {
-        const selected = yield* validate("profile", ProfileDocument, document);
-        yield* validate("profile", ProfileContent, content);
-        yield* validate("profile", ProfileRevision, expectedRevision);
-        const bytes = Buffer.from(content, "utf8");
-        if (bytes.byteLength > PROFILE_DOCUMENT_MAX_BYTES || bytes.toString("utf8") !== content)
-          return yield* new MuseAgentFeatureError({ feature: "profile", code: "invalid_request" });
-        const revision = yield* contentRevision(content);
-        const current = yield* readProfileDocument(binding, selected);
-        if (current.revision !== expectedRevision)
-          return yield* new MuseAgentFeatureError({ feature: "profile", code: "conflict" });
-        // Native fs.write has no atomic compare-and-swap. This catches stale edits before dispatch;
-        // the permit serializes T3 saves, while external native editors can still race this check.
-        yield* request(
-          "profile",
-          binding,
-          "fs.write",
-          {
-            path: profilePaths[selected],
-            text: content,
-            overwrite: true,
-            append: false,
-            create_parent: false,
-          },
-          true,
-        );
-        return { document: selected, content, revision };
-      }).pipe(profileWritePermit.withPermits(1)),
+    saveProfileDocument: Effect.fn("MuseAgentFeatureService.saveProfileDocument")(function* (
+      binding,
+      document,
+      content,
+      expectedRevision,
+    ) {
+      const selected = yield* validate("profile", ProfileDocument, document);
+      yield* validate("profile", ProfileContent, content);
+      yield* validate("profile", ProfileRevision, expectedRevision);
+      const bytes = Buffer.from(content, "utf8");
+      if (bytes.byteLength > PROFILE_DOCUMENT_MAX_BYTES || bytes.toString("utf8") !== content)
+        return yield* new MuseAgentFeatureError({ feature: "profile", code: "invalid_request" });
+      const revision = yield* contentRevision(content);
+      const current = yield* readProfileDocument(binding, selected);
+      if (current.revision !== expectedRevision)
+        return yield* new MuseAgentFeatureError({ feature: "profile", code: "conflict" });
+      // Native fs.write has no atomic compare-and-swap. This catches stale edits before dispatch;
+      // the permit serializes T3 saves, while external native editors can still race this check.
+      yield* request(
+        "profile",
+        binding,
+        "fs.write",
+        {
+          path: profilePaths[selected],
+          text: content,
+          overwrite: true,
+          append: false,
+          create_parent: false,
+        },
+        true,
+      );
+      return { document: selected, content, revision };
+    }, profileWritePermit.withPermits(1)),
     themes,
     setTheme: Effect.fnUntraced(function* (binding, themeId) {
       yield* validate("profile", ThemeId, themeId);

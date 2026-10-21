@@ -1,5 +1,6 @@
+import { PullRequestGlyph } from "../pull-requests/pullRequestGlyphs";
 import { useWorkspaceTabs } from "../workspace/WorkspaceTabsContext";
-import { SymbolView } from "../../components/AppSymbol";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { Pressable, View } from "react-native";
 
 export interface SidebarHeaderActionsProps {
@@ -8,7 +9,7 @@ export interface SidebarHeaderActionsProps {
 
 function FallbackHeaderButton(props: {
   readonly accessibilityLabel: string;
-  readonly icon: "gearshape" | "square.and.pencil" | "arrow.triangle.pull";
+  readonly icon: "gearshape" | "square.and.pencil" | typeof PullRequestGlyph.pullRequest;
   readonly onPress: () => void;
 }) {
   return (
@@ -35,7 +36,7 @@ export function SidebarHeaderActions(props: SidebarHeaderActionsProps) {
     <View className="flex-row items-center gap-0.5">
       <FallbackHeaderButton
         accessibilityLabel="Open pull requests"
-        icon="arrow.triangle.pull"
+        icon={PullRequestGlyph.pullRequest}
         onPress={() => workspace?.dispatch({ type: "select", tab: "pullRequests" })}
       />
       <FallbackHeaderButton

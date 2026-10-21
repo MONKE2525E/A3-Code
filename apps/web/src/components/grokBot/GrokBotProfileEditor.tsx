@@ -4,7 +4,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId, GrokBot } from "@t3tools/contracts";
-import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import { DraftInput } from "~/components/ui/draft-input";
@@ -73,37 +73,34 @@ export function GrokBotProfileEditor({
   }
   const look = pendingLook ?? { shape: bot.avatarShape, color: bot.avatarColor, acceptedAt: null };
 
-  const save = useCallback(
-    async (patch: ProfilePatch): Promise<SaveOutcome> => {
-      if (!canUpdate) return "rejected";
-      setPendingCount((count) => count + 1);
-      // An uncertain change stays visible until the roster shows it, even across another save.
+  const save = async (patch: ProfilePatch): Promise<SaveOutcome> => {
+    if (!canUpdate) return "rejected";
+    setPendingCount((count) => count + 1);
+    // An uncertain change stays visible until the roster shows it, even across another save.
+    setSaveState((current) => ({
+      ...current,
+      issue: current.issue?.uncertain ? current.issue : null,
+    }));
+    const result = await updateBot({
+      environmentId,
+      input: { botId: bot.id, ...patch },
+    });
+    setPendingCount((count) => count - 1);
+    if (result._tag === "Success") return "saved";
+    const error = squashAtomCommandFailure(result);
+    if (isGrokBotProfileSaveRejected(error, isAtomCommandInterrupted(result))) {
       setSaveState((current) => ({
         ...current,
-        issue: current.issue?.uncertain ? current.issue : null,
+        issue: { message: grokBotFailureMessage(error), uncertain: null },
       }));
-      const result = await updateBot({
-        environmentId,
-        input: { botId: bot.id, ...patch },
-      });
-      setPendingCount((count) => count - 1);
-      if (result._tag === "Success") return "saved";
-      const error = squashAtomCommandFailure(result);
-      if (isGrokBotProfileSaveRejected(error, isAtomCommandInterrupted(result))) {
-        setSaveState((current) => ({
-          ...current,
-          issue: { message: grokBotFailureMessage(error), uncertain: null },
-        }));
-        return "rejected";
-      }
-      setSaveState((current) => ({
-        ...current,
-        issue: { message: UNCERTAIN_SAVE_MESSAGE, uncertain: patch },
-      }));
-      return "uncertain";
-    },
-    [bot.id, canUpdate, environmentId, updateBot],
-  );
+      return "rejected";
+    }
+    setSaveState((current) => ({
+      ...current,
+      issue: { message: UNCERTAIN_SAVE_MESSAGE, uncertain: patch },
+    }));
+    return "uncertain";
+  };
 
   const changeLook = (patch: { avatarShape?: string; avatarColor?: string }) => {
     // Send both avatar fields so the uncertain check covers the whole look, not one half of it.
