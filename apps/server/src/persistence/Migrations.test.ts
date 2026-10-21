@@ -136,6 +136,17 @@ it.effect.each([
     ],
   },
   {
+    label: "Muse fork",
+    ids: [62, 63, 64, 65, 66],
+    names: [
+      "GrokBotManagedRuntime",
+      "GrokBotManagedCompletion",
+      "GrokBotMigrationCompatibility",
+      "ThreadSenderIndex",
+      "NativeTurnItemSequences",
+    ],
+  },
+  {
     label: "early fork",
     ids: [61, 62],
     names: ["GrokBotManagedRuntime", "GrokBotManagedCompletion"],
@@ -152,6 +163,13 @@ it.effect.each([
     );
     yield* runtime.default;
     yield* completion.default;
+    if (ids.includes(66)) {
+      const native = yield* Effect.promise(
+        () => import("./Migrations/072_NativeTurnItemSequences.ts"),
+      );
+      yield* native.default;
+      yield* sql`INSERT INTO orchestration_v2_turn_item_positions (thread_id, turn_item_id, ordinal, native_sequence) VALUES ('preserved-thread', 'preserved-item', 7000001, 42)`;
+    }
     yield* sql`INSERT INTO grok_bot_managed_completions (provider_turn_id, source, final_text, declared_at_ms) VALUES ('preserved-turn', 'agent_declaration', 'preserved result', 1)`;
     for (const [index, id] of ids.entries()) {
       yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (${id}, ${names[index]!})`;
@@ -162,6 +180,12 @@ it.effect.each([
       yield* sql`SELECT final_text FROM grok_bot_managed_completions WHERE provider_turn_id = 'preserved-turn'`,
       [{ final_text: "preserved result" }],
     );
+    if (ids.includes(66)) {
+      assert.deepStrictEqual(
+        yield* sql`SELECT ordinal, native_sequence FROM orchestration_v2_turn_item_positions WHERE turn_item_id = 'preserved-item'`,
+        [{ ordinal: 7000001, native_sequence: 42 }],
+      );
+    }
     assert.deepStrictEqual(yield* runMigrations(), []);
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );

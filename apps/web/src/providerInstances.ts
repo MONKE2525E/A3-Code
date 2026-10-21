@@ -260,10 +260,18 @@ function isGrokBotDriverKind(driver: string): boolean {
   return driver === "grok-bot";
 }
 
+/**
+ * Native Muse (`muse-agent`) is a personal agent like a Grok Bot, so it is kept out of ordinary
+ * coding pickers too. Muse Code (`muse`) is a coding provider and stays listed.
+ */
+function isNativeAgentDriverKind(driver: string): boolean {
+  return isGrokBotDriverKind(driver) || driver === "muse-agent";
+}
+
 export function omitGrokBotProviderEntries(
   entries: ReadonlyArray<ProviderInstanceEntry>,
 ): ReadonlyArray<ProviderInstanceEntry> {
-  return entries.filter((entry) => !isGrokBotDriverKind(entry.driverKind));
+  return entries.filter((entry) => !isNativeAgentDriverKind(entry.driverKind));
 }
 
 /** Drop a stored selection that points at a Grok Bot instance; other selections pass through. */
@@ -273,7 +281,7 @@ export function omitGrokBotModelSelection(
 ): ModelSelection | null {
   if (selection === null) return null;
   const driver = providers.find((provider) => provider.instanceId === selection.instanceId)?.driver;
-  return driver !== undefined && isGrokBotDriverKind(driver) ? null : selection;
+  return driver !== undefined && isNativeAgentDriverKind(driver) ? null : selection;
 }
 
 /**
@@ -286,7 +294,9 @@ export function resolveDefaultProviderModelSelection(
   providers: ReadonlyArray<ServerProvider>,
   selection: ModelSelection | null | undefined,
 ): ModelSelection | null {
-  const ordinaryProviders = providers.filter((provider) => !isGrokBotDriverKind(provider.driver));
+  const ordinaryProviders = providers.filter(
+    (provider) => !isNativeAgentDriverKind(provider.driver),
+  );
   const instanceId = resolveSelectableProviderInstance(ordinaryProviders, selection?.instanceId);
   if (instanceId === undefined) return null;
   if (selection?.instanceId === instanceId) return selection;

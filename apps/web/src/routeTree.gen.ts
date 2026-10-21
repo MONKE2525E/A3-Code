@@ -36,6 +36,7 @@ import { Route as SettingsAppearanceRouteImport } from './routes/settings.appear
 import { Route as ProjectsProjectKeyRouteImport } from './routes/projects.$projectKey'
 import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
 import { Route as ChatNewRouteImport } from './routes/_chat.new'
+import { Route as ChatMuseSectionRouteImport } from './routes/_chat.muse.$section'
 import { Route as ChatGrokBotsBotIdRouteImport } from './routes/_chat.grok-bots.$botId'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
 import { Route as ChatEnvironmentIdThreadIdRouteImport } from './routes/_chat.$environmentId.$threadId'
@@ -175,6 +176,11 @@ const ChatNewRoute = ChatNewRouteImport.update({
   path: '/new',
   getParentRoute: () => ChatRoute,
 } as any)
+const ChatMuseSectionRoute = ChatMuseSectionRouteImport.update({
+  id: '/muse/$section',
+  path: '/muse/$section',
+  getParentRoute: () => ChatRoute,
+} as any)
 const ChatGrokBotsBotIdRoute = ChatGrokBotsBotIdRouteImport.update({
   id: '/grok-bots/$botId',
   path: '/grok-bots/$botId',
@@ -222,6 +228,7 @@ export interface FileRoutesByFullPath {
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/grok-bots/$botId': typeof ChatGrokBotsBotIdRoute
+  '/muse/$section': typeof ChatMuseSectionRoute
 }
 export interface FileRoutesByTo {
   '/connect': typeof ConnectRoute
@@ -253,6 +260,7 @@ export interface FileRoutesByTo {
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/grok-bots/$botId': typeof ChatGrokBotsBotIdRoute
+  '/muse/$section': typeof ChatMuseSectionRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -286,6 +294,7 @@ export interface FileRoutesById {
   '/_chat/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/_chat/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/_chat/grok-bots/$botId': typeof ChatGrokBotsBotIdRoute
+  '/_chat/muse/$section': typeof ChatMuseSectionRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -319,6 +328,7 @@ export interface FileRouteTypes {
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
     | '/grok-bots/$botId'
+    | '/muse/$section'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/connect'
@@ -350,6 +360,7 @@ export interface FileRouteTypes {
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
     | '/grok-bots/$botId'
+    | '/muse/$section'
   id:
     | '__root__'
     | '/_chat'
@@ -382,6 +393,7 @@ export interface FileRouteTypes {
     | '/_chat/$environmentId/$threadId'
     | '/_chat/draft/$draftId'
     | '/_chat/grok-bots/$botId'
+    | '/_chat/muse/$section'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -586,6 +598,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatNewRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/muse/$section': {
+      id: '/_chat/muse/$section'
+      path: '/muse/$section'
+      fullPath: '/muse/$section'
+      preLoaderRoute: typeof ChatMuseSectionRouteImport
+      parentRoute: typeof ChatRoute
+    }
     '/_chat/grok-bots/$botId': {
       id: '/_chat/grok-bots/$botId'
       path: '/grok-bots/$botId'
@@ -617,6 +636,7 @@ interface ChatRouteChildren {
   ChatEnvironmentIdThreadIdRoute: typeof ChatEnvironmentIdThreadIdRoute
   ChatDraftDraftIdRoute: typeof ChatDraftDraftIdRoute
   ChatGrokBotsBotIdRoute: typeof ChatGrokBotsBotIdRoute
+  ChatMuseSectionRoute: typeof ChatMuseSectionRoute
 }
 
 const ChatRouteChildren: ChatRouteChildren = {
@@ -626,6 +646,7 @@ const ChatRouteChildren: ChatRouteChildren = {
   ChatEnvironmentIdThreadIdRoute: ChatEnvironmentIdThreadIdRoute,
   ChatDraftDraftIdRoute: ChatDraftDraftIdRoute,
   ChatGrokBotsBotIdRoute: ChatGrokBotsBotIdRoute,
+  ChatMuseSectionRoute: ChatMuseSectionRoute,
 }
 
 const ChatRouteWithChildren = ChatRoute._addFileChildren(ChatRouteChildren)

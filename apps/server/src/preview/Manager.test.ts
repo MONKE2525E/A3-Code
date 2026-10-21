@@ -272,3 +272,29 @@ it.layer(layer)("PreviewManager", (it) => {
     }),
   );
 });
+
+it.effect(
+  "does not allow generic previews to claim integration threads or their cookie profile",
+  () =>
+    Effect.gen(function* () {
+      const manager = yield* PreviewManager.PreviewManager;
+      for (const input of [
+        {
+          threadId: ThreadId.make("integration-auth:muse:guessed"),
+          runtime: "server" as const,
+          url: "https://example.test",
+        },
+        {
+          threadId: ThreadId.make("ordinary-thread"),
+          runtime: "server" as const,
+          profileId: "integration-muse-auth",
+          url: "https://example.test",
+        },
+      ]) {
+        expect((yield* manager.open(input).pipe(Effect.flip))._tag).toBe(
+          "PreviewControlRequiredError",
+        );
+        expect((yield* manager.list({ threadId: input.threadId })).sessions).toEqual([]);
+      }
+    }).pipe(Effect.provide(layer)),
+);

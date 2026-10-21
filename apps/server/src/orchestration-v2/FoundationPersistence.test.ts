@@ -472,12 +472,12 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         });
         const original = yield* sql<{ readonly payload_json: string }>`
           SELECT payload_json FROM orchestration_events
-          WHERE sequence = ${history[0]!.sequence}
-        `;
+              WHERE sequence = ${history[0]!.sequence}
+      `;
         yield* Effect.acquireRelease(
           sql`
             UPDATE orchestration_events SET payload_json = 'unreadable unrelated payload'
-            WHERE sequence = ${history[0]!.sequence}
+              WHERE sequence = ${history[0]!.sequence}
           `,
           () =>
             sql`
@@ -774,11 +774,11 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         INSERT INTO orchestration_events (
           event_id, aggregate_kind, stream_id, stream_version, event_type,
           occurred_at, actor_kind, payload_json, metadata_json, application_event_version
-        )
+                    )
         VALUES (
           ${`event:v1:${threadIdValue}:${version}`}, 'thread', ${threadIdValue}, ${version},
           'thread.message-appended', ${nowIso}, 'user', '{}', '{}', 1
-        )
+                    )
       `;
       yield* insertV1Event(importedV1ThreadId, 1);
       yield* insertV1Event(importedV1ThreadId, 2);
@@ -787,7 +787,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         INSERT INTO orchestration_v2_legacy_imports (
           thread_id, source_updated_at, shell_imported_at, transcript_imported_at,
           imported_message_count, last_error
-        )
+                    )
         VALUES
           (${importedV1ThreadId}, ${nowIso}, ${nowIso}, ${nowIso}, 2, NULL),
           (${pendingV1ThreadId}, ${nowIso}, ${nowIso}, NULL, 0, NULL)
@@ -796,7 +796,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       yield* sql`
         INSERT INTO orchestration_command_receipts (
           command_id, aggregate_kind, aggregate_id, accepted_at, result_sequence, status, command_type
-        )
+                    )
         VALUES
           ('command:foundation-compact:legacy', 'thread', ${importedV1ThreadId}, ${nowIso}, 1, 'accepted', 'legacy'),
           ('command:foundation-compact:pending', 'thread', ${pendingV1ThreadId}, ${nowIso}, 1, 'accepted', 'legacy')
@@ -1207,11 +1207,11 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       yield* sql`
         INSERT INTO orchestration_command_receipts (
           command_id, aggregate_kind, aggregate_id, accepted_at, result_sequence, status, command_type
-        )
+                    )
         VALUES (
           ${commandId}, 'thread', ${threadId}, ${occurredAt},
           ${expectedSequences.at(-1)!}, 'accepted', 'thread.create'
-        )
+                    )
       `;
 
       const pageLimits: Array<number> = [];
@@ -2087,12 +2087,12 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           INSERT INTO orchestration_v2_effect_outbox (
             effect_id, command_id, thread_id, effect_type, payload_json, status,
             available_at, created_at, updated_at, completed_at
-          )
+                    )
           SELECT ${prefix} || i, 'command:prune', 'thread:prune', 'terminal.cleanup',
             '{"type":"terminal.cleanup"}', ${status}, ${createdAt}, ${createdAt}, ${createdAt},
             ${completedAt}
           FROM n
-        `;
+      `;
       };
       const old = Duration.sum(EffectOutbox.SETTLED_EFFECT_RETENTION, Duration.minutes(1));
       const recent = Duration.subtract(EffectOutbox.SETTLED_EFFECT_RETENTION, Duration.minutes(1));
@@ -2392,7 +2392,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           UPDATE orchestration_v2_effect_outbox
           SET lease_expires_at = '1970-01-01T00:00:00.000Z'
           WHERE effect_id = ${firstEffectId}
-        `;
+      `;
 
         assert.isFalse(yield* worker.runOnce);
         assert.deepEqual(yield* Ref.get(executions), [firstEffectId]);
@@ -3148,29 +3148,29 @@ it.effect.each(["events", "receipts"] as const)(
         const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
         const now = DateTime.formatIso(yield* DateTime.now);
         yield* sql`
-          INSERT INTO orchestration_v2_legacy_imports (
-            thread_id, source_updated_at, shell_imported_at, transcript_imported_at,
-            imported_message_count, last_error
+        INSERT INTO orchestration_v2_legacy_imports (
+          thread_id, source_updated_at, shell_imported_at, transcript_imported_at,
+          imported_message_count, last_error
           ) VALUES ('imported', ${now}, ${now}, ${now}, 1, NULL)
-        `;
+      `;
         for (const threadId of ["imported", "pending"]) {
           if (kind === "events") {
             yield* sql`
-              INSERT INTO orchestration_events (
-                event_id, aggregate_kind, stream_id, stream_version, event_type,
-                occurred_at, actor_kind, payload_json, metadata_json, application_event_version
+        INSERT INTO orchestration_events (
+          event_id, aggregate_kind, stream_id, stream_version, event_type,
+          occurred_at, actor_kind, payload_json, metadata_json, application_event_version
               ) VALUES (
                 ${threadId}, 'thread', ${threadId}, 1, 'thread.message-appended',
                 ${now}, 'user', '{}', '{}', 1
-              )
-            `;
+                    )
+      `;
           } else {
             yield* sql`
-              INSERT INTO orchestration_command_receipts (
+        INSERT INTO orchestration_command_receipts (
                 command_id, aggregate_kind, aggregate_id, accepted_at, result_sequence,
                 status, command_type
               ) VALUES (${threadId}, 'thread', ${threadId}, ${now}, 1, 'accepted', 'legacy')
-            `;
+      `;
           }
         }
         yield* sql`CREATE TABLE concurrent_writes (value TEXT)`;
@@ -3217,4 +3217,97 @@ it.effect.each(["events", "receipts"] as const)(
         assert.deepEqual(retained, [{ id: "pending" }]);
       }).pipe(Effect.provide(maintenanceLayer));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each([false, true])(
+  "persists Muse position corrections across a batch and rebuild (batch=%s)",
+  (batch) =>
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make(`thread:muse-positions:${batch}`);
+      yield* sink.write({
+        events: [
+          threadCreatedEvent({ id: `create:${threadId}`, thread: makeThread(threadId, now), now }),
+        ],
+      });
+      const event = (id: string, sequence?: number, suffix = ""): OrchestrationV2DomainEvent => ({
+        id: EventId.make(`event:${id}:${suffix}`),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: TurnItemId.make(id),
+          threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          parentItemId: null,
+          ordinal: 0,
+          status: "completed",
+          title: null,
+          nativeItemRef:
+            sequence === undefined
+              ? null
+              : {
+                  driver: ProviderDriverKind.make("muse-agent"),
+                  nativeId: id,
+                  strength: "strong",
+                },
+          ...(sequence === undefined ? {} : { canonicalNativeSequence: sequence }),
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+          type: "user_message",
+          messageId: MessageId.make(id),
+          createdBy: "user",
+          creationSource: "provider",
+          inputIntent: "turn_start",
+          text: id,
+          attachments: [],
+        },
+      });
+      yield* sink.write({ events: [event("managed")] });
+      if (batch) {
+        const written = yield* sink.write({ events: [event("b", 0), event("a", 0)] });
+        const items = written.flatMap(({ event }) =>
+          event.type === "turn-item.updated" ? [event.payload] : [],
+        );
+        assert.strictEqual(items.find((item) => item.id === "a")?.ordinal, 2);
+        assert.strictEqual(items.find((item) => item.id === "b")?.ordinal, 3);
+      } else {
+        yield* sink.write({ events: [event("a", 1), event("b", 0)] });
+        const written = yield* sink.write({ events: [event("a", 0, "correction")] });
+        const shifted = written.find(
+          ({ event }) => event.type === "turn-item.updated" && event.payload.id === "b",
+        );
+        assert.equal(shifted?.event.type, "turn-item.updated");
+        if (shifted?.event.type === "turn-item.updated")
+          assert.strictEqual(shifted.event.payload.ordinal, 3);
+      }
+      const read = () =>
+        Effect.forEach(["managed", "a", "b"], (id) =>
+          projections.getTurnItem({ threadId, itemId: TurnItemId.make(id) }),
+        );
+      const before = yield* read();
+      assert.deepEqual(
+        before.map((item) => item?.ordinal),
+        [1, 2, 3],
+      );
+      yield* maintenance.rebuild;
+      assert.deepEqual(yield* read(), before);
+      const positions = yield* sql<{
+        readonly ordinal: number;
+      }>`SELECT ordinal FROM orchestration_v2_turn_item_positions WHERE thread_id = ${threadId} ORDER BY ordinal`;
+      assert.deepEqual(
+        positions.map((row) => row.ordinal),
+        [1, 2, 3],
+      );
+      yield* sink.write({ events: [event("a", 0, "replay"), event("b", 0, "replay")] });
+      assert.deepEqual(yield* read(), before);
+    }).pipe(Effect.provide(layerTest)),
 );

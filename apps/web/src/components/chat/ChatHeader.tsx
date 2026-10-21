@@ -2,7 +2,9 @@ import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
   type GrokBot,
+  nativeAgentSourceForThread,
   type ThreadId,
+  type ProviderInstanceId,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
@@ -22,6 +24,9 @@ import {
 import { isTrailingDoubleClick } from "../Sidebar.logic";
 import { GrokBotThreadHeading } from "../grokBot/GrokBotThreadHeading";
 import { GrokBotVoiceControl } from "../grokBot/GrokBotVoiceControl";
+import { MuseAgentThreadHeading } from "../agents/MuseAgentThreadHeading";
+import { MuseAgentHeaderFeatures } from "../agents/MuseAgentFeaturesDialog";
+import { MuseAgentHistoryPagination } from "../agents/MuseAgentHistoryPagination";
 import { Toggle } from "../ui/toggle";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
@@ -44,6 +49,7 @@ import { useClientSettings } from "../../hooks/useSettings";
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
   activeThreadId: ThreadId;
+  activeThreadProviderInstanceId?: ProviderInstanceId;
   activeThreadTitle: string;
   isServerThread: boolean;
   activeProject: EnvironmentProject | null;
@@ -56,6 +62,8 @@ interface ChatHeaderProps {
   grokBotId: GrokBot["id"] | null;
   computerOpen: boolean;
   onToggleComputer: () => void;
+  museFeaturesOpen?: boolean;
+  onToggleMuseFeatures?: () => void;
 }
 
 function resolveRenameCommit(input: {
@@ -76,6 +84,7 @@ const TITLE_MENU_OPEN_DELAY_MS = 500;
 export const ChatHeader = memo(function ChatHeader({
   activeThreadEnvironmentId,
   activeThreadId,
+  activeThreadProviderInstanceId,
   activeThreadTitle,
   isServerThread,
   activeProject,
@@ -87,8 +96,12 @@ export const ChatHeader = memo(function ChatHeader({
   grokBotId,
   computerOpen,
   onToggleComputer,
+  museFeaturesOpen = false,
+  onToggleMuseFeatures,
 }: ChatHeaderProps) {
   const activeProjectName = activeProject?.isScratch ? "No project" : activeProject?.title;
+  const isMuseAgentThread = nativeAgentSourceForThread({ id: activeThreadId }) === "muse-agent";
+
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const interfaceFont = useClientSettings((settings) => settings.fontFamilySans);
   const breadcrumbContainerRef = useRef<HTMLDivElement>(null);
@@ -297,7 +310,7 @@ export const ChatHeader = memo(function ChatHeader({
         {/* Project threads lead the header with their project: knowing which
             project a thread lives in is priority zero, and the thread title
             alone doesn't answer it. Bot threads show the bot's identity instead. */}
-        {activeProject && grokBotId === null ? (
+        {activeProject && grokBotId === null && !isMuseAgentThread ? (
           <>
             <WorkspaceBreadcrumbItem className="shrink">
               <Tooltip>
@@ -387,6 +400,15 @@ export const ChatHeader = memo(function ChatHeader({
                 fallbackTitle={activeThreadTitle}
               />
             </h2>
+          ) : isMuseAgentThread ? (
+            <h2 className="min-w-0 flex-1">
+              <MuseAgentThreadHeading
+                environmentId={activeThreadEnvironmentId}
+                threadId={activeThreadId}
+                providerInstanceId={activeThreadProviderInstanceId}
+                fallbackTitle={activeThreadTitle}
+              />
+            </h2>
           ) : isServerThread ? (
             <Tooltip>
               <TooltipTrigger
@@ -426,6 +448,24 @@ export const ChatHeader = memo(function ChatHeader({
           )}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
+      {isMuseAgentThread && isServerThread ? (
+        <MuseAgentHistoryPagination
+          key={`${activeThreadEnvironmentId}:${activeThreadId}:${activeThreadProviderInstanceId}`}
+          environmentId={activeThreadEnvironmentId}
+          threadId={activeThreadId}
+          providerInstanceId={activeThreadProviderInstanceId}
+        />
+      ) : null}
+      {isMuseAgentThread ? (
+        onToggleMuseFeatures ? (
+          <MuseAgentHeaderFeatures
+            environmentId={activeThreadEnvironmentId}
+            providerInstanceId={activeThreadProviderInstanceId}
+            pressed={museFeaturesOpen}
+            onToggle={onToggleMuseFeatures}
+          />
+        ) : null
+      ) : null}
       {grokBotId !== null ? (
         <>
           <Tooltip>

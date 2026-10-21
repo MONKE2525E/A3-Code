@@ -1,27 +1,26 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, GrokBot } from "@t3tools/contracts";
 import { useLocation, useNavigate } from "@tanstack/react-router";
-import {
-  EllipsisIcon,
-  EyeOffIcon,
-  HistoryIcon,
-  PinIcon,
-  PinOffIcon,
-  SettingsIcon,
-  Trash2Icon,
-} from "lucide-react";
 import * as Schema from "effect/Schema";
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
+
+import { AI_AGENTS_SECTION_LABEL } from "~/components/agents/aiAgents";
+import { enabledAgentMarketplaces } from "~/components/agents/nativeAgentAvailability";
+import {
+  AgentPinnedTile,
+  AgentRosterNotice,
+  AgentRosterRow,
+  AgentRowMenu,
+} from "~/components/agents/AgentRoster";
+import { MuseAgentSidebarSection } from "~/components/agents/MuseAgentSidebarSection";
 
 import { requestConfirmDialog } from "~/confirmDialog";
 import { Collapsible, CollapsiblePanel } from "~/components/ui/collapsible";
 import { CollapsibleSectionHeader } from "~/components/ui/collapsible-section-header";
 import { Button } from "~/components/ui/button";
-import { Menu, MenuItem, MenuPopup, MenuTrigger } from "~/components/ui/menu";
 import { Skeleton } from "~/components/ui/skeleton";
 import { SidebarGroup, useSidebar } from "~/components/ui/sidebar";
 import { useLocalStorage } from "~/hooks/useLocalStorage";
-import { cn } from "~/lib/utils";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { useConnectedEnvironmentIds } from "~/state/environments";
 import {
@@ -61,17 +60,94 @@ import { useGrokBotToolActivities, useGrokBotUnreadBotIds } from "./useGrokBotTh
 
 const GROK_BOTS_OPEN_STORAGE_KEY = "t3code:grok-bots-sidebar-open";
 
-export function GrokBotSidebarDropdown() {
+/**
+ * The shared AI Agents section. Grok Bots are its built-in roster; other native agents, such as
+ * Muse, pass their rows as `nativeAgents` and appear above the bots. Without a configured Grok
+ * Bot provider the section shows only the other agents, and nothing when there are none.
+ */
+export function GrokBotSidebarDropdown({
+  nativeAgents,
+}: { readonly nativeAgents?: ReactNode } = {}) {
   const environmentId = useSelectedGrokBotEnvironmentId();
   const configs = useAtomValue(environmentServerConfigsAtom);
   const config = environmentId === null ? undefined : configs.get(environmentId);
-  const configured = Object.values(config?.settings.providerInstances ?? {}).some(
-    (instance) => instance.driver === "grok-bot",
+  const available = enabledAgentMarketplaces(config?.settings.providerInstances);
+  if (available.length === 0) return null;
+  return available.includes("grok-bot") ? (
+    <ConfiguredGrokBotSidebarDropdown
+      nativeAgents={nativeAgents}
+      museEnabled={available.includes("muse-agent")}
+    />
+  ) : (
+    <NativeAgentsOnlySection nativeAgents={nativeAgents} />
   );
-  return configured ? <ConfiguredGrokBotSidebarDropdown /> : null;
 }
 
-function ConfiguredGrokBotSidebarDropdown() {
+function NativeAgentsOnlySection({ nativeAgents }: { readonly nativeAgents?: ReactNode }) {
+  const selectedEnvironmentId = useSelectedGrokBotEnvironmentId();
+  const resolved = resolveGrokBotSelectedEnvironment({
+    selectedEnvironmentId,
+    connectedEnvironmentIds: useConnectedEnvironmentIds(),
+  });
+  const { isReady: catalogReady, presentation } = useEnvironmentPresentation(selectedEnvironmentId);
+  const connecting =
+    resolved.kind === "disconnected" &&
+    isGrokBotEnvironmentConnecting({
+      catalogReady,
+      phase: presentation?.connection.phase ?? null,
+    });
+  const environmentId = resolved.kind === "environment" ? resolved.environmentId : null;
+  const [open, setOpen] = useLocalStorage(GROK_BOTS_OPEN_STORAGE_KEY, true, Schema.Boolean);
+  const navigate = useNavigate();
+  const { isMobile, setOpenMobile } = useSidebar();
+  const openSettings = () => {
+    if (isMobile) setOpenMobile(false);
+    void navigate({
+      to: "/settings/providers",
+      search: selectedEnvironmentId ? { machine: selectedEnvironmentId } : {},
+    });
+  };
+  return (
+    <SidebarGroup className="z-[1]">
+      <Collapsible open={open} onOpenChange={setOpen}>
+        <CollapsibleSectionHeader expanded={open} tone="muted" onClick={() => setOpen(!open)}>
+          {AI_AGENTS_SECTION_LABEL}
+        </CollapsibleSectionHeader>
+        <CollapsiblePanel>
+          <div className="mt-0.5">
+            {nativeAgents}
+            {environmentId !== null ? (
+              <MuseAgentSidebarSection
+                environmentId={environmentId}
+                onOpenSettings={openSettings}
+              />
+            ) : resolved.kind === "no-environment" ? (
+              <p className="px-2 py-2 text-xs text-sidebar-muted-foreground">
+                Connect an environment to use AI Agents.
+              </p>
+            ) : connecting ? (
+              <GrokBotSidebarLoading label="Loading Muse…" />
+            ) : (
+              <AgentRosterNotice
+                message="This environment is unavailable. Reconnect it or choose a connected one."
+                actionLabel="Open settings"
+                onAction={openSettings}
+              />
+            )}
+          </div>
+        </CollapsiblePanel>
+      </Collapsible>
+    </SidebarGroup>
+  );
+}
+
+function ConfiguredGrokBotSidebarDropdown({
+  nativeAgents,
+  museEnabled,
+}: {
+  readonly nativeAgents?: ReactNode;
+  readonly museEnabled: boolean;
+}) {
   const selectedEnvironmentId = useSelectedGrokBotEnvironmentId();
   const connectedEnvironmentIds = useConnectedEnvironmentIds();
   const resolved = resolveGrokBotSelectedEnvironment({
@@ -175,18 +251,25 @@ function ConfiguredGrokBotSidebarDropdown() {
           tone="muted"
           onClick={() => setOpenAndRefresh(!open)}
         >
-          Grok Bots
+          {AI_AGENTS_SECTION_LABEL}
         </CollapsibleSectionHeader>
         <CollapsiblePanel>
           <div className="mt-0.5">
+            {nativeAgents}
+            {environmentId !== null && museEnabled ? (
+              <MuseAgentSidebarSection
+                environmentId={environmentId}
+                onOpenSettings={() => openSettings()}
+              />
+            ) : null}
             {resolved.kind === "no-environment" ? (
               <p className="px-2 py-2 text-xs text-sidebar-muted-foreground">
-                Connect an environment to use Grok Bots.
+                Connect an environment to use AI Agents.
               </p>
             ) : connecting ? (
               <GrokBotSidebarLoading />
             ) : resolved.kind === "disconnected" ? (
-              <GrokBotSidebarNotice
+              <AgentRosterNotice
                 message="This environment is unavailable. Reconnect it or choose a connected one."
                 actionLabel="Open settings"
                 onAction={() => openSettings()}
@@ -194,19 +277,22 @@ function ConfiguredGrokBotSidebarDropdown() {
             ) : status.isPending && status.data === null ? (
               <GrokBotSidebarLoading />
             ) : status.error ? (
-              <GrokBotSidebarNotice
+              <AgentRosterNotice
                 message={status.error}
                 actionLabel="Open settings"
                 onAction={() => openSettings()}
               />
             ) : !ready && status.data?.installed !== true ? (
-              <GrokBotSidebarNotice
-                message="Set up the Grok Bot connection to chat with your bots here."
-                actionLabel="Set up"
-                onAction={() => openSettings()}
-              />
+              <div className="flex items-center justify-between gap-2 px-2 py-1">
+                <span className="min-w-0 truncate text-xs text-sidebar-muted-foreground">
+                  Grok Bots not connected
+                </span>
+                <Button size="xs" variant="ghost" onClick={() => openSettings()}>
+                  Set up
+                </Button>
+              </div>
             ) : !ready ? (
-              <GrokBotSidebarNotice
+              <AgentRosterNotice
                 message="Open Grok Bot and sign in, then refresh the connection."
                 actionLabel="Refresh"
                 onAction={() => {
@@ -219,13 +305,13 @@ function ConfiguredGrokBotSidebarDropdown() {
             ) : roster.isPending && roster.data === null ? (
               <GrokBotSidebarLoading />
             ) : roster.error && !recoveringRoster ? (
-              <GrokBotSidebarNotice
+              <AgentRosterNotice
                 message={roster.error}
                 actionLabel="Retry"
                 onAction={() => roster.refresh()}
               />
             ) : pinned.length === 0 && rows.length === 0 && hidden.length === 0 ? (
-              <GrokBotSidebarNotice
+              <AgentRosterNotice
                 message="No bots to show."
                 actionLabel="Settings"
                 onAction={() => openSettings()}
@@ -257,42 +343,12 @@ function ConfiguredGrokBotSidebarDropdown() {
   );
 }
 
-function GrokBotSidebarLoading() {
+function GrokBotSidebarLoading({ label = "Loading Grok Bots…" }: { readonly label?: string }) {
   return (
     <div className="flex flex-col gap-2 px-1 py-1" role="status" aria-busy="true">
-      <p className="px-1 text-xs text-sidebar-muted-foreground">Loading Grok Bots…</p>
+      <p className="px-1 text-xs text-sidebar-muted-foreground">{label}</p>
       <Skeleton className="h-16 w-full" shape="card" />
       <Skeleton className="h-10 w-full" shape="card" />
-    </div>
-  );
-}
-
-function GrokBotSidebarNotice({
-  message,
-  actionLabel,
-  onAction,
-  secondaryLabel,
-  onSecondary,
-}: {
-  readonly message: string;
-  readonly actionLabel: string;
-  readonly onAction: () => void;
-  readonly secondaryLabel?: string;
-  readonly onSecondary?: () => void;
-}) {
-  return (
-    <div className="flex flex-col gap-2 px-2 py-2">
-      <p className="text-xs leading-4.5 text-sidebar-muted-foreground">{message}</p>
-      <div className="flex flex-wrap gap-1.5">
-        <Button size="xs" variant="outline" onClick={onAction}>
-          {actionLabel}
-        </Button>
-        {secondaryLabel && onSecondary ? (
-          <Button size="xs" variant="ghost" onClick={onSecondary}>
-            {secondaryLabel}
-          </Button>
-        ) : null}
-      </div>
     </div>
   );
 }
@@ -352,12 +408,26 @@ function GrokBotRosterList({
     readiness.kind === "unavailable" ||
     readiness.kind === "denied" ||
     readiness.kind === "blocked" ? (
-      <GrokBotSidebarNotice
+      <AgentRosterNotice
         message={readiness.message}
         actionLabel="Settings"
         onAction={onOpenSettings}
       />
     ) : null;
+
+  const renderRow = (bot: GrokBot) => (
+    <GrokBotRosterRow
+      bot={bot}
+      selected={bot.id === activeBotId}
+      environmentId={environmentId}
+      toolActivity={toolActivities.get(bot.id)}
+      statusDot={statusDotFor(bot.id)}
+      onOpen={() => onOpen(bot.id)}
+      onEdit={() => onEdit(bot.id)}
+      onHistory={() => onHistory(bot.id)}
+      onTogglePin={() => togglePin(bot)}
+    />
+  );
 
   return (
     <div className="flex flex-col gap-1">
@@ -383,19 +453,7 @@ function GrokBotRosterList({
       ) : null}
       <ul className="flex flex-col gap-px">
         {rows.map((bot) => (
-          <li key={bot.id}>
-            <GrokBotRosterRow
-              bot={bot}
-              selected={bot.id === activeBotId}
-              environmentId={environmentId}
-              toolActivity={toolActivities.get(bot.id)}
-              statusDot={statusDotFor(bot.id)}
-              onOpen={() => onOpen(bot.id)}
-              onEdit={() => onEdit(bot.id)}
-              onHistory={() => onHistory(bot.id)}
-              onTogglePin={() => togglePin(bot)}
-            />
-          </li>
+          <li key={bot.id}>{renderRow(bot)}</li>
         ))}
       </ul>
       {hidden.length > 0 ? (
@@ -410,19 +468,7 @@ function GrokBotRosterList({
           <CollapsiblePanel>
             <ul className="flex flex-col gap-px">
               {hidden.map((bot) => (
-                <li key={bot.id}>
-                  <GrokBotRosterRow
-                    bot={bot}
-                    selected={bot.id === activeBotId}
-                    environmentId={environmentId}
-                    toolActivity={toolActivities.get(bot.id)}
-                    statusDot={statusDotFor(bot.id)}
-                    onOpen={() => onOpen(bot.id)}
-                    onEdit={() => onEdit(bot.id)}
-                    onHistory={() => onHistory(bot.id)}
-                    onTogglePin={() => togglePin(bot)}
-                  />
-                </li>
+                <li key={bot.id}>{renderRow(bot)}</li>
               ))}
             </ul>
           </CollapsiblePanel>
@@ -456,18 +502,14 @@ function GrokBotRosterRow({
   const storedActivity = useGrokBotActivity(grokBotSurfaceKey(environmentId, bot.id));
   const activity: GrokBotActivity | undefined = toolActivity ?? storedActivity;
   return (
-    <div
-      className={cn(
-        "group/sidebar-row group/bot relative w-full overflow-hidden rounded-md text-sidebar-foreground",
-        selected ? "bg-sidebar-row-active" : "hover:bg-sidebar-row-hover",
-      )}
-    >
-      <button
-        type="button"
-        aria-current={selected ? "page" : undefined}
-        className="relative z-10 flex h-[3.375rem] w-full min-w-0 cursor-pointer items-center gap-2 pl-(--sidebar-row-content-inset) pr-8.5 py-(--sidebar-content-inset) text-left outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-        onClick={onOpen}
-      >
+    <AgentRosterRow
+      name={bot.name}
+      label={bot.label}
+      selected={selected}
+      statusDot={statusDot}
+      statusText={toolActivity ? GROK_BOT_TOOL_ACTIVITY_LABELS[toolActivity] : null}
+      onOpen={onOpen}
+      avatar={
         <GrokBotAvatar
           bot={bot}
           environmentId={environmentId}
@@ -477,32 +519,18 @@ function GrokBotRosterRow({
           statusDot={statusDot}
           restingPose="upright"
         />
-        <span className="flex h-5 min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
-          <span className="min-w-0 max-w-full shrink-0 truncate text-sm font-medium">
-            {bot.name}
-          </span>
-          {bot.label.trim().length > 0 ? (
-            <span className="min-w-0 shrink truncate rounded-full bg-sidebar-control-surface px-2 py-0.5 text-xs leading-4 text-secondary-label">
-              {bot.label}
-            </span>
-          ) : null}
-        </span>
-        {statusDot === "unread" ? <span className="sr-only">New activity</span> : null}
-      </button>
-      {toolActivity ? (
-        <span role="status" className="sr-only">
-          {GROK_BOT_TOOL_ACTIVITY_LABELS[toolActivity]}
-        </span>
-      ) : null}
-      <GrokBotRowMenu
-        bot={bot}
-        environmentId={environmentId}
-        onEdit={onEdit}
-        onTogglePin={onTogglePin}
-        className="absolute top-1/2 right-1.5 z-20 -translate-y-1/2 opacity-0 group-hover/bot:opacity-100 group-focus-within/bot:opacity-100 has-data-popup-open:opacity-100"
-        onHistory={onHistory}
-      />
-    </div>
+      }
+      menu={
+        <GrokBotRowMenu
+          bot={bot}
+          environmentId={environmentId}
+          variant="row"
+          onEdit={onEdit}
+          onTogglePin={onTogglePin}
+          onHistory={onHistory}
+        />
+      }
+    />
   );
 }
 
@@ -530,18 +558,14 @@ function GrokBotPinnedTile({
   const storedActivity = useGrokBotActivity(grokBotSurfaceKey(environmentId, bot.id));
   const activity: GrokBotActivity | undefined = toolActivity ?? storedActivity;
   return (
-    <div
-      className={cn(
-        "group/sidebar-row group/bot relative rounded-md text-sidebar-foreground",
-        selected ? "bg-sidebar-row-active" : "hover:bg-sidebar-row-hover",
-      )}
-    >
-      <button
-        type="button"
-        aria-current={selected ? "page" : undefined}
-        className="flex w-full min-w-0 cursor-pointer flex-col items-center gap-1.5 rounded-md px-2 pt-1.5 pb-1 text-center outline-none select-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-        onClick={onOpen}
-      >
+    <AgentPinnedTile
+      name={bot.name}
+      label={bot.label}
+      selected={selected}
+      statusDot={statusDot}
+      statusText={toolActivity ? GROK_BOT_TOOL_ACTIVITY_LABELS[toolActivity] : null}
+      onOpen={onOpen}
+      avatar={
         <GrokBotAvatar
           bot={bot}
           environmentId={environmentId}
@@ -552,45 +576,36 @@ function GrokBotPinnedTile({
           statusDot={statusDot}
           restingPose="upright"
         />
-        <span className="w-full truncate text-sm font-medium">{bot.name}</span>
-        {bot.label.trim().length > 0 ? (
-          <span className="max-w-full truncate rounded-full bg-sidebar-control-surface px-2 py-0.5 text-xs leading-4 text-secondary-label">
-            {bot.label}
-          </span>
-        ) : null}
-        {statusDot === "unread" ? <span className="sr-only">New activity</span> : null}
-      </button>
-      {toolActivity ? (
-        <span role="status" className="sr-only">
-          {GROK_BOT_TOOL_ACTIVITY_LABELS[toolActivity]}
-        </span>
-      ) : null}
-      <GrokBotRowMenu
-        bot={bot}
-        environmentId={environmentId}
-        onEdit={onEdit}
-        onTogglePin={onTogglePin}
-        className="absolute top-1 right-1 opacity-0 group-hover/bot:opacity-100 group-focus-within/bot:opacity-100 has-data-popup-open:opacity-100"
-        onHistory={onHistory}
-      />
-    </div>
+      }
+      menu={
+        <GrokBotRowMenu
+          bot={bot}
+          environmentId={environmentId}
+          variant="tile"
+          onEdit={onEdit}
+          onTogglePin={onTogglePin}
+          onHistory={onHistory}
+        />
+      }
+    />
   );
 }
 
+/** Grok Bot's menu: the shared menu, wired to the bot's pin, hide, and delete commands. */
 function GrokBotRowMenu({
   bot,
   environmentId,
+  variant,
   onEdit,
   onHistory,
   onTogglePin,
-  className,
 }: {
   readonly bot: GrokBot;
   readonly environmentId: EnvironmentId;
+  readonly variant: "row" | "tile";
   readonly onEdit: () => void;
   readonly onHistory: () => void;
   readonly onTogglePin: () => void;
-  readonly className?: string;
 }) {
   const canUpdate = useAtomValue(grokBotsUpdate.permissionAtom(environmentId));
   const updateBot = useAtomCommand(grokBotsUpdate, { reportFailure: true });
@@ -612,44 +627,23 @@ function GrokBotRowMenu({
   };
 
   return (
-    <div className={className}>
-      <Menu>
-        <MenuTrigger
-          render={<Button size="icon-micro" variant="ghost" aria-label={`Edit ${bot.name}`} />}
-        >
-          <EllipsisIcon />
-        </MenuTrigger>
-        <MenuPopup align="end" side="bottom">
-          <MenuItem disabled={!canUpdate} onClick={onTogglePin}>
-            {bot.pinned ? <PinOffIcon /> : <PinIcon />}
-            {bot.pinned ? "Unpin" : "Pin"}
-          </MenuItem>
-          <MenuItem
-            disabled={!canUpdate}
-            onClick={() =>
-              void updateBot({
-                environmentId,
-                input: { botId: bot.id, hidden: !bot.hidden },
-              })
-            }
-          >
-            <EyeOffIcon />
-            {bot.hidden ? "Show in list" : "Hide"}
-          </MenuItem>
-          <MenuItem onClick={onEdit}>
-            <SettingsIcon />
-            Edit
-          </MenuItem>
-          <MenuItem onClick={onHistory}>
-            <HistoryIcon />
-            View history
-          </MenuItem>
-          <MenuItem variant="destructive" disabled={!canDelete} onClick={() => void removeBot()}>
-            <Trash2Icon />
-            Delete
-          </MenuItem>
-        </MenuPopup>
-      </Menu>
-    </div>
+    <AgentRowMenu
+      name={bot.name}
+      variant={variant}
+      pinned={bot.pinned}
+      canUpdate={canUpdate}
+      canDelete={canDelete}
+      hidden={bot.hidden}
+      onTogglePin={onTogglePin}
+      onToggleHidden={() =>
+        void updateBot({
+          environmentId,
+          input: { botId: bot.id, hidden: !bot.hidden },
+        })
+      }
+      onEdit={onEdit}
+      onHistory={onHistory}
+      onDelete={() => void removeBot()}
+    />
   );
 }

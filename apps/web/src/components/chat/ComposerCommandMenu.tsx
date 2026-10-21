@@ -8,6 +8,8 @@ import {
   type EnvironmentId,
   type GrokBotComposerBot,
   type GrokBotComposerConnector,
+  type MuseAgentConnector,
+  type MuseAgentSkill,
   type ProjectEntry,
   type ProviderDriverKind,
   type PullRequestContextMetadata,
@@ -20,6 +22,7 @@ import {
   FolderIcon,
   MessagesSquareIcon,
   PackageIcon,
+  PlugIcon,
   SettingsIcon,
   UserRoundIcon,
   type LucideIcon,
@@ -95,6 +98,28 @@ export type ComposerCommandItem =
       type: "grok-connector";
       connector: GrokBotComposerConnector;
       logoUrl: string | null;
+      label: string;
+      description: string;
+    }
+  | {
+      id: string;
+      type: "muse-connector";
+      connector: MuseAgentConnector;
+      label: string;
+      description: string;
+    }
+  | {
+      id: string;
+      type: "muse-skill";
+      skill: MuseAgentSkill;
+      label: string;
+      description: string;
+    }
+  | {
+      id: string;
+      type: "muse-slash-command";
+      name: string;
+      runnable: boolean;
       label: string;
       description: string;
     };
@@ -245,6 +270,12 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
       ) : null}
       {props.item.type === "grok-connector" ? (
         <GrokBotConnectorIcon logoUrl={props.item.logoUrl} />
+      ) : null}
+      {props.item.type === "muse-connector" ? (
+        <PlugIcon aria-hidden="true" className="size-4 shrink-0 text-secondary-label" />
+      ) : null}
+      {props.item.type === "muse-skill" ? (
+        <PackageIcon aria-hidden="true" className="size-4 shrink-0 text-secondary-label" />
       ) : null}
       {pullRequestPresentation ? (
         <pullRequestPresentation.Icon

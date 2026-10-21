@@ -74,6 +74,7 @@ import Migration0068 from "./Migrations/068_GrokBotManagedRuntime.ts";
 import Migration0069 from "./Migrations/069_GrokBotManagedCompletion.ts";
 import Migration0070 from "./Migrations/070_GrokBotMigrationCompatibility.ts";
 import Migration0071 from "./Migrations/071_ThreadSenderIndex.ts";
+import Migration0072 from "./Migrations/072_NativeTurnItemSequences.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -148,6 +149,7 @@ const migrationEntries = [
   [69, "GrokBotManagedCompletion", Migration0069],
   [70, "GrokBotMigrationCompatibility", Migration0070],
   [71, "ThreadSenderIndex", Migration0071],
+  [72, "NativeTurnItemSequences", Migration0072],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -218,6 +220,7 @@ const reconcileLegacyForkMigrations = Effect.fn("reconcileLegacyForkMigrations")
     [63, new Set(["GrokBotManagedCompletion"])],
     [64, new Set(["GrokBotMigrationCompatibility"])],
     [65, new Set(["ThreadSenderIndex"])],
+    [66, new Set(["NativeTurnItemSequences"])],
   ]);
   const legacy = rows.filter((row) => known.get(row.migration_id)?.has(row.name));
   if (legacy.length === 0) return;

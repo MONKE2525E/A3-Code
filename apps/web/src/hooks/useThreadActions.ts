@@ -341,7 +341,10 @@ export function useThreadActions() {
     return result;
   };
 
-  const archiveThread = async (target: ScopedThreadRef, opts: { onArchived?: () => void } = {}) => {
+  const archiveThread = async (
+    target: ScopedThreadRef,
+    opts: { onArchived?: () => void; undo?: false } = {},
+  ) => {
     const resolved = resolveThreadTarget(target);
     if (!resolved) return AsyncResult.success(undefined);
     const { thread, threadRef } = resolved;
@@ -378,7 +381,10 @@ export function useThreadActions() {
     showThreadUndoNotice({
       action: "Archived",
       claim: action,
-      undo: () => unarchiveThread(threadRef, { navigate: shouldNavigateToDraft }),
+      undo:
+        opts.undo === false
+          ? null
+          : () => unarchiveThread(threadRef, { navigate: shouldNavigateToDraft }),
       failureTitle: "Failed to undo archive",
     });
 

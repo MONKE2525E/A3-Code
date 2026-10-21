@@ -1372,6 +1372,11 @@ describe("OrchestratorMcpService provider resolution", () => {
             driver: ProviderDriverKind.make("grok-bot"),
             model: "bot-id",
           }),
+          providerSnapshot({
+            instanceId: ProviderInstanceId.make("custom-muse"),
+            driver: ProviderDriverKind.make("muse-agent"),
+            model: "muse-agent",
+          }),
         ];
         const layerDependencies = Layer.mergeAll(
           NodeServices.layer,
@@ -1390,6 +1395,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             antigravityInstanceId,
             disabledAntigravityInstanceId,
             ProviderInstanceId.make("native-bot"),
+            ProviderInstanceId.make("custom-muse"),
           ]),
           Layer.mock(ProjectService.ProjectService)({}),
           Layer.mock(SecretRequests.SecretRequests)({}),
@@ -1403,6 +1409,9 @@ describe("OrchestratorMcpService provider resolution", () => {
             capabilities.providers.map((provider) => [provider.providerInstanceId, provider]),
           );
           assert.isFalse(byId.get(ProviderInstanceId.make("native-bot"))?.canRunChildTask);
+          const muse = byId.get(ProviderInstanceId.make("custom-muse"));
+          assert.isFalse(muse?.canRunChildTask);
+          assert.isFalse(muse?.canRunCrossProviderChildTask);
           for (const provider of providers) {
             assert.deepEqual(
               byId.get(provider.instanceId)?.models.map((model) => model.id),
@@ -1475,6 +1484,60 @@ describe("OrchestratorMcpService provider resolution", () => {
           ]);
         }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
       }),
+  );
+
+  it.effect("rejects explicit, driver-only, and inherited Muse delegation before dispatch", () =>
+    Effect.gen(function* () {
+      const museInstanceId = ProviderInstanceId.make("custom-muse");
+      const selection = { instanceId: museInstanceId, model: "muse-agent" };
+      const parent = parentProjection([], selection);
+      let dispatchCount = 0;
+      const dependencies = Layer.mergeAll(
+        NodeServices.layer,
+        ServerSettings.layerTest(),
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          hasReceipt: () => Effect.succeed(false),
+          getThreadRecords: () =>
+            Effect.succeed({
+              ...parent,
+              runs: parent.runs.map((run) => ({ ...run, providerInstanceId: museInstanceId })),
+            }),
+          dispatch: () =>
+            Effect.sync(() => {
+              dispatchCount++;
+              return { sequence: 1, storedEvents: [] };
+            }),
+        }),
+        providerRegistryLayer([
+          providerSnapshot({
+            instanceId: museInstanceId,
+            driver: ProviderDriverKind.make("muse-agent"),
+            model: selection.model,
+          }),
+        ]),
+        adapterRegistryLayer([museInstanceId]),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        for (const target of [
+          { providerInstanceId: museInstanceId },
+          { driverKind: ProviderDriverKind.make("muse-agent") },
+          undefined,
+        ]) {
+          const error = yield* service
+            .delegateTask(
+              { ...scope, thread: { ...scope.thread!, providerInstanceId: museInstanceId } },
+              { task: "Summarize the diff.", target, mode: "async" },
+            )
+            .pipe(Effect.flip);
+          assert.equal(error.code, "provider_unavailable");
+        }
+        assert.equal(dispatchCount, 0);
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(dependencies))));
+    }),
   );
 
   it.effect("rejects delegation to a provider without a registered adapter", () =>
@@ -1636,6 +1699,148 @@ describe("OrchestratorMcpService provider resolution", () => {
         };
         assert.equal(request.modelSelection.instanceId, altInstanceId);
       }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
+  );
+
+  it.effect("cross-project worktree delegation uses the destination checkout", () =>
+    Effect.gen(function* () {
+      const altInstanceId = ProviderInstanceId.make("codex-alt");
+      const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
+      const destinationId = ProjectId.make("other-project");
+      const resolved: string[] = [];
+      const task = {
+        id: taskId,
+        threadId: parentThreadId,
+        runId: parentRunId,
+        parentNodeId,
+        origin: "app_owned",
+        createdBy: "agent",
+        driver: ProviderDriverKind.make("codex"),
+        providerInstanceId: altInstanceId,
+        providerThreadId: null,
+        childThreadId,
+        nativeTaskRef: null,
+        prompt: "Summarize the diff.",
+        title: null,
+        model: "gpt-5.4",
+        status: "running",
+        result: null,
+        startedAt: null,
+        completedAt: null,
+      };
+      let delegated = false;
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          hasReceipt: () => Effect.succeed(false),
+          getThreadRecords: (threadId) =>
+            Effect.succeed(
+              threadId === parentThreadId
+                ? {
+                    ...parentProjection(delegated ? [task] : []),
+                    thread: {
+                      ...parentProjection([]).thread,
+                      archivedAt: null,
+                      worktreePath: "/parent-checkout",
+                    },
+                  }
+                : childProjection,
+            ),
+          isProviderInstanceEnabledForProject: ({ instanceId }) =>
+            Effect.succeed(instanceId !== codexInstanceId),
+          assertProviderInstanceEnabled: ({ projectId, instanceId }) =>
+            instanceId === codexInstanceId
+              ? Effect.fail(
+                  new ThreadManagementService.ThreadManagementProviderInstanceDisabledError({
+                    projectId,
+                    instanceId,
+                  }),
+                )
+              : Effect.void,
+          dispatch: (command) =>
+            Ref.update(dispatched, (commands) => [...commands, command]).pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  delegated = true;
+                }),
+              ),
+              Effect.as({
+                sequence: 1,
+                storedEvents: [
+                  {
+                    sequence: 1,
+                    commandId: null,
+                    event: { type: "subagent.updated", payload: task },
+                  },
+                ],
+              } as never),
+            ),
+        }),
+        providerRegistryLayer([
+          providerSnapshot({
+            instanceId: codexInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            model: "gpt-5.4",
+          }),
+          providerSnapshot({
+            instanceId: altInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            model: "gpt-5.4",
+          }),
+        ]),
+        adapterRegistryLayer([codexInstanceId, altInstanceId]),
+        Layer.mock(ProjectService.ProjectService)({
+          getById: (id) =>
+            Effect.succeed(
+              Option.some({ id, title: "Destination", workspaceRoot: "/destination" } as never),
+            ),
+        }),
+        Layer.mock(GitVcsDriver.GitVcsDriver)({
+          resolveCommit: ({ cwd }) =>
+            Effect.sync(() => {
+              resolved.push(cwd);
+              return { commitSha: "destination-head" };
+            }),
+        }),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        ServerSettings.layerTest(),
+      );
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const result = yield* service.delegateTask(scope, {
+          task: "Summarize the diff.",
+          target: { driverKind: ProviderDriverKind.make("codex") },
+          mode: "async",
+          clientRequestId: "delegate-destination-worktree",
+          projectId: destinationId,
+          isolation: "worktree",
+        });
+        assert.equal(result.status, "running");
+        const commands = yield* Ref.get(dispatched);
+        assert.equal(commands.length, 1);
+        const request = commands[0] as {
+          modelSelection: { instanceId: string; model: string };
+        };
+        assert.equal(request.modelSelection.instanceId, altInstanceId);
+        assert.deepEqual(resolved, ["/destination"]);
+        assert.deepInclude(commands[0], {
+          projectId: destinationId,
+          workspaceStrategy: {
+            type: "worktree",
+            baseRef: "destination-head",
+            startFromOrigin: false,
+          },
+        });
+      }).pipe(
+        Effect.provide(
+          OrchestratorMcpService.layer.pipe(
+            Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     }),
   );
 

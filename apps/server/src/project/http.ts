@@ -15,16 +15,12 @@ import {
 import { traceLocalHandlerWork } from "../cloud/traceRelayRequest.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as ProjectService from "./ProjectService.ts";
-import { projectMutationOperation } from "./ProjectMutation.ts";
+import { projectMutationOperation, projectMutationRejectionMessage } from "./ProjectMutation.ts";
 
-const failProjectMutation = Effect.fn("environment.projects.failMutation")(function* (
+export const failProjectMutation = Effect.fn("environment.projects.failMutation")(function* (
   cause: ProjectService.ProjectServiceError | ServerRuntimeStartup.ServerRuntimeStartupError,
 ) {
-  if (
-    cause._tag === "ProjectNotFoundError" ||
-    cause._tag === "ProjectConflictError" ||
-    cause._tag === "ProjectNotEmptyError"
-  ) {
+  if (projectMutationRejectionMessage(cause) !== null) {
     return yield* failEnvironmentInvalidRequest("invalid_command");
   }
   return yield* failEnvironmentInternal("project_mutation_failed", cause);

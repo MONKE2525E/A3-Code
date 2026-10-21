@@ -215,6 +215,7 @@ function layerExecutorFor(input: {
         get: () => Effect.succeed(Option.none()),
         isLive: () => Effect.succeed(false),
         close: () => Effect.void,
+        closeNativeDeliverySession: () => Effect.succeed(false),
         closeInstance: () => Effect.void,
         release: () => record("release"),
         detach: () => record("detach"),

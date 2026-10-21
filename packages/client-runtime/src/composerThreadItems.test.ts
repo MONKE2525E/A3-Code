@@ -30,15 +30,18 @@ describe("matchComposerThreadItems", () => {
     ).toEqual([]);
   });
 
-  it("never offers a Grok Bot backing thread, but still offers ordinary agent threads", () => {
-    const items = matchComposerThreadItems({
-      shells: [shell("grok-bot:9f2c", "Login bot"), shell("agent", "Login agent")],
-      environmentId: env,
-      excludeThreadId: null,
-      query: "login",
-    });
-    expect(items.map((item) => item.thread.threadId)).toEqual(["agent"]);
-  });
+  it.each(["grok-bot", "muse-agent"])(
+    "never offers a %s backing thread, but still offers ordinary agent threads",
+    (source) => {
+      const items = matchComposerThreadItems({
+        shells: [shell(`${source}:9f2c`, "Login native agent"), shell("agent", "Login agent")],
+        environmentId: env,
+        excludeThreadId: null,
+        query: "login",
+      });
+      expect(items.map((item) => item.thread.threadId)).toEqual(["agent"]);
+    },
+  );
 
   it("matches titles within the environment, newest first, skipping self and archived", () => {
     const items = matchComposerThreadItems({

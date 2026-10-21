@@ -28,6 +28,7 @@ import { CSS } from "@dnd-kit/utilities";
 import {
   Smartphone,
   Monitor,
+  Sparkles,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -137,8 +138,10 @@ interface RightPanelTabsProps {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
+  onAddMuseFeatures?: (() => void) | undefined;
   onAddComputer?: (() => void) | undefined;
   computerAvailable?: boolean | undefined;
+  nativeAgentThread?: boolean | undefined;
   onAddDevice: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
@@ -308,6 +311,23 @@ function SurfaceMenuItem(props: {
   return <DisabledReasonTooltip reason={props.disabledReason} trigger={item} />;
 }
 
+/** Surfaces that need a project or git checkout. A Muse thread has neither, so they are left out. */
+const PROJECT_SURFACE_LABELS: ReadonlySet<string> = new Set([
+  "Terminal",
+  "Files",
+  "Diff",
+  "Pull request",
+  "Linked pull requests",
+]);
+
+/**
+ * List launcher shown when the right panel has no surfaces. Keyboard-first
+ * without palette chrome: a surface's letter opens it directly from anywhere
+ * outside a typing context, and arrows plus Enter work while the launcher is
+ * focused. The highlight only appears on hover or arrow use. Unavailable
+ * surfaces stay visible with a one-line reason.
+ */
+
 function RightPanelEmptyState(props: {
   onAddBrowser: () => void;
   onAddBrowserInProfile: (profileId: string) => void;
@@ -317,8 +337,10 @@ function RightPanelEmptyState(props: {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
+  onAddMuseFeatures?: (() => void) | undefined;
   onAddComputer?: (() => void) | undefined;
   computerAvailable?: boolean | undefined;
+  nativeAgentThread?: boolean | undefined;
   onAddDevice: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
@@ -331,6 +353,19 @@ function RightPanelEmptyState(props: {
   const [highlight, setHighlight] = useState(-1);
 
   const actions = [
+    ...(props.onAddMuseFeatures
+      ? [
+          {
+            label: "Muse",
+            icon: Sparkles,
+            shortcut: "U",
+            available: true,
+            disabledReason: "",
+            onClick: props.onAddMuseFeatures,
+          },
+        ]
+      : []),
+
     ...(props.computerAvailable && props.onAddComputer
       ? [
           {
@@ -400,7 +435,7 @@ function RightPanelEmptyState(props: {
       disabledReason: SURFACE_UNAVAILABLE_HINTS.device,
       onClick: props.onAddDevice,
     },
-  ] as const;
+  ].filter((action) => !(props.nativeAgentThread && PROJECT_SURFACE_LABELS.has(action.label)));
 
   type SurfaceAction = (typeof actions)[number];
 
@@ -584,6 +619,8 @@ function surfaceTitle(
       return "Pull requests";
     case "grok-computer":
       return "Computer";
+    case "muse-features":
+      return "Muse";
     case "device":
       return surface.title ?? surface.target?.name ?? "Device";
     case "preview": {
@@ -676,6 +713,10 @@ function SurfaceIcon({
       return <PullRequestGlyph.link className="size-3 shrink-0" />;
     case "grok-computer":
       return <Monitor className="size-3 shrink-0" />;
+    case "muse-features":
+      return (
+        <img src="/muse-logo.png" alt="" className="size-3 shrink-0 object-contain" aria-hidden />
+      );
     case "device":
       return surface.target?.platform === "ios" ? (
         <AppleIcon className="size-3 shrink-0" />
@@ -1049,6 +1090,19 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
   };
 
   const addSurfaceActions = [
+    ...(props.onAddMuseFeatures
+      ? [
+          {
+            label: "Muse",
+            icon: Sparkles,
+            shortcut: "U",
+            available: true,
+            disabledReason: "",
+            onClick: props.onAddMuseFeatures,
+          },
+        ]
+      : []),
+
     ...(props.computerAvailable && props.onAddComputer
       ? [
           {
@@ -1117,7 +1171,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       disabledReason: SURFACE_DISABLED_REASONS.device,
       onClick: props.onAddDevice,
     },
-  ] as const;
+  ].filter((action) => !(props.nativeAgentThread && PROJECT_SURFACE_LABELS.has(action.label)));
 
   const handleAddSurfaceMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     const action = surfaceShortcutActionForKey(addSurfaceActions, event.nativeEvent);
@@ -1489,8 +1543,10 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddFiles={props.onAddFiles}
             onAddPullRequest={props.onAddPullRequest}
             onAddPullRequests={props.onAddPullRequests}
+            onAddMuseFeatures={props.onAddMuseFeatures}
             onAddComputer={props.onAddComputer}
             computerAvailable={props.computerAvailable}
+            nativeAgentThread={props.nativeAgentThread}
             onAddDevice={props.onAddDevice}
             browserAvailable={props.browserAvailable}
             terminalAvailable={props.terminalAvailable}

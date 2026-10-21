@@ -75,6 +75,7 @@ function curatedCauseMessages(cause: unknown): {
       ? `${category.summary}: ${reason}. ${category.guidance}`
       : `${category.summary}. ${category.guidance}`;
   };
+  let promptNotSubmitted = false;
   for (let depth = 0; depth < 16 && cause != null && !seen.has(cause); depth++) {
     seen.add(cause);
     try {
@@ -85,6 +86,40 @@ function curatedCauseMessages(cause: unknown): {
       if (typeof cause !== "object") break;
       const tag = (cause as Record<string, unknown>)._tag;
       switch (tag) {
+        case "ProviderPromptNotSubmittedError":
+          promptNotSubmitted = true;
+          break;
+        case "MuseAgentTransportError": {
+          const kind = stringField(cause, "kind");
+          if (kind === "disconnected" || kind === "unavailable")
+            return {
+              known: promptNotSubmitted
+                ? "Muse disconnected before setup completed. T3 could not restore the connection; check Muse in Settings → Providers and retry."
+                : "Muse disconnected. Check the conversation in Muse before retrying; reconnect Muse in Settings → Providers if needed.",
+              category: categoryMessage(),
+            };
+          if (kind === "account_changed")
+            return {
+              known:
+                "The Muse account or workspace changed. Reconnect Muse in Settings → Providers.",
+              category: categoryMessage(),
+            };
+          if (kind === "uncertain")
+            return {
+              known:
+                "Muse may have received this message. T3 did not resend it. Check the conversation in Muse before retrying.",
+              category: categoryMessage(),
+            };
+          break;
+        }
+        case "MuseAgentDeliveryError":
+          if (stringField(cause, "kind") === "busy")
+            return {
+              known:
+                "Muse still has an earlier message awaiting confirmation. Open Muse’s Pending deliveries and refresh; if that turn has ended, use Release local tracking. This message was not sent.",
+              category: categoryMessage(),
+            };
+          break;
         case "ContextHandoffBudgetError":
           return { known: new ContextHandoffBudgetError().message, category: categoryMessage() };
         case "GrokBotNativeAttachmentError":
@@ -139,6 +174,7 @@ export function knownProviderFailureMessage(cause: unknown): string | undefined 
 
 export function isTransientStartCause(cause: unknown): boolean {
   const seen = new Set<unknown>();
+  let promptNotSubmitted = false;
   for (let depth = 0; depth < 16 && cause != null && !seen.has(cause); depth++) {
     seen.add(cause);
     try {
@@ -147,6 +183,14 @@ export function isTransientStartCause(cause: unknown): boolean {
         continue;
       }
       if (typeof cause !== "object") return false;
+      if ("_tag" in cause && cause._tag === "ProviderPromptNotSubmittedError") {
+        promptNotSubmitted = true;
+      }
+      if ("_tag" in cause && cause._tag === "MuseAgentTransportError") {
+        const kind = stringField(cause, "kind");
+        return promptNotSubmitted && (kind === "disconnected" || kind === "unavailable");
+      }
+      if ("_tag" in cause && cause._tag === "MuseAgentDeliveryError") return false;
       if ("_tag" in cause && cause._tag === "GrokBotNativeAttachmentError") {
         return "transient" in cause && cause.transient === true;
       }
@@ -158,7 +202,7 @@ export function isTransientStartCause(cause: unknown): boolean {
   return false;
 }
 
-function stringField(value: unknown, key: "message" | "code"): string | undefined {
+function stringField(value: unknown, key: "message" | "code" | "kind"): string | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   try {
     const candidate = (value as Record<string, unknown>)[key];

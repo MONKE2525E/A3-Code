@@ -83,6 +83,7 @@ const PROMPT_REFUSAL_TAGS = [
 ] as const;
 
 const refusedBeforePrompt = (error: unknown): boolean =>
+  Predicate.isTagged(error, "ProviderPromptNotSubmittedError") ||
   PROMPT_REFUSAL_TAGS.some((tag) => Predicate.isTagged(error, tag)) ||
   (Predicate.hasProperty(error, "cause") && refusedBeforePrompt(error.cause));
 
@@ -272,7 +273,8 @@ export const layer: Layer.Layer<
           (handoff.transferId == null || !subagentResultTransfers.has(handoff.transferId)) &&
           handoff.status === "ready" &&
           (handoff.targetRunId === run.id ||
-            (handoff.toProviderThreadId === run.providerThreadId &&
+            (providerThread?.driver !== "muse-agent" &&
+              handoff.toProviderThreadId === run.providerThreadId &&
               projection.runs.some(
                 (source) =>
                   source.id === handoff.targetRunId &&
@@ -806,6 +808,8 @@ export const layer: Layer.Layer<
           }),
         );
         if (replacement === undefined) return undefined;
+        // Muse reattaches its cloud conversation; local failures are not missing native history.
+        if (session.driver === "muse-agent") return replacement;
         const transferId = yield* idAllocator.allocate.contextTransfer({
           sourceThreadId: projection.thread.id,
           targetThreadId: projection.thread.id,
@@ -1179,6 +1183,7 @@ export const layer: Layer.Layer<
       };
       const missedRuns = projection.runs.filter(
         (source) =>
+          session.driver !== "muse-agent" &&
           source.ordinal < run.ordinal &&
           source.providerThreadId === providerThread.id &&
           (source.status === "failed" || source.status === "interrupted") &&
@@ -1372,6 +1377,7 @@ export const layer: Layer.Layer<
           messageId: message.id,
           text: userText,
           attachments: message.attachments,
+          ...(message.context === undefined ? {} : { context: message.context }),
           createdBy: message.createdBy,
           creationSource: message.creationSource,
           ...(message.scheduledTaskId === undefined
@@ -1494,6 +1500,7 @@ export const layer: Layer.Layer<
             records: message.context?.records ?? [],
           }),
           attachments: message.attachments,
+          ...(message.context === undefined ? {} : { context: message.context }),
           createdBy: message.createdBy,
           creationSource: message.creationSource,
         },

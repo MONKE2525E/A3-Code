@@ -75,6 +75,7 @@ async function submitQueuedRunEdit(input: {
   readonly editing: EditingQueuedRun;
   readonly content: QueuedRunEditContent;
   readonly editQueuedRun: ReturnType<typeof useEditQueuedRunCommand>;
+  readonly validateDispatch?: (() => string | null) | undefined;
 }): Promise<string | null> {
   const { environmentId, draftTarget, editing, content } = input;
   const editText = content.prompt.trim();
@@ -126,6 +127,8 @@ async function submitQueuedRunEdit(input: {
           attachmentId: uploads[editing.existingAttachments.length + index]?.id ?? attachment.id,
         })),
       })?.records ?? [];
+    const blocked = input.validateDispatch?.();
+    if (blocked != null) return blocked;
     const result = await input.editQueuedRun({
       environmentId,
       input: {
@@ -291,6 +294,7 @@ export function useQueuedRunEdit(input: {
   const saveEdit = async (
     content: QueuedRunEditContent,
     setThreadError: (threadId: ThreadId, error: string | null) => void,
+    validateDispatch?: () => string | null,
   ) => {
     if (editing === null || saveInFlightRef.current) return;
     const newAttachments = [...content.images, ...content.files];
@@ -319,6 +323,7 @@ export function useQueuedRunEdit(input: {
       editing,
       content,
       editQueuedRun: editQueuedRunCommand,
+      validateDispatch,
     });
     saveInFlightRef.current = false;
     setIsSaving(false);

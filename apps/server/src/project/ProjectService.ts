@@ -1,5 +1,6 @@
 import {
   CommandId,
+  isNativeAgentBackingThread,
   type OrchestrationProjectShell,
   ProjectId,
   type Project,
@@ -8,12 +9,16 @@ import {
   type ProjectSnapshot,
   type ThreadId,
 } from "@t3tools/contracts";
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
@@ -33,6 +38,7 @@ import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as ServerConfig from "../config.ts";
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
   readonly commandId: CommandId;
@@ -83,6 +89,18 @@ export class ProjectNotEmptyError extends Schema.TaggedError<ProjectNotEmptyErro
   }
 }
 
+export class ProjectProtectedError extends Schema.TaggedError<ProjectProtectedError>()(
+  "ProjectProtectedError",
+  { projectId: ProjectId, operation: Schema.Literals(["delete", "move", "claim"]) },
+) {
+  override get message(): string {
+    if (this.operation === "claim") return "The AI Agents workspace is reserved for native agents.";
+    return this.operation === "move"
+      ? "The managed AI Agents project cannot be moved."
+      : "The managed AI Agents project cannot be deleted.";
+  }
+}
+
 export class ProjectOperationError extends Schema.TaggedError<ProjectOperationError>()(
   "ProjectOperationError",
   {
@@ -108,6 +126,7 @@ export type ProjectServiceError =
   | ProjectNotFoundError
   | ProjectConflictError
   | ProjectNotEmptyError
+  | ProjectProtectedError
   | ProjectOperationError;
 
 export class ProjectService extends Context.Service<
@@ -117,6 +136,13 @@ export class ProjectService extends Context.Service<
     readonly bootstrap: (
       input: ProjectBootstrapInput,
     ) => Effect.Effect<
+      { readonly project: Project; readonly created: boolean },
+      ProjectServiceError
+    >;
+    readonly bootstrapNativeAgentProject: (input: {
+      readonly commandId: CommandId;
+      readonly projectId: ProjectId;
+    }) => Effect.Effect<
       { readonly project: Project; readonly created: boolean },
       ProjectServiceError
     >;
@@ -150,6 +176,65 @@ export const make = Effect.gen(function* () {
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const config = yield* ServerConfig.ServerConfig;
+  const path = yield* Path.Path;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const nativeAgentWorkspaceRoot = path.resolve(config.baseDir, "native-agents");
+  const homeDirectory = yield* HostProcess.HomeDirectory;
+  const resolveWorkspaceRoot = (root: string) =>
+    path.resolve(expandHomePath(root.trim(), homeDirectory));
+  const realWorkspaceRoot = Effect.fn("ProjectService.realWorkspaceRoot")(function* (root: string) {
+    let current = root;
+    const missingSegments: string[] = [];
+    while (true) {
+      const real = yield* fileSystem.realPath(current).pipe(
+        Effect.catchIf(
+          (error) => error.reason._tag === "NotFound",
+          () => Effect.succeed(null),
+        ),
+        Effect.mapError(
+          (cause) =>
+            new ProjectOperationError({
+              operation: "normalize-workspace",
+              workspaceRoot: root,
+              cause,
+            }),
+        ),
+      );
+      if (real !== null) return path.resolve(real, ...missingSegments);
+      const parent = path.dirname(current);
+      if (parent === current) return path.resolve(current, ...missingSegments);
+      missingSegments.unshift(path.basename(current));
+      current = parent;
+    }
+  });
+  const isNativeAgentWorkspace = Effect.fn("ProjectService.isNativeAgentWorkspace")(function* (
+    root: string,
+  ) {
+    const resolved = resolveWorkspaceRoot(root);
+    if (resolved === nativeAgentWorkspaceRoot) return true;
+    const candidate = yield* realWorkspaceRoot(resolved);
+    const managed = yield* realWorkspaceRoot(nativeAgentWorkspaceRoot);
+    if (candidate === managed) return true;
+    if (candidate.toLowerCase() !== managed.toLowerCase()) return false;
+    // Missing names do not establish filesystem identity. Materialize our reserved directory
+    // before asking realPath whether a case variant refers to it.
+    yield* fileSystem.makeDirectory(nativeAgentWorkspaceRoot, { recursive: true }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProjectOperationError({
+            operation: "normalize-workspace",
+            workspaceRoot: nativeAgentWorkspaceRoot,
+            cause,
+          }),
+      ),
+    );
+    return (
+      (yield* realWorkspaceRoot(resolved)) === (yield* realWorkspaceRoot(nativeAgentWorkspaceRoot))
+    );
+  });
+  // Commands for one project run in order. Commands that claim a workspace root
+  // also hold that root, so two projects cannot both claim it.
   const projectLocks = yield* KeyedLock.make<ProjectId>();
   const workspaceLocks = yield* KeyedLock.make<string>();
 
@@ -325,23 +410,34 @@ export const make = Effect.gen(function* () {
     return Option.isNone(row) ? Option.none() : Option.some(yield* hydrate(row.value));
   });
 
+  const createAtWorkspace = Effect.fn("ProjectService.createAtWorkspace")(function* (
+    input: ProjectCreateInput,
+    workspaceRoot: string,
+  ) {
+    yield* commit({
+      type: "project.create",
+      commandId: input.commandId,
+      projectId: input.projectId,
+      title: input.title,
+      workspaceRoot,
+      ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
+    });
+    yield* projectEnrichment.invalidate([workspaceRoot]);
+    return yield* readCommitted(input.projectId);
+  });
+
   const create: ProjectService["Service"]["create"] = Effect.fn("ProjectService.create")(
     function* (input) {
+      if (yield* isNativeAgentWorkspace(input.workspaceRoot))
+        return yield* new ProjectProtectedError({ projectId: input.projectId, operation: "claim" });
       const workspaceRoot = yield* normalizeWorkspaceRoot({
         projectId: input.projectId,
         workspaceRoot: input.workspaceRoot,
         createIfMissing: input.createWorkspaceRootIfMissing ?? false,
       });
-      yield* commit({
-        type: "project.create",
-        commandId: input.commandId,
-        projectId: input.projectId,
-        title: input.title,
-        workspaceRoot,
-        ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
-      });
-      yield* projectEnrichment.invalidate([workspaceRoot]);
-      return yield* readCommitted(input.projectId);
+      if (yield* isNativeAgentWorkspace(workspaceRoot))
+        return yield* new ProjectProtectedError({ projectId: input.projectId, operation: "claim" });
+      return yield* createAtWorkspace(input, workspaceRoot);
     },
   );
 
@@ -352,13 +448,31 @@ export const make = Effect.gen(function* () {
         return yield* new ProjectNotFoundError({ projectId: input.projectId });
       }
       const previousRoot = existing.value.workspaceRoot;
-      const workspaceRoot =
+      const wasManaged =
         input.workspaceRoot === undefined
+          ? path.resolve(previousRoot) === nativeAgentWorkspaceRoot
+          : yield* isNativeAgentWorkspace(previousRoot);
+      const requestedManaged =
+        input.workspaceRoot === undefined
+          ? wasManaged
+          : yield* isNativeAgentWorkspace(input.workspaceRoot);
+      if (!wasManaged && requestedManaged)
+        return yield* new ProjectProtectedError({ projectId: input.projectId, operation: "claim" });
+      if (wasManaged && !requestedManaged)
+        return yield* new ProjectProtectedError({ projectId: input.projectId, operation: "move" });
+      const workspaceRoot =
+        input.workspaceRoot === undefined || wasManaged
           ? previousRoot
           : yield* normalizeWorkspaceRoot({
               projectId: input.projectId,
               workspaceRoot: input.workspaceRoot,
             });
+      if (
+        input.workspaceRoot !== undefined &&
+        !wasManaged &&
+        (yield* isNativeAgentWorkspace(workspaceRoot))
+      )
+        return yield* new ProjectProtectedError({ projectId: input.projectId, operation: "claim" });
       yield* commit({
         type: "project.meta.update",
         commandId: input.commandId,
@@ -385,12 +499,37 @@ export const make = Effect.gen(function* () {
 
   const bootstrap: ProjectService["Service"]["bootstrap"] = Effect.fn("ProjectService.bootstrap")(
     function* (input) {
+      if (yield* isNativeAgentWorkspace(input.workspaceRoot))
+        return yield* new ProjectProtectedError({ projectId: input.projectId, operation: "claim" });
       const existing = yield* getByWorkspaceRoot(input.workspaceRoot);
       if (Option.isSome(existing)) return { project: existing.value, created: false };
       return { project: yield* create(input), created: true };
     },
   );
 
+  const bootstrapNativeAgentProject: ProjectService["Service"]["bootstrapNativeAgentProject"] =
+    Effect.fn("ProjectService.bootstrapNativeAgentProject")(function* (input) {
+      const existing = yield* getByWorkspaceRoot(nativeAgentWorkspaceRoot);
+      if (Option.isSome(existing)) return { project: existing.value, created: false };
+      const rows = yield* projects
+        .list()
+        .pipe(
+          Effect.mapError(
+            (cause) => new ProjectOperationError({ operation: "list-projects", cause }),
+          ),
+        );
+      for (const row of rows) {
+        if (yield* isNativeAgentWorkspace(row.workspaceRoot))
+          return { project: yield* hydrate(row), created: false };
+      }
+      const project = yield* createAtWorkspace(
+        { ...input, title: "AI Agents", workspaceRoot: nativeAgentWorkspaceRoot },
+        nativeAgentWorkspaceRoot,
+      );
+      return { project, created: true };
+    });
+
+  /** Delete one child thread durably; a stable command id makes a retry resume the cascade. */
   const deleteChildThread = Effect.fn("ProjectService.deleteChildThread")(function* (
     input: ProjectDeleteInput,
     threadId: ThreadId,
@@ -455,6 +594,8 @@ export const make = Effect.gen(function* () {
     const projectThreads = [...snapshot.threads, ...snapshot.archivedThreads].filter(
       (thread) => thread.projectId === projectId,
     );
+    if (projectThreads.some(isNativeAgentBackingThread))
+      return yield* new ProjectProtectedError({ projectId, operation: "delete" });
     if (projectThreads.length > 0 && input.force !== true) {
       return yield* new ProjectNotEmptyError({ projectId });
     }
@@ -499,6 +640,9 @@ export const make = Effect.gen(function* () {
       if (Option.isNone(existing)) {
         return yield* new ProjectNotFoundError({ projectId });
       }
+
+      if (yield* isNativeAgentWorkspace(existing.value.workspaceRoot))
+        return yield* new ProjectProtectedError({ projectId, operation: "delete" });
 
       const isFirstDelete = existing.value.deletedAt === null;
       if (isFirstDelete) {
@@ -565,6 +709,7 @@ export const make = Effect.gen(function* () {
   return ProjectService.of({
     create,
     bootstrap,
+    bootstrapNativeAgentProject,
     update,
     delete: deleteProject,
     getById,

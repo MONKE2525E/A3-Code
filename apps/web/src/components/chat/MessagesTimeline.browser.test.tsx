@@ -204,28 +204,31 @@ describe("Grok Bot timeline behavior", () => {
       .toHaveAttribute("href", href);
   });
 
-  it("downloads assistant attachments in the bot's own thread", async () => {
-    const attachment = {
-      type: "file" as const,
-      id: "attachment-bot-report",
-      name: "bot-report.pdf",
-      mimeType: "application/pdf",
-      sizeBytes: 42,
-    };
-    const entry = message("", { role: "assistant", attachments: [attachment] });
-    const onFileDownload = vi.fn();
-    await using other = await renderTimeline([entry], { onFileDownload });
-    expect(other.buttons("Download bot-report.pdf")).toHaveLength(0);
-    await other.unmount();
-    await using bot = await renderTimeline([entry], {
-      routeThreadKey: "environment-local:grok-bot:bot-1",
-      onFileDownload,
-    });
-    await vi.waitFor(() => expect(bot.buttons("Download bot-report.pdf")).toHaveLength(1));
-    await click(bot.button("Download bot-report.pdf"));
-    expect(onFileDownload).toHaveBeenCalledWith(attachment);
-    expect(bot.text()).not.toContain("(empty response)");
-  });
+  it.each(["grok-bot", "muse-agent"])(
+    "downloads assistant attachments in the %s native thread",
+    async (source) => {
+      const attachment = {
+        type: "file" as const,
+        id: "attachment-bot-report",
+        name: "bot-report.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 42,
+      };
+      const entry = message("", { role: "assistant", attachments: [attachment] });
+      const onFileDownload = vi.fn();
+      await using other = await renderTimeline([entry], { onFileDownload });
+      expect(other.buttons("Download bot-report.pdf")).toHaveLength(0);
+      await other.unmount();
+      await using bot = await renderTimeline([entry], {
+        routeThreadKey: `environment-local:${source}:bot-1`,
+        onFileDownload,
+      });
+      await vi.waitFor(() => expect(bot.buttons("Download bot-report.pdf")).toHaveLength(1));
+      await click(bot.button("Download bot-report.pdf"));
+      expect(onFileDownload).toHaveBeenCalledWith(attachment);
+      expect(bot.text()).not.toContain("(empty response)");
+    },
+  );
 
   it("shows voice requests as markers without exposing internal prompts", async () => {
     await using screen = await renderTimeline([

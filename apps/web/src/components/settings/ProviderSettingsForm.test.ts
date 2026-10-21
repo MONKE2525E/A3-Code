@@ -9,6 +9,11 @@ import {
 } from "./ProviderSettingsForm";
 
 describe("ProviderSettingsForm helpers", () => {
+  it("keeps Muse account binding out of editable settings", () => {
+    const muse = providerClients.get(ProviderDriverKind.make("muse-agent"));
+    expect(muse).toBeDefined();
+    expect(deriveProviderSettingsFields(muse!)).toEqual([]);
+  });
   it("keeps every masked field as a stored secret", () => {
     const settingsSchema = makeProviderSettingsSchema({
       token: TrimmedString.pipe(

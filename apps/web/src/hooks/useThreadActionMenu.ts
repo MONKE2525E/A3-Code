@@ -9,6 +9,7 @@ import {
 import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import {
   AuthOrchestrationOperateScope,
+  nativeAgentSourceForThread,
   type ScopedThreadRef,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -46,6 +47,13 @@ import { useCopyToClipboard } from "./useCopyToClipboard";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { useClientSettings } from "./useSettings";
 import { useThreadActions } from "./useThreadActions";
+
+const MUSE_UNSAFE_ACTIONS = new Set<ThreadActionMenuId>([
+  "rename",
+  "regenerate-title",
+  "archive",
+  "delete",
+]);
 
 function failureToast(title: string, error: unknown) {
   toastManager.add(
@@ -128,6 +136,7 @@ export function useThreadActionMenu(input: {
       };
       const isRegeneratingTitle = thread.titleRegeneration != null;
       const snoozePresets = resolveSnoozePresets(now, timestampFormat);
+      const museThread = nativeAgentSourceForThread({ id: threadRef.threadId }) === "muse-agent";
       const items = buildThreadActionMenuItems({
         canOperate: readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope),
         branch: thread.branch ?? null,
@@ -141,10 +150,17 @@ export function useThreadActionMenu(input: {
         isRunning: !threadRuntimeCanArchive(thread.runtime),
         supports,
         snoozePresets,
-      });
+      }).filter((item) => !museThread || !MUSE_UNSAFE_ACTIONS.has(item.id));
       const clicked = await settlePromise(() => api.contextMenu.show(items, position));
       if (clicked._tag === "Failure" || clicked.value === null) return;
       const action: ThreadActionMenuId = clicked.value;
+      if (museThread && MUSE_UNSAFE_ACTIONS.has(action)) {
+        failureToast(
+          "Muse action unavailable",
+          new Error("Use Muse’s conversation menu to change this conversation."),
+        );
+        return;
+      }
       if (
         threadActionRequiresOperate(action) &&
         !readEnvironmentScope(threadRef.environmentId, AuthOrchestrationOperateScope)

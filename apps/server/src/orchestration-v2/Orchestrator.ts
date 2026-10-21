@@ -23,6 +23,7 @@ import {
   isGrokBotBackingThread,
   isOrchestrationV2WorkActive,
   isProviderNativeSubagentThread,
+  nativeAgentSourceForThread,
   MessageId,
   type NodeId,
   type ModelSelection,
@@ -295,6 +296,17 @@ export const OrchestratorV2Error = Schema.Union([
   OrchestratorThreadAboveModeLimitError,
 ]);
 export type OrchestratorV2Error = typeof OrchestratorV2Error.Type;
+
+/** Grants the native service creation of one reserved Muse shell; never supplied by clients. */
+export const MuseThreadCreation = Context.Reference<ThreadId | undefined>(
+  "t3/orchestration-v2/MuseThreadCreation",
+  { defaultValue: () => undefined },
+);
+
+/** Authorizes one paired native mutation without exposing a bypass in the wire contract. */
+export const MuseThreadMutation = Context.Reference<
+  { readonly threadId: ThreadId; readonly operation: "archive" | "rename" } | undefined
+>("t3/orchestration-v2/MuseThreadMutation", { defaultValue: () => undefined });
 
 export interface OrchestratorV2DispatchResult {
   readonly sequence: number;
@@ -2677,6 +2689,60 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     if (
+      (command.type === "thread.model-selection.set" || command.type === "provider.switch") &&
+      nativeAgentSourceForThread(thread) === "muse-agent"
+    ) {
+      return yield* new OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause:
+          "Muse conversations cannot change provider or model through generic thread commands.",
+      });
+    }
+    if (
+      nativeAgentSourceForThread(thread) === "muse-agent" &&
+      ((command.type === "thread.runtime-mode.set" && command.runtimeMode !== "full-access") ||
+        (command.type === "thread.interaction-mode.set" && command.interactionMode !== "default"))
+    ) {
+      return yield* new OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Muse conversations require full-access runtime and default interaction modes.",
+      });
+    }
+    if (
+      command.type === "thread.metadata.update" &&
+      command.worktreePath !== undefined &&
+      command.worktreePath !== thread.worktreePath &&
+      nativeAgentSourceForThread(thread) === "muse-agent"
+    ) {
+      return yield* new OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Muse conversations cannot change worktree through generic thread commands.",
+      });
+    }
+    if (nativeAgentSourceForThread(thread) === "muse-agent") {
+      const operation =
+        command.type === "thread.archive" || command.type === "thread.unarchive"
+          ? "archive"
+          : command.type === "thread.title.regeneration.complete" ||
+              (command.type === "thread.metadata.update" &&
+                (command.title !== undefined || command.regenerateTitle === true))
+            ? "rename"
+            : undefined;
+      if (operation !== undefined) {
+        const grant = yield* MuseThreadMutation;
+        if (grant?.threadId !== command.threadId || grant.operation !== operation) {
+          return yield* new OrchestratorCommandRejectedError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Muse conversations require native ${operation} controls to keep Muse and T3 synchronized.`,
+          });
+        }
+      }
+    }
+    if (
       command.type === "thread.pull-request.watch" &&
       command.watching &&
       isProviderNativeSubagentThread(thread)
@@ -3880,6 +3946,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
         ),
       );
+    if (nativeAgentSourceForThread(sourceProjection.thread) === "muse-agent") {
+      return yield* new OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Muse conversations cannot be forked through generic thread commands.",
+      });
+    }
     // The source is not under this command's lock, so check the modes this
     // command copies, not an earlier read the source's user could outrun.
     yield* refuseAboveDispatchModeLimit(command, command.sourceThreadId, sourceProjection.thread);
@@ -4122,6 +4195,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly notification?: OrchestrationV2ConversationMessage["notification"];
     readonly delegatedCompletion?: OrchestrationV2ConversationMessage["delegatedCompletion"];
     readonly forceRestart: boolean;
+    readonly nativeAttentionRestart?: boolean;
   }) {
     const targetRun = input.projection.runs.find((candidate) => candidate.id === input.targetRunId);
     if (targetRun === undefined) {
@@ -4196,16 +4270,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cause: `Provider thread ${targetRun.providerThreadId} has no active provider session for steering.`,
       });
     }
+    const nativeAttentionRestart =
+      input.nativeAttentionRestart === true && providerThread.driver === "grok-bot";
+    if (
+      (providerThread.driver === "grok-bot" || providerThread.driver === "muse-agent") &&
+      !nativeAttentionRestart
+    ) {
+      return yield* new OrchestratorDispatchError({
+        commandId: input.command.commandId,
+        commandType: input.command.type,
+        cause: "Native agents do not support steering. Queue the message for their next turn.",
+      });
+    }
     const providerSessionId = providerThread.providerSessionId;
-    // Grok has no turn-start event: an accepted native turn remains pending until explicit
-    // completion. A follow-up can interrupt/restart that exact attempt, never mark it done.
     const providerTurn = latestProviderTurnForAttempt(
       input.projection.providerTurns.filter(
         (candidate) =>
           candidate.nodeId === rootNodeId &&
           candidate.providerThreadId === providerThread.id &&
           (candidate.status === "running" ||
-            (providerThread.driver === "grok-bot" && candidate.status === "pending")),
+            (nativeAttentionRestart && candidate.status === "pending")),
       ),
       targetRun.activeAttemptId,
     );
@@ -4358,15 +4442,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const selectionMustApplyNow =
       selectionChanged &&
       (providerInstanceChanged || selectionTransition?.type !== "apply_on_next_turn");
-    const steeringPolicy = yield* enforceCommandPolicy(input.command)(
-      commandPolicy.decideSteeringExecution({
-        commandId: input.command.commandId,
-        threadId: input.command.threadId,
-        providerInstanceId: targetRun.providerInstanceId,
-        capabilities: session.providerSession.capabilities,
-        forceRestart: input.forceRestart || selectionMustApplyNow,
-      }),
-    );
+    const turnCapabilities = session.providerSession.capabilities.turns;
+    const steeringPolicy =
+      nativeAttentionRestart && turnCapabilities.supportsInterrupt
+        ? "interrupt_restart"
+        : yield* enforceCommandPolicy(input.command)(
+            commandPolicy.decideSteeringExecution({
+              commandId: input.command.commandId,
+              threadId: input.command.threadId,
+              providerInstanceId: targetRun.providerInstanceId,
+              capabilities: session.providerSession.capabilities,
+              forceRestart: input.forceRestart || selectionMustApplyNow,
+            }),
+          );
 
     if (steeringPolicy === "active_steering") {
       const instanceChanged =
@@ -4832,6 +4920,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
     let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+    if (
+      nativeAgentSourceForThread(projection.thread) === "muse-agent" &&
+      command.modelSelection !== undefined &&
+      (command.modelSelection.instanceId !== projection.thread.modelSelection.instanceId ||
+        command.modelSelection.model !== projection.thread.modelSelection.model ||
+        !!command.modelSelection.options?.length)
+    ) {
+      return yield* new OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause:
+          "Muse conversations cannot change provider or model through generic thread commands.",
+      });
+    }
     if (command.manualContinuationOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
       const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -5005,6 +5107,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const onlyMaintenanceHistory =
       userMessages.length > 0 && userMessages.every(isNativeMaintenanceCommand);
     if (
+      nativeAgentSourceForThread(projection.thread) !== "muse-agent" &&
       !isNativeMaintenanceCommand(command) &&
       ((command.titleSeed !== undefined &&
         (yield* projectionStore
@@ -5044,25 +5147,31 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       command.dispatchMode,
       command.deliveryIntent,
     );
-    const targetRunId =
-      dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active"
-        ? dispatchMode.targetRunId
+    // A child awaiting input cannot finish the native parent's blocking wait.
+    // Restart only this server-owned attention delivery; user follow-ups stay queued.
+    const blockedGrokRun =
+      command.createdBy === "agent" &&
+      command.creationSource === "server" &&
+      command.notification?.source.kind === "system" &&
+      command.dispatchMode.type === "queue_after_active" &&
+      command.deliveryIntent === "auto"
+        ? projection.runs.findLast(
+            (run) =>
+              run.status === "running" &&
+              projection.providerThreads.some(
+                (thread) => thread.id === run.providerThreadId && thread.driver === "grok-bot",
+              ) &&
+              projection.subagents.some(
+                (task) =>
+                  task.runId === run.id &&
+                  task.origin === "app_owned" &&
+                  task.status === "running" &&
+                  (task.completionWake ?? "settled_only") === "settled_only",
+              ),
+          )
         : undefined;
-    const grokTarget =
-      dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active"
-        ? projection.runs.find((run) => run.id === targetRunId)
-        : command.deliveryIntent === "auto"
-          ? projection.runs.findLast((run) => run.status === "running")
-          : undefined;
-    const restartGrokTurn =
-      grokTarget?.status === "running" &&
-      projection.providerThreads.some(
-        (thread) => thread.id === grokTarget.providerThreadId && thread.driver === "grok-bot",
-      ) &&
-      (dispatchMode.type === "steer_active" || command.deliveryIntent === "auto");
-    if (restartGrokTurn) {
-      dispatchMode = { type: "restart_active", targetRunId: grokTarget.id };
-    }
+    if (blockedGrokRun !== undefined)
+      dispatchMode = { type: "restart_active", targetRunId: blockedGrokRun.id };
     if (dispatchMode.type === "steer_active") {
       const targetRunId = dispatchMode.targetRunId;
       const target = projection.runs.find((run) => run.id === targetRunId);
@@ -5082,8 +5191,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         dispatchMode = { type: "start_immediately" };
       }
     }
-    // Automatic child-attention delivery can release a native Grok wait.
-    // If that run settled before dispatch, the queued intent starts a new turn.
+    // If the active run settled before dispatch, automatic queued intent starts a new turn.
     // Restart continuations also start immediately.
     // Stop leaves the run reading as running until its provider stops. A plain
     // send in that window queues behind the stopped queue instead of steering
@@ -5104,7 +5212,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           !(
             command.dispatchMode.type === "queue_after_active" &&
             command.deliveryIntent === "auto" &&
-            (dispatchMode.type === "start_immediately" || restartGrokTurn)
+            (dispatchMode.type === "start_immediately" || blockedGrokRun !== undefined)
           ) &&
           !(
             command.restartContinuationOfRunId !== undefined &&
@@ -5272,6 +5380,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(command.voiceRequest === undefined ? {} : { voiceRequest: command.voiceRequest }),
         ...(command.notification === undefined ? {} : { notification: command.notification }),
         forceRestart: dispatchMode.type === "restart_active",
+        nativeAttentionRestart: blockedGrokRun !== undefined,
       });
       return;
     }
@@ -7059,6 +7168,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
         ),
       );
+      if (targetAdapter.driver === "muse-agent") {
+        return yield* new OrchestratorCommandRejectedError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Muse cannot run app-owned delegated tasks. Choose a coding provider instead.",
+        });
+      }
 
       const now = command.createdAt ?? (yield* DateTime.now);
       const taskNodeId = idAllocator.derive.delegatedTaskNode({
@@ -11494,6 +11610,48 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       "orchestration_v2.thread_id": commandThreadId(command),
     });
 
+    const createdThreadId =
+      command.type === "thread.create"
+        ? command.threadId
+        : command.type === "thread.fork"
+          ? command.targetThreadId
+          : undefined;
+    if (
+      createdThreadId?.startsWith("muse-agent:") &&
+      (command.type !== "thread.create" || (yield* MuseThreadCreation) !== createdThreadId)
+    ) {
+      return yield* new OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "Muse thread IDs are reserved for native conversation creation.",
+      });
+    }
+
+    if (command.type === "thread.create") {
+      const adapter = yield* providerAdapters.get(command.modelSelection.instanceId).pipe(
+        Effect.catchTags({ ProviderAdapterRegistryLookupError: () => Effect.succeed(undefined) }),
+        Effect.mapError(
+          (cause) =>
+            new OrchestratorProviderAdapterError({
+              commandId: command.commandId,
+              providerInstanceId: command.modelSelection.instanceId,
+              cause,
+            }),
+        ),
+      );
+      if (
+        adapter?.driver === "muse-agent" &&
+        (!command.threadId.startsWith("muse-agent:") ||
+          (yield* MuseThreadCreation) !== command.threadId)
+      ) {
+        return yield* new OrchestratorCommandRejectedError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Muse conversations must be created through native conversation controls.",
+        });
+      }
+    }
+
     const events = yield* Ref.make<Array<OrchestrationV2DomainEvent>>([]);
     const effects = yield* Ref.make<Array<PendingOrchestrationEffectV2>>([]);
     let cancelUnsettledEffects:
@@ -11879,6 +12037,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
             ),
           );
+        if (nativeAgentSourceForThread(projection.thread) === "muse-agent") {
+          return yield* new OrchestratorCommandRejectedError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause:
+              "Muse conversations cannot be deleted through generic thread commands. Use Muse's archive controls instead.",
+          });
+        }
         return yield* mapDispatchError(command)(
           planThreadDeletion({
             command,

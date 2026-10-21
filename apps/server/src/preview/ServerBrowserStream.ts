@@ -1,6 +1,7 @@
 import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
 import {
   AuthOrchestrationReadScope,
+  AuthSettingsWriteScope,
   AuthPreviewOperateScope,
   PREVIEW_STREAM_HOST_SETUP_CLOSE_CODE,
   PreviewStreamHostSetup,
@@ -24,6 +25,7 @@ import { authenticateMediaRequest } from "../auth/http.ts";
 import { assetResponseHeaders } from "../http.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
+import { isIntegrationAuthThread } from "./IntegrationBrowser.ts";
 
 const PREVIEW_STREAM_ROUTE_PREFIX = "/api/preview-stream";
 /** Matches `PREVIEW_STREAM_TAB_GONE_CODE` in the client. */
@@ -76,6 +78,8 @@ const makeHandler = Effect.fnUntraced(function* (browser: ServerBrowser.ServerBr
     session.scopes.includes(AuthPreviewOperateScope) && params.get("interactive") !== "false";
   const threadId = params.get("threadId") ?? "";
   const tabId = params.get("tabId") ?? "";
+  if (isIntegrationAuthThread(threadId) && !session.scopes.includes(AuthSettingsWriteScope))
+    return HttpServerResponse.text("Not Found", { status: 404 });
   if (threadId.length === 0 || tabId.length === 0) {
     return HttpServerResponse.text("Not Found", { status: 404 });
   }
@@ -85,6 +89,7 @@ const makeHandler = Effect.fnUntraced(function* (browser: ServerBrowser.ServerBr
         .attachViewer({
           threadId,
           tabId,
+          authSessionId: session.sessionId,
           canOperate,
           maxWidth: intParam(params, "maxWidth", 1280, 7680),
           maxHeight: intParam(params, "maxHeight", 800, 4320),
@@ -225,11 +230,17 @@ const serveDownload = Effect.fnUntraced(function* (
   browser: ServerBrowser.ServerBrowser["Service"],
   params: URLSearchParams,
 ) {
-  yield* authenticateMediaRequest(AuthOrchestrationReadScope);
+  const session = yield* authenticateMediaRequest(AuthOrchestrationReadScope);
+  if (
+    isIntegrationAuthThread(params.get("threadId") ?? "") &&
+    !session.scopes.includes(AuthSettingsWriteScope)
+  )
+    return HttpServerResponse.text("Not Found", { status: 404 });
   const download = yield* browser.openDownload({
     threadId: params.get("threadId") ?? "",
     tabId: params.get("tabId") ?? "",
     downloadId: params.get("id") ?? "",
+    authSessionId: session.sessionId,
   });
   if (Option.isNone(download)) return HttpServerResponse.text("Not Found", { status: 404 });
   return yield* HttpServerResponse.file(download.value.path, {
@@ -246,7 +257,12 @@ const UPLOAD_MAX_FILES = 20;
 // The request span already covers this upload route.
 const receiveUpload = Effect.fnUntraced(
   function* (browser: ServerBrowser.ServerBrowser["Service"], params: URLSearchParams) {
-    yield* authenticateMediaRequest(AuthPreviewOperateScope);
+    const session = yield* authenticateMediaRequest(AuthPreviewOperateScope);
+    if (
+      isIntegrationAuthThread(params.get("threadId") ?? "") &&
+      !session.scopes.includes(AuthSettingsWriteScope)
+    )
+      return HttpServerResponse.text("Not Found", { status: 404 });
     const request = yield* HttpServerRequest.HttpServerRequest;
     const fs = yield* FileSystem.FileSystem;
     const parts = yield* request.multipart.pipe(
@@ -275,6 +291,7 @@ const receiveUpload = Effect.fnUntraced(
       threadId: params.get("threadId") ?? "",
       tabId: params.get("tabId") ?? "",
       chooserId: params.get("chooser") ?? "",
+      authSessionId: session.sessionId,
       files,
     });
     return answered

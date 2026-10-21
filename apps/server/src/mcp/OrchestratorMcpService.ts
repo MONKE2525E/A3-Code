@@ -363,8 +363,11 @@ function providerConstraints(
       "Grok Bot runs its canonical bot chat, not coding subagent threads. Choose a coding provider and its advertised model.",
     );
   }
-  if (!provider.enabled) constraints.push("Provider instance is disabled.");
-  if (!provider.installed) constraints.push("Provider executable is not installed.");
+  if (provider.driver === "muse-agent") {
+    constraints.push(
+      "Muse runs canonical native conversations, not coding subagent threads. Choose a coding provider and its advertised model.",
+    );
+  }
   if (!isProviderAvailable(provider)) {
     constraints.push(provider.unavailableReason ?? "Provider driver is unavailable.");
   }
@@ -2875,10 +2878,12 @@ const make = Effect.gen(function* () {
           );
           let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
           if (input.isolation === "worktree" && !isRetryOfAcceptedDelegation) {
-            const project = yield* requireProject(parent.thread.projectId);
+            const project = yield* requireProject(input.projectId ?? parent.thread.projectId);
+            const parentCheckout =
+              project.id === parent.thread.projectId ? parent.thread.worktreePath : null;
             const base = yield* gitDriver
               .resolveCommit({
-                cwd: parent.thread.worktreePath ?? project.workspaceRoot,
+                cwd: parentCheckout ?? project.workspaceRoot,
                 revision: "HEAD",
               })
               .pipe(
@@ -2889,7 +2894,7 @@ const make = Effect.gen(function* () {
             // Launch preparation creates the worktree from the project root, so a
             // parent checkout in another repository (such as a Git folder inside
             // Scratch) would hand it a commit it cannot find.
-            if (parent.thread.worktreePath !== null) {
+            if (parentCheckout !== null) {
               yield* gitDriver
                 .resolveCommit({ cwd: project.workspaceRoot, revision: base.commitSha })
                 .pipe(

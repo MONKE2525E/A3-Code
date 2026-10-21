@@ -143,6 +143,7 @@ it.effect.each([
       {
         threadId: "thread",
         tabId: "tab",
+        authSessionId: "stream-test",
         maxWidth: 1280,
         maxHeight: 800,
         quality: 70,
@@ -433,4 +434,41 @@ it.effect.each([
       command: "sudo t3 browser setup",
     });
   }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "rejects generic read/preview-operate grants at every private stream and file route",
+  () =>
+    Effect.gen(function* () {
+      const browser = Layer.mock(ServerBrowser.ServerBrowser)({
+        attachViewer: () => Effect.die("private stream must be rejected before attachment"),
+        openDownload: () => Effect.die("private download must be rejected before lookup"),
+        answerFileChooser: () => Effect.die("private upload must be rejected before parsing"),
+      });
+      const web = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          HttpRouter.toWebHandler(
+            routeLayer.pipe(
+              Layer.provide(browser),
+              Layer.provide(platformLayer),
+              Layer.provideMerge(
+                makeAuth([AuthOrchestrationReadScope, AuthPreviewOperateScope]).layer,
+              ),
+            ),
+            { disableLogger: true },
+          ),
+        ),
+        ({ dispose }) => Effect.promise(dispose),
+      );
+      const base = "http://t3.test/api/preview-stream/";
+      const query = "?threadId=integration-auth:muse:known&tabId=known";
+      for (const request of [
+        new Request(`${base}ws${query}`, { headers: { upgrade: "websocket" } }),
+        new Request(`${base}download${query}&id=known`),
+        new Request(`${base}upload${query}&chooser=known`, { method: "POST" }),
+      ]) {
+        const response = yield* Effect.promise(() => web.handler(request));
+        expect(response.status).toBe(404);
+      }
+    }).pipe(Effect.scoped),
 );

@@ -12,7 +12,7 @@ import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled"
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { resolveThreadProviderStack } from "@t3tools/client-runtime/state/models";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
-import { isGrokBotBackingThread } from "@t3tools/client-runtime/state/grok-bot-threads";
+import { isGrokBotBackingThread, nativeAgentSourceForThread } from "@t3tools/contracts";
 import {
   createInboxReturnTracker,
   isThreadWorking,
@@ -93,14 +93,44 @@ export function resolveThreadListV2SnoozeMenuSelection(input: {
   return { _tag: "expired" };
 }
 
+/**
+ * Generic coding-thread menu actions Muse cannot use. Same ids as web
+ * `MUSE_UNSAFE_ACTIONS` (rename, regenerate-title, archive, delete).
+ */
+const THREAD_LIST_V2_MUSE_UNSAFE_ACTIONS = new Set<string>([
+  "rename",
+  "regenerate-title",
+  "archive",
+  "delete",
+]);
+
+/** Ordinary threads may use generic metadata/archive/delete RPCs. Muse cannot. */
+export function threadListV2AllowsGenericUnsupportedActions(thread: {
+  readonly id: string;
+}): boolean {
+  return nativeAgentSourceForThread(thread) !== "muse-agent";
+}
+
+export function filterThreadListV2GenericUnsupportedMenuActions<T extends { readonly id?: string }>(
+  actions: ReadonlyArray<T>,
+  thread: { readonly id: string },
+): T[] {
+  if (threadListV2AllowsGenericUnsupportedActions(thread)) return [...actions];
+  return actions.filter(
+    (action) => action.id === undefined || !THREAD_LIST_V2_MUSE_UNSAFE_ACTIONS.has(action.id),
+  );
+}
+
 export function resolveThreadListV2SwipeActions(input: {
   readonly variant: "card" | "slim";
   readonly settlementSupported: boolean;
   readonly snoozeSupported: boolean;
   readonly snoozable: boolean;
   readonly snoozed?: boolean;
+  /** False hides the pre-lifecycle Archive fallback (Muse rows). Absent keeps Archive. */
+  readonly genericArchiveSupported?: boolean;
 }): {
-  readonly primary: Exclude<ThreadListV2SwipeAction, "snooze">;
+  readonly primary: Exclude<ThreadListV2SwipeAction, "snooze"> | null;
   readonly secondary: "snooze" | null;
 } {
   if (input.snoozed === true) {
@@ -110,7 +140,9 @@ export function resolveThreadListV2SwipeActions(input: {
     ? input.variant === "slim"
       ? "unsettle"
       : "settle"
-    : "archive";
+    : input.genericArchiveSupported === false
+      ? null
+      : "archive";
   return {
     primary,
     secondary: input.snoozeSupported && input.snoozable ? "snooze" : null,

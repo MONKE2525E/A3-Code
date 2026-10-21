@@ -12,6 +12,7 @@ import {
   ProviderInstanceId,
   ProviderSessionId,
   ThreadId,
+  nativeAgentSourceForDriver,
   type ProviderThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -168,6 +169,13 @@ export interface ProviderSessionManagerV2Shape {
   readonly close: (
     providerSessionId: ProviderSessionId,
   ) => Effect.Effect<void, ProviderSessionManagerV2Error>;
+  /** Retire the captured native runtime only if no other turn took ownership meanwhile. */
+  readonly closeNativeDeliverySession: (input: {
+    readonly runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
+    readonly providerThreadId: ProviderThreadId;
+    readonly runOrdinal: number;
+  }) => Effect.Effect<boolean, ProviderSessionManagerV2Error>;
+  /** Closes every live runtime owned by one provider instance. */
   readonly closeInstance: (
     instanceId: ProviderInstanceId,
   ) => Effect.Effect<void, ProviderSessionManagerV2Error>;
@@ -1026,18 +1034,35 @@ export const layerWithOptions = (
         function* (input: {
           readonly providerSessionId: ProviderSessionId;
           readonly onlyIfIdleGeneration?: number;
+          readonly expectedRuntime?: ProviderAdapter.ProviderAdapterV2SessionRuntime;
+          readonly allowedBusyTurn?: string;
+          readonly onRemoved?: () => void;
         }): Effect.fn.Return<readonly [Option.Option<LiveSessionEntry>, DateTime.Utc]> {
           const key = sessionKey(input.providerSessionId);
-          const candidate = (yield* Ref.get(sessions)).get(key);
+          let candidate = (yield* Ref.get(sessions)).get(key);
           if (candidate === undefined) {
             return [Option.none<LiveSessionEntry>(), yield* DateTime.now] as const;
           }
           const removed = yield* Effect.zip(
             Ref.modify(sessions, (current) => {
               const existing = current.get(key);
+              if (existing === undefined) return ["gone", current] as const;
+              // Activity updates replace the entry record while preserving its runtime.
+              // Compare the captured runtime identity, then use its current busy-turn set.
+              if (
+                input.expectedRuntime !== undefined &&
+                existing.exposedRuntime === input.expectedRuntime
+              )
+                candidate = existing;
               if (existing !== candidate) {
-                return [existing === undefined ? "gone" : "changed", current] as const;
+                return ["changed", current] as const;
               }
+              if (
+                input.expectedRuntime !== undefined &&
+                (existing.exposedRuntime !== input.expectedRuntime ||
+                  [...existing.busyTurns].some((key) => key !== input.allowedBusyTurn))
+              )
+                return ["kept", current] as const;
               if (
                 input.onlyIfIdleGeneration !== undefined &&
                 (existing.busyTurns.size > 0 ||
@@ -1047,12 +1072,15 @@ export const layerWithOptions = (
               }
               const updated = new Map(current);
               updated.delete(key);
+              input.onRemoved?.();
               return ["removed", updated] as const;
             }),
             DateTime.now,
           ).pipe(candidate.requestEventPermit.withPermits(1));
           const [outcome, releasedAt] = removed;
-          if (outcome === "changed") return yield* removeLiveEntry(input);
+          // Another entry took this id while the permit was held; release it instead.
+          if (outcome === "changed" && input.expectedRuntime === undefined)
+            return yield* removeLiveEntry(input);
           return [
             outcome === "removed" ? Option.some(candidate) : Option.none<LiveSessionEntry>(),
             releasedAt,
@@ -1104,6 +1132,9 @@ export const layerWithOptions = (
         readonly cancelIdleFiber?: boolean;
         readonly onlyIfIdleGeneration?: number;
         readonly gracefulSubscribers?: boolean;
+        readonly expectedRuntime?: ProviderAdapter.ProviderAdapterV2SessionRuntime;
+        readonly allowedBusyTurn?: string;
+        readonly onRemoved?: () => void;
       }) =>
         Effect.acquireUseRelease(
           removeLiveEntry(input),
@@ -1124,7 +1155,8 @@ export const layerWithOptions = (
                   }
                   if (
                     input.gracefulSubscribers === true ||
-                    (entry.runtime.driver === "grok-bot" && input.reason === "manual_shutdown")
+                    (nativeAgentSourceForDriver(entry.runtime.driver) !== undefined &&
+                      input.reason === "manual_shutdown")
                   ) {
                     yield* endSubscribers(entry);
                   } else if (
@@ -1485,7 +1517,7 @@ export const layerWithOptions = (
             );
             if (attached !== undefined) {
               const prepared =
-                attached.driver === "grok-bot"
+                nativeAgentSourceForDriver(attached.driver) !== undefined
                   ? { mcpCredentialId: undefined, issued: false }
                   : yield* prepareMcpSession(input.threadId, input.providerInstanceId);
               preparedForCleanup = prepared;
@@ -1848,7 +1880,7 @@ export const layerWithOptions = (
           eventSubscribers,
           remotePendingEvents,
           requestEventPermit,
-          runtime.driver === "grok-bot",
+          nativeAgentSourceForDriver(runtime.driver) !== undefined,
         );
         // Every provider's turn operations pass through here, so this is where they are
         // counted. Only turn starts are timed: until the provider accepts the turn.
@@ -2060,7 +2092,7 @@ export const layerWithOptions = (
 
       const startEventPump = (entry: LiveSessionEntry) => {
         let stoppedByProvider = false;
-        const settledGrokRuns = new Set<string>();
+        const settledNativeRuns = new Set<string>();
         return entry.runtime.events.pipe(
           Stream.runForEach((event) => {
             if (shutdownSignal.received) return Effect.void;
@@ -2125,8 +2157,8 @@ export const layerWithOptions = (
                   // (project trust, login, or session-switch hooks). Persist
                   // their runless request artifacts directly so the normal T3
                   // request UI can answer them and unblock session setup.
-                  const grokHistory =
-                    entry.runtime.driver === "grok-bot"
+                  const nativeHistory =
+                    nativeAgentSourceForDriver(entry.runtime.driver) !== undefined
                       ? event.type === "message.updated"
                         ? event.message
                         : event.type === "turn_item.updated"
@@ -2135,12 +2167,12 @@ export const layerWithOptions = (
                       : undefined;
                   let settledHistoryThreadId: ThreadId | undefined;
                   if (
-                    grokHistory?.runId != null &&
-                    entry.attachedThreadIds.has(grokHistory.threadId)
+                    nativeHistory?.runId != null &&
+                    entry.attachedThreadIds.has(nativeHistory.threadId)
                   ) {
-                    if (!settledGrokRuns.has(grokHistory.runId)) {
+                    if (!settledNativeRuns.has(nativeHistory.runId)) {
                       const records = yield* projectionStore
-                        .getThreadRecords(grokHistory.threadId, ["runs"])
+                        .getThreadRecords(nativeHistory.threadId, ["runs"])
                         .pipe(
                           Effect.mapError(
                             (cause) =>
@@ -2155,21 +2187,21 @@ export const layerWithOptions = (
                         if (
                           ["completed", "failed", "cancelled", "interrupted"].includes(run.status)
                         )
-                          settledGrokRuns.add(run.id);
+                          settledNativeRuns.add(run.id);
                       }
                     }
-                    if (settledGrokRuns.has(grokHistory.runId))
-                      settledHistoryThreadId = grokHistory.threadId;
+                    if (settledNativeRuns.has(nativeHistory.runId))
+                      settledHistoryThreadId = nativeHistory.threadId;
                   }
                   const threadId =
                     settledHistoryThreadId ??
-                    (entry.runtime.driver === "grok-bot" &&
+                    (nativeAgentSourceForDriver(entry.runtime.driver) !== undefined &&
                     event.type === "message.updated" &&
                     event.message.runId === null &&
                     event.message.nodeId === null &&
                     entry.attachedThreadIds.has(event.message.threadId)
                       ? event.message.threadId
-                      : entry.runtime.driver === "grok-bot" &&
+                      : nativeAgentSourceForDriver(entry.runtime.driver) !== undefined &&
                           event.type === "turn_item.updated" &&
                           event.turnItem.runId === null &&
                           event.turnItem.nodeId === null &&
@@ -2221,7 +2253,7 @@ export const layerWithOptions = (
                   yield* Effect.gen(function* () {
                     const signal = { type: "event" as const, event };
                     if (
-                      entry.runtime.driver === "grok-bot" &&
+                      nativeAgentSourceForDriver(entry.runtime.driver) !== undefined &&
                       (yield* Ref.get(entry.eventSubscribers)).size === 0
                     ) {
                       const pending = yield* Ref.get(entry.remotePendingEvents);
@@ -2364,7 +2396,7 @@ export const layerWithOptions = (
               );
               // Remote turns own durable, run-scoped credentials independently of this observer.
               const prepared =
-                adapter.driver === "grok-bot"
+                nativeAgentSourceForDriver(adapter.driver) !== undefined
                   ? { mcpCredentialId: undefined, issued: false }
                   : yield* prepareMcpSession(input.threadId, input.modelSelection.instanceId);
               const mcpCredentialId = prepared.mcpCredentialId;
@@ -2539,6 +2571,29 @@ export const layerWithOptions = (
                 }),
             ),
           ),
+        closeNativeDeliverySession: (input) => {
+          if (nativeAgentSourceForDriver(input.runtime.driver) === undefined)
+            return Effect.succeed(false);
+          let removed = false;
+          return releaseEntry({
+            providerSessionId: input.runtime.providerSessionId,
+            reason: "manual_shutdown",
+            expectedRuntime: input.runtime,
+            allowedBusyTurn: busyTurnKey(input.providerThreadId, input.runOrdinal),
+            onRemoved: () => {
+              removed = true;
+            },
+          }).pipe(
+            Effect.map(() => removed),
+            Effect.mapError(
+              (cause) =>
+                new ProviderSessionCloseError({
+                  providerSessionId: input.runtime.providerSessionId,
+                  cause,
+                }),
+            ),
+          );
+        },
         closeInstance: Effect.fn("ProviderSessionManager.closeInstance")(
           function* (instanceId) {
             const active = [...(yield* Ref.get(sessions)).values()].filter(

@@ -17,6 +17,7 @@ import * as Arr from "effect/Array";
 import * as Result from "effect/Result";
 import { useEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
 import {
+  AuthOrchestrationReadScope,
   isProviderDriverKind,
   resolveProviderInstanceEnabled,
   type ProviderInstanceConfig,
@@ -36,6 +37,7 @@ import {
   toCustomModelSetting,
 } from "@t3tools/shared/model";
 import { cn } from "../../lib/utils";
+import { useEnvironmentScope } from "../../state/session";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useStableCallback } from "../../hooks/useStableCallback";
 import { normalizeProviderAccentColor } from "../../providerInstances";
@@ -60,6 +62,9 @@ import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import { GROK_BOT_DRIVER_KIND } from "../chat/ProviderInstanceIcon";
 import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
 import { AcpSessionManagementSection } from "./AcpSessionManagementSection";
+import { MUSE_AGENT_DRIVER } from "../agents/aiAgents";
+import { MuseAgentFeaturesButton } from "../agents/MuseAgentFeaturesDialog";
+import { AddMuseAgentProviderStep } from "../agents/AddMuseAgentProviderStep";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { readCodexSetupMode } from "./CodexSetupSection.logic";
 import {
@@ -600,6 +605,29 @@ interface ProviderInstanceCardProps {
         readonly workspaceRoot: string;
       }>
     | undefined;
+}
+
+/** Hidden without orchestration read access: every Muse feature read needs it. */
+function MuseFeaturesSettingsSection(props: {
+  readonly environmentId: EnvironmentId;
+  readonly instanceId: ProviderInstanceId;
+}) {
+  const canRead = useEnvironmentScope(props.environmentId, AuthOrchestrationReadScope);
+  if (!canRead) return null;
+  return (
+    <SettingsSection title="Muse features">
+      <SettingsRow
+        title="Memory, routines, connections, skills, conversations"
+        description="Browse and manage what this Muse account holds."
+        control={
+          <MuseAgentFeaturesButton
+            environmentId={props.environmentId}
+            providerInstanceId={props.instanceId}
+          />
+        }
+      />
+    </SettingsSection>
+  );
 }
 
 const EMPTY_ACP_PROJECTS: NonNullable<ProviderInstanceCardProps["acpProjects"]> = [];
@@ -1183,6 +1211,20 @@ export function ProviderInstanceCard({
         />
       </SettingsSection>
 
+      {environmentId !== undefined && instance.driver === MUSE_AGENT_DRIVER ? (
+        <SettingsSection title="Connection">
+          <div inert={readOnly} aria-disabled={readOnly || undefined}>
+            <AddMuseAgentProviderStep
+              key={`${environmentId}:${instanceId}`}
+              environmentId={environmentId}
+              environmentLabel="this environment"
+              reconnecting
+              onConnected={() => {}}
+            />
+          </div>
+        </SettingsSection>
+      ) : null}
+
       {setup || environmentFields.length > 0 ? (
         <SettingsSection title="Setup">
           {setup}
@@ -1254,7 +1296,11 @@ export function ProviderInstanceCard({
         />
       ) : null}
 
-      {driverOption !== undefined ? (
+      {environmentId !== undefined && instance.driver === MUSE_AGENT_DRIVER ? (
+        <MuseFeaturesSettingsSection environmentId={environmentId} instanceId={instanceId} />
+      ) : null}
+
+      {driverOption !== undefined && instance.driver !== MUSE_AGENT_DRIVER ? (
         <SettingsSection title="Models">
           <div className="px-3 py-3 sm:px-4">
             <p className="mb-3 text-xs text-muted-foreground">

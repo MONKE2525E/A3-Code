@@ -151,9 +151,9 @@ const target = {
   threadId: ThreadId.make("thread"),
 };
 const position = { x: 10, y: 20 };
-const createMenu = () =>
+const createMenu = (threadId = target.threadId) =>
   useThreadActionMenu({
-    threadRef: target,
+    threadRef: { ...target, threadId },
     projectCwd: "/project",
     onStartRename: () => recordEffect("rename"),
   });
@@ -166,6 +166,20 @@ beforeEach(() => {
 });
 
 describe("thread menu permissions", () => {
+  it.each(["rename", "regenerate-title", "archive", "delete"] as const)(
+    "omits and refuses generic %s for Muse",
+    async (action) => {
+      state.granted.add("secondary");
+      state.show.mockResolvedValue(action);
+      createMenu(ThreadId.make(`muse-agent:${"a".repeat(64)}`)).openMenu(position);
+      await state.completed.promise;
+      const items = state.show.mock.calls[0]![0];
+      expect(items.some((item) => item.id === action)).toBe(false);
+      expect(items.some((item) => item.id === "copy")).toBe(true);
+      expect(state.effects).toEqual([]);
+    },
+  );
+
   it.each(["rename", "regenerate-title", "delete", "pin", "settle", "archive"] as const)(
     "%s rechecks after the native menu closes",
     async (action) => {

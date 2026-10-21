@@ -2,7 +2,11 @@ import { AsyncResult } from "effect/reactivity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { toastManager } from "../components/ui/toast";
-import { showThreadUndoNotice, useThreadUndoNotice } from "./showThreadUndoNotice";
+import {
+  showThreadUndoNotice,
+  useThreadUndoNotice,
+  undoLatestThreadAction,
+} from "./showThreadUndoNotice";
 import * as ThreadUndo from "./threadUndo";
 
 beforeEach(() => vi.useFakeTimers());
@@ -39,4 +43,13 @@ describe("thread undo notice", () => {
     await notice().undo();
     expect(undo).toHaveBeenCalledOnce();
   });
+});
+
+it("does not offer Undo or retain a claim for an archive requiring native restoration", () => {
+  const { options } = setup();
+  const claim = ThreadUndo.begin("archive", "env/muse");
+  showThreadUndoNotice({ ...options, action: "Archived", undo: null, claim });
+  expect(useThreadUndoNotice.getState().notice).toBeNull();
+  expect(undoLatestThreadAction()).toBe(false);
+  expect(claim.isCurrent()).toBe(false);
 });

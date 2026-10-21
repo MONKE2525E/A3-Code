@@ -19,6 +19,22 @@
       "types": "./src/grokBotProvider.ts",
       "import": "./src/grokBotProvider.ts"
     },
+    "./museAgent": {
+      "types": "./src/museAgent.ts",
+      "import": "./src/museAgent.ts"
+    },
+    "./museAgentDictation": {
+      "types": "./src/museAgentDictation.ts",
+      "import": "./src/museAgentDictation.ts"
+    },
+    "./museAgentComputer": {
+      "types": "./src/museAgentComputer.ts",
+      "import": "./src/museAgentComputer.ts"
+    },
+    "./museAgentFeatures": {
+      "types": "./src/museAgentFeatures.ts",
+      "import": "./src/museAgentFeatures.ts"
+    },
     "./grokBotVoice": {
       "types": "./src/grokBotVoice.ts",
       "import": "./src/grokBotVoice.ts"

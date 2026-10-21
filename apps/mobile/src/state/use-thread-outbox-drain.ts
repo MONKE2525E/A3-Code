@@ -5,7 +5,11 @@ import {
   type EnvironmentProject,
   type EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
-import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+  type AtomCommandResult,
+} from "@t3tools/client-runtime/state/runtime";
 import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 import {
   AuthOrchestrationOperateScope,
@@ -14,6 +18,7 @@ import {
   DEFAULT_RUNTIME_MODE,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   type MessageId,
+  type EnvironmentId,
 } from "@t3tools/contracts";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
 import * as Cause from "effect/Cause";
@@ -30,6 +35,7 @@ import {
   describeUnavailableModelSelection,
   isModelSelectionUnavailable,
 } from "../lib/modelOptions";
+import { openCachedMuseThread, resolveMuseOutboxAttachAction } from "../lib/museAgentThread";
 import {
   retainAcknowledgedThreadMessage,
   forgetAcknowledgedThreadMessage,
@@ -43,6 +49,7 @@ import {
   recordPendingThreadCreationOutcome,
 } from "./pending-thread-creation";
 import { serverEnvironment } from "./server";
+import { environmentCatalog } from "../connection/catalog";
 import { gitEnvironment } from "./git";
 import { readEnvironmentScope, useEnvironmentsWithScope } from "./session";
 import {
@@ -65,6 +72,7 @@ import {
   type ThreadOutboxCommandStage,
   type ThreadOutboxFailureAction,
 } from "./thread-outbox-model";
+import { museAgentOpenThread } from "./museAgent";
 import { environmentThreadShells, threadEnvironment } from "./threads";
 import {
   appendComposerDraftAttachments,
@@ -169,6 +177,12 @@ function findThread(
     (candidate) =>
       candidate.environmentId === message.environmentId && candidate.id === message.threadId,
   );
+}
+
+function connectedGeneration(environmentId: EnvironmentId): number | null {
+  const state = appAtomRegistry.get(environmentCatalog.stateAtom(environmentId));
+  if (state._tag !== "Success" || state.value.phase !== "connected") return null;
+  return state.value.generation;
 }
 
 function findCreationProject(
@@ -586,6 +600,7 @@ async function preserveUploadedAttachmentsForEditor(
 
 export function useThreadOutboxDrain(): void {
   const startTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
+  const openMuseThread = useAtomCommand(museAgentOpenThread, { reportFailure: false });
   const preparePullRequest = useAtomCommand(gitEnvironment.preparePullRequestThread, {
     reportFailure: false,
   });
@@ -840,6 +855,77 @@ export function useThreadOutboxDrain(): void {
         currentConfig.providers,
       );
       if (!hasAccess()) return true;
+      const liveThread =
+        findThread(appAtomRegistry.get(environmentThreadShells.threadShellsAtom), queuedMessage) ??
+        thread;
+      const museAttach = resolveMuseOutboxAttachAction({
+        threadId: queuedMessage.threadId,
+        queuedProviderInstanceId: queuedMessage.modelSelection?.instanceId,
+        liveThread: {
+          id: liveThread.id,
+          providerInstanceId: liveThread.providerInstanceId,
+        },
+        providers: currentConfig.providers,
+        connected: connectedGeneration(queuedMessage.environmentId) !== null,
+        canOpen: hasAccess(),
+      });
+      if (museAttach.action === "restore") {
+        return restoreQueuedMessage(persistedMessage, museAttach.reason);
+      }
+      if (museAttach.action === "park") {
+        return true;
+      }
+      if (museAttach.action === "open") {
+        const generation = connectedGeneration(queuedMessage.environmentId);
+        if (generation === null) return true;
+        let attached = false;
+        try {
+          await openCachedMuseThread({
+            hit: {
+              environmentId: queuedMessage.environmentId,
+              threadId: museAttach.expectedThreadId,
+            },
+            shells: [
+              {
+                environmentId: queuedMessage.environmentId,
+                id: museAttach.expectedThreadId,
+                providerInstanceId: museAttach.providerInstanceId,
+              },
+            ],
+            openThread: async (target) => {
+              const result = await openMuseThread(target);
+              if (result._tag === "Success") return result.value;
+              if (isAtomCommandInterrupted(result)) {
+                throw new Error("Muse connection was interrupted. Retry to reconnect.");
+              }
+              throw squashAtomCommandFailure(result);
+            },
+            navigate: async () => {
+              attached = true;
+            },
+          });
+        } catch {
+          setThreadComposerError(
+            scopedThreadKey(queuedMessage.environmentId, queuedMessage.threadId),
+            "Muse could not reconnect. Sign in to the expected Muse account and retry the queued message.",
+            queuedMessage.messageId,
+          );
+          return false;
+        }
+        if (!attached) {
+          return false;
+        }
+        if (!hasAccess() || connectedGeneration(queuedMessage.environmentId) !== generation) {
+          return true;
+        }
+        if (!isQueuedMessagePayloadCurrent(persistedMessage, deliveryRevision)) {
+          return true;
+        }
+        if (appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId]) {
+          await preserveUploadedAttachmentsForEditor(queuedMessage, persistedMessage);
+          return true;
+        }
+      }
       const deliveryResult = await startTurn({
         environmentId: queuedMessage.environmentId,
         input: {
@@ -889,6 +975,7 @@ export function useThreadOutboxDrain(): void {
     },
     [
       makeDeliveryHelpers,
+      openMuseThread,
       setThreadInteractionMode,
       setThreadRuntimeMode,
       startTurn,
@@ -1168,6 +1255,27 @@ export function useThreadOutboxDrain(): void {
         continue;
       }
       const serverConfig = serverConfigs.get(nextQueuedMessage.environmentId);
+      if (
+        deliveryAction === "send" &&
+        creation === undefined &&
+        thread !== undefined &&
+        serverConfig !== undefined
+      ) {
+        const queuedMuseAttach = resolveMuseOutboxAttachAction({
+          threadId: nextQueuedMessage.threadId,
+          queuedProviderInstanceId: nextQueuedMessage.modelSelection?.instanceId,
+          liveThread: {
+            id: thread.id,
+            providerInstanceId: thread.providerInstanceId,
+          },
+          providers: serverConfig.providers,
+          connected: environment?.connectionState === "connected",
+          canOpen: operableEnvironments.has(nextQueuedMessage.environmentId),
+        });
+        if (queuedMuseAttach.action === "park") {
+          continue;
+        }
+      }
       const dispatchStep = resolveThreadOutboxDispatchStep({
         deliveryAction,
         fileAttachments: nextQueuedMessage.attachments.filter(

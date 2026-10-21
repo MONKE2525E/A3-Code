@@ -359,12 +359,12 @@ describe("mobile model options", () => {
     expect(resolveSelectableModelSelection(null, disabled, null)).toBe(disabled);
   });
 
-  it("keeps Grok Bot instances out of new-task defaults and pickers", () => {
+  it.each(["grok-bot", "muse-agent"])("keeps %s out of coding defaults and pickers", (driver) => {
     const config = {
       providers: [
         {
-          instanceId: "grok-bot",
-          driver: "grok-bot",
+          instanceId: "native-agent-instance",
+          driver,
           enabled: true,
           installed: true,
           auth: { status: "authenticated" },
@@ -382,12 +382,27 @@ describe("mobile model options", () => {
         },
       ],
     } as unknown as ServerConfig;
-    const staleBot = { instanceId: ProviderInstanceId.make("grok-bot"), model: "bot-poteto" };
+    const staleBot = {
+      instanceId: ProviderInstanceId.make("native-agent-instance"),
+      model: "bot-poteto",
+    };
 
+    expect(resolveSelectableModelSelection(config, staleBot, null)).toBeNull();
     expect(resolveDefaultableModelSelection(config, staleBot, null)).toBeNull();
-    // The new-task flow resolves its fallback before building options, so the bot never reaches here.
     const modelOptions = buildModelOptions(config, null, undefined, null);
     expect(modelOptions.map((option) => option.key)).toEqual(["codex:gpt-5.6-sol"]);
+    expect(buildModelOptions(config, staleBot, undefined, null)).toEqual(modelOptions);
+    expect(buildModelOptions(config, staleBot, staleBot.instanceId, null)).toEqual([]);
+    const settingsOnly = {
+      ...config,
+      providers: [],
+      settings: {
+        ...DEFAULT_SERVER_SETTINGS,
+        providerInstances: { [staleBot.instanceId]: { driver, enabled: true } },
+      },
+    } as unknown as ServerConfig;
+    expect(resolveSelectableModelSelection(settingsOnly, staleBot, null)).toBeNull();
+    expect(buildModelOptions(settingsOnly, staleBot, undefined, null)).toEqual([]);
     expect(
       resolveNewTaskModelSelection({
         draftSelection: null,

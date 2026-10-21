@@ -1,6 +1,9 @@
+"use client";
+
+import { openCachedMuseThread } from "./agents/openCachedMuseThread";
+
 import { threadPullRequestLinkMode } from "@t3tools/client-runtime/thread-pull-request-compatibility";
 import { settingsSearchResultSearch } from "./grokBot/grokBotPresentation";
-import { isGrokBotBackingThread } from "@t3tools/client-runtime/state/grok-bot-threads";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -48,7 +51,9 @@ import {
   type EnvironmentId,
   type EnvironmentMachineKind,
   type FilesystemBrowseResult,
+  isNativeAgentBackingThread,
   type ProjectId,
+  type ThreadId,
   type SourceControlDiscoveryResult,
   SourceControlProviderKind,
   type SourceControlRepositoryInfo,
@@ -92,6 +97,7 @@ import {
 } from "react";
 import type { LegendListRef } from "@legendapp/list/react";
 import { useAtomValue } from "@effect/atom-react";
+import { Atom } from "effect/reactivity";
 
 import { isDesktopLocalConnectionTarget } from "../connection/desktopLocal";
 import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstraps";
@@ -143,6 +149,9 @@ import {
 } from "../state/entities";
 import { useThreadSearch } from "../state/queries";
 import { grokBotsListQuery } from "../state/grokBots";
+import { museAgentOpenThread, museAgentProfileQuery } from "../state/museAgent";
+import { MuseAgentAvatar } from "./agents/MuseAgentAvatar";
+import { useMuseAgentAvatar } from "./agents/useMuseAgentAvatar";
 import { GrokBotAvatar } from "./grokBot/GrokBotAvatar";
 import { grokBotSearchHitsFromMatches } from "./grokBot/grokBotSearchHits";
 import { useSelectedGrokBotEnvironmentId } from "./grokBot/useGrokBotEnvironment";
@@ -194,6 +203,7 @@ import {
   buildLinkedThreadActionItems,
   buildGrokBotSearchItems,
   type GrokBotSearchHit,
+  buildMuseAgentSearchItems,
   buildCommandPaletteRows,
   enumerateCommandPaletteItems,
   findHighlightedCommandPaletteItem,
@@ -471,7 +481,7 @@ const selectCommandPaletteClientSettings = (settings: ClientSettings) => ({
 function useSortedProjectGroups(environmentLabelById: ReadonlyMap<EnvironmentId, string>) {
   const projects = useProjects();
   const shellThreads = useThreadShells();
-  const threads = shellThreads.filter((thread) => !isGrokBotBackingThread(thread));
+  const threads = shellThreads.filter((thread) => !isNativeAgentBackingThread(thread));
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const clientSettings = useClientSettings(selectCommandPaletteClientSettings);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -780,6 +790,7 @@ function OpenCommandPaletteDialog(props: {
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
+  const openMuseThread = useAtomCommand(museAgentOpenThread, { reportFailure: false });
   const { environments } = useEnvironments();
   const desktopLocalBootstraps = useDesktopLocalBootstraps();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -835,7 +846,8 @@ function OpenCommandPaletteDialog(props: {
     }
   };
   const shellThreads = useThreadShells();
-  const threads = shellThreads.filter((thread) => !isGrokBotBackingThread(thread));
+  const threads = shellThreads.filter((thread) => !isNativeAgentBackingThread(thread));
+
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const {
     theme,
@@ -869,8 +881,20 @@ function OpenCommandPaletteDialog(props: {
     .filter((environment) => environment.connection.phase === "connected")
     .map((environment) => environment.environmentId);
   const threadSearchQuery = currentView === null && !isActionsOnly ? deferredQuery : "";
+  const museOpenPermissions = useAtomValue(
+    Atom.make(
+      (get) =>
+        new Map(
+          environmentIds.map(
+            (environmentId) =>
+              [environmentId, get(museAgentOpenThread.permissionAtom(environmentId))] as const,
+          ),
+        ),
+    ),
+  );
   const { threadSearch, contentMatchByKey: threadContentMatchByKey } =
     useThreadSearchWithContentMatches(environmentIds, threadSearchQuery);
+
   // Bot conversations are excluded from `threads`, so global search is the only palette route to them.
   // The roster names bots in the Grok Bot environment, falling back to the open one until a Grok Bot route
   // selects one. Other environments fall back to a generic name.
@@ -882,6 +906,12 @@ function OpenCommandPaletteDialog(props: {
       ? null
       : grokBotsListQuery({ environmentId: rosterEnvironmentId, input: {} }),
   );
+  const museProfile = useEnvironmentQuery(
+    rosterEnvironmentId === null
+      ? null
+      : museAgentProfileQuery({ environmentId: rosterEnvironmentId, input: {} }),
+  );
+  const museAvatar = useMuseAgentAvatar(rosterEnvironmentId, museProfile.data);
   const grokBotSearchItems = (() => {
     const hits = grokBotSearchHitsFromMatches({
       matches: threadSearch.matches,
@@ -889,10 +919,11 @@ function OpenCommandPaletteDialog(props: {
       rosterEnvironmentId,
       roster: grokBotRoster.data ?? [],
     });
-    return buildGrokBotSearchItems({
+    const grokItems = buildGrokBotSearchItems({
       hits,
       query: threadSearch.query,
       icon: grokBotSearchIcon,
+
       run: async (hit) => {
         await navigate({
           to: "/grok-bots/$botId",
@@ -901,6 +932,45 @@ function OpenCommandPaletteDialog(props: {
         });
       },
     });
+    const museName = museProfile.data?.name?.trim() || "Muse";
+    const museIcon = <MuseAgentAvatar name={museName} imageUrl={museAvatar.imageUrl} size="sm" />;
+    const museItems = buildMuseAgentSearchItems({
+      hits: threadSearch.matches.flatMap((match) =>
+        (match.source === "user" || match.source === "assistant") &&
+        match.threadId.startsWith("muse-agent:")
+          ? [
+              {
+                environmentId: match.environmentId,
+                threadId: match.threadId,
+                source: match.source,
+                snippet: match.snippet,
+              },
+            ]
+          : [],
+      ),
+      query: threadSearch.query,
+      identity: { environmentId: rosterEnvironmentId, name: museName, icon: museIcon },
+      fallbackIcon: <MuseAgentAvatar name="Muse" size="sm" />,
+      canOpen: (environmentId) => museOpenPermissions.get(environmentId) === true,
+      run: (hit) =>
+        openCachedMuseThread({
+          hit,
+          shells: shellThreads,
+          openThread: async (target) => {
+            const result = await openMuseThread(target);
+            if (result._tag === "Success") return result.value;
+            if (isAtomCommandInterrupted(result)) return null;
+            throw squashAtomCommandFailure(result);
+          },
+          navigate: async (target) => {
+            await navigate({
+              to: "/$environmentId/$threadId",
+              params: buildThreadRouteParams(scopeThreadRef(target.environmentId, target.threadId)),
+            });
+          },
+        }),
+    });
+    return [...museItems, ...grokItems];
   })();
 
   const [browseGeneration, setBrowseGeneration] = useState(0);

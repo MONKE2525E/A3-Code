@@ -877,22 +877,22 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
     }).pipe(Effect.provide(Layer.fresh(layerTest))),
   );
 
-  it.effect(
-    "interrupts and restarts a pending Grok attempt for follow-up input without completing it",
-    () =>
+  it.effect.each(["grok-bot", "muse-agent"] as const)(
+    "rejects steering %s and queues automatic follow-up input without interrupting it",
+    (nativeDriver) =>
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const eventSink = yield* EventSink.EventSinkV2;
         const outbox = yield* EffectOutbox.EffectOutboxV2;
         const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
-        const threadId = ThreadId.make("grok-pending-followup");
+        const threadId = ThreadId.make(`native-pending-followup:${nativeDriver}`);
         yield* orchestrator.dispatch({
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",
-          commandId: CommandId.make("grok-followup-create"),
+          commandId: CommandId.make(`grok-followup-create:${nativeDriver}`),
           threadId,
-          projectId: ProjectId.make("grok-followup-project"),
+          projectId: ProjectId.make(`grok-followup-project:${nativeDriver}`),
           title: "Grok",
           modelSelection,
           runtimeMode: "full-access",
@@ -904,9 +904,9 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
           type: "message.dispatch",
           createdBy: "user",
           creationSource: "web",
-          commandId: CommandId.make("grok-followup-first"),
+          commandId: CommandId.make(`grok-followup-first:${nativeDriver}`),
           threadId,
-          messageId: MessageId.make("grok-followup-first"),
+          messageId: MessageId.make(`grok-followup-first:${nativeDriver}`),
           text: "First",
           attachments: [],
           dispatchMode: { type: "start_immediately" },
@@ -915,7 +915,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         const run = initial.runs[0]!;
         const providerThread = {
           ...initial.providerThreads[0]!,
-          driver: ProviderDriverKind.make("grok-bot"),
+          driver: ProviderDriverKind.make(nativeDriver),
         };
         const now = yield* DateTime.now;
         const providerSession = {
@@ -931,7 +931,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
           lastError: null,
         };
         const providerTurn = {
-          id: ProviderTurnId.make("grok-followup-pending"),
+          id: ProviderTurnId.make(`grok-followup-pending:${nativeDriver}`),
           providerThreadId: providerThread.id,
           nodeId: run.rootNodeId!,
           runAttemptId: run.activeAttemptId,
@@ -942,10 +942,10 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
           completedAt: null,
         };
         yield* eventSink.write({
-          commandId: CommandId.make("grok-followup-seed"),
+          commandId: CommandId.make(`grok-followup-seed:${nativeDriver}`),
           events: [
             {
-              id: EventId.make("grok-followup-run"),
+              id: EventId.make(`grok-followup-run:${nativeDriver}`),
               type: "run.updated",
               threadId,
               runId: run.id,
@@ -953,21 +953,21 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
               payload: { ...run, status: "running", startedAt: now },
             },
             {
-              id: EventId.make("grok-followup-thread"),
+              id: EventId.make(`grok-followup-thread:${nativeDriver}`),
               type: "provider-thread.updated",
               threadId,
               occurredAt: now,
               payload: providerThread,
             },
             {
-              id: EventId.make("grok-followup-session"),
+              id: EventId.make(`grok-followup-session:${nativeDriver}`),
               type: "provider-session.attached",
               threadId,
               occurredAt: now,
               payload: providerSession,
             },
             {
-              id: EventId.make("grok-followup-turn"),
+              id: EventId.make(`grok-followup-turn:${nativeDriver}`),
               type: "provider-turn.updated",
               threadId,
               runId: run.id,
@@ -984,29 +984,45 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
             ),
           );
         yield* Effect.addFinalizer(() => Effect.sync(() => spy.mockRestore()));
-        const commandId = CommandId.make("grok-followup-next");
+        for (const type of ["steer_active", "restart_active"] as const) {
+          const commandId = CommandId.make(`grok-followup-${nativeDriver}-${type}`);
+          const result = yield* orchestrator
+            .dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId,
+              threadId,
+              messageId: MessageId.make(`grok-followup-${nativeDriver}-${type}`),
+              text: "Follow up",
+              attachments: [],
+              dispatchMode: { type, targetRunId: run.id },
+            })
+            .pipe(Effect.flip);
+          assert.equal(result._tag, "OrchestratorDispatchError");
+          assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
+        }
+        const commandId = CommandId.make(`grok-followup-next:${nativeDriver}`);
         yield* orchestrator.dispatch({
           type: "message.dispatch",
           createdBy: "user",
           creationSource: "web",
           commandId,
           threadId,
-          messageId: MessageId.make("grok-followup-next"),
+          messageId: MessageId.make(`grok-followup-next:${nativeDriver}`),
           text: "Follow up",
           attachments: [],
-          dispatchMode: { type: "steer_active", targetRunId: run.id },
+          dispatchMode: { type: "queue_after_active" },
+          deliveryIntent: "auto",
         });
         const effects = yield* outbox.listByCommandId(commandId);
-        assert.isTrue(effects.some((effect) => effect.request.type === "provider-turn.restart"));
+        assert.isFalse(effects.some((effect) => effect.request.type === "provider-turn.restart"));
         assert.isFalse(effects.some((effect) => effect.request.type === "provider-turn.steer"));
         const updated = yield* orchestrator.getThreadProjection(threadId);
-        assert.lengthOf(updated.runs, 1);
-        assert.notEqual(updated.runs[0]?.status, "completed");
-        assert.notEqual(updated.runs[0]?.activeAttemptId, run.activeAttemptId);
-        assert.equal(
-          updated.attempts.find((attempt) => attempt.id === run.activeAttemptId)?.status,
-          "superseded",
-        );
+        assert.lengthOf(updated.runs, 2);
+        assert.equal(updated.runs[0]?.status, "running");
+        assert.equal(updated.runs[0]?.activeAttemptId, run.activeAttemptId);
+        assert.equal(updated.runs[1]?.status, "queued");
       }),
   );
 

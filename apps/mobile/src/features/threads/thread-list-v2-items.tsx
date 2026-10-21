@@ -60,6 +60,8 @@ import {
   resolveThreadListV2Status,
   resolveThreadListV2ProviderDrivers,
   resolveThreadListV2SwipeActions,
+  filterThreadListV2GenericUnsupportedMenuActions,
+  threadListV2AllowsGenericUnsupportedActions,
   type ThreadListV2Status,
 } from "./threadListV2";
 import { QueuedMessageIcon } from "./queued-message-icon";
@@ -670,12 +672,14 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     const id = setTimeout(() => setSnoozeGateClock({ thread, now: Date.now() }), delayMs);
     return () => clearTimeout(id);
   }, [snoozeGateExpiryMs, snoozeGateClock.now, thread]);
+  const allowsGenericUnsupported = threadListV2AllowsGenericUnsupportedActions(thread);
   const swipeActions = resolveThreadListV2SwipeActions({
     variant,
     settlementSupported: props.settlementSupported,
     snoozeSupported: props.snoozeSupported,
     snoozable: canSnooze(thread, { now: snoozeGateNow }),
     snoozed: snoozedRow,
+    genericArchiveSupported: allowsGenericUnsupported,
   });
   const snoozePresets = useMemo(
     () => (swipeActions.secondary === "snooze" ? resolveSnoozePresets(new Date()) : ([] as const)),
@@ -882,6 +886,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     ],
   );
   const primaryAction = useMemo(() => {
+    // Pre-settlement server: archive is the swipe action, as in v1. (Slim
+    // rows cannot occur here — unsupported environments never classify as
+    // settled.) Muse rows omit that fallback because generic archive has no restore.
+    if (swipeActions.primary === null) return null;
     if (swipeActions.primary === "archive") {
       return {
         accessibilityLabel: `Archive ${thread.title}`,
@@ -936,11 +944,12 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         : null,
     [handleMenuAction, snoozePresetActions, swipeActions.secondary, thread.title],
   );
-  const swipeAccessibilityHint = !canOperateThread
-    ? "Opens the thread"
-    : secondaryAction === null
-      ? `Opens the thread. Swipe left to ${primaryAction.label.toLowerCase()}.`
-      : `Opens the thread. Swipe left for ${primaryAction.label.toLowerCase()} and snooze actions.`;
+  const swipeAccessibilityHint =
+    !canOperateThread || primaryAction === null
+      ? "Opens the thread"
+      : secondaryAction === null
+        ? `Opens the thread. Swipe left to ${primaryAction.label.toLowerCase()}.`
+        : `Opens the thread. Swipe left for ${primaryAction.label.toLowerCase()} and snooze actions.`;
 
   const cardContent = (
     <>
@@ -1312,62 +1321,86 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       </RowPressable>
     );
 
+  const menuActions = useMemo(
+    () =>
+      filterThreadListV2GenericUnsupportedMenuActions<MenuAction>(
+        [
+          ...(thread.branch
+            ? [
+                {
+                  id: "new-thread-on-branch",
+                  title: getThreadListV2NewBranchMenuTitle(thread.branch),
+                  image: "square.and.pencil",
+                },
+              ]
+            : []),
+          { id: "copy-thread-id", title: "Copy thread ID", image: "doc.on.doc" },
+          ...(snoozedRow
+            ? snoozedMenuActions
+            : !props.settlementSupported
+              ? legacyMenuActions
+              : canUnsettle
+                ? slimMenuActions
+                : swipeActions.secondary === "snooze"
+                  ? snoozableCardMenuActions
+                  : cardMenuActions),
+        ],
+        thread,
+      ),
+    [
+      canUnsettle,
+      cardMenuActions,
+      legacyMenuActions,
+      slimMenuActions,
+      snoozableCardMenuActions,
+      snoozedMenuActions,
+      snoozedRow,
+      props.settlementSupported,
+      swipeActions.secondary,
+      thread,
+    ],
+  );
+
   if (!canOperateThread)
     return <View style={rowAppearance.swipeContainerStyle}>{rowContent(() => {})}</View>;
+
+  const rowMenu = (close: () => void) => (
+    <Menu actions={menuActions} onPressAction={handleMenuAction} shouldOpenOnLongPress>
+      {rowContent(close)}
+    </Menu>
+  );
 
   return (
     <View collapsable={false}>
       {customSnoozeOpen && (
         <CustomSnoozeSheet onClose={() => setCustomSnoozeOpen(false)} onSnooze={handleSnooze} />
       )}
-      <ThreadSwipeable
-        dormant={dormant}
-        threadKey={`${thread.environmentId}:${thread.id}`}
-        backgroundColor={rowAppearance.swipeBackgroundColor}
-        compactActions={variant === "slim"}
-        containerStyle={rowAppearance.swipeContainerStyle}
-        enableTrackpadSwipe
-        fullSwipeAction="primary"
-        fullSwipeWidth={props.fullSwipeWidth ?? windowWidth - 32}
-        onDelete={handleDelete}
-        onSwipeableClose={props.onSwipeableClose}
-        onSwipeableWillOpen={props.onSwipeableWillOpen}
-        primaryAction={primaryAction}
-        secondaryAction={secondaryAction}
-        resetKey={`${thread.environmentId}:${thread.id}:${variant}:${snoozedRow}:${thread.settledAt}:${thread.unsettledAt}:${thread.snoozedUntil}`}
-        simultaneousWith={props.simultaneousSwipeGesture}
-        threadTitle={thread.title}
-      >
-        {(close) => (
-          <Menu
-            actions={[
-              ...(thread.branch
-                ? [
-                    {
-                      id: "new-thread-on-branch",
-                      title: getThreadListV2NewBranchMenuTitle(thread.branch),
-                      image: "square.and.pencil",
-                    },
-                  ]
-                : []),
-              { id: "copy-thread-id", title: "Copy thread ID", image: "doc.on.doc" },
-              ...(snoozedRow
-                ? snoozedMenuActions
-                : !props.settlementSupported
-                  ? legacyMenuActions
-                  : canUnsettle
-                    ? slimMenuActions
-                    : swipeActions.secondary === "snooze"
-                      ? snoozableCardMenuActions
-                      : cardMenuActions),
-            ]}
-            onPressAction={handleMenuAction}
-            shouldOpenOnLongPress
-          >
-            {rowContent(close)}
-          </Menu>
-        )}
-      </ThreadSwipeable>
+      {primaryAction === null ? (
+        rowMenu(() => {})
+      ) : (
+        <ThreadSwipeable
+          dormant={dormant}
+          threadKey={`${thread.environmentId}:${thread.id}`}
+          backgroundColor={rowAppearance.swipeBackgroundColor}
+          compactActions={variant === "slim"}
+          containerStyle={rowAppearance.swipeContainerStyle}
+          enableTrackpadSwipe
+          // Full swipe commits the advertised lifecycle action (Settle /
+          // Un-settle), never the secondary snooze action.
+          fullSwipeAction="primary"
+          fullSwipeWidth={props.fullSwipeWidth ?? windowWidth - 32}
+          onDelete={allowsGenericUnsupported ? handleDelete : () => {}}
+          onSwipeableClose={props.onSwipeableClose}
+          onSwipeableWillOpen={props.onSwipeableWillOpen}
+          primaryAction={primaryAction}
+          secondaryAction={secondaryAction}
+          resetKey={`${thread.environmentId}:${thread.id}:${variant}:${snoozedRow}:${thread.settledAt}:${thread.unsettledAt}:${thread.snoozedUntil}`}
+          simultaneousWith={props.simultaneousSwipeGesture}
+          threadTitle={thread.title}
+        >
+          {rowMenu}
+        </ThreadSwipeable>
+      )}
     </View>
   );
 });

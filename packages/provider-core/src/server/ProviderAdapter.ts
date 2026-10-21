@@ -36,6 +36,7 @@ import {
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Schema from "effect/Schema";
+
 import type * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
 import type * as Stream from "effect/Stream";
@@ -44,6 +45,12 @@ import type {
   ProviderSelectionTransitionInput,
   ProviderSelectionTransitionPlan,
 } from "./selectionTransition.ts";
+
+/** Admission has not been attempted; inline handoffs can be restored as unsent. */
+export class ProviderPromptNotSubmittedError extends Schema.TaggedError<ProviderPromptNotSubmittedError>()(
+  "ProviderPromptNotSubmittedError",
+  { cause: Schema.Defect() },
+) {}
 
 export const ProviderAdapterV2RuntimePolicy = Schema.Struct({
   runtimeMode: RuntimeMode,
@@ -57,6 +64,7 @@ export type ProviderAdapterV2RuntimePolicy = typeof ProviderAdapterV2RuntimePoli
 
 export const ProviderAdapterV2TurnMessage = Schema.Struct({
   messageId: MessageId,
+  context: OrchestrationV2ConversationMessage.fields.context,
   text: Schema.String,
   attachments: Schema.Array(ChatAttachment),
   createdBy: OrchestrationV2ConversationMessage.fields.createdBy,
@@ -626,6 +634,22 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly readThreadSnapshot: (
     input: ProviderAdapterV2ReadThreadSnapshotInput,
   ) => Effect.Effect<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>;
+  /** Imports an older native page through this runtime's existing event stream. */
+  readonly loadHistoryPage?: (input: {
+    readonly threadId: ThreadId;
+    readonly beforeSeq?: number;
+  }) => Effect.Effect<
+    {
+      readonly nextBeforeSeq: number | null;
+      readonly hasMore: boolean;
+      readonly importedMessages: number;
+    },
+    ProviderAdapterV2Error
+  >;
+  /**
+   * Providers that accept product feedback for a thread (#7949, Codex → OpenAI)
+   * expose it here; absent means the driver has no feedback channel.
+   */
   readonly uploadFeedback?: (input: {
     readonly providerThread: OrchestrationV2ProviderThread;
     readonly reason?: string;

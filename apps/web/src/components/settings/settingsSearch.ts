@@ -998,10 +998,10 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "grok-bots",
-    title: "Grok Bots",
+    title: "AI Agents",
     to: "/settings/providers",
     targetId: "grok-bots-bridge",
-    searchTerms: ["grok bot assistants featured pin hide chat"],
+    searchTerms: ["grok bot muse assistants agents featured pin hide chat"],
   },
   {
     id: "grok-bots-bridge",

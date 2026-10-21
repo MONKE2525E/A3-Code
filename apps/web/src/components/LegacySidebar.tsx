@@ -67,7 +67,7 @@ import {
   settlePromise,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { isGrokBotBackingThread } from "@t3tools/client-runtime/state/grok-bot-threads";
+import { isNativeAgentBackingThread } from "@t3tools/contracts";
 import { threadRuntimeCanArchive } from "@t3tools/client-runtime/state/models";
 import { useNavigate, useRouter } from "@tanstack/react-router";
 import {
@@ -1116,7 +1116,7 @@ function useProjectThreads(project: SidebarProjectSnapshot) {
     (settings) => settings.sidebarThreadSortOrder,
   );
   const sidebarThreads = useThreadShellsForProjectRefs(project.memberProjectRefs).filter(
-    (thread) => !isGrokBotBackingThread(thread),
+    (thread) => !isNativeAgentBackingThread(thread),
   );
   const threadLastVisitedAts = useUiStateStore(
     useShallow((state) =>
@@ -1369,6 +1369,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const renamingCommittedRef = useRef(false);
   const renamingInputRef = useRef<HTMLInputElement | null>(null);
   const confirmArchiveButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+
   const {
     hasOverflowingThreads,
     hiddenThreadStatus,
@@ -3388,6 +3389,7 @@ export default function LegacySidebar() {
     terminalOpen: routeTerminalOpen,
     threadJumpCommandByKey,
   });
+
   const sidebarShortcutContext = {
     terminalFocus: terminalFocused,
     terminalOpen: routeTerminalOpen,

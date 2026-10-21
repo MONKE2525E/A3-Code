@@ -52,6 +52,47 @@ const item = (id: string, timestamp: string) =>
   }) satisfies OrchestrationV2TurnItem;
 
 it.effect(
+  "prepends paginated Muse history without moving managed rows and replays normalized positions",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const positions = yield* Positions.TurnItemPositionStoreV2;
+      yield* sql`INSERT INTO orchestration_v2_projection_runs (run_id, thread_id, ordinal, provider, status, requested_at, payload_json)
+      VALUES ('run:pagination', ${threadId}, 1, 'muse-agent', 'completed', '2026-10-11T06:00:00.000Z', '{}')`;
+      const native = (id: string, seq: number, time: string) => ({
+        ...item(id, time),
+        canonicalNativeSequence: seq,
+        nativeItemRef: {
+          driver: ProviderDriverKind.make("muse-agent"),
+          nativeId: id,
+          strength: "strong" as const,
+        },
+      });
+      const recent = yield* positions.normalize(native("recent", 100, "2026-10-11T05:00:00.000Z"));
+      const managed = yield* positions.normalize({
+        ...native("managed", 101, "2026-10-11T06:00:01.000Z"),
+        runId: RunId.make("run:pagination"),
+      });
+      const foreignAfter = yield* positions.normalize(
+        native("foreign-after", 110, "2026-10-11T06:00:02.000Z"),
+      );
+      const older = yield* positions.normalize(native("older", 0, "2026-10-11T04:00:00.000Z"));
+      assert.isBelow(older.ordinal, recent.ordinal);
+      assert.isBelow(recent.ordinal, managed.ordinal);
+      assert.isBelow(managed.ordinal, foreignAfter.ordinal);
+      assert.strictEqual((yield* positions.normalize(older)).ordinal, older.ordinal);
+      assert.strictEqual((yield* positions.normalize(recent)).ordinal, recent.ordinal);
+      assert.strictEqual((yield* positions.normalize(managed)).ordinal, managed.ordinal);
+      assert.strictEqual((yield* positions.normalize(foreignAfter)).ordinal, foreignAfter.ordinal);
+      const managedAfterForeign = yield* positions.normalize({
+        ...native("managed-after-foreign", 111, "2026-10-11T06:00:03.000Z"),
+        runId: RunId.make("run:pagination"),
+      });
+      assert.isAbove(managedAfterForeign.ordinal, foreignAfter.ordinal);
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect(
   "positions call-posted chat after preceding runs and repairs an old history position",
   () =>
     Effect.gen(function* () {
@@ -122,6 +163,52 @@ it.effect(
 );
 
 it.effect(
+  "places Muse native messages after their preceding managed run and promotes proven owned replies",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const positions = yield* Positions.TurnItemPositionStoreV2;
+      const native = {
+        ...item("muse:native-answer", "2026-10-11T08:01:00.000Z"),
+        nativeItemRef: {
+          driver: ProviderDriverKind.make("muse-agent"),
+          nativeId: "answer",
+          strength: "strong" as const,
+        },
+        type: "assistant_message" as const,
+        streaming: false,
+      };
+      const beforeRunExists = yield* positions.normalize(native);
+      assert.isBelow(beforeRunExists.ordinal, 1_000_000);
+      yield* sql`INSERT INTO orchestration_v2_projection_runs (run_id, thread_id, ordinal, provider, status, requested_at, payload_json)
+      VALUES ('run:muse-six', ${threadId}, 6, 'muse-agent', 'completed', '2026-10-11T08:00:00.000Z', '{}')`;
+      const ownUser = yield* positions.allocate({
+        threadId,
+        turnItemId: TurnItemId.make("muse:own-user"),
+        runId: RunId.make("run:muse-six"),
+      });
+      const replayed = yield* positions.normalize(beforeRunExists);
+      assert.isAbove(replayed.ordinal, ownUser);
+      assert.isBelow(replayed.ordinal, 7_000_000);
+      const other = yield* positions.normalize({
+        ...native,
+        id: TurnItemId.make("muse:early-associated"),
+      });
+      const owned = yield* positions.normalize({ ...other, runId: RunId.make("run:muse-six") });
+      assert.strictEqual(owned.id, other.id);
+      assert.strictEqual((yield* positions.normalize(owned)).ordinal, owned.ordinal);
+
+      const early = item("muse:promoted-reply", "2026-10-11T07:00:00.000Z");
+      const old = yield* positions.normalize({ ...early, nativeItemRef: native.nativeItemRef });
+      assert.isBelow(old.ordinal, 1_000_000);
+      const promoted = yield* positions.normalize({ ...old, runId: RunId.make("run:muse-six") });
+      assert.isAbove(promoted.ordinal, ownUser);
+      assert.strictEqual(promoted.id, old.id);
+      assert.strictEqual((yield* positions.normalize(promoted)).ordinal, promoted.ordinal);
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect(
   "repairs an already persisted pre-run native position on replay without changing its identity",
   () =>
     Effect.gen(function* () {
@@ -188,4 +275,103 @@ it.effect("reuses an item's position without attempting another allocation inser
       1,
     );
   }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("keeps managed slots and native sequence order across collisions and older pages", () =>
+  Effect.gen(function* () {
+    const positions = yield* Positions.TurnItemPositionStoreV2;
+    const allocate = (id: string, nativeSequence?: number) =>
+      positions.allocate({
+        threadId,
+        turnItemId: TurnItemId.make(id),
+        runId: null,
+        runOrdinal: 1,
+        ...(nativeSequence === undefined ? {} : { nativeSequence }),
+      });
+    assert.strictEqual(yield* allocate("managed"), 1_000_001);
+    assert.strictEqual(yield* allocate("native:later", 1), 1_000_003);
+    assert.strictEqual(yield* allocate("native:earlier", 0), 1_000_002);
+    assert.strictEqual(yield* allocate("native:later", 1), 1_000_003);
+    assert.strictEqual(yield* allocate("managed"), 1_000_001);
+    assert.strictEqual(yield* allocate("managed:later"), 1_000_004);
+    assert.strictEqual(yield* allocate("native:latest", 2), 1_000_005);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("allocates sequence zero past a managed item and rolls back exhausted blocks", () =>
+  Effect.gen(function* () {
+    const positions = yield* Positions.TurnItemPositionStoreV2;
+    const sql = yield* SqlClient.SqlClient;
+    yield* positions.allocate({
+      threadId,
+      turnItemId: TurnItemId.make("managed"),
+      runId: null,
+      runOrdinal: 1,
+    });
+    const input = {
+      threadId,
+      turnItemId: TurnItemId.make("native"),
+      runId: null,
+      runOrdinal: 1,
+      nativeSequence: 0,
+    };
+    assert.strictEqual(yield* positions.allocate(input), 1_000_002);
+    yield* Effect.flip(positions.allocate({ ...input, nativeSequence: 999_998 }));
+    assert.strictEqual(yield* positions.allocate(input), 1_000_002);
+    const rows = yield* sql<{
+      readonly ordinal: number;
+    }>`SELECT ordinal FROM orchestration_v2_turn_item_positions WHERE thread_id = ${threadId} ORDER BY ordinal`;
+    assert.deepEqual(
+      rows.map((row) => row.ordinal),
+      [1_000_001, 1_000_002],
+    );
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("repairs legacy native slots and promotes native ownership without collisions", () =>
+  Effect.gen(function* () {
+    const positions = yield* Positions.TurnItemPositionStoreV2;
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`INSERT INTO orchestration_v2_turn_item_positions (thread_id, turn_item_id, ordinal, native_sequence)
+      VALUES (${threadId}, 'managed', 1000001, NULL), (${threadId}, 'later', 1000002, 1)`;
+    assert.strictEqual(
+      yield* positions.allocate({
+        threadId,
+        turnItemId: TurnItemId.make("earlier"),
+        runId: null,
+        runOrdinal: 1,
+        nativeSequence: 0,
+      }),
+      1_000_002,
+    );
+    assert.strictEqual(
+      yield* positions.allocate({
+        threadId,
+        turnItemId: TurnItemId.make("later"),
+        runId: null,
+        runOrdinal: 1,
+        nativeSequence: 1,
+      }),
+      1_000_003,
+    );
+    assert.strictEqual(
+      yield* positions.allocate({
+        threadId,
+        turnItemId: TurnItemId.make("earlier"),
+        runId: RunId.make("owned"),
+        runOrdinal: 1,
+      }),
+      1_000_002,
+    );
+    assert.strictEqual(
+      yield* positions.allocate({
+        threadId,
+        turnItemId: TurnItemId.make("later"),
+        runId: null,
+        runOrdinal: 1,
+        nativeSequence: 1,
+      }),
+      1_000_004,
+    );
+  }).pipe(Effect.provide(layer)),
 );

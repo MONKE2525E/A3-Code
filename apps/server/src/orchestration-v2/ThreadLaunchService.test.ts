@@ -194,6 +194,7 @@ const otherProject = {
   ...project,
   id: otherProjectId,
   title: "Other",
+  workspaceRoot: "/other-repo",
 } as const;
 
 const adapter = {
@@ -276,6 +277,7 @@ function makeHarness(options: HarnessOptions = {}) {
     Layer.succeed(ProjectService.ProjectService, {
       create: () => Effect.die("unused"),
       bootstrap: () => Effect.die("unused"),
+      bootstrapNativeAgentProject: () => Effect.die("unused"),
       update: () => Effect.die("unused"),
       delete: () => Effect.die("unused"),
       getById: (id) =>
@@ -2241,6 +2243,8 @@ it.effect.each([
       hasCommit: ({ refName }) => Effect.succeed(refName === "HEAD"),
       git: {
         remoteExists: () => Effect.succeed(testCase.origin),
+        resolveWorktreeBaseRemote: () =>
+          Effect.succeed(testCase.origin ? { remoteName: "origin", branchName: "main" } : null),
         hasRefNamed: () => Effect.succeed(false),
       },
     });

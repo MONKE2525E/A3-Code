@@ -26,6 +26,7 @@ import {
   deriveThreadActivityRun,
   deriveThreadRuntime,
   deriveLatestProviderSessionError,
+  deriveLatestProviderSessionRetirement,
   threadRuntimeHasInterruptibleRun,
 } from "./threadExecution.ts";
 
@@ -422,4 +423,34 @@ describe("provider-reported model selection", () => {
       }),
     ).toBeNull();
   });
+});
+
+it("derives observer retirement from the newest matching session update", () => {
+  const instanceId = v2Projection.thread.providerInstanceId;
+  const stopped = {
+    id: ProviderSessionId.make("retired-observer"),
+    providerInstanceId: instanceId,
+    status: "stopped" as const,
+    updatedAt: now,
+  };
+  const ready = {
+    ...stopped,
+    id: ProviderSessionId.make("fresh-observer"),
+    status: "ready" as const,
+    updatedAt: DateTime.add(now, { seconds: 1 }),
+  };
+  const retirement = (
+    providerSessions: NonNullable<
+      Parameters<typeof deriveLatestProviderSessionRetirement>[0]
+    >["providerSessions"],
+  ) => deriveLatestProviderSessionRetirement({ thread: v2Projection.thread, providerSessions });
+  expect(retirement([stopped])).toContain("retired-observer:");
+  expect(retirement([ready, stopped])).toBeNull();
+  expect(
+    retirement([
+      { ...ready, providerInstanceId: ProviderInstanceId.make("another-provider") },
+      stopped,
+    ]),
+  ).toContain("retired-observer:");
+  expect(retirement([{ ...ready, status: "error" }, stopped])).toContain("fresh-observer:");
 });

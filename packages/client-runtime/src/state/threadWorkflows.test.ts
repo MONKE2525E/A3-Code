@@ -137,6 +137,37 @@ describe("thread workflows", () => {
     expect(state.canPromoteToSteer).toBe(true);
   });
 
+  it.each(["grok-bot", "muse-agent"])(
+    "never offers steering for %s even with cached steering capabilities",
+    (driver) => {
+      const state = deriveThreadQueueWorkflowState({
+        thread: { id: "thread", activeProviderThreadId: "provider-thread" },
+        runs: [
+          {
+            id: "active",
+            status: "running",
+            providerThreadId: "provider-thread",
+            activeAttemptId: "attempt",
+            ordinal: 1,
+          },
+        ],
+        messages: [],
+        providerThreads: [{ id: "provider-thread", providerSessionId: "session" }],
+        providerSessions: [
+          {
+            id: "session",
+            driver,
+            status: "running",
+            capabilities: capabilities({ queued: true, steer: true, restartSteer: true }),
+          },
+        ],
+        providerTurns: [{ runAttemptId: "attempt", status: "running" }],
+      } as never);
+      expect(state.canPromoteToSteer).toBe(false);
+      expect(state.canReorder).toBe(true);
+    },
+  );
+
   it("keeps held messages visible and clears the hold when they leave the queue", () => {
     for (const status of ["queued", "cancelled", "starting"] as const) {
       const state = deriveThreadQueueWorkflowState({

@@ -8,10 +8,14 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as FileSystem from "effect/FileSystem";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -73,6 +77,554 @@ const layerDatabase = SqlitePersistence.layerMemory.pipe(
 );
 const decodeEffectRequest = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationEffectRequestV2),
+);
+
+it.effect.each([false, true])(
+  "refuses generic deletion of managed native storage, force=%s",
+  (force) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const projectId = ProjectId.make("project:managed-native");
+      yield* seedProject(projectId);
+      yield* sql`UPDATE projection_projects SET workspace_root = ${path.resolve(config.baseDir, "native-agents")} WHERE project_id = ${projectId}`;
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectService.make;
+        const error = yield* Effect.flip(
+          service.delete({
+            commandId: CommandId.make(`command:delete-managed:${force}`),
+            projectId,
+            force,
+          }),
+        );
+        assert.equal(error._tag, "ProjectProtectedError");
+        assert.isTrue(Option.isSome(yield* service.getById(projectId)));
+        const deleted =
+          yield* sql`SELECT 1 FROM orchestration_events WHERE event_type = 'project.deleted'`;
+        assert.lengthOf(deleted, 0);
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("keeps the managed workspace fixed while allowing its other metadata to change", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const config = yield* ServerConfig.ServerConfig;
+    const path = yield* Path.Path;
+    const projectId = ProjectId.make("project:managed-update");
+    const root = path.resolve(config.baseDir, "native-agents");
+    yield* seedProject(projectId);
+    yield* sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectId}`;
+    yield* Effect.gen(function* () {
+      const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+      const service = yield* ProjectService.make.pipe(
+        Effect.provideService(WorkspacePaths.WorkspacePaths, {
+          ...workspacePaths,
+          normalizeWorkspaceRoot: (requested) =>
+            requested === "/work/unrelated-checkout"
+              ? Effect.die("Managed moves must be rejected before inspecting the destination.")
+              : workspacePaths.normalizeWorkspaceRoot(requested),
+        }),
+      );
+      const error = yield* Effect.flip(
+        service.update({
+          commandId: CommandId.make("command:move-managed"),
+          projectId,
+          workspaceRoot: "/work/unrelated-checkout",
+          title: "Moved",
+        }),
+      );
+      assert.equal(error._tag, "ProjectProtectedError");
+      assert.equal(error.message, "The managed AI Agents project cannot be moved.");
+      const events =
+        yield* sql`SELECT 1 FROM orchestration_events WHERE event_type = 'project.meta-updated'`;
+      assert.lengthOf(events, 0);
+      const unchanged = yield* service.getById(projectId);
+      assert.equal(Option.getOrThrow(unchanged).workspaceRoot, root);
+      assert.equal(Option.getOrThrow(unchanged).title, "Deletion test");
+      const updated = yield* service.update({
+        commandId: CommandId.make("command:rename-managed"),
+        projectId,
+        workspaceRoot: root,
+        title: "Agents",
+      });
+      assert.equal(updated.workspaceRoot, root);
+      assert.equal(updated.title, "Agents");
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect.each(["whitespace", "home", "relative-segments"] as const)(
+  "accepts an equivalent managed workspace root using %s syntax",
+  (syntax) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const root = path.resolve(config.baseDir, "native-agents");
+      yield* fs.makeDirectory(root, { recursive: true });
+      const projectId = ProjectId.make(`project:equivalent-root:${syntax}`);
+      yield* seedProject(projectId);
+      yield* sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectId}`;
+      const requested =
+        syntax === "home"
+          ? "~/native-agents"
+          : syntax === "whitespace"
+            ? `  ${root}  `
+            : `${root}/../native-agents/.`;
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectService.make.pipe(Effect.provide(WorkspacePaths.layer));
+        const updated = yield* service.update({
+          commandId: CommandId.make(`command:equivalent-root:${syntax}`),
+          projectId,
+          workspaceRoot: requested,
+          title: "Updated agents",
+        });
+        assert.equal(updated.workspaceRoot, root);
+        assert.equal(updated.title, "Updated agents");
+      }).pipe(
+        Effect.provide(layerServices),
+        Effect.provideService(HostProcess.HomeDirectory, config.baseDir),
+      );
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect.each(["create", "bootstrap", "update"] as const)(
+  "rejects generic %s claims on an unregistered managed directory before filesystem access",
+  (operation) =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const root = path.resolve(config.baseDir, "native-agents");
+      const projectId = ProjectId.make(`project:reserved-claim:${operation}`);
+      if (operation === "update") yield* seedProject(projectId);
+      assert.isFalse(yield* fs.exists(root));
+      yield* Effect.gen(function* () {
+        const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+        const service = yield* ProjectService.make.pipe(
+          Effect.provideService(WorkspacePaths.WorkspacePaths, {
+            ...workspacePaths,
+            normalizeWorkspaceRoot: () =>
+              Effect.die("Reserved claims must not touch the destination."),
+          }),
+        );
+        const input = {
+          commandId: CommandId.make(`command:reserved-claim:${operation}`),
+          projectId,
+          title: "Ordinary project",
+          workspaceRoot: "  ~/native-agents  ",
+          createWorkspaceRootIfMissing: true,
+        };
+        const claim =
+          operation === "create"
+            ? service.create(input).pipe(Effect.asVoid)
+            : operation === "bootstrap"
+              ? service.bootstrap(input).pipe(Effect.asVoid)
+              : service.update(input).pipe(Effect.asVoid);
+        const error = yield* claim.pipe(Effect.flip);
+        assert.equal(error._tag, "ProjectProtectedError");
+        assert.equal(error.message, "The AI Agents workspace is reserved for native agents.");
+        const row = yield* service.getById(projectId);
+        if (operation === "update")
+          assert.equal(Option.getOrThrow(row).workspaceRoot, `/work/${projectId}`);
+        else assert.isTrue(Option.isNone(row));
+        const sql = yield* SqlClient.SqlClient;
+        assert.lengthOf(yield* sql`SELECT 1 FROM orchestration_events`, 0);
+        assert.isFalse(yield* fs.exists(root));
+      }).pipe(
+        Effect.provide(layerServices),
+        Effect.provideService(HostProcess.HomeDirectory, config.baseDir),
+      );
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect.each(["create", "bootstrap", "update"] as const)(
+  "rejects a filesystem alias of managed storage through generic %s",
+  (operation) =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const root = path.resolve(config.baseDir, "native-agents");
+      const alias = path.resolve(config.baseDir, "ordinary-looking-alias");
+      yield* fs.makeDirectory(root, { recursive: true });
+      yield* fs.symlink(root, alias);
+      assert.equal(yield* fs.realPath(alias), yield* fs.realPath(root));
+      const projectId = ProjectId.make(`project:alias-claim:${operation}`);
+      if (operation === "update") yield* seedProject(projectId);
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectService.make.pipe(Effect.provide(WorkspacePaths.layer));
+        const input = {
+          commandId: CommandId.make(`command:alias-claim:${operation}`),
+          projectId,
+          title: "Ordinary alias project",
+          workspaceRoot: alias,
+        };
+        const claim =
+          operation === "create"
+            ? service.create(input).pipe(Effect.asVoid)
+            : operation === "bootstrap"
+              ? service.bootstrap(input).pipe(Effect.asVoid)
+              : service.update(input).pipe(Effect.asVoid);
+        const error = yield* claim.pipe(Effect.flip);
+        assert.equal(error._tag, "ProjectProtectedError");
+        const sql = yield* SqlClient.SqlClient;
+        assert.lengthOf(yield* sql`SELECT 1 FROM orchestration_events`, 0);
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("rejects a parent alias before creating missing managed storage", () =>
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
+    const root = path.resolve(config.baseDir, "native-agents");
+    const aliasParent = path.resolve(config.baseDir, "parent-alias");
+    yield* fs.symlink(config.baseDir, aliasParent);
+    assert.isFalse(yield* fs.exists(root));
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectService.make.pipe(Effect.provide(WorkspacePaths.layer));
+      const error = yield* service
+        .create({
+          commandId: CommandId.make("command:missing-alias-claim"),
+          projectId: ProjectId.make("project:missing-alias-claim"),
+          title: "Parent alias",
+          workspaceRoot: path.join(aliasParent, "native-agents"),
+          createWorkspaceRootIfMissing: true,
+        })
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "ProjectProtectedError");
+      assert.isFalse(yield* fs.exists(root));
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect(
+  "accepts an alias of the owned managed directory without replacing its canonical root",
+  () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const sql = yield* SqlClient.SqlClient;
+      const root = path.resolve(config.baseDir, "native-agents");
+      const alias = path.resolve(config.baseDir, "owned-alias");
+      yield* fs.makeDirectory(root, { recursive: true });
+      yield* fs.symlink(root, alias);
+      const projectId = ProjectId.make("project:owned-alias");
+      yield* seedProject(projectId);
+      yield* sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectId}`;
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectService.make.pipe(Effect.provide(WorkspacePaths.layer));
+        const updated = yield* service.update({
+          commandId: CommandId.make("command:owned-alias-update"),
+          projectId,
+          workspaceRoot: alias,
+          title: "Updated through alias",
+        });
+        assert.equal(updated.workspaceRoot, root);
+        assert.equal(updated.title, "Updated through alias");
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("continues to accept a symlink to an ordinary directory", () =>
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
+    const root = path.resolve(config.baseDir, "ordinary");
+    const alias = path.resolve(config.baseDir, "ordinary-alias");
+    yield* fs.makeDirectory(root, { recursive: true });
+    yield* fs.symlink(root, alias);
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectService.make.pipe(Effect.provide(WorkspacePaths.layer));
+      const created = yield* service.create({
+        commandId: CommandId.make("command:ordinary-alias"),
+        projectId: ProjectId.make("project:ordinary-alias"),
+        title: "Ordinary alias",
+        workspaceRoot: alias,
+      });
+      assert.equal(created.workspaceRoot, alias);
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect.each(["delete", "move"] as const)(
+  "protects a legacy managed alias record against %s",
+  (operation) =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const sql = yield* SqlClient.SqlClient;
+      const root = path.resolve(config.baseDir, "native-agents");
+      const alias = path.resolve(config.baseDir, "legacy-alias");
+      yield* fs.makeDirectory(root, { recursive: true });
+      yield* fs.symlink(root, alias);
+      const projectId = ProjectId.make(`project:legacy-alias:${operation}`);
+      yield* seedProject(projectId);
+      yield* sql`UPDATE projection_projects SET workspace_root = ${alias} WHERE project_id = ${projectId}`;
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectService.make;
+        const commandId = CommandId.make(`command:legacy-alias:${operation}`);
+        const mutation =
+          operation === "delete"
+            ? service.delete({ commandId, projectId, force: true })
+            : service.update({ commandId, projectId, workspaceRoot: "/work/unrelated-checkout" });
+        const error = yield* mutation.pipe(Effect.flip);
+        assert.equal(error._tag, "ProjectProtectedError");
+        assert.equal(Option.getOrThrow(yield* service.getById(projectId)).workspaceRoot, alias);
+        assert.lengthOf(yield* sql`SELECT 1 FROM orchestration_events`, 0);
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("fails a reserved-identity check when realPath is denied", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const projectId = ProjectId.make("project:denied-realpath");
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectService.make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          realPath: (root) =>
+            Effect.fail(
+              PlatformError.systemError({
+                _tag: "PermissionDenied",
+                module: "FileSystem",
+                method: "realPath",
+                pathOrDescriptor: root,
+                description: "Test realPath denied.",
+              }),
+            ),
+        }),
+      );
+      const error = yield* service
+        .create({
+          commandId: CommandId.make("command:denied-realpath"),
+          projectId,
+          workspaceRoot: "/work/unchecked-alias",
+          title: "Unchecked",
+        })
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "ProjectOperationError");
+      assert.isTrue(Option.isNone(yield* service.getById(projectId)));
+      yield* seedProject(projectId);
+      const renamed = yield* service.update({
+        commandId: CommandId.make("command:metadata-without-realpath"),
+        projectId,
+        title: "Metadata only",
+      });
+      assert.equal(renamed.title, "Metadata only");
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect.each([
+  { operation: "create", insensitive: true },
+  { operation: "bootstrap", insensitive: true },
+  { operation: "update", insensitive: true },
+  { operation: "create", insensitive: false },
+  { operation: "bootstrap", insensitive: false },
+  { operation: "update", insensitive: false },
+] as const)(
+  "resolves missing case variants for $operation, insensitive=$insensitive",
+  ({ operation, insensitive }) =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const root = path.resolve(config.baseDir, "native-agents");
+      const variant = path.resolve(config.baseDir, "NATIVE-AGENTS");
+      let managedExists = false;
+      const filesystem = {
+        ...fs,
+        realPath: (requested: string) => {
+          if (requested !== root && requested !== variant) return fs.realPath(requested);
+          return managedExists && (requested === root || insensitive)
+            ? Effect.succeed(root)
+            : Effect.fail(
+                PlatformError.systemError({
+                  _tag: "NotFound",
+                  module: "FileSystem",
+                  method: "realPath",
+                  pathOrDescriptor: requested,
+                }),
+              );
+        },
+        makeDirectory: (requested: string, options?: Parameters<typeof fs.makeDirectory>[1]) =>
+          requested === root
+            ? Effect.sync(() => {
+                managedExists = true;
+              })
+            : fs.makeDirectory(requested, options),
+      };
+      const projectId = ProjectId.make(`project:case-claim:${operation}:${insensitive}`);
+      if (operation === "update") yield* seedProject(projectId);
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectService.make.pipe(
+          Effect.provideService(FileSystem.FileSystem, filesystem),
+        );
+        const input = {
+          commandId: CommandId.make(`command:case-claim:${operation}:${insensitive}`),
+          projectId,
+          workspaceRoot: variant,
+          title: "Case variant",
+          createWorkspaceRootIfMissing: true,
+        };
+        const mutation =
+          operation === "create"
+            ? service.create(input).pipe(Effect.asVoid)
+            : operation === "bootstrap"
+              ? service.bootstrap(input).pipe(Effect.asVoid)
+              : service.update(input).pipe(Effect.asVoid);
+        const result = yield* mutation.pipe(Effect.exit);
+        if (insensitive) {
+          assert.equal(result._tag, "Failure");
+          const sql = yield* SqlClient.SqlClient;
+          assert.lengthOf(yield* sql`SELECT 1 FROM orchestration_events`, 0);
+          const row = yield* service.getById(projectId);
+          if (operation === "update")
+            assert.equal(Option.getOrThrow(row).workspaceRoot, `/work/${projectId}`);
+          else assert.isTrue(Option.isNone(row));
+        } else {
+          assert.equal(result._tag, "Success");
+          assert.equal(Option.getOrThrow(yield* service.getById(projectId)).workspaceRoot, variant);
+        }
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("reuses a legacy alias owner during native bootstrap", () =>
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
+    const sql = yield* SqlClient.SqlClient;
+    const root = path.resolve(config.baseDir, "native-agents");
+    const alias = path.resolve(config.baseDir, "bootstrap-owner-alias");
+    yield* fs.makeDirectory(root, { recursive: true });
+    yield* fs.symlink(root, alias);
+    const projectId = ProjectId.make("project:legacy-bootstrap-owner");
+    yield* seedProject(projectId);
+    yield* sql`UPDATE projection_projects SET workspace_root = ${alias} WHERE project_id = ${projectId}`;
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectService.make.pipe(Effect.provide(WorkspacePaths.layer));
+      const threadId = ThreadId.make("muse-agent:legacy-bootstrap-thread");
+      const sink = yield* EventSink.EventSinkV2;
+      yield* sink.write({ events: [nativeThreadCreated(projectId, threadId)] });
+      const result = yield* service.bootstrapNativeAgentProject({
+        commandId: CommandId.make("command:reuse-legacy-owner"),
+        projectId: ProjectId.make("project:must-not-create-duplicate"),
+      });
+      assert.isFalse(result.created);
+      assert.equal(result.project.id, projectId);
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      assert.equal(
+        (yield* projections.getThreadProjection(threadId)).thread.projectId,
+        result.project.id,
+      );
+
+      assert.lengthOf(yield* sql`SELECT 1 FROM projection_projects WHERE deleted_at IS NULL`, 1);
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("creates and reuses the reserved project through native bootstrap", () =>
+  Effect.gen(function* () {
+    const config = yield* ServerConfig.ServerConfig;
+    const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
+    const root = path.resolve(config.baseDir, "native-agents");
+    yield* fs.makeDirectory(root, { recursive: true });
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectService.make.pipe(Effect.provide(WorkspacePaths.layer));
+      const first = yield* service.bootstrapNativeAgentProject({
+        commandId: CommandId.make("command:native-bootstrap"),
+        projectId: ProjectId.make("project:native-bootstrap"),
+      });
+      const second = yield* service.bootstrapNativeAgentProject({
+        commandId: CommandId.make("command:native-bootstrap-again"),
+        projectId: ProjectId.make("project:unused-bootstrap"),
+      });
+      assert.isTrue(first.created);
+      assert.isFalse(second.created);
+      assert.equal(first.project.workspaceRoot, root);
+      assert.equal(second.project.id, first.project.id);
+      const sql = yield* SqlClient.SqlClient;
+      assert.lengthOf(yield* sql`SELECT 1 FROM projection_projects WHERE deleted_at IS NULL`, 1);
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect("allows moving an ordinary project with the same display name", () =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("project:ordinary-move");
+    yield* seedProject(projectId);
+    yield* Effect.gen(function* () {
+      const service = yield* ProjectService.make;
+      const updated = yield* service.update({
+        commandId: CommandId.make("command:move-ordinary"),
+        projectId,
+        title: "AI Agents",
+        workspaceRoot: "/work/another/native-agents",
+      });
+      assert.equal(updated.workspaceRoot, "/work/another/native-agents");
+    }).pipe(Effect.provide(layerServices));
+  }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect(
+  "refuses a force-delete cascade containing canonical Muse or Grok shells even after a root edit",
+  () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project:relocated-native");
+      yield* seedProject(projectId);
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectService.make;
+        const sink = yield* EventSink.EventSinkV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const ids = [ThreadId.make("muse-agent:canonical"), ThreadId.make("grok-bot:canonical")];
+        yield* sink.write({ events: ids.map((id) => nativeThreadCreated(projectId, id)) });
+        const error = yield* Effect.flip(
+          service.delete({
+            commandId: CommandId.make("command:delete-native-cascade"),
+            projectId,
+            force: true,
+          }),
+        );
+        assert.equal(error._tag, "ProjectProtectedError");
+        assert.isTrue(Option.isSome(yield* service.getById(projectId)));
+        for (const id of ids)
+          assert.isNull((yield* projections.getThreadProjection(id)).thread.deletedAt);
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
+);
+
+it.effect(
+  "allows deleting an ordinary project named AI Agents in a different native-agents folder",
+  () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project:user-agents");
+      const sql = yield* SqlClient.SqlClient;
+      yield* seedProject(projectId);
+      yield* sql`UPDATE projection_projects SET title = 'AI Agents', workspace_root = '/work/native-agents' WHERE project_id = ${projectId}`;
+      yield* Effect.gen(function* () {
+        const service = yield* ProjectService.make;
+        const deleted = yield* service.delete({
+          commandId: CommandId.make("command:delete-user-agents"),
+          projectId,
+          force: true,
+        });
+        assert.isNotNull(deleted.deletedAt);
+        assert.isTrue(Option.isNone(yield* service.getById(projectId)));
+      }).pipe(Effect.provide(layerServices));
+    }).pipe(Effect.provide(layerDatabase)),
 );
 
 const seedProject = Effect.fn("ProjectDeletionTest.seedProject")(function* (projectId: ProjectId) {

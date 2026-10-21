@@ -1,5 +1,16 @@
+import { useInsertionEffect } from "react";
+import { Cause } from "effect";
+import { MuseAgentFeaturesPanel } from "./agents/MuseAgentFeaturesDialog";
 import { GrokBotComputerPanel } from "./grokBot/GrokBotComputerPanel";
 import { GrokBotSecureInputPanel } from "./grokBot/GrokBotSecureInputPanel";
+import { MuseAgentCredentialPanel } from "./agents/MuseAgentCredentialPanel";
+import {
+  guardMuseAgentTurnDispatch,
+  museAgentAttachScopeIdentity,
+  MuseAgentRouteConnection,
+  museAgentTurnDispatchBlockedReason,
+  resolveMuseAgentComposerSendBlockedReason,
+} from "./agents/MuseAgentRouteConnection";
 import { GROK_BOT_MAIN_SESSION_ID, grokBotSecretChatTarget } from "./grokBot/grokBotSecretRequest";
 import { formatFilePathForClipboard } from "@t3tools/client-runtime/media-actions";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
@@ -85,6 +96,7 @@ import {
   resolveProjectProviderInstanceEnabled,
   RuntimeMode,
   isGrokBotBackingThread,
+  nativeAgentSourceForThread,
 } from "@t3tools/contracts";
 import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
@@ -107,6 +119,7 @@ import {
   deriveLatestThreadRun,
   deriveThreadRuntime,
   deriveLatestProviderSessionError,
+  deriveLatestProviderSessionRetirement,
   presentPendingBackgroundWork,
   presentProviderGoal,
 } from "@t3tools/client-runtime/state/thread-execution";
@@ -203,7 +216,7 @@ import {
   findRevertCheckpoint,
   hasActionableProposedPlan,
   isLatestRunSettled,
-  resolveGrokBotSendDispatchMode,
+  resolveNativeAgentSendDispatchMode,
 } from "../session-logic";
 import { type LegendListRef } from "@legendapp/list/react";
 import {
@@ -1101,7 +1114,7 @@ export default function ChatView(props: ChatViewProps) {
   const setThreadInteractionMode = useOrchestrationCommand(threadEnvironment.setInteractionMode, {
     reportFailure: false,
   });
-  const startThreadTurn = useOrchestrationCommand(threadEnvironment.startTurn, {
+  const startThreadTurnCommand = useOrchestrationCommand(threadEnvironment.startTurn, {
     reportFailure: false,
   });
   const resumeThreadQueue = useOrchestrationCommand(threadEnvironment.resumeThreadQueue, {
@@ -1199,6 +1212,7 @@ export default function ChatView(props: ChatViewProps) {
   const promptRef = useRef("");
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
   const composerRef = useComposerHandleContext() ?? localComposerRef;
+  const museAttachSendBlockedReasonRef = useRef<string | null>(null);
   const queuedRunEdit = useQueuedRunEdit({
     environmentId,
     routeThreadRef,
@@ -2498,6 +2512,86 @@ export default function ChatView(props: ChatViewProps) {
   });
   const selectedProvider = selectedProviderEntry?.driverKind ?? requestedDriverKind;
   const isGrokBotThread = activeThreadId !== null && isGrokBotBackingThread({ id: activeThreadId });
+  // Native Muse threads use the same compact composer as Grok Bot, so they also skip the strip below.
+  const isMuseAgentThread =
+    activeThreadId !== null && nativeAgentSourceForThread({ id: activeThreadId }) === "muse-agent";
+  const museAttachConnected = activeEnvironmentConnectionPhase === "connected";
+  const museAttachScope =
+    isMuseAgentThread && activeThread
+      ? museAgentAttachScopeIdentity({
+          environmentId: activeThread.environmentId,
+          threadId: activeThread.id,
+          providerInstanceId: activeThread.modelSelection.instanceId,
+          connected: museAttachConnected,
+        })
+      : "";
+  const [museAttachScopeState, setMuseAttachScopeState] = useState(museAttachScope);
+  const [museAttachSendBlockedReason, setMuseAttachSendBlockedReason] = useState<
+    string | null | undefined
+  >(undefined);
+  const museAttachDispatchRef = useRef({
+    scope: museAttachScope,
+    blockedReason: null as string | null,
+    connected: museAttachConnected,
+    providerInstanceId: activeThread?.modelSelection.instanceId ?? "",
+  });
+  if (museAttachScopeState !== museAttachScope) {
+    setMuseAttachScopeState(museAttachScope);
+    setMuseAttachSendBlockedReason(undefined);
+  }
+  const museSendBlockedReason = resolveMuseAgentComposerSendBlockedReason(
+    isMuseAgentThread,
+    museAttachSendBlockedReason,
+  );
+  useInsertionEffect(() => {
+    museAttachSendBlockedReasonRef.current = museSendBlockedReason;
+    museAttachDispatchRef.current = {
+      scope: museAttachScope,
+      blockedReason: museSendBlockedReason,
+      connected: museAttachConnected,
+      providerInstanceId: activeThread?.modelSelection.instanceId ?? "",
+    };
+  }, [
+    museSendBlockedReason,
+    museAttachScope,
+    museAttachConnected,
+    activeThread?.modelSelection.instanceId,
+  ]);
+  const onMuseAttachSendBlockedReasonChange = (reason: string | null) => {
+    museAttachSendBlockedReasonRef.current = reason;
+    museAttachDispatchRef.current = {
+      ...museAttachDispatchRef.current,
+      blockedReason: reason,
+    };
+    setMuseAttachSendBlockedReason((previous) => (previous === reason ? previous : reason));
+  };
+  const startThreadTurn = async (args: Parameters<typeof startThreadTurnCommand>[0]) => {
+    const guarded = await guardMuseAgentTurnDispatch(
+      () => {
+        const attach = museAttachDispatchRef.current;
+        const providerInstanceId =
+          args.input.modelSelection?.instanceId ?? attach.providerInstanceId;
+        return {
+          isMuseDispatch: nativeAgentSourceForThread({ id: args.input.threadId }) === "muse-agent",
+          dispatchScope: museAgentAttachScopeIdentity({
+            environmentId: args.environmentId,
+            threadId: args.input.threadId,
+            providerInstanceId,
+            connected: attach.connected,
+          }),
+          currentAttachScope: attach.scope,
+          currentBlockedReason: attach.blockedReason,
+          isNewThreadBootstrap: args.input.bootstrap?.createThread != null,
+        };
+      },
+      () => startThreadTurnCommand(args),
+    );
+    if (!guarded.ok) {
+      return AsyncResult.failure(Cause.fail(new Error(guarded.reason)));
+    }
+    return guarded.value;
+  };
+  const isNativeAgentComposerThread = isGrokBotThread || isMuseAgentThread;
   const activeProviderInstanceId = selectedProviderEntry?.instanceId ?? null;
   const activeProviderStatus = selectedProviderEntry?.snapshot ?? null;
   const { enabled: interactionModeEnabled, interactionMode } = resolveComposerInteractionMode({
@@ -3265,7 +3359,7 @@ export default function ChatView(props: ChatViewProps) {
           reportedModelSelection,
         );
   const mountComposerContextStrip =
-    !isGrokBotThread &&
+    !isNativeAgentComposerThread &&
     shouldShowComposerContextStrip({
       isDraftHeroState,
       persistInActiveThreads: settings.persistComposerContextStrip,
@@ -3275,7 +3369,7 @@ export default function ChatView(props: ChatViewProps) {
       hostsRestingComposerControls: routeKind === "server",
     });
   const showComposerContextStrip =
-    !isGrokBotThread &&
+    !isNativeAgentComposerThread &&
     shouldShowComposerContextStrip({
       isDraftHeroState,
       persistInActiveThreads: settings.persistComposerContextStrip,
@@ -3285,7 +3379,7 @@ export default function ChatView(props: ChatViewProps) {
       hostsRestingComposerControls: routeKind === "server" && restingComposerControlsVisible,
     });
   const mountComposerModelStrip =
-    !isGrokBotThread &&
+    !isNativeAgentComposerThread &&
     routeKind === "server" &&
     !mountComposerContextStrip &&
     !showProviderSubagentBar;
@@ -3573,6 +3667,8 @@ export default function ChatView(props: ChatViewProps) {
   };
   const insertArtifactTemplateStable = useStableCallback(insertArtifactTemplate);
   const sendAppMessage = async (text: string) => {
+    const museAttachBlock = museAttachSendBlockedReasonRef.current;
+    if (museAttachBlock != null) throw new Error(museAttachBlock);
     if (!isServerThread || activeThreadId === null) {
       throw new Error("Messages from apps need a started thread.");
     }
@@ -5141,14 +5237,16 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadShell?.lastVisitedAt,
     activeThreadLocalVisitedAt,
   );
+  // Muse owns settlement for its native conversations.
   const activeThreadWokeVisible = isThreadWokeUnseen({
     wokeAt: activeThreadWokeAt,
     settled: activeThreadShell?.settledOverride === "settled",
     lastVisitedAt: activeThreadLastVisitedAt,
     latestRunCompletedAt: activeLatestRun?.completedAt ?? null,
   });
+
   const activeThreadSettled =
-    supportsSettlement && activeThreadShell?.settledOverride === "settled";
+    supportsSettlement && !isMuseAgentThread && activeThreadShell?.settledOverride === "settled";
   const unsettleThreadMutation = useOrchestrationCommand(threadEnvironment.unsettle, {
     reportFailure: false,
   });
@@ -6326,7 +6424,8 @@ export default function ChatView(props: ChatViewProps) {
       threadDetailLoading ||
       readPendingEnvironmentChange() !== null ||
       sendInFlightRef.current ||
-      feedbackUploadsInFlightRef.current.has(routeThreadKey)
+      feedbackUploadsInFlightRef.current.has(routeThreadKey) ||
+      museAttachSendBlockedReasonRef.current != null
     ) {
       notifyDirectAnnotationAttached();
       return;
@@ -6450,6 +6549,25 @@ export default function ChatView(props: ChatViewProps) {
     if (queuedRunEdit.isEditing) {
       // Edit mode repurposes the composer: sending saves the queued message
       // in place instead of dispatching a new turn.
+      const validateQueuedEditDispatch = () =>
+        museAgentTurnDispatchBlockedReason({
+          isMuseDispatch: nativeAgentSourceForThread({ id: activeThread.id }) === "muse-agent",
+          dispatchScope: museAgentAttachScopeIdentity({
+            environmentId: activeThread.environmentId,
+            threadId: activeThread.id,
+            providerInstanceId:
+              museAttachDispatchRef.current.providerInstanceId ||
+              activeThread.modelSelection.instanceId,
+            connected: museAttachDispatchRef.current.connected,
+          }),
+          currentAttachScope: museAttachDispatchRef.current.scope,
+          currentBlockedReason: museAttachDispatchRef.current.blockedReason,
+        });
+      const museQueuedEditBlock = validateQueuedEditDispatch();
+      if (museQueuedEditBlock != null) {
+        setThreadError(activeThread.id, museQueuedEditBlock);
+        return;
+      }
       await queuedRunEdit.saveEdit(
         {
           prompt: promptForSend,
@@ -6461,7 +6579,9 @@ export default function ChatView(props: ChatViewProps) {
           threadContexts: composerThreadContexts,
         },
         setThreadError,
+        validateQueuedEditDispatch,
       );
+
       return;
     }
     const {
@@ -6556,6 +6676,25 @@ export default function ChatView(props: ChatViewProps) {
       if (composerRef.current?.validateProviderInput(outgoingFollowUpText) === false) {
         return;
       }
+      const musePlanFollowUpBlock = museAgentTurnDispatchBlockedReason({
+        isMuseDispatch: isMuseAgentThread,
+        dispatchScope: museAgentAttachScopeIdentity({
+          environmentId: activeThread.environmentId,
+          threadId: activeThread.id,
+          providerInstanceId: ctxSelectedModelSelection.instanceId,
+          connected: museAttachDispatchRef.current.connected,
+        }),
+        currentAttachScope: museAttachDispatchRef.current.scope,
+        currentBlockedReason: museAttachDispatchRef.current.blockedReason,
+      });
+      if (musePlanFollowUpBlock != null) {
+        setThreadError(activeThread.id, musePlanFollowUpBlock);
+        return;
+      }
+      // The composer is cleared before the send resolves, so hold everything it carried: a
+      // transient failure must give the prose and its context back, as the ordinary send does.
+      // Snapshot exactly what was sent, copied, so later mutations cannot alias the backup.
+
       const followUpPromptSnapshot = promptRef.current;
       const followUpTerminalContexts = [...sendableComposerTerminalContexts];
       const followUpReviewComments = [...composerReviewComments];
@@ -6704,9 +6843,9 @@ export default function ChatView(props: ChatViewProps) {
       resumeCompactionTokens !== null &&
       !keepFullHistory &&
       messageTextForSend.toLowerCase() !== "/compact";
-    // Once setup finishes, a GrokBot send restarts an active run or starts an idle turn.
-    const sendDispatchMode = resolveGrokBotSendDispatchMode({
-      isGrokBotThread,
+    // Native agents queue follow-ups; neither supports steering or restart-based steering.
+    const sendDispatchMode = resolveNativeAgentSendDispatchMode({
+      isNativeAgentThread: isNativeAgentComposerThread,
       phase,
       dispatchMode,
     });
@@ -6872,6 +7011,27 @@ export default function ChatView(props: ChatViewProps) {
       );
       return;
     }
+    const museDispatchBlock = museAgentTurnDispatchBlockedReason({
+      isMuseDispatch: isMuseAgentThread,
+      dispatchScope: museAgentAttachScopeIdentity({
+        environmentId: activeThread.environmentId,
+        threadId: threadIdForSend,
+        providerInstanceId: ctxSelectedModelSelection.instanceId,
+        connected: museAttachDispatchRef.current.connected,
+      }),
+      currentAttachScope: museAttachDispatchRef.current.scope,
+      currentBlockedReason: museAttachDispatchRef.current.blockedReason,
+    });
+    if (museDispatchBlock != null) {
+      sendInFlightRef.current = false;
+      setThreadError(threadIdForSend, museDispatchBlock);
+      setDockedDraftHeroThreadKey((currentThreadKey) =>
+        currentThreadKey === activeThreadKey ? null : currentThreadKey,
+      );
+      return;
+    }
+    // A send queued behind setup leaves the first send's dispatch and setup card alone.
+
     if (sendQueuesBehindSetup) {
       setSetupQueueSendThreadKey(activeThreadKey);
     } else {
@@ -7675,6 +7835,16 @@ export default function ChatView(props: ChatViewProps) {
     const nextThreadTitle = truncate(buildPlanImplementationThreadTitle(planMarkdown));
     const nextThreadModelSelection: ModelSelection = ctxSelectedModelSelection;
 
+    const museImplementBlock = museAgentTurnDispatchBlockedReason({
+      isMuseDispatch: isMuseAgentThread,
+      dispatchScope: museAttachDispatchRef.current.scope,
+      currentAttachScope: museAttachDispatchRef.current.scope,
+      currentBlockedReason: museAttachDispatchRef.current.blockedReason,
+    });
+    if (museImplementBlock != null) {
+      return;
+    }
+
     sendInFlightRef.current = true;
     beginLocalDispatch({ preparingWorktree: false });
     const finish = () => {
@@ -7700,7 +7870,20 @@ export default function ChatView(props: ChatViewProps) {
       createResult._tag === "Failure" ? createResult : null;
 
     if (failure === null) {
-      const startResult = await startThreadTurn({
+      const museStartBlock = museAgentTurnDispatchBlockedReason({
+        isMuseDispatch: isMuseAgentThread,
+        dispatchScope: museAttachDispatchRef.current.scope,
+        currentAttachScope: museAttachDispatchRef.current.scope,
+        currentBlockedReason: museAttachDispatchRef.current.blockedReason,
+      });
+      if (museStartBlock != null) {
+        failure = AsyncResult.failure(Cause.fail(new Error(museStartBlock)));
+      }
+    }
+    if (failure === null) {
+      // New thread is not this route's attach. Recheck the source above; skip
+      // the same-thread identity wrap so an unrelated green gate is not required.
+      const startResult = await startThreadTurnCommand({
         environmentId,
         input: {
           threadId: nextThreadId,
@@ -7944,7 +8127,8 @@ export default function ChatView(props: ChatViewProps) {
     !needsLoadBalancing &&
     !activeEnvironmentUnavailable &&
     !activePendingProgress &&
-    !feedbackUploading;
+    !feedbackUploading &&
+    museSendBlockedReason === null;
   useEffect(() => {
     if (
       !workLocallyResendReady ||
@@ -8058,7 +8242,18 @@ export default function ChatView(props: ChatViewProps) {
   }
 
   const rightPanelContent = activeThreadRef ? (
-    renderedRightPanelSurface?.kind === "grok-computer" && isGrokBotThread ? (
+    renderedRightPanelSurface?.kind === "muse-features" && isMuseAgentThread && activeThread ? (
+      <MuseAgentFeaturesPanel
+        key={activeThread.environmentId}
+        environmentId={activeThread.environmentId}
+        threadId={activeThread.id}
+        providerInstanceId={activeThread.modelSelection.instanceId}
+        onClose={() => {
+          if (activeThreadRef === null) return;
+          useRightPanelStore.getState().toggle(activeThreadRef, "muse-features");
+        }}
+      />
+    ) : renderedRightPanelSurface?.kind === "grok-computer" && isGrokBotThread ? (
       <GrokBotComputerPanel
         environmentId={activeThread.environmentId}
         botId={activeThread.modelSelection.model}
@@ -8230,6 +8425,7 @@ export default function ChatView(props: ChatViewProps) {
           <ChatHeader
             activeThreadEnvironmentId={activeThread.environmentId}
             activeThreadId={activeThread.id}
+            activeThreadProviderInstanceId={activeThread.modelSelection.instanceId}
             isServerThread={isServerThread}
             activeThreadTitle={activeThread.title}
             activeProject={activeProject ?? null}
@@ -8238,6 +8434,11 @@ export default function ChatView(props: ChatViewProps) {
             rightPanelOpen={inlineRightPanelOwnsTitleBar}
             grokBotId={isGrokBotThread ? activeThread.modelSelection.model : null}
             computerOpen={activeRightPanelKind === "grok-computer"}
+            museFeaturesOpen={activeRightPanelKind === "muse-features"}
+            onToggleMuseFeatures={() => {
+              if (activeThreadRef === null) return;
+              useRightPanelStore.getState().toggle(activeThreadRef, "muse-features");
+            }}
             onToggleComputer={() => {
               if (activeThreadRef === null) return;
               useRightPanelStore.getState().toggle(activeThreadRef, "grok-computer");
@@ -8305,6 +8506,20 @@ export default function ChatView(props: ChatViewProps) {
               />
             </div>
             <div className="relative flex min-h-0 flex-1 flex-col bg-background">
+              {isMuseAgentThread && activeThread ? (
+                <MuseAgentRouteConnection
+                  key={`muse-route:${activeThread.environmentId}:${activeThread.id}:${activeThread.modelSelection.instanceId}`}
+                  environmentId={activeThread.environmentId}
+                  providerInstanceId={activeThread.modelSelection.instanceId}
+                  threadId={activeThread.id}
+                  connected={activeEnvironmentConnectionPhase === "connected"}
+                  hasMessages={displayedTimeline.entries.length > 0}
+                  observerRetirement={deriveLatestProviderSessionRetirement(serverProjection)}
+                  onSendBlockedReasonChange={onMuseAttachSendBlockedReasonChange}
+                />
+              ) : null}
+              {/* Messages — LegendList handles virtualization and scrolling internally */}
+
               <MessagesTimeline
                 citationRequest={paintOnlyDisplayedTimeline ? null : citationRequest}
                 citationHistoryLoading={threadDetailLoading}
@@ -8503,6 +8718,13 @@ export default function ChatView(props: ChatViewProps) {
                       requests={grokBotSecretRequests}
                     />
                   )}
+                  {isMuseAgentThread && activeThread ? (
+                    <MuseAgentCredentialPanel
+                      environmentId={activeThread.environmentId}
+                      providerInstanceId={activeThread.modelSelection.instanceId}
+                      threadId={activeThread.id}
+                    />
+                  ) : null}
                   <div
                     ref={draftHeroComposerAnchorRef}
                     className="relative z-10"
@@ -8514,7 +8736,8 @@ export default function ChatView(props: ChatViewProps) {
                   >
                     <ComposerSurface.Shell
                       contextStrip={
-                        !isGrokBotThread && (showComposerContextStrip || showComposerModelStrip)
+                        !isNativeAgentComposerThread &&
+                        (showComposerContextStrip || showComposerModelStrip)
                       }
                     >
                       <ComposerSurface.Host
@@ -8589,7 +8812,8 @@ export default function ChatView(props: ChatViewProps) {
                               canResume={resumableRunId !== null || hasHeldQueuedRuns}
                               isRevertingCheckpoint={isRevertingCheckpoint}
                               sendDisabledReason={
-                                !canOperateThread
+                                museSendBlockedReason ??
+                                (!canOperateThread
                                   ? "This connection cannot change threads."
                                   : isEnvironmentChanging
                                     ? "Preparing machine"
@@ -8601,10 +8825,11 @@ export default function ChatView(props: ChatViewProps) {
                                           ? "Messages loading"
                                           : worktreeSetupBlocksSend
                                             ? "Preparing worktree"
-                                            : projectCloneSendBlockReason
+                                            : projectCloneSendBlockReason)
                               }
                               isPreparingWorktree={isPreparingWorktree && !sendQueuesBehindSetup}
                               queuedRunsControl={queuedRunsControl}
+
                               bannerItems={composerBannerItems}
                               resumeCompactionTokens={resumeCompactionTokens}
                               keepFullHistory={keepFullHistory}
@@ -8947,6 +9172,15 @@ export default function ChatView(props: ChatViewProps) {
           onAddDevice={addDeviceSurfaceStable}
           onAddComputer={() => useRightPanelStore.getState().open(activeThreadRef, "grok-computer")}
           computerAvailable={isGrokBotThread}
+          onAddMuseFeatures={
+            isMuseAgentThread
+              ? () => {
+                  useRightPanelStore.getState().open(activeThreadRef, "muse-features");
+                }
+              : undefined
+          }
+          nativeAgentThread={isMuseAgentThread}
+
           browserAvailable={canOperatePreview && browserAvailable}
           terminalAvailable={activeProject !== null && canOperateTerminal}
           diffAvailable={isServerThread && isGitRepo}
@@ -9006,6 +9240,15 @@ export default function ChatView(props: ChatViewProps) {
               useRightPanelStore.getState().open(activeThreadRef, "grok-computer")
             }
             computerAvailable={isGrokBotThread}
+            onAddMuseFeatures={
+              isMuseAgentThread
+                ? () => {
+                    useRightPanelStore.getState().open(activeThreadRef, "muse-features");
+                  }
+                : undefined
+            }
+            nativeAgentThread={isMuseAgentThread}
+
             browserAvailable={canOperatePreview && browserAvailable}
             terminalAvailable={activeProject !== null && canOperateTerminal}
             diffAvailable={isServerThread && isGitRepo}

@@ -17,7 +17,6 @@ import {
   ThreadId,
   type GrokBot,
   type GrokBotOrchestratorConfig,
-  type OrchestrationV2ProviderSession,
 } from "@t3tools/contracts";
 import type { ProviderAdapterV2 } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -216,7 +215,7 @@ const fixture = (
     readonly bots?: readonly GrokBot[];
     readonly botDelete?: Bots.GrokBotService["Service"]["delete"];
     readonly orchestrator?: Orchestrator.OrchestratorV2["Service"];
-    readonly scratchUnavailable?: boolean;
+    readonly storageUnavailable?: boolean;
     readonly providerSessions?: ProviderSessions.ProviderSessionManagerV2["Service"];
   } = {},
 ) =>
@@ -251,8 +250,13 @@ const fixture = (
       Layer.provide(
         Layer.mock(Folders.ManagedProjectFolders)({
           namedProjectsRoot: "/tmp/unused-projects",
-          ensureScratchProject: options.scratchUnavailable
-            ? Effect.fail(new Folders.ScratchUnavailableError())
+          ensureNativeAgentProject: options.storageUnavailable
+            ? Effect.fail(
+                new Folders.ScratchFolderError({
+                  folder: "/tmp/native-agents",
+                  cause: "unavailable",
+                }),
+              )
             : Effect.succeed({ projectId: scratchProjectId }),
         }),
       ),
@@ -287,7 +291,7 @@ const create = (id: string, selected = selection) =>
   );
 
 it.effect(
-  "agent messages restart an unsettled pending Grok attempt instead of queueing indefinitely",
+  "agent messages queue behind an unsettled pending Grok attempt without steering or superseding it",
   () =>
     Effect.gen(function* () {
       yield* observing;
@@ -395,13 +399,16 @@ it.effect(
         { botId: bot.id, message: "follow up", clientRequestId: "followup" },
         caller,
       );
-      assert.equal(next.delivery, "started");
+      assert.equal(next.delivery, "queued");
       const updated = yield* orchestrator.getThreadProjection(first.threadId!);
-      assert.lengthOf(updated.runs, 1);
-      assert.notEqual(updated.runs[0]?.activeAttemptId, run.activeAttemptId);
+      assert.lengthOf(updated.runs, 2);
+      assert.equal(
+        updated.runs.find((candidate) => candidate.id === run.id)?.activeAttemptId,
+        run.activeAttemptId,
+      );
       assert.equal(
         updated.attempts.find((attempt) => attempt.id === run.activeAttemptId)?.status,
-        "superseded",
+        initial.attempts.find((attempt) => attempt.id === run.activeAttemptId)?.status,
       );
       const retry = yield* service.send(
         { botId: bot.id, message: "follow up", clientRequestId: "followup" },
@@ -520,18 +527,18 @@ it.effect("restores the canonical bot conversation without taking an ordinary pr
   }).pipe(Effect.provide(runtime()), Effect.scoped),
 );
 
-it.effect("requires No project storage even when an older client provides a project", () =>
+it.effect("reports unavailable native storage even when an older client provides a project", () =>
   Effect.gen(function* () {
     yield* seedProjects;
-    const service = yield* fixture({ scratchUnavailable: true });
+    const service = yield* fixture({ storageUnavailable: true });
     assert.equal(
       (yield* Effect.flip(service.open({ botId: bot.id }))).message,
-      "Grok Bot conversations require No project storage, which is unavailable in this environment.",
+      "The Grok Bot thread could not be opened. Try again.",
     );
     const missing = yield* Effect.flip(
       service.open({ botId: bot.id, projectId: ProjectId.make("missing") }),
     );
-    assert.equal(missing.reason, "scratch_unavailable");
+    assert.equal(missing.reason, "storage_failed");
     const linked = yield* fixture({
       bots: [
         {

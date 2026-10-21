@@ -11,7 +11,10 @@ import type {
   RuntimeMode,
   ServerConfig as T3ServerConfig,
 } from "@t3tools/contracts";
-import { resolveProjectProviderInstanceEnabled } from "@t3tools/contracts";
+import {
+  nativeAgentSourceForDriver,
+  resolveProjectProviderInstanceEnabled,
+} from "@t3tools/contracts";
 import {
   buildExplicitProviderOptionSelectionsFromDescriptors,
   getProviderOptionDescriptors,
@@ -196,8 +199,8 @@ export function resolveSelectableModelSelection(
   );
   const driver =
     provider?.driver ?? config.settings?.providerInstances[selection.instanceId]?.driver;
-  // Grok Bot instances serve bot threads only; a stale bot selection never becomes a new task's provider.
-  if (driver === "grok-bot") {
+  // Native agents require their own canonical threads, never ordinary coding tasks.
+  if (driver !== undefined && nativeAgentSourceForDriver(driver) !== undefined) {
     return null;
   }
   if (driver === "antigravity") {
@@ -307,7 +310,7 @@ export function buildModelOptions(
       !isProviderEnabledForProject(config, provider, projectId) ||
       !provider.installed ||
       provider.auth.status === "unauthenticated" ||
-      provider.driver === "grok-bot" ||
+      nativeAgentSourceForDriver(provider.driver) !== undefined ||
       (provider.driver === "antigravity" && provider.availability === "unavailable")
     ) {
       continue;
@@ -359,6 +362,13 @@ export function buildModelOptions(
 
   if (
     fallbackModelSelection &&
+    nativeAgentSourceForDriver(
+      config?.providers.find(
+        (provider) => provider.instanceId === fallbackModelSelection.instanceId,
+      )?.driver ??
+        config?.settings?.providerInstances[fallbackModelSelection.instanceId]?.driver ??
+        "",
+    ) === undefined &&
     (providerInstanceId === undefined ||
       fallbackModelSelection.instanceId === providerInstanceId) &&
     (!config?.settings?.providerModelPreferences?.[

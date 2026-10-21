@@ -1,5 +1,8 @@
 import { useRenderedAppearance } from "../../hooks/useTheme";
 import type { Root, RootContent } from "mdast";
+import { museOptionWidgetText } from "~/lib/museOptionWidgetText";
+import { MuseAgentOptionWidgets } from "../agents/MuseAgentOptionWidgets";
+
 import { ThreadFindTimelineContext } from "./ThreadFindProvider";
 import { AgentSenderAttribution, GrokBotPeerMessageLink } from "../grokBot/GrokBotPeerMessageLink";
 import { GrokBotVoiceCallMarkerLabel } from "../grokBot/GrokBotVoiceCallMarkerLabel";
@@ -11,7 +14,11 @@ import { MarkdownFindContext, findRevealRef } from "./markdownFindContext";
 import { useChatCanvas } from "./ChatCanvasContext";
 import { WorkLogBlock, WorkLogButton, WorkLogDetails, WorkLogList, WorkLogRow } from "./WorkLog";
 import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
-import { isGrokBotBackingThread, type WorktreeSetupSnapshot } from "@t3tools/contracts";
+import {
+  isGrokBotBackingThread,
+  isNativeAgentBackingThread,
+  type WorktreeSetupSnapshot,
+} from "@t3tools/contracts";
 import { ReadOnlySourcePreview } from "../files/AttachmentFilePreview";
 import { useRightPanelStore } from "~/rightPanelStore";
 import {
@@ -2726,8 +2733,7 @@ function AttemptFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "at
   );
 }
 
-// Bot replies carry attachments (files the bot produced or received). Rendering mirrors the
-// user row's image, video, and file presentation so both sides of a bot chat look alike.
+// Native agent replies use the same image, video, and file presentation as user messages.
 function AssistantMessageAttachments({
   attachments,
 }: {
@@ -2871,14 +2877,22 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
       </div>
     );
   }
-  // Only a bot's own thread shows assistant attachments; other providers stay text-only.
-  const isGrokBotChat =
-    ctx.threadRef !== null && isGrokBotBackingThread({ id: ctx.threadRef.threadId });
-  const assistantAttachments = isGrokBotChat ? row.message.attachments : undefined;
+  const isNativeAgentChat =
+    ctx.threadRef !== null && isNativeAgentBackingThread({ id: ctx.threadRef.threadId });
+  const assistantAttachments = isNativeAgentChat ? row.message.attachments : undefined;
   const hasAssistantAttachments = (assistantAttachments?.length ?? 0) > 0;
+  const musePresentation = ctx.threadRef?.threadId.startsWith("muse-agent:")
+    ? museOptionWidgetText(row.message.text)
+    : null;
+  const hasMuseOptionWidget = (musePresentation?.widgetIds.length ?? 0) > 0;
+  const visibleText = musePresentation?.text ?? row.message.text;
   const messageText =
-    row.message.text ||
-    (row.message.streaming || hasAssistantAttachments ? "" : "(empty response)");
+    visibleText ||
+    (row.message.streaming ||
+    hasAssistantAttachments ||
+    ctx.threadRef?.threadId.startsWith("muse-agent:")
+      ? ""
+      : "(empty response)");
 
   return (
     <>
@@ -2916,6 +2930,13 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
             />
           </AssistantCitationSource>
         </div>
+        {hasMuseOptionWidget && ctx.threadRef ? (
+          <MuseAgentOptionWidgets
+            threadRef={ctx.threadRef}
+            messageId={row.message.id}
+            isStreaming={Boolean(row.message.streaming)}
+          />
+        ) : null}
         {assistantAttachments && hasAssistantAttachments ? (
           <AssistantMessageAttachments attachments={assistantAttachments} />
         ) : null}

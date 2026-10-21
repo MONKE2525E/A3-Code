@@ -3,6 +3,8 @@
 import { useNavigate } from "@tanstack/react-router";
 import { GROK_BOT_DRIVER_KIND, ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { AddGrokBotProviderStep } from "./AddGrokBotProviderStep";
+import { MUSE_AGENT_DRIVER } from "../agents/aiAgents";
+import { AddMuseAgentProviderStep } from "../agents/AddMuseAgentProviderStep";
 
 import { Radio as RadioPrimitive } from "@base-ui/react/radio";
 import { CheckIcon } from "lucide-react";
@@ -143,6 +145,7 @@ export function AddProviderInstanceDialog({
   const driverOption = providerClients.get(driver) ?? DEFAULT_DRIVER_OPTION;
   const isAcpRegistry = driver === ACP_REGISTRY_DRIVER_KIND;
   const isGrokBot = driver === GROK_BOT_DRIVER_KIND;
+  const isMuseAgent = driver === MUSE_AGENT_DRIVER;
   const defaultIdentity: ProviderIdentityDraft = {
     label: driverOption.label,
     accentColor: "",
@@ -368,7 +371,7 @@ export function AddProviderInstanceDialog({
           title="Add provider"
           description={<>Add an account or configure a provider on {environmentLabel}.</>}
         >
-          {isGrokBot ? null : isAcpRegistry ? (
+          {isGrokBot || isMuseAgent ? null : isAcpRegistry ? (
             <AddProviderInstanceWizardSteps
               currentStep={wizardStep}
               summaries={wizardStepSummaries}
@@ -469,6 +472,21 @@ export function AddProviderInstanceDialog({
                       type: "success",
                       title: "Grok Bot connected",
                       description: "Your bots are in the sidebar.",
+                    });
+                    onOpenChange(false);
+                  }}
+                />
+              ) : wizardStep === 0 && isMuseAgent ? (
+                <AddMuseAgentProviderStep
+                  key={environmentId}
+                  environmentId={environmentId}
+                  environmentLabel={environmentLabel}
+                  onConnected={(instanceId) => {
+                    if (instanceId) onCreated?.(instanceId);
+                    toastManager.add({
+                      type: "success",
+                      title: "Muse connected",
+                      description: "Muse is in the AI Agents section of the sidebar.",
                     });
                     onOpenChange(false);
                   }}
@@ -685,7 +703,7 @@ export function AddProviderInstanceDialog({
               >
                 {wizardStep === 0 ? "Cancel" : "Back"}
               </Button>
-              {isGrokBot ? null : wizardStep === 0 && driver === "codex" ? (
+              {isGrokBot || isMuseAgent ? null : wizardStep === 0 && driver === "codex" ? (
                 <>
                   <Button variant="outline" size="sm" onClick={() => navigateToStep(1)}>
                     Configure manually

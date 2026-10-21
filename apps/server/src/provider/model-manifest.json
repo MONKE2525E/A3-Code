@@ -95,6 +95,16 @@
         { "range": ">=1.4.2", "status": "supported" },
         { "range": "<1.4.2", "status": "unknown" }
       ]
+    },
+    {
+      "driver": "muse-agent",
+      "t3CodeRange": ">=0.0.45",
+      "ranges": []
+    },
+    {
+      "driver": "grok-bot",
+      "t3CodeRange": ">=0.0.45",
+      "ranges": []
     }
   ],
   "currentModels": {

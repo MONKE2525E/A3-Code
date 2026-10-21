@@ -5,6 +5,7 @@ import {
   ProviderDriverKind,
 } from "@t3tools/contracts";
 import { GrokBotProviderSettings } from "@t3tools/contracts/grokBotProvider";
+import { MuseAgentProviderSettings } from "@t3tools/contracts/museAgent";
 import { acpRegistryClient } from "@t3tools/provider-acp-registry/client";
 import { makeProviderClientRegistry } from "@t3tools/provider-core/client";
 import { cursorClient } from "@t3tools/provider-cursor/client";
@@ -37,6 +38,13 @@ export const providerClients = makeProviderClientRegistry([
     label: "GrokBot",
     settingsSchema: GrokBotProviderSettings,
     // Bots are added through the native GrokBot step and edited in the bot panel.
+    hasDefaultInstance: false,
+  },
+  {
+    driverKind: ProviderDriverKind.make("muse-agent"),
+    label: "Muse",
+    settingsSchema: MuseAgentProviderSettings,
+    // The personal agent is added once by detection in the AI Agents section, never by hand.
     hasDefaultInstance: false,
   },
   museClient,

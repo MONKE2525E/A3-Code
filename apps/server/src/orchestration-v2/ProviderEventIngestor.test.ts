@@ -12,12 +12,13 @@ import {
   NodeId,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2ConversationMessage,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
   type OrchestrationV2TurnItem,
-  type ThreadId,
+  ThreadId,
   ProviderDriverKind,
   ProviderInstanceId,
   PlanId,
@@ -122,7 +123,7 @@ const CODEX_DRIVER = ProviderDriverKind.make("codex");
 function threadCreatedEvent(
   now: DateTime.Utc,
 ): Effect.Effect<
-  OrchestrationV2DomainEvent,
+  Extract<OrchestrationV2DomainEvent, { readonly type: "thread.created" }>,
   IdAllocator.IdAllocatorV2Error,
   IdAllocator.IdAllocatorV2
 > {
@@ -180,6 +181,219 @@ function threadCreatedEvent(
 }
 
 const layer = it.layer(layerTest);
+
+layer("native Muse observer ownership", (it) => {
+  const fixture = (name: string, source = "muse-agent") =>
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const allocator = yield* IdAllocator.IdAllocatorV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make(`${source}:ownership-${name}`);
+      const original = yield* threadCreatedEvent(now);
+      yield* sink.write({
+        events: [
+          {
+            ...original,
+            threadId,
+            payload: {
+              ...original.payload,
+              id: threadId,
+              lineage: { ...original.payload.lineage, rootThreadId: threadId },
+            },
+          },
+        ],
+      });
+      const driver = ProviderDriverKind.make(source);
+      const providerSessionId = yield* allocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const pair = (text: string, owned: boolean, suffix = "answer") => {
+        const message: OrchestrationV2ConversationMessage = {
+          id: MessageId.make(`${threadId}:${suffix}`),
+          threadId,
+          runId: owned ? RunId.make(`${threadId}:run`) : null,
+          nodeId: owned ? NodeId.make(`${threadId}:node`) : null,
+          role: "assistant",
+          createdBy: "agent",
+          creationSource: "provider",
+          text,
+          attachments: [],
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        };
+        const turnItem: OrchestrationV2TurnItem = {
+          id: TurnItemId.make(`${threadId}:item:${suffix}`),
+          type: "assistant_message",
+          threadId,
+          runId: message.runId,
+          nodeId: message.nodeId,
+          providerThreadId: original.payload.activeProviderThreadId,
+          providerTurnId: owned ? ProviderTurnId.make(`${threadId}:turn`) : null,
+          nativeItemRef: { driver, nativeId: suffix, strength: "strong" },
+          parentItemId: null,
+          ordinal: 0,
+          status: "completed",
+          title: null,
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+          messageId: message.id,
+          text,
+          attachments: [],
+          streaming: false,
+        };
+        return { message, turnItem };
+      };
+      const normalize = (value: ReturnType<typeof pair>) =>
+        Effect.gen(function* () {
+          const input = {
+            providerSessionId,
+            providerInstanceId: modelSelection.instanceId,
+            threadId,
+          };
+          const messages = yield* ingestor.normalize({
+            ...input,
+            event: { type: "message.updated", driver, message: value.message },
+          });
+          const items = yield* ingestor.normalize({
+            ...input,
+            event: { type: "turn_item.updated", driver, turnItem: value.turnItem },
+          });
+          return [...messages, ...items];
+        });
+      const ingest = (value: ReturnType<typeof pair>) =>
+        Effect.gen(function* () {
+          const input = {
+            providerSessionId,
+            providerInstanceId: modelSelection.instanceId,
+            threadId,
+          };
+          const messages = yield* ingestor.ingestNormalized({
+            ...input,
+            event: { type: "message.updated", driver, message: value.message },
+          });
+          const items = yield* ingestor.ingestNormalized({
+            ...input,
+            event: { type: "turn_item.updated", driver, turnItem: value.turnItem },
+          });
+          return [...messages, ...items];
+        });
+      const saved = (value: ReturnType<typeof pair>) =>
+        Effect.gen(function* () {
+          const records = yield* store.getThreadRecords(threadId, ["messages"], {
+            messageIds: [value.message.id],
+          });
+          const item = yield* store.getTurnItem({ threadId, itemId: value.turnItem.id });
+          if (item?.type !== "assistant_message") throw new Error("expected assistant_message");
+          return { message: records.messages[0]!, turnItem: item };
+        });
+      return { sink, threadId, pair, normalize, ingest, saved };
+    });
+
+  it.effect("rejects queued observer downgrades before event log and live publication", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* fixture("downgrade");
+        const owned = f.pair("Verified managed result", true);
+        yield* f.ingest(owned);
+        const sequence = yield* f.sink.latestSequence({ threadId: f.threadId });
+        const live = yield* f.sink.stream({ threadId: f.threadId, afterSequence: sequence }).pipe(
+          Stream.takeUntil(
+            ({ event }) =>
+              event.type === "message.updated" && event.payload.text === "Foreign observer marker",
+          ),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        assert.deepStrictEqual(yield* f.ingest(f.pair("Late runless replacement", false)), []);
+        const marker = f.pair("Foreign observer marker", false, "foreign");
+        yield* f.ingest(marker);
+        const published = yield* Fiber.join(live);
+        assert.deepStrictEqual(
+          published.map(({ event }) => event.type),
+          ["message.updated"],
+        );
+        assert.strictEqual(
+          published[0]!.event.type === "message.updated" && published[0]!.event.payload.id,
+          marker.message.id,
+        );
+        const saved = yield* f.saved(owned);
+        assert.strictEqual(saved.message.text, "Verified managed result");
+        assert.strictEqual(saved.message.runId, owned.message.runId);
+        assert.strictEqual(saved.turnItem.text, "Verified managed result");
+        assert.strictEqual(saved.turnItem.runId, owned.message.runId);
+        const logged = yield* f.sink
+          .stream({ threadId: f.threadId, afterSequence: sequence })
+          .pipe(Stream.take(2), Stream.runCollect);
+        assert.deepStrictEqual(
+          logged.map(({ event }) => event.type),
+          ["message.updated", "turn-item.updated"],
+        );
+        assert.strictEqual(yield* f.sink.latestSequence({ threadId: f.threadId }), sequence + 2);
+      }),
+    ),
+  );
+
+  it.effect(
+    "allows a first observer answer to acquire managed ownership and preserves foreign IDs",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture("promotion");
+        const runless = f.pair("First observer answer", false);
+        assert.lengthOf(yield* f.ingest(runless), 2);
+        const owned = f.pair("Managed canonical answer", true);
+        assert.lengthOf(yield* f.ingest(owned), 2);
+        const foreign = f.pair("Native phone answer", false, "phone");
+        assert.lengthOf(yield* f.ingest(foreign), 2);
+        const saved = yield* f.saved(owned);
+        assert.strictEqual(saved.message.text, "Managed canonical answer");
+        assert.strictEqual(saved.message.runId, owned.message.runId);
+        assert.strictEqual(saved.turnItem.runId, owned.message.runId);
+        const phone = yield* f.saved(foreign);
+        assert.strictEqual(phone.message.text, "Native phone answer");
+        assert.strictEqual(phone.message.runId, null);
+        assert.strictEqual(phone.turnItem.runId, null);
+      }),
+  );
+
+  it.effect("rejects same-batch observer downgrade after managed events", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture("same-batch");
+      const owned = f.pair("Accepted managed answer", true);
+      const stale = f.pair("Queued observer body", false);
+      const committed = yield* f.sink.write({
+        events: [...(yield* f.normalize(owned)), ...(yield* f.normalize(stale))],
+      });
+      assert.deepStrictEqual(
+        committed.map(({ event }) => event.type),
+        ["message.updated", "turn-item.updated"],
+      );
+      const saved = yield* f.saved(owned);
+      assert.strictEqual(saved.message.text, "Accepted managed answer");
+      assert.strictEqual(saved.message.runId, owned.message.runId);
+      assert.strictEqual(saved.turnItem.text, "Accepted managed answer");
+      assert.strictEqual(saved.turnItem.runId, owned.message.runId);
+    }),
+  );
+
+  it.effect("retains existing Grok observer update behavior", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture("grok-unchanged", "grok-bot");
+      yield* f.ingest(f.pair("Initial managed Grok reply", true));
+      const observed = f.pair("Updated native Grok reply", false);
+      assert.lengthOf(yield* f.ingest(observed), 2);
+      const saved = yield* f.saved(observed);
+      assert.strictEqual(saved.message.text, "Updated native Grok reply");
+      assert.strictEqual(saved.message.runId, null);
+      assert.strictEqual(saved.turnItem.text, "Updated native Grok reply");
+      assert.strictEqual(saved.turnItem.runId, null);
+    }),
+  );
+});
 
 it.effect("records accepted billed turn usage once without billing the context window", () => {
   const recorded: Array<Readonly<Record<string, unknown>>> = [];

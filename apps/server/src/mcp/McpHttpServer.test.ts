@@ -26,6 +26,8 @@ import * as McpToolAccess from "./McpToolAccess.ts";
 import * as McpToolAccessTestkit from "./McpToolAccess.testkit.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
+import * as NativeAgentService from "../nativeAgents/NativeAgentService.ts";
+import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
@@ -761,4 +763,44 @@ it.effect("admits provider and OAuth client credentials and points only clients 
       expect(deadProvider.headers["www-authenticate"]).toBe('Bearer error="invalid_token"');
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("registers Muse discovery and messaging on the HTTP transport", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    expect(server.tools.map(({ tool }) => tool.name)).toEqual(
+      expect.arrayContaining(["muse_agent_discover", "muse_agent_send"]),
+    );
+    const result = yield* server
+      .callTool({ name: "muse_agent_discover", arguments: {} })
+      .pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+        Effect.provideService(McpSchema.McpServerClient, client),
+      );
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toEqual({ available: false, reference: null });
+  }).pipe(
+    Effect.provide(
+      McpHttpServer.layerMuseAgentToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(NativeAgentService.NativeAgentService)({
+              status: Effect.succeed({
+                installed: false,
+                sessionPresent: false,
+                ready: false,
+                message: "Sign in",
+                provider: null,
+                capabilities: [],
+              }),
+            }),
+            Layer.mock(ThreadManagement.ThreadManagementService)({}),
+            Layer.mock(OrchestratorMcpService.OrchestratorMcpService)({}),
+          ),
+        ),
+      ),
+    ),
+  ),
 );

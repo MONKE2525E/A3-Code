@@ -1,3 +1,4 @@
+import * as NativeAgentService from "./nativeAgents/NativeAgentService.ts";
 import * as GrokBotComputerService from "./grokBot/GrokBotComputerService.ts";
 import * as GrokBotNetworkService from "./grokBot/GrokBotNetworkService.ts";
 import * as GrokBotSecretService from "./grokBot/GrokBotSecretService.ts";
@@ -300,6 +301,7 @@ it.live.each(["thread", "shell"] as const)(
 
 // Build the production RPC layer; unrelated capabilities fail if this test calls them.
 const layerUnusedConfigRpcServices = Layer.mergeAll(
+  Layer.mock(NativeAgentService.NativeAgentService)({}),
   Layer.mock(ServerSecretStore.ServerSecretStore)({}),
   Layer.mock(WorkspacePaths.WorkspacePaths)({}),
   Layer.mock(TraceDiagnostics.TraceDiagnostics)({}),
@@ -486,6 +488,7 @@ it.effect(
             {},
             yield* PreviewAutomationBroker.PreviewAutomationBroker,
             yield* ServerBrowser.ServerBrowser,
+            { open: Effect.die("unused"), close: () => Effect.void },
           ).pipe(Layer.provide(configRpcServices)),
         ),
       );
