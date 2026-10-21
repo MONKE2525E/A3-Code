@@ -1136,17 +1136,13 @@ export function deriveGrokBotAwaitingCompletion(input: {
   return input.runStartedAtMs !== null && activity.observedAtMs >= input.runStartedAtMs;
 }
 
-/**
- * A Grok Bot follow-up sent while its run is in flight restarts that run: the native
- * app cannot steer an active turn, and queueing would wait on a settlement that may
- * never arrive. An idle send keeps the caller's dispatch mode.
- */
-export function resolveGrokBotSendDispatchMode(input: {
-  readonly isGrokBotThread: boolean;
+/** Native agents accept follow-ups as new turns after the active turn finishes. */
+export function resolveNativeAgentSendDispatchMode(input: {
+  readonly isNativeAgentThread: boolean;
   readonly phase: SessionPhase;
   readonly dispatchMode: ComposerDispatchMode;
 }): ComposerDispatchMode {
-  return input.isGrokBotThread && input.phase === "running" ? "restart" : input.dispatchMode;
+  return input.isNativeAgentThread && input.phase === "running" ? "queue" : input.dispatchMode;
 }
 
 /**

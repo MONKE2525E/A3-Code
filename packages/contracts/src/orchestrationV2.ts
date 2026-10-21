@@ -1483,6 +1483,8 @@ const OrchestrationV2TurnItemBaseFields = {
   nativeItemRef: Schema.NullOr(OrchestrationV2ProviderRef),
   parentItemId: Schema.NullOr(TurnItemId),
   ordinal: NonNegativeInt,
+  /** Canonical native history order, independent of the normalized display position. */
+  canonicalNativeSequence: Schema.optionalKey(NonNegativeInt.check(Schema.isLessThan(999_999))),
   status: OrchestrationV2TurnItemStatus,
   title: Schema.NullOr(Schema.String),
   startedAt: Schema.NullOr(Schema.DateTimeUtc),

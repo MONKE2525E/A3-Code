@@ -3,16 +3,20 @@ import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import { AVAILABLE_CONNECTION_STATE, type PreparedConnection } from "../connection/model.ts";
 import type { RpcSession } from "../rpc/session.ts";
 import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import {
   AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  AuthPreviewOperateScope,
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
   ThreadId,
   EnvironmentId,
   ScheduledTaskId,
+  ProviderInstanceId,
   WS_METHODS,
   type AuthSessionState,
 } from "@t3tools/contracts";
@@ -45,11 +49,10 @@ const grant = (allowed: boolean): AuthSessionState => ({
   scopes: allowed ? [AuthOrchestrationOperateScope] : [],
   permissions: allowed ? [AuthOrchestrationOperateScope] : [],
 });
-const runtime = Atom.runtime(
-  Layer.succeed(EnvironmentRegistry, {
-    run: (_id: EnvironmentId, effect: Effect.Effect<unknown>) => effect,
-  } as unknown as EnvironmentRegistry["Service"]),
-);
+const environmentLayer = Layer.succeed(EnvironmentRegistry, {
+  run: (_id: EnvironmentId, effect: Effect.Effect<unknown>) => effect,
+} as unknown as EnvironmentRegistry["Service"]);
+const runtime = Atom.runtime(environmentLayer);
 const permissions = createCommandPermissions(runtime, WS_METHODS.scheduledTasksDelete);
 const setup = Effect.gen(function* () {
   const registry = AtomRegistry.make();
@@ -59,6 +62,71 @@ const setup = Effect.gen(function* () {
 });
 
 describe("command permissions", () => {
+  it.effect("requires operate on the selected destination to import Muse history", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const readOnly = {
+          ...grant(false),
+          scopes: [AuthOrchestrationReadScope],
+          permissions: [AuthOrchestrationReadScope],
+        };
+        registry.set(sessions(env), AsyncResult.success(readOnly));
+        registry.set(sessions(other), AsyncResult.success(readOnly));
+        const command = createCommandPermissions(runtime, WS_METHODS.museAgentsFeatureUpdate);
+        const input = {
+          operation: "history_page" as const,
+          providerInstanceId: ProviderInstanceId.make("muse-test"),
+          threadId: ThreadId.make("muse-agent:test"),
+          beforeSeq: 10,
+        };
+        expect(registry.get(command.permissionAtom(env, input))).toBe(false);
+        expect((yield* command.authorize(registry, env, input).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        expect(registry.get(command.permissionAtom(env, input))).toBe(true);
+        yield* command.authorize(registry, env, input);
+        expect((yield* command.authorize(registry, other, input).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+      }),
+    ),
+  );
+  it.effect("requires operate on the destination to select a Muse option", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(false),
+            scopes: [AuthOrchestrationReadScope],
+            permissions: [AuthOrchestrationReadScope],
+          }),
+        );
+        const command = createCommandPermissions(runtime, WS_METHODS.museAgentsFeatureUpdate);
+        const input = {
+          operation: "option_select" as const,
+          providerInstanceId: ProviderInstanceId.make("muse-test"),
+          threadId: ThreadId.make("muse-agent:test"),
+          selection: {
+            widgetId: "widget-1",
+            hostMessageId: "assistant-1",
+            text: "Choice",
+            interactionId: "c3cd22b0-b756-436c-9e5a-78e78f7c5abd",
+          },
+        };
+        expect(registry.get(command.permissionAtom(env, input))).toBe(false);
+        expect((yield* command.authorize(registry, env, input).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        expect(registry.get(command.permissionAtom(env, input))).toBe(true);
+        yield* command.authorize(registry, env, input);
+      }),
+    ),
+  );
   it.effect("reads native provider status without authorizing setup", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -97,6 +165,7 @@ describe("command permissions", () => {
           );
         }
         for (const method of [
+          WS_METHODS.museAgentsSignIn,
           WS_METHODS.grokBotsSetup,
           WS_METHODS.grokBotsCreate,
           WS_METHODS.grokBotsUpdate,
@@ -368,4 +437,215 @@ it.effect("rejects protected unary and streamed RPCs outside a guarded command",
     expect(streamed._tag).toBe("EnvironmentAuthorizationError");
     expect(writes).toBe(0);
   }),
+);
+
+it.effect("requires settings, read and preview operation grants together for Muse sign-in", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const registry = yield* setup;
+      const command = createCommandPermissions(runtime, WS_METHODS.museAgentsSignIn);
+      const required = [
+        AuthSettingsWriteScope,
+        AuthOrchestrationReadScope,
+        AuthPreviewOperateScope,
+      ];
+      for (const omitted of required) {
+        const scopes = required.filter((scope) => scope !== omitted);
+        registry.set(
+          sessions(env),
+          AsyncResult.success({ ...grant(false), scopes, permissions: scopes }),
+        );
+        expect(registry.get(command.permissionAtom(env))).toBe(false);
+        expect((yield* command.authorize(registry, env, {}).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+      }
+      registry.set(
+        sessions(env),
+        AsyncResult.success({ ...grant(false), scopes: required, permissions: required }),
+      );
+      expect(registry.get(command.permissionAtom(env))).toBe(true);
+      yield* command.authorize(registry, env, {});
+    }),
+  ),
+);
+
+it.effect("separates Muse account settings from conversation operations per destination", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const registry = yield* setup;
+      const command = createCommandPermissions(runtime, WS_METHODS.museAgentsFeatureUpdate);
+      const operate = grant(true);
+      const settings = {
+        ...grant(false),
+        scopes: [AuthSettingsWriteScope],
+        permissions: [AuthSettingsWriteScope],
+      };
+      registry.set(sessions(env), AsyncResult.success(operate));
+      registry.set(sessions(other), AsyncResult.success(settings));
+      for (const operation of [
+        "connector_auth",
+        "connector_link",
+        "connector_scope_link",
+        "connector_disconnect",
+        "connector_unlink",
+        "profile_save",
+        "profile_set_theme",
+      ]) {
+        const input = { operation };
+        expect(registry.get(command.permissionAtom(env, input))).toBe(false);
+        expect((yield* command.authorize(registry, env, input).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+        expect(registry.get(command.permissionAtom(other, input))).toBe(true);
+        yield* command.authorize(registry, other, input);
+      }
+      for (const operation of [
+        "credential_submit",
+        "history_page",
+        "computer_action",
+        "delivery_release",
+        "task_delete",
+        "session_rename",
+        "session_archive",
+      ]) {
+        const input = { operation };
+        expect(registry.get(command.permissionAtom(env, input))).toBe(true);
+        yield* command.authorize(registry, env, input);
+        expect(registry.get(command.permissionAtom(other, input))).toBe(false);
+        expect((yield* command.authorize(registry, other, input).pipe(Effect.flip))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+      }
+    }),
+  ),
+);
+
+it.effect(
+  "checks and executes binary Muse commands with their transport inputs and operate grant",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const { createMuseAgentDictationCommand, MuseAgentDictationClient } = yield* Effect.promise(
+          () => import("./museAgentDictationHttp.ts"),
+        );
+        const { createMuseAgentComputerStreamCommand, MuseAgentComputerStreamClient } =
+          yield* Effect.promise(() => import("./museAgentComputerStream.ts"));
+        const { PrimaryConnectionTarget } = yield* Effect.promise(
+          () => import("../connection/model.ts"),
+        );
+        const target = new PrimaryConnectionTarget({
+          environmentId: env,
+          label: "Test",
+          httpBaseUrl: "http://localhost:1234",
+          wsBaseUrl: "ws://localhost:1234",
+        });
+        const prepared = yield* SubscriptionRef.make<Option.Option<PreparedConnection>>(
+          Option.some({
+            environmentId: env,
+            label: "Test",
+            target,
+            httpBaseUrl: target.httpBaseUrl,
+            socketUrl: target.wsBaseUrl,
+            httpAuthorization: null,
+          }),
+        );
+        let uploads = 0;
+        let streams = 0;
+        const state = yield* SubscriptionRef.make(AVAILABLE_CONNECTION_STATE);
+        const session = yield* SubscriptionRef.make(Option.none<RpcSession>());
+        const httpRuntime = Atom.runtime(
+          Layer.mergeAll(
+            environmentLayer,
+            Layer.succeed(EnvironmentSupervisor, {
+              target,
+              state,
+              session,
+              prepared,
+              connect: Effect.void,
+              disconnect: Effect.void,
+              retryNow: Effect.void,
+            }),
+            Layer.succeed(MuseAgentDictationClient, {
+              transcribe: () =>
+                Effect.sync(() => {
+                  uploads++;
+                  return { text: "Transcript" };
+                }),
+            }),
+            Layer.succeed(MuseAgentComputerStreamClient, {
+              prepare: () =>
+                Effect.sync(() => {
+                  streams++;
+                  return { socketUrl: "ws://localhost:1234/computer" };
+                }),
+            }),
+          ),
+        );
+        const dictation = createMuseAgentDictationCommand(httpRuntime);
+        const computer = createMuseAgentComputerStreamCommand(httpRuntime);
+        const audio = {
+          providerInstanceId: ProviderInstanceId.make("muse-test"),
+          pcm: new Uint8Array([0, 0]),
+        };
+        const viewer = {
+          providerInstanceId: audio.providerInstanceId,
+          sessionId: "primary",
+          taskId: "task",
+          takeoverId: "lease",
+        };
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        expect(registry.get(dictation.permissionAtom(env, audio))).toBe(true);
+        expect(registry.get(computer.permissionAtom(env, viewer))).toBe(true);
+        expect(
+          yield* Effect.promise(() =>
+            dictation.run(registry, { environmentId: env, input: audio }),
+          ),
+        ).toMatchObject({ _tag: "Success", value: { text: "Transcript" } });
+        expect(
+          yield* Effect.promise(() =>
+            computer.run(registry, { environmentId: env, input: viewer }),
+          ),
+        ).toMatchObject({ _tag: "Success", value: { socketUrl: "ws://localhost:1234/computer" } });
+        expect([uploads, streams]).toEqual([1, 1]);
+        registry.set(sessions(env), AsyncResult.success(grant(false)));
+        expect(registry.get(dictation.permissionAtom(env, audio))).toBe(false);
+        expect(
+          yield* Effect.promise(() =>
+            dictation.run(registry, { environmentId: env, input: audio }),
+          ),
+        ).toMatchObject({ _tag: "Failure" });
+        expect(
+          yield* Effect.promise(() =>
+            computer.run(registry, { environmentId: env, input: viewer }),
+          ),
+        ).toMatchObject({ _tag: "Failure" });
+        expect([uploads, streams]).toEqual([1, 1]);
+      }),
+    ),
+);
+
+it.effect("allows owned Muse sign-in cleanup after all environment grants are revoked", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const registry = yield* setup;
+      const cleanup = createCommandPermissions(runtime, WS_METHODS.museAgentsCloseSignIn);
+      const signIn = createCommandPermissions(runtime, WS_METHODS.museAgentsSignIn);
+      registry.set(
+        sessions(env),
+        AsyncResult.success({
+          ...grant(false),
+          scopes: [],
+          permissions: [],
+        }),
+      );
+      expect(registry.get(cleanup.permissionAtom(env))).toBe(true);
+      yield* cleanup.authorize(registry, env, { threadId: "owned-private-page" });
+      expect(registry.get(signIn.permissionAtom(env))).toBe(false);
+      expect((yield* signIn.authorize(registry, env, {}).pipe(Effect.flip))._tag).toBe(
+        "EnvironmentAuthorizationError",
+      );
+    }),
+  ),
 );

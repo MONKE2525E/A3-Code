@@ -1,6 +1,6 @@
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
-import { isGrokBotBackingThread } from "@t3tools/client-runtime/state/grok-bot-threads";
+import { isNativeAgentBackingThread } from "@t3tools/contracts";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { LinkIcon, PlusIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -43,9 +43,9 @@ function ChatIndexRouteView() {
 function IndexDraftLanding() {
   const projects = useProjects();
   const shellThreads = useThreadShells();
-  // A bot's work thread must not make its project look like the most recent one.
+  // An agent's chat thread must not make its project look like the most recent one.
   const threads = useMemo(
-    () => shellThreads.filter((thread) => !isGrokBotBackingThread(thread)),
+    () => shellThreads.filter((thread) => !isNativeAgentBackingThread(thread)),
     [shellThreads],
   );
   const bootstrapped = useAllEnvironmentShellsBootstrapped();

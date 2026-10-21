@@ -374,7 +374,7 @@ export function useThreadActions() {
   );
 
   const archiveThread = useCallback(
-    async (target: ScopedThreadRef, opts: { onArchived?: () => void } = {}) => {
+    async (target: ScopedThreadRef, opts: { onArchived?: () => void; undo?: false } = {}) => {
       const resolved = resolveThreadTarget(target);
       if (!resolved) return AsyncResult.success(undefined);
       const { thread, threadRef } = resolved;
@@ -412,7 +412,10 @@ export function useThreadActions() {
         action: "Archived",
         claim: action,
         // Undo also brings the reader back when archiving moved them to a draft.
-        undo: () => unarchiveThread(threadRef, { navigate: shouldNavigateToDraft }),
+        undo:
+          opts.undo === false
+            ? null
+            : () => unarchiveThread(threadRef, { navigate: shouldNavigateToDraft }),
         failureTitle: "Failed to undo archive",
       });
 

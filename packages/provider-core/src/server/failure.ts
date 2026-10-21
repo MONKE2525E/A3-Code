@@ -43,6 +43,7 @@ function causeDetails(cause: unknown): {
   const seen = new Set<unknown>();
   let message: string | undefined;
   let retryable = false;
+  let promptNotSubmitted = false;
   for (let depth = 0; depth < 16 && cause != null && !seen.has(cause); depth++) {
     seen.add(cause);
     try {
@@ -52,6 +53,40 @@ function causeDetails(cause: unknown): {
       }
       if (typeof cause !== "object") break;
       switch ((cause as Record<string, unknown>)._tag) {
+        case "ProviderPromptNotSubmittedError":
+          promptNotSubmitted = true;
+          break;
+        case "MuseAgentTransportError": {
+          const kind = stringField(cause, "kind");
+          if (kind === "disconnected" || kind === "unavailable")
+            return {
+              message: promptNotSubmitted
+                ? "Muse disconnected before setup completed. T3 could not restore the connection; check Muse in Settings → Providers and retry."
+                : "Muse disconnected. Check the conversation in Muse before retrying; reconnect Muse in Settings → Providers if needed.",
+              retryable: promptNotSubmitted,
+            };
+          if (kind === "account_changed")
+            return {
+              message:
+                "The Muse account or workspace changed. Reconnect Muse in Settings → Providers.",
+              retryable: false,
+            };
+          if (kind === "uncertain")
+            return {
+              message:
+                "Muse may have received this message. T3 did not resend it. Check the conversation in Muse before retrying.",
+              retryable: false,
+            };
+          break;
+        }
+        case "MuseAgentDeliveryError":
+          if (stringField(cause, "kind") === "busy")
+            return {
+              message:
+                "Muse still has an earlier message awaiting confirmation. Open Muse’s Pending deliveries and refresh; if that turn has ended, use Release local tracking. This message was not sent.",
+              retryable: false,
+            };
+          break;
         case "ContextHandoffBudgetError":
           return { message: new ContextHandoffBudgetError().message, retryable: false };
         case "ClaudeBackgroundWorkBlocksQueryReplacementError":
@@ -105,7 +140,7 @@ export function isTransientStartCause(cause: unknown): boolean {
   return causeDetails(cause).retryable;
 }
 
-function stringField(value: unknown, key: "message" | "code"): string | undefined {
+function stringField(value: unknown, key: "message" | "code" | "kind"): string | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   try {
     const candidate = (value as Record<string, unknown>)[key];

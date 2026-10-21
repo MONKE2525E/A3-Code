@@ -33,6 +33,7 @@ const state = vi.hoisted(() => ({
   providers: null as Atom.Atom<ReadonlyArray<ServerProvider>> | null,
   config: null as Atom.Atom<{ keybindings: ResolvedKeybindingsConfig }> | null,
   projects: [] as Project[],
+  serverConfigs: new Map<EnvironmentId, { nativeAgentWorkspaceRoot?: string }>(),
   update:
     vi.fn<
       (request: {
@@ -75,6 +76,7 @@ vi.mock("~/state/environments", () => ({
 }));
 vi.mock("~/state/entities", () => ({
   useProjects: () => state.projects,
+  useServerConfigs: () => state.serverConfigs,
   useThreadShells: () => [],
 }));
 vi.mock("~/state/projects", () => ({
@@ -240,6 +242,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   state.registry = AtomRegistry.make();
   state.sessions.clear();
+  state.serverConfigs = new Map();
   for (const id of [primaryId, remoteId])
     state.sessions.set(id, Atom.make<SessionResult>(writable()).pipe(Atom.keepAlive));
   state.projects = [primaryId, remoteId].map((environmentId) => ({
@@ -309,11 +312,11 @@ function group() {
   })[0]!;
 }
 
-async function mountPanel() {
+async function mountPanel(projectKey = group().projectKey) {
   await act(() => {
     renderer = create(
       <RegistryContext.Provider value={state.registry!}>
-        <ProjectSettingsPanel projectKey={group().projectKey} />
+        <ProjectSettingsPanel projectKey={projectKey} />
       </RegistryContext.Provider>,
     );
   });
@@ -473,4 +476,58 @@ describe("project settings permissions", () => {
       expect(state.update).toHaveBeenCalledTimes(allowed ? 2 : 0);
     },
   );
+});
+
+describe("native agent project", () => {
+  const managedRoot = "/work/primary/native-agents";
+
+  function hasText(text: string) {
+    return JSON.stringify(renderer!.toJSON()).includes(text);
+  }
+
+  it("does not offer removal when the managed project is opened by a direct settings link", async () => {
+    const managed = {
+      ...state.projects[0]!,
+      title: "AI Agents",
+      workspaceRoot: managedRoot,
+      repositoryIdentity: null,
+    };
+    const ordinary = { ...state.projects[1]!, repositoryIdentity: null };
+    state.projects = [managed, ordinary];
+    state.serverConfigs = new Map([[primaryId, { nativeAgentWorkspaceRoot: managedRoot }]]);
+    const managedKey = buildSidebarProjectSnapshots({
+      projects: [managed],
+      settings: DEFAULT_CLIENT_SETTINGS,
+      primaryEnvironmentId: primaryId,
+      resolveEnvironmentLabel: (id) => id,
+    })[0]!.projectKey;
+
+    const root = await mountPanel(managedKey);
+
+    expect(hasText("This project is no longer available.")).toBe(true);
+    expect(
+      root.findAllByType("button").some((node) => node.children.includes("Remove project")),
+    ).toBe(false);
+    expect(state.delete).not.toHaveBeenCalled();
+  });
+
+  it("keeps an ordinary project with the managed title manageable", async () => {
+    const ordinary = {
+      ...state.projects[0]!,
+      title: "AI Agents",
+      workspaceRoot: "/work/ai-agents",
+    };
+    state.projects = [ordinary];
+    state.serverConfigs = new Map([[primaryId, { nativeAgentWorkspaceRoot: managedRoot }]]);
+    const ordinaryKey = buildSidebarProjectSnapshots({
+      projects: [ordinary],
+      settings: DEFAULT_CLIENT_SETTINGS,
+      primaryEnvironmentId: primaryId,
+      resolveEnvironmentLabel: (id) => id,
+    })[0]!.projectKey;
+
+    await mountPanel(ordinaryKey);
+
+    expect(button("Remove project")).toBeDefined();
+  });
 });

@@ -1,3 +1,6 @@
+import * as NativeAgentService from "./nativeAgents/NativeAgentService.ts";
+import * as IntegrationBrowser from "./preview/IntegrationBrowser.ts";
+import { NativeAgentError } from "@t3tools/contracts";
 import * as GrokBotComputerService from "./grokBot/GrokBotComputerService.ts";
 import * as GrokBotNetworkService from "./grokBot/GrokBotNetworkService.ts";
 import * as GrokBotSecretService from "./grokBot/GrokBotSecretService.ts";
@@ -21,6 +24,7 @@ import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
+import * as Scope from "effect/Scope";
 import { rpcInitialItems } from "./rpcInitialItems.ts";
 import { subscribeChatGptHandoff } from "./provider/CodexChatGptHandoff.ts";
 import { subscribeCodexAuthCallback } from "./provider/CodexAuthCallback.ts";
@@ -76,7 +80,6 @@ import {
   ProjectSearchContentsError,
   ProjectSearchEntriesError,
   ProjectWriteFileError,
-  ProjectMutationError,
   ProviderUploadFeedbackError,
   ProviderSetupError,
   RelayClientInstallFailedError,
@@ -206,7 +209,7 @@ import * as ReviewService from "./review/ReviewService.ts";
 import * as ProjectEnrichmentService from "./project/ProjectEnrichmentService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import * as ManagedProjectFolders from "./project/ManagedProjectFolders.ts";
-import { projectMutationOperation } from "./project/ProjectMutation.ts";
+import { projectMutationOperation, projectMutationRpcError } from "./project/ProjectMutation.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
@@ -553,6 +556,13 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
 const MainWsRpcGroup = ServerWsRpcGroup.omit(
+  WS_METHODS.museAgentsFeatureRead,
+  WS_METHODS.museAgentsFeatureUpdate,
+  WS_METHODS.museAgentsStatus,
+  WS_METHODS.museAgentsSetup,
+  WS_METHODS.museAgentsProfile,
+  WS_METHODS.museAgentsOpenThread,
+  WS_METHODS.nativeAgentsOpenThread,
   WS_METHODS.grokBotsStatus,
   WS_METHODS.grokBotsSetup,
   WS_METHODS.grokBotsList,
@@ -600,6 +610,52 @@ const MainWsRpcGroup = ServerWsRpcGroup.omit(
   WS_METHODS.grokBotsImportMarketplaceTemplate,
 );
 const layerGrokExtensionsRpc = Layer.mergeAll(
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.museAgentsFeatureRead,
+    Effect.map(
+      NativeAgentService.NativeAgentService,
+      (service) => (input) => service.featureRead(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.museAgentsFeatureUpdate,
+    Effect.map(
+      NativeAgentService.NativeAgentService,
+      (service) => (input) => service.featureUpdate(input),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.museAgentsStatus,
+    Effect.map(NativeAgentService.NativeAgentService, (service) => () => service.status),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.museAgentsSetup,
+    Effect.map(NativeAgentService.NativeAgentService, (service) => () => service.setup),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.museAgentsProfile,
+    Effect.map(
+      NativeAgentService.NativeAgentService,
+      (service) => (input) => service.profile(input.providerInstanceId),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.museAgentsOpenThread,
+    Effect.map(
+      NativeAgentService.NativeAgentService,
+      (service) => (input) =>
+        service.open({
+          source: "muse-agent",
+          providerInstanceId: input.providerInstanceId,
+          agentId: "muse",
+          ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
+        }),
+    ),
+  ),
+  ServerWsRpcGroup.toLayerHandler(
+    WS_METHODS.nativeAgentsOpenThread,
+    Effect.map(NativeAgentService.NativeAgentService, (service) => (input) => service.open(input)),
+  ),
   ServerWsRpcGroup.toLayerHandler(
     WS_METHODS.grokBotsStatus,
     Effect.map(GrokBotService.GrokBotService, (service) => () => service.status),
@@ -1541,6 +1597,7 @@ const layerWsRpc = (
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
+  museSignIn: IntegrationBrowser.MuseSignInOwner,
 ) =>
   MainWsRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -2091,6 +2148,7 @@ const layerWsRpc = (
               onSome: (root) => ({ scratchWorkspaceRoot: root }),
             }),
             newProjectsRoot: managedFolders.namedProjectsRoot,
+            nativeAgentWorkspaceRoot: (yield* Path.Path).resolve(config.baseDir, "native-agents"),
           };
         });
 
@@ -3038,19 +3096,9 @@ const layerWsRpc = (
             ),
           ),
         [WS_METHODS.projectsMutate]: (mutation) =>
-          startup.enqueueCommand(mutateProject(mutation)).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectMutationError({
-                  commandId: mutation.commandId,
-                  message:
-                    cause._tag === "ProjectNotEmptyError"
-                      ? cause.message
-                      : "Failed to mutate project.",
-                  cause,
-                }),
-            ),
-          ),
+          startup
+            .enqueueCommand(mutateProject(mutation))
+            .pipe(Effect.mapError((cause) => projectMutationRpcError(mutation.commandId, cause))),
         [WS_METHODS.shellOpenInEditor]: (input) => externalLauncher.launchEditor(input),
         [WS_METHODS.filesystemGetMetadata]: (input) => workspaceFileSystem.getMetadata(input),
         [WS_METHODS.filesystemBrowse]: (input) =>
@@ -3262,6 +3310,17 @@ const layerWsRpc = (
             Effect.acquireRelease(
               terminalManager.subscribeMetadata((event) => Queue.offer(queue, event)),
               (unsubscribe) => Effect.sync(unsubscribe),
+            ),
+          ),
+        [WS_METHODS.museAgentsCloseSignIn]: (input) => museSignIn.close(input.threadId),
+        [WS_METHODS.museAgentsSignIn]: () =>
+          museSignIn.open.pipe(
+            Effect.mapError(
+              () =>
+                new NativeAgentError({
+                  reason: "provider_unavailable",
+                  detail: "The Muse sign-in browser could not be opened.",
+                }),
             ),
           ),
         [WS_METHODS.previewOpen]: (input) => previewManager.open(input),
@@ -3503,6 +3562,7 @@ export const layer = Layer.unwrap(
   Effect.gen(function* () {
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
     const serverBrowser = yield* ServerBrowser.ServerBrowser;
+    const integrationBrowser = yield* IntegrationBrowser.IntegrationBrowser;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const pullRequests = yield* PullRequestService.PullRequestService;
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
@@ -3537,6 +3597,11 @@ export const layer = Layer.unwrap(
             failEnvironmentInternal("internal_error", error),
           ),
         );
+        // This owner must survive temporary RPC handler-layer construction.
+        const museSignIn = yield* integrationBrowser.museSignInOwner(
+          session.sessionId,
+          yield* Scope.Scope,
+        );
         const clientOrigin = readClientConnectionOrigin(request);
         const clientAnalyticsProps = readClientAnalyticsProps(request);
         yield* sessions.recordClientConnection(session.sessionId, clientOrigin);
@@ -3560,6 +3625,7 @@ export const layer = Layer.unwrap(
               clientAnalyticsProps,
               previewAutomationBroker,
               serverBrowser,
+              museSignIn,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Request fibers run in the handlers' context, so this reporter sees
@@ -3569,6 +3635,9 @@ export const layer = Layer.unwrap(
               Layer.provide(AgentSessionScanner.layer),
               Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
+              Layer.provide(
+                Layer.succeed(IntegrationBrowser.IntegrationBrowser, integrationBrowser),
+              ),
               // One server-lifetime service means clients share the same PR caches, and a WS
               // mutation invalidates the HTTP diff cache that every client reads from.
               Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),

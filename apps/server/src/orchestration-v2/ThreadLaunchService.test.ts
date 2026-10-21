@@ -170,6 +170,7 @@ function makeHarness(options: HarnessOptions = {}) {
     Layer.succeed(ProjectService.ProjectService, {
       create: () => Effect.die("unused"),
       bootstrap: () => Effect.die("unused"),
+      bootstrapNativeAgentProject: () => Effect.die("unused"),
       update: () => Effect.die("unused"),
       delete: () => Effect.die("unused"),
       getById: (id) =>

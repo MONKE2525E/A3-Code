@@ -27,6 +27,8 @@ import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import { PreviewControlsToolkit } from "./toolkits/previewControls/tools.ts";
 import * as PreviewControlsHandlers from "./toolkits/previewControls/handlers.ts";
 import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
+import { MuseAgentToolkit } from "./toolkits/museAgent/tools.ts";
+import * as MuseAgentHandlers from "./toolkits/museAgent/handlers.ts";
 import { GrokBotToolkit } from "./toolkits/grokBot/tools.ts";
 import * as GrokBotHandlers from "./toolkits/grokBot/handlers.ts";
 import * as GrokBotOrchestrator from "./toolkits/grokBot/orchestrator.ts";
@@ -818,6 +820,8 @@ export const layerOrchestratorToolkit = toolkitRegistration(
   OrchestratorHandlers.layer,
 ).pipe(Layer.provide(OrchestratorMcpService.layer), Layer.provide(ThreadMetadataMcpService.layer));
 
+export const layerMuseAgentToolkit = toolkitRegistration(MuseAgentToolkit, MuseAgentHandlers.layer);
+
 export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
 
 const layerWorktreeToolkitRegistration = toolkitRegistration(
@@ -878,6 +882,7 @@ export const layer = Layer.mergeAll(
   layerProjectRegistration,
   layerEnvironmentToolkit,
   toolkitRegistration(GrokBotToolkit, GrokBotHandlers.layer),
+  layerMuseAgentToolkit.pipe(Layer.provide(OrchestratorMcpService.layer)),
   toolkitRegistration(GrokBotOrchestrator.toolkit, GrokBotOrchestrator.layer),
   toolkitRegistration(GrokBotCompletion.toolkit, GrokBotCompletion.layer),
   layerPreviewControlsRegistration,

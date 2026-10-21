@@ -78,6 +78,50 @@ export function buildGrokBotSearchItems(input: {
   return items;
 }
 
+/** A global search hit on the native Muse chat, which is a canonical thread with no Grok bot behind it. */
+export interface MuseAgentSearchHit {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: string;
+  readonly source: "user" | "assistant";
+  readonly snippet: string;
+}
+
+/** Each Muse conversation appears once per environment in global search. */
+export function buildMuseAgentSearchItems(input: {
+  readonly hits: ReadonlyArray<MuseAgentSearchHit>;
+  readonly query: string;
+  readonly identity: {
+    readonly environmentId: EnvironmentId | null;
+    readonly name: string;
+    readonly icon: ReactNode;
+  };
+  readonly fallbackIcon: ReactNode;
+  readonly canOpen: (environmentId: EnvironmentId) => boolean;
+  readonly run: (hit: MuseAgentSearchHit) => Promise<void>;
+}): CommandPaletteActionItem[] {
+  const seen = new Set<string>();
+  const items: CommandPaletteActionItem[] = [];
+  for (const hit of input.hits) {
+    const key = `${hit.environmentId}:${hit.threadId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const known = hit.environmentId === input.identity.environmentId;
+    const name = known ? input.identity.name : "Muse";
+    items.push({
+      kind: "action",
+      value: `muse-agent:${key}`,
+      title: name,
+      description: "Muse conversation",
+      disabled: !input.canOpen(hit.environmentId),
+      searchTerms: [input.query, name, hit.snippet],
+      threadContentMatch: { source: hit.source, snippet: hit.snippet, query: input.query },
+      icon: known ? input.identity.icon : input.fallbackIcon,
+      run: () => input.run(hit),
+    });
+  }
+  return items;
+}
+
 export function browseInputEndPaddingClass(input: {
   readonly willCreateProjectPath: boolean;
   readonly hasHighlightedBrowseItem: boolean;

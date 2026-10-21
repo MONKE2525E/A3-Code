@@ -6,6 +6,10 @@ import {
 } from "@t3tools/client-runtime/state/threads";
 import { PullRequestDiffLoader } from "@t3tools/client-runtime/state/pull-requests";
 import * as GrokBotAvatarEngineHttp from "@t3tools/client-runtime/state/grok-bot-avatar-engine";
+import * as MuseAgentAvatarHttp from "@t3tools/client-runtime/state/muse-agent-avatar";
+import * as MuseAgentComputerPreviewHttp from "@t3tools/client-runtime/state/muse-agent-computer-preview";
+import * as MuseAgentComputerStream from "@t3tools/client-runtime/state/muse-agent-computer-stream";
+import * as MuseAgentDictationHttp from "@t3tools/client-runtime/state/muse-agent-dictation";
 import * as Layer from "effect/Layer";
 import { Atom } from "effect/reactivity";
 
@@ -21,6 +25,10 @@ const layerSnapshotLoader = Layer.mergeAll(
   ThreadHistoryController.layer,
   PullRequestDiffLoader.layer,
   GrokBotAvatarEngineHttp.layer,
+  MuseAgentAvatarHttp.layer,
+  MuseAgentComputerPreviewHttp.layer,
+  MuseAgentComputerStream.layer,
+  MuseAgentDictationHttp.layer,
 );
 
 type ConnectionLayerSource =

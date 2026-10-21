@@ -1,4 +1,4 @@
-import { isGrokBotBackingThread } from "@t3tools/contracts";
+import { isNativeAgentBackingThread } from "@t3tools/contracts";
 import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 
 const COMPOSER_THREAD_RESULT_LIMIT = 5;
@@ -38,7 +38,7 @@ export function matchComposerThreadItems(input: {
         shell.environmentId === input.environmentId &&
         shell.id !== input.excludeThreadId &&
         shell.archivedAt === null &&
-        !isGrokBotBackingThread(shell) &&
+        !isNativeAgentBackingThread(shell) &&
         shell.title.toLowerCase().includes(query),
     )
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))

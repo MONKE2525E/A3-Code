@@ -32,6 +32,7 @@ import {
   normalizePreviewUrl,
 } from "@t3tools/shared/preview";
 import * as Context from "effect/Context";
+import { isIntegrationAuthThread, MUSE_AUTH_PROFILE } from "./IntegrationBrowser.ts";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -138,7 +139,7 @@ const normalizeUrl = (rawUrl: string): Effect.Effect<string, PreviewInvalidUrlEr
 const currentIsoTimestamp = DateTime.now.pipe(Effect.map(DateTime.formatIso));
 
 /** @public Service construction is part of the canonical Effect module API. */
-export const make = Effect.gen(function* PreviewManagerMake() {
+function* makePreviewManager(options: { readonly privateSessions?: boolean }) {
   const crypto = yield* Crypto.Crypto;
   const serverEpoch = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
   const stateRef = yield* SynchronizedRef.make<ManagerState>(initialState);
@@ -206,6 +207,11 @@ export const make = Effect.gen(function* PreviewManagerMake() {
 
   const open: PreviewManager["Service"]["open"] = Effect.fn("PreviewManager.open")(
     function* (input) {
+      if (
+        !options.privateSessions &&
+        (isIntegrationAuthThread(input.threadId) || input.profileId === MUSE_AUTH_PROFILE)
+      )
+        return yield* new PreviewControlRequiredError({ tabId: "private-sign-in" });
       const runtime = input.runtime;
       // Persisted client surfaces must not bind to a different tab after a server restart.
       const tabId = `${newPreviewTabId()}${runtime === "server" ? `_${serverEpoch}` : ""}`;
@@ -512,6 +518,9 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     events,
     subscribeEvents: PubSub.subscribe(eventsPubSub),
   });
-}).pipe(Effect.withSpan("PreviewManager.make"));
+}
 
+export const makeWithOptions = (options: { readonly privateSessions?: boolean } = {}) =>
+  Effect.gen(() => makePreviewManager(options)).pipe(Effect.withSpan("PreviewManager.make"));
+export const make = makeWithOptions();
 export const layer = Layer.effect(PreviewManager, make);

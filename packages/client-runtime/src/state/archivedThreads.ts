@@ -1,4 +1,9 @@
-import { EnvironmentId, type OrchestrationV2ArchivedShellSnapshot } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  isNativeAgentBackingThread,
+  nativeAgentSourceForThread,
+  type OrchestrationV2ArchivedShellSnapshot,
+} from "@t3tools/contracts";
 import * as Arr from "effect/Array";
 import { pipe } from "effect/Function";
 import * as Option from "effect/Option";
@@ -42,6 +47,7 @@ export function createArchivedThreadSnapshotsAtomFamily<E>(options: {
     environmentId: EnvironmentId,
   ) => Atom.Atom<AsyncResult.AsyncResult<OrchestrationV2ArchivedShellSnapshot, E>>;
   readonly labelPrefix: string;
+  readonly includeMuseConversations?: boolean;
 }) {
   return Atom.family((environmentKey: string) =>
     Atom.make((get): ArchivedThreadSnapshotsState => {
@@ -55,7 +61,19 @@ export function createArchivedThreadSnapshotsAtomFamily<E>(options: {
 
         const snapshot = Option.getOrNull(AsyncResult.value(result));
         if (snapshot !== null) {
-          snapshots.push({ environmentId, snapshot });
+          // Expose native conversations only on clients with a paired restore action.
+          snapshots.push({
+            environmentId,
+            snapshot: {
+              ...snapshot,
+              threads: snapshot.threads.filter(
+                (thread) =>
+                  !isNativeAgentBackingThread(thread) ||
+                  (options.includeMuseConversations === true &&
+                    nativeAgentSourceForThread(thread) === "muse-agent"),
+              ),
+            },
+          });
         }
 
         if (error === null && result._tag === "Failure") {

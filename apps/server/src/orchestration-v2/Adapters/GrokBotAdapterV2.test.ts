@@ -1326,6 +1326,8 @@ it.effect("requires current owned turn verification before a native session inte
         .pipe(Effect.flip))._tag,
       "ProviderAdapterSteerRunUnsupportedError",
     );
+    assert.isFalse(GrokBotCapabilitiesV2.turns.supportsActiveSteering);
+    assert.isFalse(GrokBotCapabilitiesV2.turns.supportsSteeringByInterruptRestart);
     assert.equal(GrokBotCapabilitiesV2.turns.terminalStatusQuality, "weak");
     assert.isTrue(GrokBotCapabilitiesV2.context.acceptsSyntheticUserContext);
     assert.isTrue(GrokBotCapabilitiesV2.turns.emitsTurnCompleted);

@@ -1,5 +1,6 @@
 import type { EnvironmentId } from "@t3tools/contracts";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
+import { loadMarketplaceIcon } from "./marketplaceIconCache";
 
 import { cn } from "~/lib/utils";
 
@@ -143,29 +144,55 @@ function RemoteImage({
 }) {
   // A failed load is remembered per URL, so a refreshed listing with a new URL tries again.
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
-  const showImage = url !== null && url !== failedUrl;
+  const [cached, setCached] = useState<{ source: string; blobUrl: string | null } | null>(null);
+  const [loadedUrl, setLoadedUrl] = useState<string | null>(null);
+  const source = cached?.source === url ? (cached.blobUrl ?? url) : null;
+  useEffect(() => {
+    if (!url) return;
+    let cancelled = false;
+    let blobUrl: string | undefined;
+    void loadMarketplaceIcon(url).then((blob) => {
+      if (cancelled) return;
+      if (blob) blobUrl = URL.createObjectURL(blob);
+      setCached({ source: url, blobUrl: blobUrl ?? null });
+      setFailedUrl(null);
+    });
+    return () => {
+      cancelled = true;
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+    };
+  }, [url]);
+  useEffect(() => {
+    if (!url || loadedUrl === source) return;
+    const timer = window.setTimeout(() => setFailedUrl(url), 10000);
+    return () => window.clearTimeout(timer);
+  }, [url, source, loadedUrl]);
+  const showImage = source !== null && url !== failedUrl;
   return (
     <span
       className={cn(
-        "inline-flex shrink-0",
+        "relative inline-flex shrink-0",
         (showImage || fallbackClipped) && cn("overflow-hidden", className),
       )}
       style={{ width: pixels, height: pixels }}
     >
+      {loadedUrl !== source || !showImage ? fallback : null}
       {showImage ? (
         <img
-          src={url}
+          src={source ?? undefined}
           alt=""
           loading="lazy"
           decoding="async"
           // Hosts that block hotlinking key on the referrer.
           referrerPolicy="no-referrer"
-          className="size-full object-cover"
+          className={cn(
+            "absolute inset-0 size-full object-cover",
+            loadedUrl !== source && "opacity-0",
+          )}
+          onLoad={() => setLoadedUrl(source)}
           onError={() => setFailedUrl(url)}
         />
-      ) : (
-        fallback
-      )}
+      ) : null}
     </span>
   );
 }

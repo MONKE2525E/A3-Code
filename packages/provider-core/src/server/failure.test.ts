@@ -259,3 +259,41 @@ it("names the Grok Bot stage that failed to start a turn and marks transient one
     "could not start this turn",
   );
 });
+
+it("retries Muse disconnection only with proof that no prompt was submitted", () => {
+  const disconnected = { _tag: "MuseAgentTransportError", kind: "disconnected" };
+  const beforePrompt = {
+    _tag: "ProviderPromptNotSubmittedError",
+    cause: { _tag: "NativeAgentDirectToolsError", cause: disconnected },
+  };
+  assert.isTrue(isTransientStartCause(beforePrompt));
+  assert.isFalse(isTransientStartCause(disconnected));
+  assert.include(makeProviderFailure({ cause: beforePrompt }).message, "before setup completed");
+  const streaming = makeProviderFailure({
+    cause: { _tag: "ProviderAdapterEventStreamError", cause: disconnected },
+  });
+  assert.include(streaming.message, "Check the conversation in Muse before retrying");
+  assert.notInclude(streaming.message, "before setup completed");
+  for (const kind of ["busy", "uncertain", "account_changed", "protocol"]) {
+    const cause = {
+      _tag: "ProviderPromptNotSubmittedError",
+      cause: { _tag: kind === "busy" ? "MuseAgentDeliveryError" : "MuseAgentTransportError", kind },
+    };
+    assert.isFalse(isTransientStartCause(cause));
+  }
+});
+
+it("explains blocked Muse delivery recovery without exposing native error payloads", () => {
+  const cause = {
+    _tag: "ProviderAdapterTurnStartError",
+    cause: {
+      _tag: "ProviderPromptNotSubmittedError",
+      cause: { _tag: "MuseAgentDeliveryError", kind: "busy", message: "secret-native-data" },
+    },
+  };
+  const failure = makeProviderFailure({ cause });
+  assert.include(failure.message, "Release local tracking");
+  assert.include(failure.message, "This message was not sent");
+  assert.notInclude(failure.message, "secret-native-data");
+  assert.isFalse(isTransientStartCause(cause));
+});

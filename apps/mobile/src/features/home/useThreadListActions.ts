@@ -1,7 +1,7 @@
 import type { ThreadMoveDestination } from "../threads/threadOrder";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { canSnooze, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
-import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
+import { AuthOrchestrationOperateScope, nativeAgentSourceForThread } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Haptics from "expo-haptics";
 import { useCallback, useRef } from "react";
@@ -9,6 +9,8 @@ import { Alert, Platform } from "react-native";
 
 import { withThreadDismissal } from "./thread-dismissal";
 import { showConfirmDialog, showTextInputDialog } from "../../components/ConfirmDialogHost";
+import { museAgentFeatureUpdate } from "../../state/museAgent";
+import { resolveMuseAgentNativeOpenPlan } from "../../lib/museAgentThread";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { refreshArchivedThreadsForEnvironment } from "../archive/useArchivedThreadSnapshots";
 import { pinOrderKeyBetween } from "@t3tools/client-runtime/state/thread-sort";
@@ -28,7 +30,10 @@ import {
   createThreadMovePlanner,
   threadDropLifecycle,
 } from "../threads/threadOrder";
-import { getThreadListV2OrderedSection } from "../threads/threadListV2";
+import {
+  getThreadListV2OrderedSection,
+  threadListV2AllowsGenericUnsupportedActions,
+} from "../threads/threadListV2";
 import { threadCanArchive } from "./threadArchive";
 import { resolveThreadTitleRename } from "../threads/thread-title-rename";
 
@@ -125,6 +130,7 @@ function useThreadActionExecutor(
   const deleteMutation = useAtomCommand(threadEnvironment.delete, { reportFailure: false });
   const settleMutation = useAtomCommand(threadEnvironment.settle, { reportFailure: false });
   const unsettleMutation = useAtomCommand(threadEnvironment.unsettle, { reportFailure: false });
+  const restoreMuse = useAtomCommand(museAgentFeatureUpdate, { reportFailure: false });
   const inFlightThreadKeys = useRef(new Set<string>());
 
   const executeAction = useCallback(
@@ -145,6 +151,51 @@ function useThreadActionExecutor(
           Alert.alert(
             actionFailureTitle(action),
             "This environment's server does not support settling yet. Update the server to use Settle.",
+          );
+          return false;
+        }
+        if (action === "unarchive" && nativeAgentSourceForThread(thread) === "muse-agent") {
+          const result = await withThreadDismissal(
+            key,
+            async () => {
+              const plan = resolveMuseAgentNativeOpenPlan({
+                threadId: thread.id,
+                providerInstanceId: thread.modelSelection.instanceId,
+                providers:
+                  appAtomRegistry.get(environmentServerConfigsAtom).get(thread.environmentId)
+                    ?.providers ?? null,
+              });
+              if (plan.kind !== "open" || plan.sessionId === undefined) return null;
+              return restoreMuse({
+                environmentId: thread.environmentId,
+                input: {
+                  operation: "session_archive",
+                  providerInstanceId: plan.providerInstanceId,
+                  sessionId: plan.sessionId,
+                  archived: false,
+                },
+              });
+            },
+            (result) => result?._tag === "Success",
+          );
+          if (result?._tag !== "Success") {
+            Alert.alert(
+              actionFailureTitle(action),
+              "The Muse conversation could not be restored. Reconnect to its Muse server and try again.",
+            );
+            return false;
+          }
+          refreshArchivedThreadsForEnvironment(thread.environmentId);
+          onCompleted?.(action, thread);
+          return true;
+        }
+        if (
+          (action === "archive" || action === "unarchive" || action === "delete") &&
+          !threadListV2AllowsGenericUnsupportedActions(thread)
+        ) {
+          Alert.alert(
+            actionFailureTitle(action),
+            "Muse conversations cannot use generic archive or delete.",
           );
           return false;
         }
@@ -198,6 +249,7 @@ function useThreadActionExecutor(
     },
     [
       archiveMutation,
+      restoreMuse,
       deleteMutation,
       onCompleted,
       settleMutation,
@@ -214,6 +266,7 @@ function useConfirmDeleteThread(
 ) {
   return useCallback(
     (thread: EnvironmentThreadShell) => {
+      if (!threadListV2AllowsGenericUnsupportedActions(thread)) return;
       if (!checkThreadOperationPermission(thread, actionFailureTitle("delete"))) return;
       const title = "Delete thread?";
       const message = `“${thread.title}” will be permanently deleted, including its terminal history.`;
@@ -281,6 +334,7 @@ export function useThreadListActions(): {
 
   const archiveThread = useCallback(
     (thread: EnvironmentThreadShell) => {
+      if (!threadListV2AllowsGenericUnsupportedActions(thread)) return;
       void executeAction("archive", thread);
     },
     [executeAction],
@@ -493,6 +547,7 @@ export function useThreadListActions(): {
   );
   const regenerateThreadTitle = useCallback(
     async (thread: EnvironmentThreadShell) => {
+      if (!threadListV2AllowsGenericUnsupportedActions(thread)) return false;
       if (!checkThreadOperationPermission(thread, "Could not regenerate title")) return false;
       const key = scopedThreadKey(thread.environmentId, thread.id);
       if (
@@ -535,6 +590,7 @@ export function useThreadListActions(): {
   );
   const renameThread = useCallback(
     (thread: EnvironmentThreadShell) => {
+      if (!threadListV2AllowsGenericUnsupportedActions(thread)) return;
       const commit = (title: string) => {
         const resolution = resolveThreadTitleRename({ title, originalTitle: thread.title });
         if (resolution.action === "reject-empty") {

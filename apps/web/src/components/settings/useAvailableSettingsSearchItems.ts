@@ -16,6 +16,7 @@ import {
   filterAvailableSettingsSearchItems,
   getThreadAutoSettlementSearchAvailability,
 } from "./settingsSearch";
+import { enabledAgentMarketplaces } from "../agents/nativeAgentAvailability";
 
 export function useAvailableSettingsSearchItems(scopeSearch: SettingsScopeSearch = {}) {
   const { environments } = useEnvironments();
@@ -61,7 +62,17 @@ export function useAvailableSettingsSearchItems(scopeSearch: SettingsScopeSearch
         hasThreadAutoSettlement:
           getThreadAutoSettlementSearchAvailability(environments).eligibleEnvironmentIds.length > 0,
         managedTunnelActive,
-      }),
+      }).filter(
+        (item) =>
+          item.to !== "/settings/marketplace" ||
+          environments.some(
+            (environment) =>
+              (scopeSearch.machine === undefined ||
+                environment.environmentId === scopeSearch.machine) &&
+              enabledAgentMarketplaces(environment.serverConfig?.settings.providerInstances)
+                .length > 0,
+          ),
+      ),
     [
       managedTunnelActive,
       canManageLocalBackend,

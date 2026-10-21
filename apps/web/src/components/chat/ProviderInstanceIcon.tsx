@@ -17,6 +17,12 @@ import {
 /** The native Grok Bot provider has no package client; its logo is a static asset. */
 export const GROK_BOT_DRIVER_KIND = ProviderDriverKind.make("grok-bot");
 
+/** Native agents whose logo is a static asset rather than a package glyph. */
+const STATIC_LOGO_BY_PROVIDER: Partial<Record<ProviderDriverKind, string>> = {
+  [GROK_BOT_DRIVER_KIND]: "/grok-bot-logo.png",
+  [ProviderDriverKind.make("muse-agent")]: "/muse-logo.png",
+};
+
 const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>> = {
   [ProviderDriverKind.make("codex")]: OpenAI,
   [ProviderDriverKind.make("claudeAgent")]: ClaudeAI,
@@ -72,6 +78,7 @@ export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {
   indicatorBackground?: string;
 }) {
   const Icon = PROVIDER_ICON_BY_PROVIDER[props.driverKind] ?? null;
+  const staticLogo = STATIC_LOGO_BY_PROVIDER[props.driverKind] ?? null;
   const packageIcon = providerClients.get(props.driverKind)?.icon;
   const indicatorBackground = props.indicatorBackground ?? "var(--card)";
   const accentStyle = props.accentColor
@@ -102,12 +109,12 @@ export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {
           fallbackClassName="size-full"
           icon={acpRegistryIconUrl}
         />
-      ) : props.driverKind === GROK_BOT_DRIVER_KIND ? (
+      ) : staticLogo !== null ? (
         <img
-          src="/grok-bot-logo.png"
+          src={staticLogo}
           alt=""
           draggable={false}
-          // The artwork covers ~77% of the 256px canvas; scaling the box
+          // Both logos cover ~200px of their 256px canvas; scaling the box
           // (not the layout) matches the optical size of the 16px SVG peers.
           className={cn("size-5 shrink-0 scale-[1.28] object-contain", props.iconClassName)}
           aria-hidden

@@ -132,7 +132,7 @@ const make = Effect.gen(function* () {
     // a canonical thread. Create it here, with the same receipt id `open` uses, so
     // bots never opened in T3 are searchable without a pin or any provider turn.
     if (Option.isNone(thread) && title !== undefined) {
-      const { projectId } = yield* folders.ensureScratchProject;
+      const { projectId } = yield* folders.ensureNativeAgentProject;
       const project = yield* projects.getShell(projectId);
       if (Option.isNone(project)) return;
       const currentSettings = yield* settings.getSettings;
@@ -320,14 +320,8 @@ const make = Effect.gen(function* () {
         let thread = Option.getOrUndefined(previous);
         const bot = (yield* bots.list).find((entry) => entry.id === input.botId);
         if (bot === undefined) return yield* new GrokBotError({ reason: "bot_not_found" });
-        const { projectId } = yield* folders.ensureScratchProject.pipe(
-          Effect.catchTags({
-            ScratchUnavailableError: () =>
-              Effect.fail(new GrokBotThreadError({ reason: "scratch_unavailable" })),
-          }),
-          Effect.mapError((error) =>
-            error._tag === "GrokBotThreadError" ? error : storageError(),
-          ),
+        const { projectId } = yield* folders.ensureNativeAgentProject.pipe(
+          Effect.mapError(storageError),
         );
         const project = yield* projects.getShell(projectId).pipe(Effect.mapError(storageError));
         if (Option.isNone(project)) return yield* storageError();

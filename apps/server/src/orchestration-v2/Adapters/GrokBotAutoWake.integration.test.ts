@@ -36,7 +36,7 @@ import {
 } from "./GrokBotProvider.testkit.ts";
 
 it.effect.each(["user_follow_up", "user_input", "command"] as const)(
-  "sends an automatic wake and restarts the native bot for %s without stopping its child",
+  "delivers %s without steering the native bot or stopping its child",
   (kind) =>
     Effect.gen(function* () {
       const fixture = yield* makeTurn;
@@ -304,16 +304,22 @@ it.effect.each(["user_follow_up", "user_input", "command"] as const)(
         }
         yield* worker.drain();
         const projection = yield* orchestrator.getThreadProjection(threadId);
-        assert.equal(interrupts, 1);
-        assert.lengthOf(sent, 2);
+        assert.equal(interrupts, kind === "user_follow_up" ? 0 : 1);
+        assert.lengthOf(sent, kind === "user_follow_up" ? 1 : 2);
         assert.equal(
           projection.attempts.find((attempt) => attempt.id === first.activeAttemptId)?.status,
-          "superseded",
+          kind === "user_follow_up" ? "running" : "superseded",
         );
-        assert.notEqual(
-          projection.runs.find((run) => run.id === first.id)?.activeAttemptId,
-          first.activeAttemptId,
-        );
+        const activeAttemptId = projection.runs.find((run) => run.id === first.id)?.activeAttemptId;
+        if (kind === "user_follow_up") {
+          assert.equal(activeAttemptId, first.activeAttemptId);
+          assert.equal(
+            projection.runs.find((run) => run.userMessageId === "user:follow-up")?.status,
+            "queued",
+          );
+        } else {
+          assert.notEqual(activeAttemptId, first.activeAttemptId);
+        }
         assert.equal(projection.runs.find((run) => run.id === first.id)?.status, "running");
         assert.lengthOf(
           projection.messages.filter((message) => message.notification !== undefined),

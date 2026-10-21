@@ -11,6 +11,7 @@ import {
   type ChatAttachment,
   CommandId,
   isGrokBotBackingThread,
+  isNativeAgentBackingThread,
   MessageId,
   OrchestrationV2StopWorkflowError,
   type OrchestrationV2StopWorkflowInput,
@@ -771,7 +772,9 @@ const make = Effect.gen(function* () {
           targetRunId: steerableRun.id,
         };
       } else if (input.mode === "auto" && steerableRun !== undefined) {
-        dispatchMode = { type: "steer_active", targetRunId: steerableRun.id };
+        dispatchMode = isNativeAgentBackingThread(target.thread)
+          ? { type: "queue_after_active" }
+          : { type: "steer_active", targetRunId: steerableRun.id };
       } else {
         dispatchMode = {
           type: input.mode === "queue" ? "queue_after_active" : "start_immediately",

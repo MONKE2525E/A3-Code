@@ -150,6 +150,44 @@ it.effect("offers nothing when the data dir sits inside a Git checkout", () =>
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
+it.effect(
+  "opens native agent storage inside a checkout and recreates it without changing the project",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const checkout = yield* fs.makeTempDirectoryScoped({ prefix: "t3-native-storage-" });
+      yield* git(checkout, ["init", "--quiet"]);
+      const baseDir = path.join(checkout, ".t3");
+      yield* fs.makeDirectory(baseDir);
+      yield* Effect.gen(function* () {
+        const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+        const projects = yield* ProjectService.ProjectService;
+        assert.equal(
+          (yield* Effect.flip(folders.ensureScratchProject))._tag,
+          "ScratchUnavailableError",
+        );
+        const first = yield* folders.ensureNativeAgentProject;
+        const project = Option.getOrThrow(yield* projects.getById(first.projectId));
+        const expectedRoot = path.join(baseDir, "native-agents");
+        assert.equal(project.workspaceRoot, expectedRoot);
+        assert.equal(
+          (yield* git(expectedRoot, ["rev-parse", "--show-toplevel"])).stdout.trim(),
+          expectedRoot,
+        );
+        assert.deepEqual(
+          yield* Effect.all([folders.ensureNativeAgentProject, folders.ensureNativeAgentProject], {
+            concurrency: 2,
+          }),
+          [first, first],
+        );
+        yield* fs.remove(expectedRoot, { recursive: true });
+        assert.deepEqual(yield* folders.ensureNativeAgentProject, first);
+        assert.isTrue(yield* fs.exists(path.join(expectedRoot, ".git")));
+      }).pipe(Effect.provide(layer(baseDir)));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
 it.effect("offers a Scratch folder when Git is not installed", () =>
   withScratch(
     ({ baseDir }) =>
@@ -602,4 +640,50 @@ it.effect("removes the folder when the repository cannot be made", () =>
       }),
     },
   ),
+);
+
+it.effect.each(["NotFound", "PermissionDenied"] as const)(
+  "native storage handles Git spawn $0 without masking other failures",
+  (reason) =>
+    withScratch(
+      ({ baseDir }) =>
+        Effect.gen(function* () {
+          const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+          const projects = yield* ProjectService.ProjectService;
+          if (reason === "NotFound") {
+            const first = yield* folders.ensureNativeAgentProject;
+            assert.deepEqual(yield* folders.ensureNativeAgentProject, first);
+            const project = Option.getOrThrow(yield* projects.getById(first.projectId));
+            const path = yield* Path.Path;
+            assert.equal(project.workspaceRoot, path.join(baseDir, "native-agents"));
+            const fs = yield* FileSystem.FileSystem;
+            assert.isTrue(yield* fs.exists(project.workspaceRoot));
+          } else {
+            assert.equal(
+              (yield* Effect.flip(folders.ensureNativeAgentProject))._tag,
+              "ScratchFolderError",
+            );
+            assert.deepEqual((yield* projects.snapshot).projects, []);
+          }
+        }),
+      {
+        git: Layer.mock(GitVcsDriver.GitVcsDriver)({
+          execute: (input) =>
+            Effect.fail(
+              new GitCommandError({
+                operation: input.operation,
+                command: "git",
+                cwd: input.cwd,
+                detail: "Failed to spawn Git process.",
+                cause: PlatformError.systemError({
+                  _tag: reason,
+                  module: "ChildProcess",
+                  method: "spawn",
+                  syscall: "spawn git",
+                }),
+              }),
+            ),
+        }),
+      },
+    ),
 );

@@ -5,6 +5,7 @@ import type {
 import { LegendList } from "@legendapp/list/react-native";
 import {
   AuthOrchestrationOperateScope,
+  nativeAgentSourceForThread,
   type EnvironmentId,
   type EnvironmentMachineKind,
   resolveEnvironmentMachineKind,
@@ -257,6 +258,7 @@ function ArchivedThreadRow(props: {
       containerStyle={containerStyle}
       fullSwipeWidth={windowWidth - 32}
       onDelete={props.onDelete}
+      secondaryAction={nativeAgentSourceForThread(props.thread) === "muse-agent" ? null : undefined}
       onSwipeableClose={props.onSwipeableClose}
       onSwipeableWillOpen={props.onSwipeableWillOpen}
       primaryAction={{

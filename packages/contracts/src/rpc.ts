@@ -50,6 +50,18 @@ import {
   ChatGptHandoffState,
 } from "./providerSetup.ts";
 import * as Schema from "effect/Schema";
+import { MuseAgentOpenThreadInput, MuseAgentOpenThreadResult } from "./museAgent.ts";
+import {
+  MuseAgentClientProfile,
+  MuseAgentConnectionStatus,
+  MuseAgentReadProfileInput,
+  NativeAgentError,
+  NativeAgentFeatureReadInput,
+  NativeAgentFeatureReadResult,
+  NativeAgentFeatureUpdateInput,
+  NativeAgentFeatureUpdateResult,
+} from "./nativeAgentApi.ts";
+import { NativeAgentOpenThreadInput, NativeAgentOpenThreadResult } from "./nativeAgents.ts";
 import {
   GrokBot,
   GrokBotStatus,
@@ -469,6 +481,15 @@ import {
 import { Project, ProjectMutation, ProjectMutationError } from "./project.ts";
 
 export const WS_METHODS = {
+  museAgentsStatus: "museAgents.status",
+  museAgentsFeatureRead: "museAgents.featureRead",
+  museAgentsFeatureUpdate: "museAgents.featureUpdate",
+  museAgentsSetup: "museAgents.setup",
+  museAgentsSignIn: "museAgents.signIn",
+  museAgentsCloseSignIn: "museAgents.closeSignIn",
+  museAgentsProfile: "museAgents.profile",
+  museAgentsOpenThread: "museAgents.open",
+  nativeAgentsOpenThread: "aiAgents.openThread",
   grokBotsTeachRead: "grokBots.teachRead",
   grokBotsTeachStart: "grokBots.teachStart",
   grokBotsTeachStop: "grokBots.teachStop",
@@ -2193,6 +2214,52 @@ export const WsRpcGroup = RpcGroup.make(
     payload: GrokBotOpenThreadInput,
     success: GrokBotOpenThreadResult,
     error: Schema.Union([GrokBotError, GrokBotOrchestratorError, GrokBotThreadError]),
+  }),
+  Rpc.make(WS_METHODS.museAgentsStatus, {
+    payload: Schema.Struct({}),
+    success: MuseAgentConnectionStatus,
+    error: NativeAgentError,
+  }),
+  Rpc.make(WS_METHODS.museAgentsFeatureRead, {
+    payload: NativeAgentFeatureReadInput,
+    success: NativeAgentFeatureReadResult,
+    error: NativeAgentError,
+  }),
+  Rpc.make(WS_METHODS.museAgentsFeatureUpdate, {
+    payload: NativeAgentFeatureUpdateInput,
+    success: NativeAgentFeatureUpdateResult,
+    error: NativeAgentError,
+  }),
+  Rpc.make(WS_METHODS.museAgentsSetup, {
+    payload: Schema.Struct({}),
+    success: MuseAgentConnectionStatus,
+    error: NativeAgentError,
+  }),
+  Rpc.make(WS_METHODS.museAgentsCloseSignIn, {
+    payload: Schema.Struct({
+      threadId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
+    }),
+    error: EnvironmentAuthorizationError,
+  }),
+  Rpc.make(WS_METHODS.museAgentsSignIn, {
+    payload: Schema.Struct({}),
+    success: Schema.Struct({ threadId: Schema.String, tabId: Schema.String }),
+    error: Schema.Union([NativeAgentError, EnvironmentAuthorizationError]),
+  }),
+  Rpc.make(WS_METHODS.museAgentsProfile, {
+    payload: MuseAgentReadProfileInput,
+    success: MuseAgentClientProfile,
+    error: NativeAgentError,
+  }),
+  Rpc.make(WS_METHODS.museAgentsOpenThread, {
+    payload: MuseAgentOpenThreadInput,
+    success: MuseAgentOpenThreadResult,
+    error: NativeAgentError,
+  }),
+  Rpc.make(WS_METHODS.nativeAgentsOpenThread, {
+    payload: NativeAgentOpenThreadInput,
+    success: NativeAgentOpenThreadResult,
+    error: NativeAgentError,
   }),
   Rpc.make(WS_METHODS.grokBotsOrchestratorConfig, {
     payload: GrokBotOrchestratorInput,

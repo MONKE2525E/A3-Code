@@ -3514,3 +3514,96 @@ it.effect("publishes live events in commit order across concurrent writers", () 
     }).pipe(Effect.provide(layerEventSink));
   }).pipe(Effect.provide(layerDatabase)),
 );
+
+it.effect.each([false, true])(
+  "persists Muse position corrections across a batch and rebuild (batch=%s)",
+  (batch) =>
+    Effect.gen(function* () {
+      const sink = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      const sql = yield* SqlClient.SqlClient;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make(`thread:muse-positions:${batch}`);
+      yield* sink.write({
+        events: [
+          threadCreatedEvent({ id: `create:${threadId}`, thread: makeThread(threadId, now), now }),
+        ],
+      });
+      const event = (id: string, sequence?: number, suffix = ""): OrchestrationV2DomainEvent => ({
+        id: EventId.make(`event:${id}:${suffix}`),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: TurnItemId.make(id),
+          threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          parentItemId: null,
+          ordinal: 0,
+          status: "completed",
+          title: null,
+          nativeItemRef:
+            sequence === undefined
+              ? null
+              : {
+                  driver: ProviderDriverKind.make("muse-agent"),
+                  nativeId: id,
+                  strength: "strong",
+                },
+          ...(sequence === undefined ? {} : { canonicalNativeSequence: sequence }),
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+          type: "user_message",
+          messageId: MessageId.make(id),
+          createdBy: "user",
+          creationSource: "provider",
+          inputIntent: "turn_start",
+          text: id,
+          attachments: [],
+        },
+      });
+      yield* sink.write({ events: [event("managed")] });
+      if (batch) {
+        const written = yield* sink.write({ events: [event("b", 0), event("a", 0)] });
+        const items = written.flatMap(({ event }) =>
+          event.type === "turn-item.updated" ? [event.payload] : [],
+        );
+        assert.strictEqual(items.find((item) => item.id === "a")?.ordinal, 2);
+        assert.strictEqual(items.find((item) => item.id === "b")?.ordinal, 3);
+      } else {
+        yield* sink.write({ events: [event("a", 1), event("b", 0)] });
+        const written = yield* sink.write({ events: [event("a", 0, "correction")] });
+        const shifted = written.find(
+          ({ event }) => event.type === "turn-item.updated" && event.payload.id === "b",
+        );
+        assert.equal(shifted?.event.type, "turn-item.updated");
+        if (shifted?.event.type === "turn-item.updated")
+          assert.strictEqual(shifted.event.payload.ordinal, 3);
+      }
+      const read = () =>
+        Effect.forEach(["managed", "a", "b"], (id) =>
+          projections.getTurnItem({ threadId, itemId: TurnItemId.make(id) }),
+        );
+      const before = yield* read();
+      assert.deepEqual(
+        before.map((item) => item?.ordinal),
+        [1, 2, 3],
+      );
+      yield* maintenance.rebuild;
+      assert.deepEqual(yield* read(), before);
+      const positions = yield* sql<{
+        readonly ordinal: number;
+      }>`SELECT ordinal FROM orchestration_v2_turn_item_positions WHERE thread_id = ${threadId} ORDER BY ordinal`;
+      assert.deepEqual(
+        positions.map((row) => row.ordinal),
+        [1, 2, 3],
+      );
+      yield* sink.write({ events: [event("a", 0, "replay"), event("b", 0, "replay")] });
+      assert.deepEqual(yield* read(), before);
+    }).pipe(Effect.provide(layerTest)),
+);

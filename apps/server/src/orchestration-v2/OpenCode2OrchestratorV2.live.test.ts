@@ -68,7 +68,7 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as ProviderTurnStartServiceTestkit from "./ProviderTurnStartService.testkit.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
-import * as GrokBotProviderServicesTestkit from "../grokBot/GrokBotProviderServices.testkit.ts";
+import * as NativeAgentProviderServicesTestkit from "../nativeAgents/NativeAgentProviderServices.testkit.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as ProviderContinuationService from "./ProviderContinuationService.ts";
@@ -220,7 +220,7 @@ const layerOrchestration = RuntimeLayer.layer.pipe(
   Layer.provide(layerBackgroundPolicy),
   Layer.provide(layerPlatformTest),
   Layer.provide(McpProviderSessions.layer),
-  Layer.provide(GrokBotProviderServicesTestkit.layer),
+  Layer.provide(NativeAgentProviderServicesTestkit.layer),
 );
 
 // Starts the continuation run a provider wake asks for, as the production layer does.
