@@ -4,7 +4,7 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { useEffect, useState, type ReactNode } from "react";
+import { createContext, use, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Alert,
   AccessibilityInfo,
@@ -15,10 +15,10 @@ import {
   View,
 } from "react-native";
 
-import { AppActivityIndicator } from "../../components/AppActivityIndicator";
-import { SymbolView } from "../../components/AppSymbol";
+import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { EnvironmentMachineSymbol } from "../../components/EnvironmentMachineSymbol";
-import { useAndroidControlSizing } from "../../components/useAndroidControlSizing";
+import { useAndroidControlSizing } from "../../components/ui/useAndroidControlSizing";
 import {
   brandTitleOffset,
   CompactBrandTitle,
@@ -53,19 +53,40 @@ const supervisorPhasesAtom = Atom.make((get) => {
   return phases;
 }).pipe(Atom.withLabel("home:workspace-supervisor-phases"));
 
-/**
- * Debounce brief interruptions; hide device status immediately on recovery.
- */
-function useDelayedDeviceStatus(hasUnavailableDevice: boolean) {
-  const [visible, setVisible] = useState(false);
+type ConnectionDevices = {
+  readonly devices: ReadonlyArray<WorkspaceDeviceStatus>;
+  readonly fadeIn: boolean;
+};
+const ConnectionStatusContext = createContext<ConnectionDevices | null>(null);
+
+export function WorkspaceConnectionStatusProvider(props: { readonly children: ReactNode }) {
+  const { state, environments } = useWorkspaceState();
+  const { machineByEnvironmentId } = useAtomValue(threadListEnvironmentsAtom);
+  const phaseByEnvironmentId = useAtomValue(supervisorPhasesAtom);
+  const devices = workspaceDeviceStatuses(
+    environments,
+    machineByEnvironmentId,
+    phaseByEnvironmentId,
+    state.networkStatus,
+  );
+  const hasStatus = devices.some((device) => !device.isConnected);
+  const [phase, setPhase] = useState<"waiting" | "fading" | "shown">("waiting");
   useEffect(() => {
-    const timer = setTimeout(
-      () => setVisible(hasUnavailableDevice),
-      hasUnavailableDevice ? STATUS_SHOW_DELAY_MS : 0,
-    );
-    return () => clearTimeout(timer);
-  }, [hasUnavailableDevice]);
-  return visible && hasUnavailableDevice;
+    if (!hasStatus) return;
+    const timers = [
+      setTimeout(() => setPhase("fading"), STATUS_SHOW_DELAY_MS),
+      setTimeout(() => setPhase("shown"), STATUS_SHOW_DELAY_MS + FADE_IN_MS),
+    ];
+    return () => {
+      timers.forEach(clearTimeout);
+      setPhase("waiting");
+    };
+  }, [hasStatus]);
+  const status = useMemo(
+    () => (hasStatus && phase !== "waiting" ? { devices, fadeIn: phase === "fading" } : null),
+    [devices, hasStatus, phase],
+  );
+  return <ConnectionStatusContext value={status}>{props.children}</ConnectionStatusContext>;
 }
 
 /** Defaults to reduced motion until the system preference resolves, so nothing animates early. */
@@ -95,10 +116,12 @@ function StatusFadeIn(props: {
   readonly grow?: boolean;
   readonly maxWidth?: number;
   readonly reducedMotion: boolean;
+  readonly animate: boolean;
 }) {
   const [opacity] = useState(() => new Animated.Value(0));
 
   useEffect(() => {
+    if (!props.animate) return;
     const animation = Animated.timing(opacity, {
       duration: props.reducedMotion ? 0 : FADE_IN_MS,
       toValue: 1,
@@ -106,12 +129,17 @@ function StatusFadeIn(props: {
     });
     animation.start();
     return () => animation.stop();
-  }, [opacity, props.reducedMotion]);
+  }, [opacity, props.reducedMotion, props.animate]);
 
   return (
     <Animated.View
       style={[
-        { alignItems: "center", flexDirection: "row", maxWidth: props.maxWidth, opacity },
+        {
+          alignItems: "center",
+          flexDirection: "row",
+          maxWidth: props.maxWidth,
+          opacity: props.animate ? opacity : 1,
+        },
         props.grow ? { flex: 1, minWidth: 0 } : null,
       ]}
     >
@@ -267,22 +295,12 @@ export function WorkspaceConnectionTitle(props: {
   /** Space available beside the native header actions. */
   readonly maxWidth?: number;
 }) {
-  const { state, environments } = useWorkspaceState();
-  const { machineByEnvironmentId } = useAtomValue(threadListEnvironmentsAtom);
-  const phaseByEnvironmentId = useAtomValue(supervisorPhasesAtom);
+  const status = use(ConnectionStatusContext);
   const reducedMotion = useReducedMotionPreference();
   const size = props.size ?? "navbar";
   const { scale } = useAndroidControlSizing();
 
-  const devices = workspaceDeviceStatuses(
-    environments,
-    machineByEnvironmentId,
-    phaseByEnvironmentId,
-    state.networkStatus,
-  );
-  const showsDevices = useDelayedDeviceStatus(devices.some((device) => !device.isConnected));
-
-  if (!showsDevices) {
+  if (status === null) {
     return props.grow ? (
       <View style={{ alignItems: "center", flex: 1, flexDirection: "row", minWidth: 0 }}>
         {props.brand}
@@ -293,14 +311,19 @@ export function WorkspaceConnectionTitle(props: {
   }
 
   return (
-    <StatusFadeIn grow={props.grow} maxWidth={props.maxWidth} reducedMotion={reducedMotion}>
+    <StatusFadeIn
+      animate={status.fadeIn}
+      grow={props.grow}
+      maxWidth={props.maxWidth}
+      reducedMotion={reducedMotion}
+    >
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
         style={{ flexShrink: 1, marginLeft: props.statusOffset ?? 0 }}
         contentContainerStyle={{ alignItems: "center" }}
       >
-        {devices.map((device) => (
+        {status.devices.map((device) => (
           <DeviceStatusIcon
             key={device.environmentId}
             device={device}

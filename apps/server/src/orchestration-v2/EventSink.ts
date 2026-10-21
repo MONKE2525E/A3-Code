@@ -4,6 +4,7 @@ import {
   type OrchestrationV2Run,
   OrchestrationV2DomainEvent,
   OrchestrationV2RuntimeRequest,
+  type OrchestrationV2ProviderThread,
   OrchestrationV2StoredEvent,
   ProviderThreadId,
   RunAttemptId,
@@ -39,9 +40,6 @@ import * as ProjectStore from "./ProjectStore.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as GrokBotManagedStateStore from "../grokBot/GrokBotManagedStateStore.ts";
 
-/**
- * ERRORS
- */
 export class EventSinkWriteError extends Schema.TaggedError<EventSinkWriteError>()(
   "EventSinkWriteError",
   {
@@ -73,16 +71,27 @@ export class EventSinkStreamError extends Schema.TaggedError<EventSinkStreamErro
 export const EventSinkV2Error = Schema.Union([EventSinkWriteError, EventSinkStreamError]);
 export type EventSinkV2Error = typeof EventSinkV2Error.Type;
 
-/**
- * SERVICE DEFINITION
- */
 export interface EventSinkV2Shape {
   readonly write: (input: {
+    /** Return no events if another thread owns this native session at commit time. */
+    readonly unlessNativeThreadOwned?: Pick<
+      OrchestrationV2ProviderThread,
+      "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
+    >;
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly writeWithEffects: (input: {
+    /**
+     * Rebuilds each run.updated from the stored row with only its delegatedCompletion replaced.
+     * The batch must not also change that run's lifecycle.
+     */
+    readonly updateDelegatedCompletionOnly?: boolean;
+    readonly unlessNativeThreadOwned?: Pick<
+      OrchestrationV2ProviderThread,
+      "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
+    >;
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
@@ -125,6 +134,22 @@ export interface EventSinkV2Shape {
     },
     EventSinkV2Error
   >;
+  /**
+   * Atomically commit only while the stored provider thread still equals
+   * `expected`, the row its writer read, so a read-modify-write of the row
+   * cannot overwrite an update published in between. The whole row is
+   * compared because not every writer moves `updatedAt`.
+   */
+  readonly writeIfProviderThreadUnchanged: (input: {
+    readonly expected: OrchestrationV2ProviderThread;
+    readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+  }) => Effect.Effect<
+    {
+      readonly committed: boolean;
+      readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
+    },
+    EventSinkV2Error
+  >;
   readonly commitCommand: (input: {
     readonly commandId: CommandId;
     readonly threadId: ThreadId;
@@ -152,10 +177,6 @@ export interface EventSinkV2Shape {
     readonly rejectedAt: DateTime.Utc;
     readonly error: string;
   }) => Effect.Effect<CommandReceiptStore.CommandReceiptV2, EventSinkV2Error>;
-  /**
-   * Append a project event, fold it into its row and record the receipt in one
-   * transaction. A reused command id commits nothing and returns its receipt.
-   */
   readonly commitProjectCommand: (input: {
     readonly commandId: CommandId;
     readonly projectId: ProjectId;
@@ -166,7 +187,6 @@ export interface EventSinkV2Shape {
     { readonly receipt: CommandReceiptStore.ProjectCommandReceiptV2; readonly committed: boolean },
     EventSinkV2Error
   >;
-  /** Record a rejected project command, or return the receipt its command id already has. */
   readonly commitRejectedProjectCommand: (input: {
     readonly commandId: CommandId;
     readonly projectId: ProjectId;
@@ -177,7 +197,6 @@ export interface EventSinkV2Shape {
   readonly stream: (input?: {
     readonly threadId?: ThreadId;
     readonly afterSequence?: number;
-    /** Filter before queuing live events so a busy worker retains only the events it handles. */
     readonly eventType?: OrchestrationV2DomainEvent["type"];
     /** Bound RPC subscribers; internal workers must not drop their subscription under load. */
     readonly bounded?: boolean;
@@ -234,8 +253,9 @@ const layerBase: Layer.Layer<
       OrchestrationV2DomainEvent["type"],
       PubSub.PubSub<OrchestrationV2StoredEvent>
     >();
-    const publishLiveEvents = (events: ReadonlyArray<OrchestrationV2StoredEvent>) =>
-      Effect.gen(function* () {
+    const publishLiveEvents =
+      /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
+      Effect.fnUntraced(function* (events: ReadonlyArray<OrchestrationV2StoredEvent>) {
         yield* PubSub.publishAll(liveEvents, events);
         for (const [type, pubsub] of liveEventsByType) {
           yield* PubSub.publishAll(
@@ -250,10 +270,7 @@ const layerBase: Layer.Layer<
     // Transactions commit one at a time, but each writer publishes after its
     // commit. If a writer is descheduled in between, a later commit reaches
     // subscribers first, and clients drop any event at or below the newest
-    // sequence they have applied. So a writer takes this lane as the last step
-    // of its transaction and holds it until it has published. Publishing never
-    // waits, so a writer that holds the transaction while it waits for the
-    // lane is not blocked for long.
+    // sequence they have applied.
     const publishLane = yield* Semaphore.make(1);
     const commitThenPublish = <A, E, R>(
       transaction: Effect.Effect<A, E, R>,
@@ -279,11 +296,11 @@ const layerBase: Layer.Layer<
           );
       });
 
-    // A user can answer after terminal normalization reads the pending request, and native cleanup
-    // can arrive as a separate write from the request it clears. Recheck each cancelled question
-    // against the stored request inside the write transaction so stale cleanup cannot erase answers.
-    const guardUserInputCancellations = (events: ReadonlyArray<OrchestrationV2DomainEvent>) =>
-      Effect.gen(function* () {
+    // A user can answer after terminal normalization reads the pending request.
+    // Recheck inside the write transaction so stale cleanup cannot erase answers.
+    const guardUserInputCancellations =
+      /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
+      Effect.fnUntraced(function* (events: ReadonlyArray<OrchestrationV2DomainEvent>) {
         const staleRequests = new Set<RuntimeRequestId>();
         for (const event of events) {
           const question =
@@ -423,33 +440,35 @@ const layerBase: Layer.Layer<
       // this read and retains its answer, or sees the committed settled turn and is refused.
       return [...answers, ...events];
     });
-    const normalizeEvents = (input: ReadonlyArray<OrchestrationV2DomainEvent>) =>
-      Effect.gen(function* () {
-        const events = yield* retainManagedAnswers(input);
-        const runOrdinals = new Map(
-          events.flatMap((event) =>
-            event.type === "run.created" || event.type === "run.updated"
-              ? [[event.payload.id, event.payload.ordinal] as const]
-              : [],
-          ),
-        );
-        return yield* Effect.forEach(
-          events,
-          (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
-            event.type === "turn-item.updated"
-              ? turnItemPositions
-                  .normalize(
-                    event.payload,
-                    event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
-                  )
-                  .pipe(Effect.map((payload) => ({ ...event, payload })))
-              : Effect.succeed(event),
-          { concurrency: 1 },
-        );
-      });
+    const normalizeEvents = Effect.fn("EventSink.normalizeEvents")(function* (
+      input: ReadonlyArray<OrchestrationV2DomainEvent>,
+    ) {
+      const events = yield* retainManagedAnswers(input);
+      const runOrdinals = new Map(
+        events.flatMap((event) =>
+          event.type === "run.created" || event.type === "run.updated"
+            ? [[event.payload.id, event.payload.ordinal] as const]
+            : [],
+        ),
+      );
+      return yield* Effect.forEach(
+        events,
+        (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
+          event.type === "turn-item.updated"
+            ? turnItemPositions
+                .normalize(
+                  event.payload,
+                  event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
+                )
+                .pipe(Effect.map((payload) => ({ ...event, payload })))
+            : Effect.succeed(event),
+        { concurrency: 1 },
+      );
+    });
 
-    const applyStoredEvents = (storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>) =>
-      Effect.gen(function* () {
+    const applyStoredEvents =
+      /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
+      Effect.fnUntraced(function* (storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>) {
         yield* Effect.forEach(storedEvents, (stored) => projectionStore.apply(stored.event), {
           concurrency: 1,
         });
@@ -492,13 +511,13 @@ const layerBase: Layer.Layer<
               schema_version,
               last_sequence,
               updated_at
-            )
+              )
             VALUES (
               'thread-projections',
               ${ProjectionStore.ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION},
               ${sequence},
               ${now}
-            )
+              )
             ON CONFLICT(projection_name)
             DO UPDATE SET
               schema_version = excluded.schema_version,
@@ -519,10 +538,48 @@ const layerBase: Layer.Layer<
 
       return yield* commitThenPublish(
         Effect.gen(function* () {
+          // Check ownership in the same transaction that claims the native session.
+          const imported = input.unlessNativeThreadOwned;
+          if (imported?.nativeThreadRef != null) {
+            const owners = yield* sql`
+              SELECT provider_thread_id
+            FROM orchestration_v2_projection_provider_threads
+              WHERE driver = ${imported.driver}
+                AND provider_instance_id = ${imported.providerInstanceId}
+                AND thread_id IS NOT ${imported.appThreadId}
+                AND json_extract(payload_json, '$.nativeThreadRef.nativeId') = ${imported.nativeThreadRef.nativeId}
+            LIMIT 1
+          `;
+            if (owners.length > 0) return [];
+          }
+          // Checkpoint capture can finish after a cohort writer reads its parent run.
+          // Merge in this transaction so the event log and projection keep that completion.
+          const events = input.updateDelegatedCompletionOnly
+            ? yield* Effect.forEach(input.events, (event) =>
+                Effect.gen(function* () {
+                  if (event.type !== "run.updated") return event;
+                  const { runs } = yield* projectionStore.getThreadRecords(
+                    event.threadId,
+                    ["runs"],
+                    { runIds: [event.payload.id] },
+                  );
+                  const current = runs[0];
+                  return current === undefined
+                    ? event
+                    : {
+                        ...event,
+                        payload: {
+                          ...current,
+                          delegatedCompletion: event.payload.delegatedCompletion,
+                        },
+                      };
+                }),
+              )
+            : input.events;
           const normalized = yield* normalizeEvents(
             input.guardPendingUserInputCancellations === true
-              ? yield* guardUserInputCancellations(input.events)
-              : input.events,
+              ? yield* guardUserInputCancellations(events)
+              : events,
           );
           const committed = yield* eventStore.append({
             ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
@@ -531,7 +588,7 @@ const layerBase: Layer.Layer<
           yield* applyStoredEvents(committed);
           yield* effectOutbox.enqueue(input.effects);
           return committed;
-        }),
+        }).pipe(Effect.withTracerEnabled(false)),
         (storedEvents) =>
           Effect.gen(function* () {
             if (input.effects.length > 0) {
@@ -658,8 +715,42 @@ const layerBase: Layer.Layer<
       );
     });
 
-    const existingCommandResult = (commandId: CommandId) =>
-      Effect.gen(function* () {
+    const writeIfProviderThreadUnchangedEffect = Effect.fn(
+      "orchestrationV2.EventSink.writeIfProviderThreadUnchanged",
+    )(function* (input: Parameters<EventSinkV2Shape["writeIfProviderThreadUnchanged"]>[0]) {
+      yield* Effect.annotateCurrentSpan({
+        "orchestration_v2.event_count": input.events.length,
+        "orchestration_v2.provider_thread_id": input.expected.id,
+      });
+      const expectedJson = yield* ProjectionStore.encodeProviderThreadPayload(input.expected);
+
+      return yield* commitThenPublish(
+        Effect.gen(function* () {
+          const rows = yield* sql<{ readonly payload_json: string }>`
+            SELECT payload_json
+            FROM orchestration_v2_projection_provider_threads
+            WHERE provider_thread_id = ${input.expected.id}
+            LIMIT 1
+          `;
+          if (rows[0]?.payload_json !== expectedJson) {
+            return {
+              committed: false as const,
+              storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
+            };
+          }
+
+          const normalized = yield* normalizeEvents(input.events);
+          const storedEvents = yield* eventStore.append({ events: normalized });
+          yield* applyStoredEvents(storedEvents);
+          return { committed: true as const, storedEvents };
+        }),
+        (result) => (result.committed ? publishStoredEvents(result.storedEvents) : Effect.void),
+      );
+    });
+
+    const existingCommandResult =
+      /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
+      Effect.fnUntraced(function* (commandId: CommandId) {
         const existing = yield* commandReceipts.getByCommandId(commandId);
         if (Option.isNone(existing)) {
           return yield* Effect.die(
@@ -953,6 +1044,12 @@ const layerBase: Layer.Layer<
               }),
           ),
         ),
+      writeIfProviderThreadUnchanged: (input) =>
+        writeIfProviderThreadUnchangedEffect(input).pipe(
+          Effect.mapError(
+            (cause) => new EventSinkWriteError({ eventCount: input.events.length, cause }),
+          ),
+        ),
       commitCommand: (input) =>
         commitCommandEffect(input).pipe(
           Effect.mapError(
@@ -1026,10 +1123,8 @@ const layerBase: Layer.Layer<
 );
 
 /**
- * Event sink layer for application compositions that already own the
- * persistence services. Keeping the outbox instance shared with the worker is
- * important because enqueue notifications are in-memory wakeups backed by the
- * durable SQL queue.
+ * Keeping the outbox instance shared with the worker is important because enqueue notifications
+ * are in-memory wakeups backed by the durable SQL queue.
  */
 export const layerFromStores = layerBase;
 

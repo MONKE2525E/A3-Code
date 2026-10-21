@@ -11,7 +11,7 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import * as Schema from "effect/Schema";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { requestConfirmDialog } from "~/confirmDialog";
 import { Collapsible, CollapsiblePanel } from "~/components/ui/collapsible";
@@ -91,13 +91,10 @@ function ConfiguredGrokBotSidebarDropdown() {
   const { isMobile, setOpenMobile } = useSidebar();
   // Refreshing on open and on focus means a profile edit made in the Grok Bot app shows
   // as soon as the user looks at the sidebar, instead of on the next poll.
-  const setOpenAndRefresh = useCallback(
-    (next: boolean) => {
-      setOpen(next);
-      if (next && environmentId !== null) refreshGrokBotRoster(appAtomRegistry, environmentId);
-    },
-    [environmentId, setOpen],
-  );
+  const setOpenAndRefresh = (next: boolean) => {
+    setOpen(next);
+    if (next && environmentId !== null) refreshGrokBotRoster(appAtomRegistry, environmentId);
+  };
   useEffect(() => {
     if (environmentId === null) return;
     const refreshWhenVisible = () => {
@@ -119,10 +116,7 @@ function ConfiguredGrokBotSidebarDropdown() {
   const roster = useEnvironmentQuery(
     environmentId !== null && ready ? grokBotsListQuery({ environmentId, input: {} }) : null,
   );
-  const { pinned, rows, hidden } = useMemo(
-    () => partitionGrokBotRoster(roster.data ?? []),
-    [roster.data],
-  );
+  const { pinned, rows, hidden } = partitionGrokBotRoster(roster.data ?? []);
   const [expiredRosterAt, setExpiredRosterAt] = useState(0);
   useEffect(() => {
     if (roster.failure === null) return;
@@ -143,44 +137,35 @@ function ConfiguredGrokBotSidebarDropdown() {
     ? decodeURIComponent(location.pathname.slice("/grok-bots/".length).split("/")[0] ?? "")
     : null;
 
-  const openBot = useCallback(
-    (botId: string) => {
-      if (isMobile) setOpenMobile(false);
-      void navigate({
-        to: "/grok-bots/$botId",
-        params: { botId },
-        search: environmentId ? { environmentId } : {},
-      });
-    },
-    [environmentId, isMobile, navigate, setOpenMobile],
-  );
+  const openBot = (botId: string) => {
+    if (isMobile) setOpenMobile(false);
+    void navigate({
+      to: "/grok-bots/$botId",
+      params: { botId },
+      search: environmentId ? { environmentId } : {},
+    });
+  };
 
-  const openHistory = useCallback(
-    (botId: string) => {
-      if (isMobile) setOpenMobile(false);
-      void navigate({
-        to: "/grok-bots/$botId",
-        params: { botId },
-        search: environmentId ? { environmentId, view: "history" } : { view: "history" },
-      });
-    },
-    [environmentId, isMobile, navigate, setOpenMobile],
-  );
+  const openHistory = (botId: string) => {
+    if (isMobile) setOpenMobile(false);
+    void navigate({
+      to: "/grok-bots/$botId",
+      params: { botId },
+      search: environmentId ? { environmentId, view: "history" } : { view: "history" },
+    });
+  };
 
-  const openSettings = useCallback(
-    (botId?: string) => {
-      if (isMobile) setOpenMobile(false);
-      void navigate({
-        to: "/settings/providers",
-        search: grokBotSettingsDestinationSearch({
-          environmentId: selectedEnvironmentId,
-          botId,
-        }),
-        hash: botId ? "grok-bots-editor" : "grok-bots-bridge",
-      });
-    },
-    [isMobile, navigate, selectedEnvironmentId, setOpenMobile],
-  );
+  const openSettings = (botId?: string) => {
+    if (isMobile) setOpenMobile(false);
+    void navigate({
+      to: "/settings/providers",
+      search: grokBotSettingsDestinationSearch({
+        environmentId: selectedEnvironmentId,
+        botId,
+      }),
+      hash: botId ? "grok-bots-editor" : "grok-bots-bridge",
+    });
+  };
 
   return (
     <SidebarGroup className="z-[1]">
@@ -353,19 +338,16 @@ function GrokBotRosterList({
   const [hiddenOpen, setHiddenOpen] = useState(false);
   const updateBot = useAtomCommand(grokBotsUpdate, { reportFailure: true });
   // The bot pin is the source of truth; its native thread follows it when one exists.
-  const togglePin = useCallback(
-    async (bot: GrokBot) => {
-      const nextPinned = !bot.pinned;
-      const result = await updateBot({
-        environmentId,
-        input: { botId: bot.id, pinned: nextPinned },
-      });
-      if (result._tag === "Success" && instanceId !== null) {
-        await syncBotPin({ ...bot, pinned: nextPinned }, instanceId);
-      }
-    },
-    [environmentId, instanceId, syncBotPin, updateBot],
-  );
+  const togglePin = async (bot: GrokBot) => {
+    const nextPinned = !bot.pinned;
+    const result = await updateBot({
+      environmentId,
+      input: { botId: bot.id, pinned: nextPinned },
+    });
+    if (result._tag === "Success" && instanceId !== null) {
+      await syncBotPin({ ...bot, pinned: nextPinned }, instanceId);
+    }
+  };
   const nativeNotice =
     readiness.kind === "unavailable" ||
     readiness.kind === "denied" ||

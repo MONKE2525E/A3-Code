@@ -42,7 +42,7 @@ import { useAtomValue } from "@effect/atom-react";
 import * as Clipboard from "expo-clipboard";
 import { useRef, useState } from "react";
 
-import { showConfirmDialog } from "../../components/ConfirmDialogHost";
+import { confirm as showConfirmDialog } from "../../components/ui/Dialog";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { useProjects, useThreadShell } from "../../state/entities";

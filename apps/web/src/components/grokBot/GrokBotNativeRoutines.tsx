@@ -1,3 +1,4 @@
+import { useNowMinute } from "../../hooks/useNowMinute";
 import { useAtomValue } from "@effect/atom-react";
 import {
   AuthOrchestrationOperateScope,
@@ -127,12 +128,13 @@ function NativeRoutineRow({
   const deleteRoutine = useAtomCommand(grokBotsDeleteRoutine, {
     label: "grok bot routine deleted",
   });
+  const nowMinute = useNowMinute();
   const nextIso = grokBotRoutineNextRunIso(routine.nextRunAt);
   const nextCopy = !routine.isEnabled
     ? "Paused"
     : nextIso === null
       ? "Not scheduled"
-      : `Next run ${relativeLabel(nextIso)}`;
+      : `Next run ${relativeLabel(nextIso, Date.parse(nowMinute))}`;
   const toggle = async () => {
     if (busy || !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)) return;
     setBusy(true);

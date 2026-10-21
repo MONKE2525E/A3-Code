@@ -41,23 +41,25 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
 
-    const allocate: TurnItemPositionStoreV2Shape["allocate"] = ({
-      threadId,
-      turnItemId,
-      runId,
-      runOrdinal: suppliedRunOrdinal,
-      advanceNativePosition = false,
-    }) =>
-      Effect.gen(function* () {
+    const allocate: TurnItemPositionStoreV2Shape["allocate"] = Effect.fn(
+      "TurnItemPositionStore.allocate",
+    )(
+      function* ({
+        threadId,
+        turnItemId,
+        runId,
+        runOrdinal: suppliedRunOrdinal,
+        advanceNativePosition = false,
+      }) {
         const runRows =
           runId === null
             ? []
             : yield* sql<{ readonly ordinal: number }>`
-                SELECT ordinal
+          SELECT ordinal
                 FROM orchestration_v2_projection_runs
                 WHERE thread_id = ${threadId} AND run_id = ${runId}
-                LIMIT 1
-              `;
+          LIMIT 1
+        `;
         const runOrdinal = suppliedRunOrdinal ?? runRows[0]?.ordinal ?? null;
         const lowerBound = runOrdinal === null ? 0 : runOrdinal * 1_000_000;
         const upperBound = runOrdinal === null ? 999_999 : lowerBound + 999_999;
@@ -90,18 +92,21 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
           });
         }
         return ordinal;
-      }).pipe(
-        Effect.mapError((cause) =>
-          isTurnItemPositionStoreError(cause)
-            ? cause
-            : new TurnItemPositionStoreError({ threadId, turnItemId, cause }),
+      },
+      (effect, { threadId, turnItemId }) =>
+        effect.pipe(
+          Effect.mapError((cause) =>
+            isTurnItemPositionStoreError(cause)
+              ? cause
+              : new TurnItemPositionStoreError({ threadId, turnItemId, cause }),
+          ),
         ),
-      );
+    );
 
     return TurnItemPositionStoreV2.of({
       allocate,
-      normalize: (item, runOrdinal) =>
-        Effect.gen(function* () {
+      normalize: Effect.fn("TurnItemPositionStore.normalize")(
+        function* (item, runOrdinal) {
           const nativeGrokMessage =
             item.runId === null &&
             item.nativeItemRef?.driver === "grok-bot" &&
@@ -112,7 +117,7 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
                   SELECT kind FROM orchestration_v2_projection_nodes
                   WHERE thread_id = ${item.threadId} AND node_id = ${item.nodeId}
                     AND kind = 'call_parent'
-                  LIMIT 1
+          LIMIT 1
                 `
               : [];
           const runlessChatMessage = nativeGrokMessage || callParents.length > 0;
@@ -136,17 +141,20 @@ export const layer: Layer.Layer<TurnItemPositionStoreV2, never, SqlClient.SqlCli
             ...(runlessChatMessage ? { advanceNativePosition: true } : {}),
           });
           return item.ordinal === ordinal ? item : { ...item, ordinal };
-        }).pipe(
-          Effect.mapError((cause) =>
-            isTurnItemPositionStoreError(cause)
-              ? cause
-              : new TurnItemPositionStoreError({
-                  threadId: item.threadId,
-                  turnItemId: item.id,
-                  cause,
-                }),
+        },
+        (effect, item) =>
+          effect.pipe(
+            Effect.mapError((cause) =>
+              isTurnItemPositionStoreError(cause)
+                ? cause
+                : new TurnItemPositionStoreError({
+                    threadId: item.threadId,
+                    turnItemId: item.id,
+                    cause,
+                  }),
+            ),
           ),
-        ),
+      ),
     });
   }),
 );

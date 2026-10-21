@@ -8,7 +8,6 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import { useParams } from "@tanstack/react-router";
-import { useCallback, useMemo } from "react";
 import { Atom } from "effect/reactivity";
 
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
@@ -38,12 +37,12 @@ import {
  */
 export function useGrokBotNativeReadiness(environmentId: EnvironmentId): GrokBotNativeReadiness {
   const config = useEnvironmentQuery(grokBotsOrchestratorConfigQuery({ environmentId, input: {} }));
-  return useMemo(() => {
+  return (() => {
     if (config.error && !isGrokBotReadinessTransportFailure(config.failure)) {
       return { kind: "denied", message: config.error };
     }
     return grokBotNativeReadiness(config.data);
-  }, [config.data, config.error, config.failure]);
+  })();
 }
 
 /** Resolve the canonical shell without waiting for a roster refresh or an open RPC. */
@@ -65,27 +64,23 @@ export function usePrefetchPinnedGrokBotThreads(
   environmentId: EnvironmentId,
   instanceId: ProviderInstanceId | null,
 ): void {
-  const prefetch = useMemo(
-    () =>
-      createThreadPrefetchAtom({
-        threadIdsAtom: Atom.make((get) =>
-          instanceId === null
-            ? []
-            : get(environmentThreadShells.environmentThreadsAtom(environmentId))
-                .filter(
-                  (thread) =>
-                    isGrokBotBackingThread(thread) &&
-                    thread.providerInstanceId === instanceId &&
-                    thread.archivedAt === null &&
-                    thread.pinnedAt != null,
-                )
-                .map((thread) => thread.id),
-        ),
-        stateAtom: (threadId) => environmentThreads.stateAtom(environmentId, threadId),
-        limit: 4,
-      }),
-    [environmentId, instanceId],
-  );
+  const prefetch = createThreadPrefetchAtom({
+    threadIdsAtom: Atom.make((get) =>
+      instanceId === null
+        ? []
+        : get(environmentThreadShells.environmentThreadsAtom(environmentId))
+            .filter(
+              (thread) =>
+                isGrokBotBackingThread(thread) &&
+                thread.providerInstanceId === instanceId &&
+                thread.archivedAt === null &&
+                thread.pinnedAt != null,
+            )
+            .map((thread) => thread.id),
+    ),
+    stateAtom: (threadId) => environmentThreads.stateAtom(environmentId, threadId),
+    limit: 4,
+  });
   useAtomMount(prefetch);
 }
 
@@ -110,53 +105,42 @@ export function useGrokBotNativeActions(environmentId: EnvironmentId) {
   const pinThread = useOrchestrationCommand(threadEnvironment.pin, { reportFailure: false });
   const unpinThread = useOrchestrationCommand(threadEnvironment.unpin, { reportFailure: false });
 
-  const threadsNow = useCallback(
-    () => appAtomRegistry.get(environmentThreadShells.environmentThreadsAtom(environmentId)),
-    [environmentId],
-  );
+  const threadsNow = () =>
+    appAtomRegistry.get(environmentThreadShells.environmentThreadsAtom(environmentId));
 
-  const setPinned = useCallback(
-    async (threadId: ThreadId, pinned: boolean) => {
-      const result = await (pinned ? pinThread : unpinThread)({
-        environmentId,
-        input: { threadId },
-      });
-      if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-    },
-    [environmentId, pinThread, unpinThread],
-  );
+  const setPinned = async (threadId: ThreadId, pinned: boolean) => {
+    const result = await (pinned ? pinThread : unpinThread)({
+      environmentId,
+      input: { threadId },
+    });
+    if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+  };
 
   /**
    * Resolves the bot's native thread. The server always places it in no project, so the
    * caller picks nothing. Rejects with the failure so the caller can show it where the user is looking.
    */
-  const openBot = useCallback(
-    async (botId: string): Promise<ThreadId> => {
-      const result = await openThreadCommand({
-        environmentId,
-        input: { botId },
-      });
-      if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-      const threadId = result._tag === "Success" ? result.value.threadId : null;
-      if (threadId === null) throw new Error("Grok Bot did not return a thread.");
-      return threadId;
-    },
-    [environmentId, openThreadCommand],
-  );
+  const openBot = async (botId: string): Promise<ThreadId> => {
+    const result = await openThreadCommand({
+      environmentId,
+      input: { botId },
+    });
+    if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+    const threadId = result._tag === "Success" ? result.value.threadId : null;
+    if (threadId === null) throw new Error("Grok Bot did not return a thread.");
+    return threadId;
+  };
 
   /** Mirrors a bot pin change onto its existing thread. A bot without a thread has nothing to pin yet. */
-  const syncBotPin = useCallback(
-    async (bot: GrokBot, instanceId: ProviderInstanceId) => {
-      const existing = findGrokBotNativeThread(threadsNow(), { instanceId, botId: bot.id });
-      if (existing === null) return;
-      try {
-        await setPinned(existing.id, bot.pinned);
-      } catch (error) {
-        reportNativeFailure(error);
-      }
-    },
-    [setPinned, threadsNow],
-  );
+  const syncBotPin = async (bot: GrokBot, instanceId: ProviderInstanceId) => {
+    const existing = findGrokBotNativeThread(threadsNow(), { instanceId, botId: bot.id });
+    if (existing === null) return;
+    try {
+      await setPinned(existing.id, bot.pinned);
+    } catch (error) {
+      reportNativeFailure(error);
+    }
+  };
 
   return { openBot, syncBotPin };
 }
@@ -175,7 +159,7 @@ export function useOpenGrokBotNativeBotId(
   });
   const routeThreadId = useParams({ strict: false, select: (params) => params.threadId ?? null });
   const threads = useAtomValue(environmentThreadShells.environmentThreadsAtom(environmentId));
-  return useMemo(() => {
+  return (() => {
     if (instanceId === null || routeThreadId === null || routeEnvironmentId !== environmentId) {
       return null;
     }
@@ -188,5 +172,5 @@ export function useOpenGrokBotNativeBotId(
       return null;
     }
     return thread.modelSelection.model;
-  }, [environmentId, instanceId, routeEnvironmentId, routeThreadId, threads]);
+  })();
 }

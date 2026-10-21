@@ -373,6 +373,7 @@ export function buildExplainPullRequestHandoff(input: {
 }
 
 export const PULL_REQUEST_ACTION_SUCCESS_LABELS: Record<PullRequestAction, string> = {
+  "delete-branch": "Branch deleted",
   merge: "Merge requested",
   ready: "Marked ready for review",
   draft: "Converted to draft",
@@ -387,6 +388,7 @@ export const PULL_REQUEST_ACTION_SUCCESS_LABELS: Record<PullRequestAction, strin
 
 /** Said as the thing that did not happen, rather than as the operation that returned an error. */
 export const PULL_REQUEST_ACTION_FAILURE_LABELS: Record<PullRequestAction, string> = {
+  "delete-branch": "Could not delete this branch",
   merge: "Could not merge this pull request",
   ready: "Could not mark this ready for review",
   draft: "Could not convert this to a draft",
@@ -401,6 +403,8 @@ export const PULL_REQUEST_ACTION_FAILURE_LABELS: Record<PullRequestAction, strin
 
 /** What to try, for the times the host says only that it refused. */
 export const PULL_REQUEST_ACTION_FAILURE_HINTS: Record<PullRequestAction, string> = {
+  "delete-branch":
+    "The host refused it. Check that you have write access and that this branch is not protected.",
   merge:
     "The host refused the merge. Check that you have write access, that the checks it requires have passed, and that the branch is not conflicting.",
   ready: "The host refused it. Check that you have write access to this repository.",

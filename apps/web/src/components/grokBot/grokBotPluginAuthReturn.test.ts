@@ -43,7 +43,7 @@ describe("plugin OAuth pairing return", () => {
     expect(readPluginAuthReturn()).toBeNull();
     values.set(
       "t3:grok-plugin-auth-return",
-      JSON.stringify({ query: "?code=expired", savedAt: Date.now() - 16 * 60_000 }),
+      JSON.stringify({ query: "?code=expired", savedAt: 0 }),
     );
     expect(readPluginAuthReturn()).toBeNull();
   });

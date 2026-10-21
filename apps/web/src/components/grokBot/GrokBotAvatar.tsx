@@ -6,7 +6,6 @@ import {
   useContext,
   useEffect,
   useId,
-  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -222,7 +221,7 @@ function GrokBotEngineAvatar({
   const color = resolveGrokBotAvatarColor(bot.avatarColor, bot.id);
   const { BotRenderer } = engine;
   // Eyes are cut out of the body, so they show whatever is behind the avatar.
-  const appearance = useMemo(() => engine.createAppearance("var(--grok-bot-ink)"), [engine]);
+  const appearance = engine.createAppearance("var(--grok-bot-ink)");
   // The Grok Bot app seeds each mark from its agent's source id, so the same bot moves the same way everywhere.
   const markSeed = `sand-agent-mark-source-${bot.id}`;
   // Each mounted engine owns its SVG ids: the same bot can be drawn at several sizes at once.

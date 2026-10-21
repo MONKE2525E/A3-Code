@@ -9,11 +9,6 @@ type UsageProviderPresentation = {
   readonly driverKind: ProviderDriverKind;
 };
 
-/**
- * Exhaustive presentation for providers supported by the usage contract.
- * Declaration order is reused by every chart and table, so adding a provider
- * only requires its contract support and one entry here.
- */
 export const PROVIDER_PRESENTATION = {
   codex: {
     label: "Codex",
@@ -27,7 +22,6 @@ export const PROVIDER_PRESENTATION = {
   },
   grok: {
     label: "Grok Build",
-    // Contrast-aware neutral between the Codex series and muted chart chrome.
     color: "color-mix(in oklab, var(--contrast-foreground) 72%, var(--background))",
     driverKind: ProviderDriverKind.make("grok"),
   },
@@ -49,10 +43,8 @@ export const PROVIDER_PRESENTATION = {
   },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;
 
-/** Stable provider reading order across charts, summaries, tables, and hover rows. */
 export const PROVIDER_ORDER = Object.keys(PROVIDER_PRESENTATION) as UsageProviderKind[];
 
-/** Providers with real activity, independent of the metric currently displayed. */
 export function providersWithUsage(
   totals: readonly {
     readonly provider: UsageProviderKind;
@@ -74,16 +66,20 @@ export function providersWithUsage(
  * can be re-checked after their snapshot disappears.
  */
 export function limitsOnlyDrivers(
-  presentations: Iterable<Pick<EnvironmentPresentation, "serverConfig">>,
+  presentations: Iterable<
+    Pick<EnvironmentPresentation, "serverConfig"> & {
+      readonly providers?: readonly { readonly driver: string; readonly usageLimits?: unknown }[];
+    }
+  >,
   hidden: readonly string[] = [],
 ): readonly string[] {
   const costDrivers = new Set<string>(
     PROVIDER_ORDER.map((p) => PROVIDER_PRESENTATION[p].driverKind),
   );
   const found = new Set<string>(hidden);
-  for (const { serverConfig } of presentations) {
+  for (const { serverConfig, providers } of presentations) {
     if (serverConfig === null) continue;
-    for (const provider of serverConfig.providers) {
+    for (const provider of providers ?? []) {
       if (provider.usageLimits !== undefined) found.add(provider.driver);
     }
     for (const source of serverConfig.usageLimitSources ?? []) {

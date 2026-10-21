@@ -9,25 +9,17 @@ import {
 } from "../components/grokBot/grokBotPresentation";
 import { useSettingsScope } from "../components/settings/SettingsScopeContext";
 
-/**
- * Providers are machine state, so the page shows one environment at a time:
- * the chosen one from the settings scope selector.
- * A project crumb narrows candidates to where that project is registered.
- */
 function SettingsProvidersRoute() {
   const target = Route.useSearch();
   const navigate = useNavigate();
   // Keep the picked provider in the URL so the scope sentence can swap in the Grok Bot picker.
-  const selectInstance = useCallback(
-    (instanceId: ProviderInstanceId, isGrokBot: boolean) =>
-      void navigate({
-        to: "/settings/providers",
-        search: (previous) => providerSelectionSearch(previous, { instanceId, isGrokBot }),
-        replace: true,
-        resetScroll: false,
-      }),
-    [navigate],
-  );
+  const selectInstance = (instanceId: ProviderInstanceId, isGrokBot: boolean) =>
+    void navigate({
+      to: "/settings/providers",
+      search: (previous) => providerSelectionSearch(previous, { instanceId, isGrokBot }),
+      replace: true,
+      resetScroll: false,
+    });
   const { environment, scope } = useSettingsScope();
   if (!environment) {
     return (

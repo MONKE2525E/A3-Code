@@ -13,8 +13,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
-import migration from "../persistence/Migrations/062_GrokBotManagedRuntime.ts";
-import completionMigration from "../persistence/Migrations/063_GrokBotManagedCompletion.ts";
+import migration from "../persistence/Migrations/068_GrokBotManagedRuntime.ts";
+import completionMigration from "../persistence/Migrations/069_GrokBotManagedCompletion.ts";
 import type { GrokBotTurnIdentity } from "../orchestration-v2/Adapters/GrokBotSettlementProjection.ts";
 import * as Store from "./GrokBotManagedStateStore.ts";
 

@@ -3,7 +3,6 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
-import { useMemo } from "react";
 
 import { useUiStateStore } from "~/uiStateStore";
 import { environmentThreadDetails, environmentThreadShells } from "~/state/threads";
@@ -81,11 +80,7 @@ export function useGrokBotUnreadBotIds(
 ): ReadonlySet<string> {
   const threads = useAtomValue(environmentThreadShells.environmentThreadsAtom(environmentId));
   const localLastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById);
-  return useMemo(
-    () =>
-      instanceId === null
-        ? NO_UNREAD_BOT_IDS
-        : selectGrokBotUnreadBotIds({ environmentId, threads, instanceId, localLastVisitedAt }),
-    [environmentId, instanceId, localLastVisitedAt, threads],
-  );
+  return instanceId === null
+    ? NO_UNREAD_BOT_IDS
+    : selectGrokBotUnreadBotIds({ environmentId, threads, instanceId, localLastVisitedAt });
 }

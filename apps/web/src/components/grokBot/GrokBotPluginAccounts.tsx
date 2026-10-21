@@ -1,6 +1,7 @@
+import { useStableCallback } from "../../hooks/useStableCallback";
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
@@ -101,7 +102,7 @@ export function GrokBotPluginAccounts({
     };
   }, [refreshAccounts]);
 
-  const endFlow = useCallback(
+  const endFlow = useStableCallback(
     (ended: SignInFlow, message?: { readonly notice?: string; readonly error?: string }) => {
       if (activeFlow.current !== ended) return;
       activeFlow.current = null;
@@ -115,7 +116,6 @@ export function GrokBotPluginAccounts({
         /* Storage may be disabled. */
       }
     },
-    [],
   );
 
   // Both loopback and HTTPS callbacks can finish elsewhere, including in another browser origin.
@@ -200,89 +200,77 @@ export function GrokBotPluginAccounts({
     pluginId,
   ]);
 
-  const run = useCallback(
-    async (serverId: number, accountKey: string) => {
-      if (pending !== null) return;
-      // The sign-in returns to the environment's own web address. Electron's page origin and a client
-      // paired to another host are not it.
-      const redirectUri = resolveGrokBotOAuthRedirect(
-        window.location.origin,
-        httpBaseUrl,
-        config.data?.setupStatus?.mcpUrl ?? null,
-      );
-      if (activeFlow.current) endFlow(activeFlow.current);
-      setNotice(null);
-      if (redirectUri === null) {
-        setError("This environment has no web address to return to. Reconnect and try again.");
-        return;
-      }
-      const key = `${serverId}:${accountKey}`;
-      // Opened synchronously so the click still counts as a user gesture.
-      const popup = window.open("about:blank", "_blank");
-      setPending(key);
-      setError(null);
-      const result = await authenticate({
-        environmentId,
-        input: { serverId, accountKey, redirectUri },
-      });
-      setPending(null);
-      if (result._tag !== "Success") {
-        popup?.close();
-        setError("Authentication could not start. Please try again.");
-        return;
-      }
-      const response = result.value;
-      if (response.authenticated) {
-        popup?.close();
-        refreshAccounts();
-        setNotice("Connector connected.");
-        return;
-      }
-      if (!response.authorizationUrl || !response.stateId) {
-        popup?.close();
-        setError("This connector did not provide an authentication link.");
-        return;
-      }
-      try {
-        localStorage.setItem(
-          PLUGIN_AUTH_STORAGE_PREFIX + response.stateId,
-          JSON.stringify({ environmentId, pluginId }),
-        );
-        if (popup) {
-          popup.opener = null;
-          popup.location.href = response.authorizationUrl;
-        }
-        const startedAtMs = Date.now();
-        const nextFlow = {
-          environmentId,
-          pluginId,
-          serverId,
-          accountKey,
-          stateId: response.stateId,
-          authorizationUrl: response.authorizationUrl,
-          popup,
-          completesOnServer: response.loopbackPort !== null,
-          startedAtMs,
-          expiresAtMs: startedAtMs + SIGN_IN_WAIT_MS,
-        };
-        activeFlow.current = nextFlow;
-        setFlow(nextFlow);
-      } catch {
-        popup?.close();
-        setError("Allow browser storage to finish connector authentication.");
-      }
-    },
-    [
-      pending,
+  const run = useStableCallback(async (serverId: number, accountKey: string) => {
+    if (pending !== null) return;
+    // The sign-in returns to the environment's own web address. Electron's page origin and a client
+    // paired to another host are not it.
+    const redirectUri = resolveGrokBotOAuthRedirect(
+      window.location.origin,
       httpBaseUrl,
-      config.data?.setupStatus?.mcpUrl,
-      endFlow,
-      authenticate,
+      config.data?.setupStatus?.mcpUrl ?? null,
+    );
+    if (activeFlow.current) endFlow(activeFlow.current);
+    setNotice(null);
+    if (redirectUri === null) {
+      setError("This environment has no web address to return to. Reconnect and try again.");
+      return;
+    }
+    const key = `${serverId}:${accountKey}`;
+    // Opened synchronously so the click still counts as a user gesture.
+    const popup = window.open("about:blank", "_blank");
+    setPending(key);
+    setError(null);
+    const result = await authenticate({
       environmentId,
-      pluginId,
-      refreshAccounts,
-    ],
-  );
+      input: { serverId, accountKey, redirectUri },
+    });
+    setPending(null);
+    if (result._tag !== "Success") {
+      popup?.close();
+      setError("Authentication could not start. Please try again.");
+      return;
+    }
+    const response = result.value;
+    if (response.authenticated) {
+      popup?.close();
+      refreshAccounts();
+      setNotice("Connector connected.");
+      return;
+    }
+    if (!response.authorizationUrl || !response.stateId) {
+      popup?.close();
+      setError("This connector did not provide an authentication link.");
+      return;
+    }
+    try {
+      localStorage.setItem(
+        PLUGIN_AUTH_STORAGE_PREFIX + response.stateId,
+        JSON.stringify({ environmentId, pluginId }),
+      );
+      if (popup) {
+        popup.opener = null;
+        popup.location.href = response.authorizationUrl;
+      }
+      const startedAtMs = Date.now();
+      const nextFlow = {
+        environmentId,
+        pluginId,
+        serverId,
+        accountKey,
+        stateId: response.stateId,
+        authorizationUrl: response.authorizationUrl,
+        popup,
+        completesOnServer: response.loopbackPort !== null,
+        startedAtMs,
+        expiresAtMs: startedAtMs + SIGN_IN_WAIT_MS,
+      };
+      activeFlow.current = nextFlow;
+      setFlow(nextFlow);
+    } catch {
+      popup?.close();
+      setError("Allow browser storage to finish connector authentication.");
+    }
+  });
 
   const submitCallback = async (current: SignInFlow) => {
     // The address holds a one-time code, so it leaves the field on every outcome.

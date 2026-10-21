@@ -1,6 +1,7 @@
+import * as Dialog from "../../components/ui/Dialog";
 import Constants from "expo-constants";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, AppState, Linking, Platform } from "react-native";
+import { AppState, Linking, Platform } from "react-native";
 
 import { checkForkReleaseUpdate, type ForkReleaseUpdate } from "./fork-releases";
 
@@ -29,7 +30,7 @@ export function useForkReleaseUpdates(automatic = false) {
       if (!mounted.current) return;
       if (!update) {
         if (manual)
-          Alert.alert(
+          Dialog.alert(
             "No newer APK",
             "No newer mobile build is published on your fork's GitHub releases.",
           );
@@ -41,7 +42,7 @@ export function useForkReleaseUpdates(automatic = false) {
       offerUpdate(update);
     } catch (error) {
       if (manual && mounted.current)
-        Alert.alert(
+        Dialog.alert(
           "Update check failed",
           error instanceof Error ? error.message : "Could not check GitHub releases.",
         );
@@ -76,7 +77,7 @@ export function useForkReleaseUpdates(automatic = false) {
 }
 
 function offerUpdate(update: ForkReleaseUpdate) {
-  Alert.alert(
+  Dialog.alert(
     "Mobile update available",
     `Build ${update.build} is ready. Download the APK, then open it to update T3 Code Custom. Your PC keeps using upstream T3 Code.`,
     [
@@ -85,7 +86,7 @@ function offerUpdate(update: ForkReleaseUpdate) {
         text: "Download APK",
         onPress: () => {
           void Linking.openURL(update.downloadUrl).catch(() =>
-            Alert.alert(
+            Dialog.alert(
               "Download failed",
               "Could not open the APK download. Try again from Settings.",
             ),
