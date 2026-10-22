@@ -50,16 +50,17 @@ export interface Caller {
   readonly limits: CallerLimits;
 }
 
-const assertCallAuthority = (scope: McpInvocationContext.McpInvocationScope) =>
-  Effect.gen(function* () {
-    const service = yield* Effect.serviceOption(OrchestrationMcp.OrchestratorMcpService);
-    if (Option.isNone(service))
-      return yield* new OrchestratorMcpFailure({
-        code: "parent_not_active",
-        message: "Call delegation authority is unavailable.",
-      });
-    yield* service.value.validateCallInvocation(scope);
-  });
+const assertCallAuthority = Effect.fn("threadAccess.assertCallAuthority")(function* (
+  scope: McpInvocationContext.McpInvocationScope,
+) {
+  const service = yield* Effect.serviceOption(OrchestrationMcp.OrchestratorMcpService);
+  if (Option.isNone(service))
+    return yield* new OrchestratorMcpFailure({
+      code: "parent_not_active",
+      message: "Call delegation authority is unavailable.",
+    });
+  yield* service.value.validateCallInvocation(scope);
+});
 
 export const readCaller = Effect.fn("mcp.readCaller")(function* () {
   const scope = yield* McpInvocationContext.McpInvocationContext;

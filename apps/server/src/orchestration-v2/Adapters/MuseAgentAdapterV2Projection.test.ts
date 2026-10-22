@@ -216,48 +216,50 @@ it.effect(
     }),
 );
 
-it.effect(
-  "requires an owned turn_done and never settles on message completion, idle, foreign replies or subagents",
-  () =>
-    Effect.gen(function* () {
-      const projection = makeMuseAgentProjection({
-        binding,
-        sessionId: "primary",
-        threadId,
-        providerInstanceId: instanceId,
-      });
-      projection.begin(yield* makeTurn);
-      projection.admit(receipt);
-      const canonical = projection.project(
-        frame("message.assistant", 100, {
-          display_text: "Answer",
-          display_text_ready: true,
-          status: "completed",
-        }),
-      );
-      assert.strictEqual(
-        canonical.some((event) => event.type === "turn.terminal"),
-        false,
-      );
-      for (const payload of [
-        { reply_to_message_id: "unrelated", status: "completed" },
-        { session_id: "side", status: "completed" },
-        { stream_lane: "subagent", status: "completed" },
-        { status: "idle" },
-      ]) {
-        assert.deepStrictEqual(projection.project(frame("delta.turn_done", 10, payload)), []);
-      }
-      const terminal = projection.project(frame("delta.turn_done", 11, { status: "cancelled" }));
-      assert.strictEqual(
-        terminal.find((event) => event.type === "turn.terminal")?.status,
-        "cancelled",
-      );
-      assert.deepStrictEqual(
-        projection.project(frame("delta.text_append", 12, { text: "Late" })),
-        [],
-      );
-      assert.strictEqual(projection.snapshot()[0]?.text, "Answer");
-    }),
+it.effect("requires an owned main turn_done and ignores non-main transcript surfaces", () =>
+  Effect.gen(function* () {
+    const projection = makeMuseAgentProjection({
+      binding,
+      sessionId: "primary",
+      threadId,
+      providerInstanceId: instanceId,
+    });
+    projection.begin(yield* makeTurn);
+    projection.admit(receipt);
+    const canonical = projection.project(
+      frame("message.assistant", 100, {
+        display_text: "Answer",
+        display_text_ready: true,
+        status: "completed",
+      }),
+    );
+    assert.strictEqual(
+      canonical.some((event) => event.type === "turn.terminal"),
+      false,
+    );
+    for (const payload of [
+      { reply_to_message_id: "unrelated", status: "completed" },
+      { session_id: "side", status: "completed" },
+      { stream_lane: "subagent", status: "completed" },
+      { stream_lane: "activity", status: "completed" },
+      { stream_lane: "tool", status: "completed" },
+      { transcript_surface: "activity", status: "completed" },
+      { transcript_surface: "tool", status: "completed" },
+      { status: "idle" },
+    ]) {
+      assert.deepStrictEqual(projection.project(frame("delta.turn_done", 10, payload)), []);
+    }
+    const terminal = projection.project(frame("delta.turn_done", 11, { status: "cancelled" }));
+    assert.strictEqual(
+      terminal.find((event) => event.type === "turn.terminal")?.status,
+      "cancelled",
+    );
+    assert.deepStrictEqual(
+      projection.project(frame("delta.text_append", 12, { text: "Late" })),
+      [],
+    );
+    assert.strictEqual(projection.snapshot()[0]?.text, "Answer");
+  }),
 );
 
 it.effect(
@@ -296,6 +298,50 @@ it.effect(
       );
     }),
 );
+
+it("preserves transcript routing from history rows and payload-only history", () => {
+  const row = (metadata: Record<string, unknown>) =>
+    museHistoryFrame(
+      {
+        event_name: "delta.turn_done",
+        seq: 1,
+        occurred_at_ms: 1234,
+        payload: { session_id: "primary", stream_lane: "main", transcript_surface: "main_chat" },
+        ...metadata,
+      },
+      "primary",
+    );
+
+  const rowMetadata = row({ stream_lane: "activity", transcript_surface: "tool" });
+  assert.deepStrictEqual(rowMetadata?.payload, {
+    session_id: "primary",
+    stream_lane: "activity",
+    transcript_surface: "tool",
+    seq: 1,
+  });
+
+  assert.deepStrictEqual(
+    museHistoryFrame(
+      {
+        event_name: "delta.turn_done",
+        seq: 2,
+        occurred_at_ms: 1235,
+        payload: {
+          session_id: "primary",
+          stream_lane: "subagent",
+          transcript_surface: "activity",
+        },
+      },
+      "primary",
+    )?.payload,
+    {
+      session_id: "primary",
+      stream_lane: "subagent",
+      transcript_surface: "activity",
+      seq: 2,
+    },
+  );
+});
 
 it("projects runless native history into stable, linked chat items", () => {
   const projection = makeMuseAgentProjection({

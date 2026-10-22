@@ -50,6 +50,10 @@ export interface MuseAgentPendingDelivery {
   readonly context: MuseAgentDeliveryContext | null;
 }
 
+export interface MuseAgentAccountPendingDelivery extends MuseAgentPendingDelivery {
+  readonly sessionId: string;
+}
+
 export interface MuseAgentDeliveryScope {
   readonly binding: string;
   readonly sessionId: string;

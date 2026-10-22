@@ -190,26 +190,27 @@ const make = Effect.gen(function* () {
     }
   >();
   const activationFailures = new Map<string, OrchestratorMcpFailure>();
-  const scopeFor = (input: CallIdentity & { readonly access: "read" | "operate" }) =>
-    Effect.gen(function* () {
-      const call = calls.get(input.callId);
-      if (
-        call?.scope === undefined ||
-        call.identity.binding !== input.binding ||
-        call.identity.botId !== input.botId
-      )
-        return yield* (
-          activationFailures.get(input.callId) ??
-            new OrchestratorMcpFailure({
-              code: "parent_not_active",
-              message: "This voice call has no live delegation authority.",
-            })
-        );
-      yield* orchestrator.validateCallInvocation(call.scope);
-      return input.access === "read"
-        ? yield* orchestrator.restrictCallInvocation(call.scope, "read-only")
-        : call.scope;
-    });
+  const scopeFor = Effect.fn("GrokBotVoiceOrchestration.scopeFor")(function* (
+    input: CallIdentity & { readonly access: "read" | "operate" },
+  ) {
+    const call = calls.get(input.callId);
+    if (
+      call?.scope === undefined ||
+      call.identity.binding !== input.binding ||
+      call.identity.botId !== input.botId
+    )
+      return yield* (
+        activationFailures.get(input.callId) ??
+          new OrchestratorMcpFailure({
+            code: "parent_not_active",
+            message: "This voice call has no live delegation authority.",
+          })
+      );
+    yield* orchestrator.validateCallInvocation(call.scope);
+    return input.access === "read"
+      ? yield* orchestrator.restrictCallInvocation(call.scope, "read-only")
+      : call.scope;
+  });
   const ready = yield* toolkit;
   const handlerContext =
     yield* Effect.context<
@@ -219,8 +220,8 @@ const make = Effect.gen(function* () {
       >
     >();
   return GrokBotVoiceOrchestration.of({
-    activate: (input) =>
-      Effect.gen(function* () {
+    activate: Effect.fn("GrokBotVoiceOrchestration.activate")(
+      function* (input) {
         const prior = calls.get(input.callId);
         if (prior !== undefined) {
           yield* Deferred.await(prior.ready);
@@ -271,7 +272,8 @@ const make = Effect.gen(function* () {
             }),
           ),
         );
-      }).pipe(
+      },
+      (self, input) =>
         Effect.catchCause((cause) => {
           const error = Option.getOrUndefined(Cause.findErrorOption(cause));
           // Defects and interruptions are not authority failures; they keep propagating.
@@ -288,18 +290,17 @@ const make = Effect.gen(function* () {
                 }),
           );
           return Effect.logWarning("grok-bot.voice.authority-unavailable");
-        }),
-      ),
-    forget: (callId) =>
-      Effect.gen(function* () {
-        const call = calls.get(callId);
-        calls.delete(callId);
-        activationFailures.delete(callId);
-        if (call?.scope !== undefined)
-          yield* orchestrator.releaseCallInvocation(call.scope).pipe(Effect.ignore);
-      }),
-    wait: (input) =>
-      Effect.gen(function* () {
+        })(self),
+    ),
+    forget: Effect.fn("GrokBotVoiceOrchestration.forget")(function* (callId) {
+      const call = calls.get(callId);
+      calls.delete(callId);
+      activationFailures.delete(callId);
+      if (call?.scope !== undefined)
+        yield* orchestrator.releaseCallInvocation(call.scope).pipe(Effect.ignore);
+    }),
+    wait: Effect.fn("GrokBotVoiceOrchestration.wait")(
+      function* (input) {
         const scope = yield* scopeFor(input);
         const result = yield* orchestrator.waitForTask(
           scope,
@@ -355,36 +356,36 @@ const make = Effect.gen(function* () {
           },
           pending: result.waitTimedOut || approvals.length > 0 || questions.length > 0,
         } as const;
-      }).pipe(
-        Effect.catch((error) =>
-          Effect.succeed({
-            result: {
-              kind: "invalid_input" as const,
-              output: {
-                code: error.code,
-                retryable: error.code === "orchestration_error",
-                error: "T3 could not check this task's result. Its status is unknown.",
-              },
+      },
+      Effect.catch((error) =>
+        Effect.succeed({
+          result: {
+            kind: "invalid_input" as const,
+            output: {
+              code: error.code,
+              retryable: error.code === "orchestration_error",
+              error: "T3 could not check this task's result. Its status is unknown.",
             },
-            pending: error.code === "orchestration_error",
-          }),
-        ),
-        Effect.catchCause(() =>
-          Effect.succeed({
-            result: {
-              kind: "invalid_input",
-              output: {
-                code: "task_watch_failed",
-                error:
-                  "T3 could not check the delegated task. Tell the caller that its status is unknown; do not claim it finished.",
-              },
-            },
-            pending: false,
-          } as const),
-        ),
+          },
+          pending: error.code === "orchestration_error",
+        }),
       ),
-    call: (input) =>
-      Effect.gen(function* () {
+      Effect.catchCause(() =>
+        Effect.succeed({
+          result: {
+            kind: "invalid_input",
+            output: {
+              code: "task_watch_failed",
+              error:
+                "T3 could not check the delegated task. Tell the caller that its status is unknown; do not claim it finished.",
+            },
+          },
+          pending: false,
+        } as const),
+      ),
+    ),
+    call: Effect.fn("GrokBotVoiceOrchestration.call")(
+      function* (input) {
         if (!isTool(input.name))
           return {
             result: { kind: "unknown_tool", output: { error: "unknown orchestration tool" } },
@@ -511,37 +512,40 @@ const make = Effect.gen(function* () {
           },
           ...(Option.isNone(target) ? {} : { target: target.value }),
         } as const;
-      }).pipe(
-        Effect.provide(handlerContext),
-        Effect.catch((error) =>
-          Effect.succeed({
-            result: {
-              kind: "invalid_input",
-              output: {
-                tool: input.name,
-                code: isOrchestratorFailure(error) ? error.code : "invalid_arguments",
-                error: isOrchestratorFailure(error)
-                  ? error.code === "parent_not_active"
-                    ? error.message.slice(0, 500)
-                    : `T3 rejected ${input.name} (${error.code}): ${error.message.slice(0, 500)}`
-                  : `T3 could not run ${input.name}. Check its arguments against the tool's schema and try again.`,
+      },
+      (self, input) =>
+        self.pipe(
+          Effect.provide(handlerContext),
+          Effect.catch((error) =>
+            Effect.succeed({
+              result: {
+                kind: "invalid_input",
+                output: {
+                  tool: input.name,
+                  code: isOrchestratorFailure(error) ? error.code : "invalid_arguments",
+                  error: isOrchestratorFailure(error)
+                    ? error.code === "parent_not_active"
+                      ? error.message.slice(0, 500)
+                      : `T3 rejected ${input.name} (${error.code}): ${error.message.slice(0, 500)}`
+                    : `T3 could not run ${input.name}. Check its arguments against the tool's schema and try again.`,
+                },
               },
-            },
-          } as const),
-        ),
-        Effect.catchCause(() =>
-          Effect.succeed({
-            result: {
-              kind: "invalid_input",
-              output: {
-                tool: input.name,
-                code: "orchestration_unavailable",
-                error: `T3 could not execute ${input.name}. Tell the caller it failed; do not claim success or repeat a write automatically.`,
+            } as const),
+          ),
+          Effect.catchCause(() =>
+            Effect.succeed({
+              result: {
+                kind: "invalid_input",
+                output: {
+                  tool: input.name,
+                  code: "orchestration_unavailable",
+                  error: `T3 could not execute ${input.name}. Tell the caller it failed; do not claim success or repeat a write automatically.`,
+                },
               },
-            },
-          } as const),
+            } as const),
+          ),
         ),
-      ),
+    ),
   });
 });
 

@@ -198,6 +198,10 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
           threadId: input.threadId,
           providerInstanceId: options.instanceId,
         });
+        const deliveryScope = { binding, sessionId: session.session_id };
+        let recoveringTurn = (yield* native.pendingDeliveries(deliveryScope)).some(
+          (delivery) => delivery.status === "accepted",
+        );
         const projection = makeMuseAgentProjection({
           binding,
           providerInstanceId: options.instanceId,
@@ -243,13 +247,15 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
           id: input.providerSessionId,
           driver: MUSE_AGENT_DRIVER_KIND,
           providerInstanceId: options.instanceId,
-          status: "ready" as const,
+          status: recoveringTurn ? ("waiting" as const) : ("ready" as const),
           cwd: input.runtimePolicy.cwd ?? ".",
           model: "muse",
           capabilities,
           createdAt: now,
           updatedAt: now,
-          lastError: null,
+          lastError: recoveringTurn
+            ? "Waiting for Muse to finish the earlier accepted message."
+            : null,
         };
         const inbox = yield* Queue.unbounded<
           ProviderAdapter.ProviderAdapterV2Event,
@@ -293,6 +299,34 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
           if (release) yield* toolCleanup.pipe(Effect.ensuring(release), Effect.forkDetach);
         });
         yield* Effect.addFinalizer(() => releaseTurn);
+        const reconcileRecoveredDelivery = (terminalEvent?: Transport.MuseAgentNativeEvent) =>
+          native
+            .reconcilePendingDeliveries({
+              ...deliveryScope,
+              ...(terminalEvent === undefined ? {} : { terminalEvent }),
+            })
+            .pipe(
+              Effect.catchTags({
+                MuseAgentTransportError: (cause) =>
+                  cause.kind === "disconnected" || cause.kind === "unavailable"
+                    ? Effect.succeed(true)
+                    : Effect.fail(cause),
+              }),
+            );
+        const markRecoveryReady = Effect.fn("MuseAgentAdapterV2.markRecoveryReady")(function* () {
+          if (!recoveringTurn) return;
+          recoveringTurn = false;
+          yield* Queue.offer(inbox, {
+            type: "provider_session.updated",
+            driver: MUSE_AGENT_DRIVER_KIND,
+            providerSession: {
+              ...providerSession,
+              status: "ready",
+              updatedAt: yield* DateTime.now,
+              lastError: null,
+            },
+          });
+        });
         const publish = Effect.fn("MuseAgentAdapterV2.publish")(function* (
           batch: readonly ProviderAdapter.ProviderAdapterV2Event[],
         ) {
@@ -325,6 +359,19 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
             const key = projection.deliveryKey();
             if (key) yield* native.settleDelivery(key);
             yield* releaseTurn;
+            if (recoveringTurn) {
+              recoveringTurn = false;
+              yield* Queue.offer(inbox, {
+                type: "provider_session.updated",
+                driver: MUSE_AGENT_DRIVER_KIND,
+                providerSession: {
+                  ...providerSession,
+                  status: "ready",
+                  updatedAt: yield* DateTime.now,
+                  lastError: null,
+                },
+              });
+            }
           }
           yield* Queue.offerAll(inbox, batch);
         });
@@ -414,40 +461,66 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
                   return;
                 }
                 if (
+                  frame.event === "delta.turn_done" &&
+                  recoveringTurn &&
+                  projection.receipt() === undefined
+                ) {
+                  const stillRecovering = yield* reconcileRecoveredDelivery(frame);
+                  if (!stillRecovering) yield* markRecoveryReady();
+                }
+                if (
                   frame.event === "transport.disconnected" ||
                   frame.event === "transport.reconnected"
                 ) {
                   // Reconnecting cannot inherit an earlier connection's tool authority.
                   yield* closeTools;
                   const receipt = projection.receipt();
+                  recoveringTurn =
+                    recoveringTurn || (receipt !== undefined && !projection.isTerminal());
+                  if (
+                    frame.event === "transport.reconnected" &&
+                    recoveringTurn &&
+                    receipt === undefined
+                  ) {
+                    const stillRecovering = yield* reconcileRecoveredDelivery();
+                    if (!stillRecovering) yield* markRecoveryReady();
+                  }
                   if (
                     frame.event === "transport.reconnected" &&
                     receipt &&
                     !projection.isTerminal()
                   ) {
-                    for (const raw of yield* native.replay({ binding, receipt })) {
+                    for (const raw of yield* native.replay({ binding, receipt }).pipe(
+                      Effect.catchTags({
+                        MuseAgentTransportError: (cause) =>
+                          cause.kind === "disconnected" || cause.kind === "unavailable"
+                            ? Effect.succeed([])
+                            : Effect.fail(cause),
+                      }),
+                    )) {
                       const replayed = museHistoryFrame(raw, session.session_id);
                       if (replayed) yield* projectFrame(replayed);
                     }
-                    // The native bridge loses turn ownership on reconnect. Registering
-                    // tools alone cannot recover it, and resending could duplicate work.
-                    if (!projection.isTerminal())
-                      return yield* new Native.MuseAgentRuntimeError({
-                        kind: "protocol",
-                        cause: new Error("Muse reconnected before the managed turn settled."),
-                      });
+                    // Tool authority is lost on reconnect, but the native turn can still
+                    // finish. Keep its observer alive until exact terminal proof arrives.
+                    recoveringTurn = !projection.isTerminal();
                   }
                   yield* Queue.offer(inbox, {
                     type: "provider_session.updated",
                     driver: MUSE_AGENT_DRIVER_KIND,
                     providerSession: {
                       ...providerSession,
-                      status: frame.event === "transport.disconnected" ? "waiting" : "ready",
+                      status:
+                        frame.event === "transport.disconnected" || recoveringTurn
+                          ? "waiting"
+                          : "ready",
                       updatedAt: yield* DateTime.now,
                       lastError:
                         frame.event === "transport.disconnected"
                           ? "Muse connection lost. The native turn remains unsettled."
-                          : null,
+                          : recoveringTurn
+                            ? "Waiting for Muse to finish the earlier message after reconnecting."
+                            : null,
                     },
                   });
                   return;
@@ -505,6 +578,7 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
           );
         };
         let watchFiber = yield* runWatch(watch);
+        if (recoveringTurn && !(yield* reconcileRecoveredDelivery())) yield* markRecoveryReady();
         // Subscribe first; history then repairs gaps without losing events between read and watch.
         const historyLock = yield* Semaphore.make(1);
         const importPage = Effect.fn("MuseAgentAdapterV2.importPage")(function* (
@@ -624,6 +698,7 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
                   }),
                 ),
               );
+              yield* markRecoveryReady();
               yield* Fiber.interrupt(watchFiber);
               // Admission can wait while another conversation retires this observer.
               // Awaiting interruption fences every old watcher before installing its replacement.
@@ -780,29 +855,33 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
               });
               yield* publish(projection.admit(receipt));
               if (receipt.replayed && !projection.isTerminal()) {
-                for (const raw of yield* native.replay({ binding, receipt })) {
+                for (const raw of yield* native.replay({ binding, receipt }).pipe(
+                  Effect.catchTags({
+                    MuseAgentTransportError: (cause) =>
+                      cause.kind === "disconnected" || cause.kind === "unavailable"
+                        ? Effect.succeed([])
+                        : Effect.fail(cause),
+                  }),
+                )) {
                   const replayed = museHistoryFrame(raw, session.session_id);
                   if (replayed) yield* projectFrame(replayed);
                 }
-                // A durable receipt belongs to the original admission's tool client.
-                // Its pending turn cannot use this runtime's replacement registration.
+                // The original tool client cannot be restored, but its native turn
+                // remains observable without replaying the prompt.
                 if (!projection.isTerminal()) {
-                  const cause = new Native.MuseAgentRuntimeError({
-                    kind: "protocol",
-                    cause: new Error("Muse delivery replay has not settled."),
+                  recoveringTurn = true;
+                  yield* closeTools;
+                  yield* Queue.offer(inbox, {
+                    type: "provider_session.updated",
+                    driver: MUSE_AGENT_DRIVER_KIND,
+                    providerSession: {
+                      ...providerSession,
+                      status: "waiting",
+                      updatedAt: yield* DateTime.now,
+                      lastError:
+                        "Waiting for Muse to finish the earlier message after reconnecting.",
+                    },
                   });
-                  retired = true;
-                  yield* Fiber.interrupt(watchFiber);
-                  yield* watch.close;
-                  yield* Queue.fail(
-                    inbox,
-                    new ProviderAdapter.ProviderAdapterEventStreamError({
-                      driver: MUSE_AGENT_DRIVER_KIND,
-                      providerSessionId: input.providerSessionId,
-                      cause,
-                    }),
-                  );
-                  return yield* cause;
                 }
               }
             }).pipe(

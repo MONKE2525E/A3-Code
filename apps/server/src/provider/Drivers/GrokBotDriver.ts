@@ -180,8 +180,8 @@ export const GrokBotDriver: ProviderDriver<GrokBotProviderSettings, GrokBotDrive
   },
   configSchema: GrokBotProviderSettings,
   defaultConfig: () => decodeSettings({}),
-  create: (options) =>
-    Effect.gen(function* () {
+  create: Effect.fn("GrokBotDriver.create")(
+    function* (options) {
       const native = yield* GrokBotNativeRuntimeService;
       const binding = yield* GrokBotManagedBinding;
       const orchestrationAdapter = yield* createGrokBotAdapterV2(options);
@@ -218,15 +218,18 @@ export const GrokBotDriver: ProviderDriver<GrokBotProviderSettings, GrokBotDrive
           generateThreadTitle: () => unsupportedGeneration("generateThreadTitle"),
         },
       } satisfies ProviderInstance;
-    }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new ProviderDriverError({
-            driver: GROK_BOT_DRIVER_KIND,
-            instanceId: options.instanceId,
-            detail: "Failed to build the native Grok Bot provider.",
-            cause,
-          }),
+    },
+    (self, options) =>
+      self.pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderDriverError({
+              driver: GROK_BOT_DRIVER_KIND,
+              instanceId: options.instanceId,
+              detail: "Failed to build the native Grok Bot provider.",
+              cause,
+            }),
+        ),
       ),
-    ),
+  ),
 };

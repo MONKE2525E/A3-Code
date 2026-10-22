@@ -266,6 +266,185 @@ it("releases only the exact local admission without cancelling or clearing a new
   expect(f.calls.filter((call) => call.method === "chat.cancel")).toHaveLength(0);
 });
 
+it("releases an old receipt after the watched session changes", async () => {
+  const f = fixture();
+  const oldReceipt = { sessionId: "primary", messageId: "user-1", replyToMessageId: "carrier-1" };
+  await f.bridge.watch({ authority: f.authority, session: "primary" });
+  await f.bridge.request({
+    authority: f.authority,
+    method: "chat.stream",
+    params: { session_id: "primary" },
+    deliveryKey: "old-attempt",
+  });
+
+  await f.bridge.watch({ authority: f.authority, session: "side-chat" });
+  await f.bridge.releaseOwned({
+    authority: f.authority,
+    session: "primary",
+    deliveryKey: "old-attempt",
+    receipt: oldReceipt,
+  });
+  await f.bridge.request({
+    authority: f.authority,
+    method: "chat.stream",
+    params: { session_id: "side-chat" },
+    deliveryKey: "side-attempt",
+  });
+});
+
+it("preserves a different session's active owner while releasing the old receipt", async () => {
+  const f = fixture();
+  const oldReceipt = { sessionId: "primary", messageId: "user-1", replyToMessageId: "carrier-1" };
+  await f.bridge.watch({ authority: f.authority, session: "primary" });
+  await f.bridge.request({
+    authority: f.authority,
+    method: "chat.stream",
+    params: { session_id: "primary" },
+    deliveryKey: "old-attempt",
+  });
+  await f.bridge.watch({ authority: f.authority, session: "side-chat" });
+  await f.bridge.request({
+    authority: f.authority,
+    method: "chat.stream",
+    params: { session_id: "side-chat" },
+    deliveryKey: "side-attempt",
+  });
+
+  await f.bridge.releaseOwned({
+    authority: f.authority,
+    session: "primary",
+    deliveryKey: "old-attempt",
+    receipt: oldReceipt,
+  });
+  await expect(
+    f.bridge.request({
+      authority: f.authority,
+      method: "chat.stream",
+      params: { session_id: "side-chat" },
+      deliveryKey: "third-attempt",
+    }),
+  ).rejects.toThrow("owned_session_busy");
+  await f.bridge.releaseOwned({
+    authority: f.authority,
+    session: "side-chat",
+    deliveryKey: "side-attempt",
+    receipt: { sessionId: "side-chat", messageId: "user-1", replyToMessageId: "carrier-1" },
+  });
+});
+
+it("preserves a different session's in-flight admission while releasing the old receipt", async () => {
+  const f = fixture();
+  const oldReceipt = { sessionId: "primary", messageId: "user-1", replyToMessageId: "carrier-1" };
+  await f.bridge.watch({ authority: f.authority, session: "primary" });
+  await f.bridge.request({
+    authority: f.authority,
+    method: "chat.stream",
+    params: { session_id: "primary" },
+    deliveryKey: "old-attempt",
+  });
+  await f.bridge.watch({ authority: f.authority, session: "side-chat" });
+
+  let acknowledge: (value: unknown) => void = () => {};
+  f.send.mockImplementationOnce(
+    () =>
+      new Promise((resolve) => {
+        acknowledge = resolve;
+      }),
+  );
+  const inFlight = f.bridge.request({
+    authority: f.authority,
+    method: "chat.stream",
+    params: { session_id: "side-chat" },
+    deliveryKey: "side-attempt",
+  });
+  await f.bridge.releaseOwned({
+    authority: f.authority,
+    session: "primary",
+    deliveryKey: "old-attempt",
+    receipt: oldReceipt,
+  });
+  await expect(
+    f.bridge.request({
+      authority: f.authority,
+      method: "chat.stream",
+      params: { session_id: "side-chat" },
+      deliveryKey: "third-attempt",
+    }),
+  ).rejects.toThrow("owned_session_busy");
+
+  acknowledge({
+    session_id: "side-chat",
+    message_id: "side-user",
+    reply_to_message_id: "side-carrier",
+  });
+  await inFlight;
+  await f.bridge.releaseOwned({
+    authority: f.authority,
+    session: "side-chat",
+    deliveryKey: "side-attempt",
+    receipt: { sessionId: "side-chat", messageId: "side-user", replyToMessageId: "side-carrier" },
+  });
+});
+
+it("keeps the current session's registered tools after releasing an old receipt", async () => {
+  const f = fixture();
+  const oldReceipt = { sessionId: "primary", messageId: "user-1", replyToMessageId: "carrier-1" };
+  await f.bridge.watch({ authority: f.authority, session: "primary" });
+  await f.bridge.request({
+    authority: f.authority,
+    method: "chat.stream",
+    params: { session_id: "primary" },
+    deliveryKey: "old-attempt",
+  });
+  const primaryConnectionId = f.bridge.connectionId({ authority: f.authority });
+  await f.bridge.register({
+    authority: f.authority,
+    clientId: "primary-device",
+    nativeSessionId: "primary",
+    connectionId: primaryConnectionId,
+    commands: { "t3.probe": {} },
+  });
+  await f.bridge.unregister({
+    authority: f.authority,
+    clientId: "primary-device",
+    connectionId: primaryConnectionId,
+  });
+
+  await f.bridge.watch({ authority: f.authority, session: "side-chat" });
+  const sideConnectionId = f.bridge.connectionId({ authority: f.authority });
+  await f.bridge.register({
+    authority: f.authority,
+    clientId: "side-device",
+    nativeSessionId: "side-chat",
+    connectionId: sideConnectionId,
+    commands: { "t3.probe": {} },
+  });
+  await f.bridge.releaseOwned({
+    authority: f.authority,
+    session: "primary",
+    deliveryKey: "old-attempt",
+    receipt: oldReceipt,
+  });
+  await f.bridge.request({
+    authority: f.authority,
+    method: "chat.stream",
+    params: { session_id: "side-chat" },
+    deliveryKey: "side-attempt",
+  });
+
+  await f.invokes.get("t3.probe")!(
+    { invoke_id: "probe-1" },
+    { websocketConnectionID: "physical-1" },
+  );
+  expect(f.invoke).toHaveBeenCalledWith({
+    authority: f.authority,
+    nativeSessionId: "side-chat",
+    commandId: "t3.probe",
+    payload: { invoke_id: "probe-1" },
+    connectionId: sideConnectionId,
+  });
+});
+
 it("does not resurrect released local ownership when a pending acknowledgement arrives late", async () => {
   const f = fixture();
   await f.bridge.watch({ authority: f.authority, session: "primary" });
@@ -554,6 +733,36 @@ describe("native root task ownership", () => {
         "turn_not_owned",
       );
     }
+  });
+
+  it("retains native ownership through activity and tool terminal events", async () => {
+    const f = fixture();
+    await admission(f);
+    for (const surface of [
+      { stream_lane: "activity" },
+      { stream_lane: "tool" },
+      { transcript_surface: "activity" },
+      { transcript_surface: "tool" },
+    ])
+      f.emit("delta.turn_done", {
+        session_id: "primary",
+        message_id: receipt.messageId,
+        reply_to_message_id: receipt.messageId,
+        status: "completed",
+        ...surface,
+      });
+    await f.bridge.cancelOwned({ authority: f.authority, receipt });
+    f.emit("delta.turn_done", {
+      session_id: "primary",
+      message_id: receipt.messageId,
+      reply_to_message_id: receipt.messageId,
+      status: "completed",
+      stream_lane: "main",
+      transcript_surface: "main_chat",
+    });
+    await expect(f.bridge.cancelOwned({ authority: f.authority, receipt })).rejects.toThrow(
+      "turn_not_owned",
+    );
   });
 
   it("handles running before user and ignores older history without accepting a foreign root", async () => {

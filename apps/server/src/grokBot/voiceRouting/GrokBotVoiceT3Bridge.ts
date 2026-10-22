@@ -302,8 +302,8 @@ const make = Effect.gen(function* () {
           ),
         );
   };
-  const context = (botId: string) =>
-    Effect.gen(function* () {
+  const context = Effect.fn("GrokBotVoiceT3Bridge.context")(
+    function* (botId: string) {
       const threadId = yield* canonical(botId);
       yield* threadManagement.ensureLegacyTranscript(threadId);
       const snapshot = yield* threadManagement.getThreadSnapshotWindow(threadId, {
@@ -314,7 +314,9 @@ const make = Effect.gen(function* () {
         afterSequence: snapshot.snapshotSequence,
         messages: boundedChat(snapshot.projection.messages),
       };
-    }).pipe(Effect.orElseSucceed(() => undefined));
+    },
+    Effect.orElseSucceed(() => undefined),
+  );
 
   const recall = (input: VoiceToolCall) =>
     context(input.botId).pipe(
@@ -325,8 +327,8 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const search = (input: VoiceToolCall) =>
-    Effect.gen(function* () {
+  const search = Effect.fn("GrokBotVoiceT3Bridge.search")(
+    function* (input: VoiceToolCall) {
       const parsed = yield* decodeSearch(input.input).pipe(Effect.option);
       if (parsed._tag === "None")
         return { kind: "invalid_input", output: { error: "invalid search arguments" } } as const;
@@ -353,7 +355,9 @@ const make = Effect.gen(function* () {
         kind: "served",
         output: { messages, totalMatches: found.totalMatches, index: found.activeIndex },
       } as const;
-    }).pipe(Effect.orElseSucceed(() => spoken("T3 chat search is unavailable right now.")));
+    },
+    Effect.orElseSucceed(() => spoken("T3 chat search is unavailable right now.")),
+  );
 
   const chatUnavailable = () =>
     ({
@@ -363,284 +367,286 @@ const make = Effect.gen(function* () {
         retryable: true,
       },
     }) as const;
-  const chatUpdates = (input: VoiceToolCall) =>
-    Effect.gen(function* () {
-      const parsed = yield* decodeChatWait(input.input).pipe(Effect.option);
-      if (parsed._tag === "None")
-        return { kind: "invalid_input", output: { error: "invalid chat cursor" } } as const;
-      if (parsed.value.afterSequence === undefined) {
-        const chat = yield* context(input.botId);
-        return chat === undefined
-          ? chatUnavailable()
-          : ({ kind: "served", output: null, chatContext: chat } as const);
-      }
-      const threadId = yield* canonical(input.botId);
-      const event = yield* threadManagement
-        .streamStoredEventsFrom({
-          threadId,
-          afterSequence: parsed.value.afterSequence,
-          eventType: "message.updated",
-        })
-        .pipe(
-          Stream.filter(
-            (stored) =>
-              stored.event.type === "message.updated" &&
-              stored.event.payload.role === "user" &&
-              stored.event.payload.createdBy === "user" &&
-              stored.event.payload.creationSource !== "mcp" &&
-              stored.event.payload.voiceRequest !== true &&
-              chatMessage(stored.event.payload) !== undefined,
-          ),
-          Stream.runHead,
-          Effect.timeoutOption(Duration.seconds(20)),
-          Effect.map(Option.flatten),
-        );
-      const stored = Option.getOrUndefined(event);
-      return {
-        kind: "served",
-        output: null,
-        chatContext: {
-          afterSequence: stored?.sequence ?? parsed.value.afterSequence,
-          messages:
-            stored?.event.type === "message.updated" ? [chatMessage(stored.event.payload)!] : [],
-        },
-      } as const;
-    }).pipe(Effect.orElseSucceed(chatUnavailable));
+  const chatUpdates = Effect.fn("GrokBotVoiceT3Bridge.chatUpdates")(function* (
+    input: VoiceToolCall,
+  ) {
+    const parsed = yield* decodeChatWait(input.input).pipe(Effect.option);
+    if (parsed._tag === "None")
+      return { kind: "invalid_input", output: { error: "invalid chat cursor" } } as const;
+    if (parsed.value.afterSequence === undefined) {
+      const chat = yield* context(input.botId);
+      return chat === undefined
+        ? chatUnavailable()
+        : ({ kind: "served", output: null, chatContext: chat } as const);
+    }
+    const threadId = yield* canonical(input.botId);
+    const event = yield* threadManagement
+      .streamStoredEventsFrom({
+        threadId,
+        afterSequence: parsed.value.afterSequence,
+        eventType: "message.updated",
+      })
+      .pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "message.updated" &&
+            stored.event.payload.role === "user" &&
+            stored.event.payload.createdBy === "user" &&
+            stored.event.payload.creationSource !== "mcp" &&
+            stored.event.payload.voiceRequest !== true &&
+            chatMessage(stored.event.payload) !== undefined,
+        ),
+        Stream.runHead,
+        Effect.timeoutOption(Duration.seconds(20)),
+        Effect.map(Option.flatten),
+      );
+    const stored = Option.getOrUndefined(event);
+    return {
+      kind: "served",
+      output: null,
+      chatContext: {
+        afterSequence: stored?.sequence ?? parsed.value.afterSequence,
+        messages:
+          stored?.event.type === "message.updated" ? [chatMessage(stored.event.payload)!] : [],
+      },
+    } as const;
+  }, Effect.orElseSucceed(chatUnavailable));
 
   /** Reads only run status from the bot's own canonical thread; no MCP scope is involved. */
-  const progress = (input: VoiceToolCall) =>
-    Effect.gen(function* () {
-      // This branch is the client's long wait over the existing voice RPC. It is not a
-      // model tool or a new dispatch; normal progress calls still report status below.
-      const requested = yield* decodeCompletionRequest(input.input).pipe(Effect.option);
-      if (requested._tag === "Some") {
-        const requestToolCallId = requested.value.requestToolCallId;
-        const target = pending.get(key(input, requestToolCallId));
-        if (target === undefined)
+  const progress = Effect.fn("GrokBotVoiceT3Bridge.progress")(function* (input: VoiceToolCall) {
+    // This branch is the client's long wait over the existing voice RPC. It is not a
+    // model tool or a new dispatch; normal progress calls still report status below.
+    const requested = yield* decodeCompletionRequest(input.input).pipe(Effect.option);
+    if (requested._tag === "Some") {
+      const requestToolCallId = requested.value.requestToolCallId;
+      const target = pending.get(key(input, requestToolCallId));
+      if (target === undefined)
+        return { kind: "invalid_input", output: { error: "unknown voice request" } } as const;
+      const stopped = () =>
+        ({
+          kind: "served",
+          output: { status: "watch_stopped" },
+          completion: { requestToolCallId, pending: false },
+        }) as const;
+      if (target.stopped) return stopped();
+      if ("taskId" in target.target) {
+        if (Option.isNone(direct))
+          return {
+            kind: "invalid_input",
+            output: { error: "voice request unavailable" },
+          } as const;
+        const result = yield* direct.value.wait({
+          ...input,
+          taskId: target.target.taskId,
+          ...(requested.value.seenApprovalIds === undefined
+            ? {}
+            : { seenApprovalIds: requested.value.seenApprovalIds }),
+        });
+        // Ending a call removes the entry while its wait is in flight.
+        if (pending.get(key(input, requestToolCallId)) !== target)
           return { kind: "invalid_input", output: { error: "unknown voice request" } } as const;
-        const stopped = () =>
-          ({
-            kind: "served",
-            output: { status: "watch_stopped" },
-            completion: { requestToolCallId, pending: false },
-          }) as const;
-        if (target.stopped) return stopped();
-        if ("taskId" in target.target) {
-          if (Option.isNone(direct))
-            return {
-              kind: "invalid_input",
-              output: { error: "voice request unavailable" },
-            } as const;
-          const result = yield* direct.value.wait({
-            ...input,
-            taskId: target.target.taskId,
-            ...(requested.value.seenApprovalIds === undefined
-              ? {}
-              : { seenApprovalIds: requested.value.seenApprovalIds }),
-          });
-          // Ending a call removes the entry while its wait is in flight.
+        if (!result.pending && result.result.kind === "served") target.settled = true;
+        return {
+          ...result.result,
+          ...(result.result.kind === "served" &&
+          result.result.output !== null &&
+          typeof result.result.output === "object"
+            ? {
+                output: {
+                  ...result.result.output,
+                  ...(target.title === undefined ? {} : { title: target.title }),
+                },
+              }
+            : {}),
+          ...(result.result.kind === "served"
+            ? { completion: { requestToolCallId, pending: result.pending } }
+            : {}),
+        };
+      }
+      const threadId = ThreadId.make(target.target.threadId);
+      const shell = yield* threadManagement.getThreadShell(threadId).pipe(Effect.result);
+      if (shell._tag === "Failure")
+        return {
+          kind: "invalid_input",
+          output: {
+            error: "T3 could not check the watched thread. Its status is unknown.",
+            retryable: true,
+          },
+        } as const;
+      if (shell.success === null)
+        return { kind: "invalid_input", output: { error: "voice request unavailable" } } as const;
+      if (pending.get(key(input, requestToolCallId)) !== target)
+        return { kind: "invalid_input", output: { error: "unknown voice request" } } as const;
+      if (target.stopped) return stopped();
+      if (target.target.watch) {
+        const delivered = target.deliveredCompletion;
+        if (delivered && requested.value.seenApprovalIds?.includes(`run:${delivered.runId}`)) {
+          target.completionAfterOrdinal = Math.max(
+            target.completionAfterOrdinal ?? 0,
+            delivered.ordinal,
+          );
+          delete target.deliveredCompletion;
+        }
+        if (target.completionAfterOrdinal === undefined) {
+          const baseline = yield* watchBaseline(threadId);
           if (pending.get(key(input, requestToolCallId)) !== target)
             return { kind: "invalid_input", output: { error: "unknown voice request" } } as const;
-          if (!result.pending && result.result.kind === "served") target.settled = true;
-          return {
-            ...result.result,
-            ...(result.result.kind === "served" &&
-            result.result.output !== null &&
-            typeof result.result.output === "object"
-              ? {
-                  output: {
-                    ...result.result.output,
-                    ...(target.title === undefined ? {} : { title: target.title }),
-                  },
-                }
-              : {}),
-            ...(result.result.kind === "served"
-              ? { completion: { requestToolCallId, pending: result.pending } }
-              : {}),
-          };
+          if (target.stopped) return stopped();
+          if (Option.isNone(baseline))
+            return {
+              kind: "invalid_input",
+              output: { error: "T3 could not initialize this thread watch.", retryable: true },
+            } as const;
+          target.completionAfterOrdinal ??= baseline.value;
         }
-        const threadId = ThreadId.make(target.target.threadId);
-        const shell = yield* threadManagement.getThreadShell(threadId).pipe(Effect.result);
-        if (shell._tag === "Failure")
-          return {
-            kind: "invalid_input",
-            output: {
-              error: "T3 could not check the watched thread. Its status is unknown.",
-              retryable: true,
-            },
-          } as const;
-        if (shell.success === null)
-          return { kind: "invalid_input", output: { error: "voice request unavailable" } } as const;
-        if (pending.get(key(input, requestToolCallId)) !== target)
-          return { kind: "invalid_input", output: { error: "unknown voice request" } } as const;
-        if (target.stopped) return stopped();
-        if (target.target.watch) {
-          const delivered = target.deliveredCompletion;
-          if (delivered && requested.value.seenApprovalIds?.includes(`run:${delivered.runId}`)) {
-            target.completionAfterOrdinal = Math.max(
-              target.completionAfterOrdinal ?? 0,
-              delivered.ordinal,
-            );
-            delete target.deliveredCompletion;
-          }
-          if (target.completionAfterOrdinal === undefined) {
-            const baseline = yield* watchBaseline(threadId);
-            if (pending.get(key(input, requestToolCallId)) !== target)
-              return { kind: "invalid_input", output: { error: "unknown voice request" } } as const;
-            if (target.stopped) return stopped();
-            if (Option.isNone(baseline))
-              return {
-                kind: "invalid_input",
-                output: { error: "T3 could not initialize this thread watch.", retryable: true },
-              } as const;
-            target.completionAfterOrdinal ??= baseline.value;
-          }
-        }
-        const waited = yield* threadManagement
-          .waitForThread({
-            projectId: shell.success.projectId,
-            threadId,
-            ...(target.target.watch
-              ? { followThread: true, completionAfterOrdinal: target.completionAfterOrdinal ?? 0 }
-              : { runId: RunId.make(target.target.runId) }),
-            timeoutMs: 20_000,
-            ...(requested.value.seenApprovalIds === undefined
-              ? {}
-              : { seenRequestIds: requested.value.seenApprovalIds }),
-          })
-          .pipe(Effect.result);
-        if (waited._tag === "Failure")
-          return {
-            kind: "invalid_input",
-            output: {
-              error: "T3 could not check the watched run. Its status is unknown.",
-              retryable: !waited.failure._tag.includes("NotFound"),
-            },
-          } as const;
-        if (pending.get(key(input, requestToolCallId)) !== target)
-          return { kind: "invalid_input", output: { error: "unknown voice request" } } as const;
-        if (target.stopped) return stopped();
-        if (waited.success.pendingRequests?.length) {
-          const approvals = waited.success.pendingRequests.filter(
-            (item) => item.type === "approval_request",
-          );
-          const questions = waited.success.pendingRequests.filter(
-            (item) => item.type === "user_input_request",
-          );
-          return {
-            kind: "served",
-            output: {
-              status: approvals.length ? "approval_required" : "input_required",
-              title: shell.success.title,
-              threadId,
-              runId: waited.success.run?.id ?? target.target.runId,
-              ...(approvals.length
-                ? {
-                    approvals: approvals.map((item) => {
-                      const title = item.title?.trim();
-                      const prompt = item.prompt?.trim();
-                      const generic =
-                        !title ||
-                        /^(permission to continue|approval( required| request)?|permission( required| request)?)$/i.test(
-                          title,
-                        );
-                      return {
-                        requestId: item.requestId,
-                        title: (
-                          (generic ? prompt || title : title) || "Permission to continue"
-                        ).slice(0, 500),
-                        ...(prompt ? { prompt: prompt.slice(0, 1_000) } : {}),
-                      };
-                    }),
-                  }
-                : {
-                    questions: questions.map((item) => ({
-                      requestId: item.requestId,
-                      questions: item.questions,
-                    })),
-                  }),
-            },
-            completion: { requestToolCallId, pending: true },
-          } as const;
-        }
-        if (waited.success.timedOut)
-          return {
-            kind: "served",
-            output: null,
-            completion: { requestToolCallId, pending: true },
-          } as const;
-        const runId = waited.success.run?.id ?? target.target.runId;
-        const records = yield* threadManagement
-          .getThreadRecords(threadId, ["messages"], {
-            messageRunIds: [RunId.make(runId)],
-          })
-          .pipe(Effect.result);
-        if (pending.get(key(input, requestToolCallId)) !== target)
-          return { kind: "invalid_input", output: { error: "unknown voice request" } } as const;
-        if (target.stopped) return stopped();
-        if (records._tag === "Failure")
-          return {
-            kind: "invalid_input",
-            output: {
-              error: "T3 could not read the watched result. Its status is unknown.",
-              retryable: true,
-            },
-          } as const;
-        // Only the selected launch run's final text is its result. Other requests and native
-        // chat updates must not be delivered as completion of this work.
-        target.settled = !target.target.watch;
-        const final = records.success.messages.findLast(
-          (message) =>
-            message.runId === runId &&
-            message.role === "assistant" &&
-            !message.streaming &&
-            message.text.trim().length > 0,
+      }
+      const waited = yield* threadManagement
+        .waitForThread({
+          projectId: shell.success.projectId,
+          threadId,
+          ...(target.target.watch
+            ? { followThread: true, completionAfterOrdinal: target.completionAfterOrdinal ?? 0 }
+            : { runId: RunId.make(target.target.runId) }),
+          timeoutMs: 20_000,
+          ...(requested.value.seenApprovalIds === undefined
+            ? {}
+            : { seenRequestIds: requested.value.seenApprovalIds }),
+        })
+        .pipe(Effect.result);
+      if (waited._tag === "Failure")
+        return {
+          kind: "invalid_input",
+          output: {
+            error: "T3 could not check the watched run. Its status is unknown.",
+            retryable: !waited.failure._tag.includes("NotFound"),
+          },
+        } as const;
+      if (pending.get(key(input, requestToolCallId)) !== target)
+        return { kind: "invalid_input", output: { error: "unknown voice request" } } as const;
+      if (target.stopped) return stopped();
+      if (waited.success.pendingRequests?.length) {
+        const approvals = waited.success.pendingRequests.filter(
+          (item) => item.type === "approval_request",
         );
-        if (target.target.watch && waited.success.run)
-          target.deliveredCompletion = { runId, ordinal: waited.success.run.ordinal };
+        const questions = waited.success.pendingRequests.filter(
+          (item) => item.type === "user_input_request",
+        );
         return {
           kind: "served",
           output: {
-            status: "landed",
-            ...(target.target.watch ? { runId } : {}),
+            status: approvals.length ? "approval_required" : "input_required",
             title: shell.success.title,
-            runStatus: waited.success.run?.status,
-            ...(waited.success.run?.status === "failed"
+            threadId,
+            runId: waited.success.run?.id ?? target.target.runId,
+            ...(approvals.length
               ? {
-                  error:
-                    "A thread run from this call failed. Open its T3 thread for the error. That task has not been completed.",
+                  approvals: approvals.map((item) => {
+                    const title = item.title?.trim();
+                    const prompt = item.prompt?.trim();
+                    const generic =
+                      !title ||
+                      /^(permission to continue|approval( required| request)?|permission( required| request)?)$/i.test(
+                        title,
+                      );
+                    return {
+                      requestId: item.requestId,
+                      title: (
+                        (generic ? prompt || title : title) || "Permission to continue"
+                      ).slice(0, 500),
+                      ...(prompt ? { prompt: prompt.slice(0, 1_000) } : {}),
+                    };
+                  }),
                 }
-              : {}),
-            updates: final === undefined ? [] : [final.text.slice(0, 16_000)],
+              : {
+                  questions: questions.map((item) => ({
+                    requestId: item.requestId,
+                    questions: item.questions,
+                  })),
+                }),
           },
-          completion: { requestToolCallId, pending: target.target.watch === true },
+          completion: { requestToolCallId, pending: true },
         } as const;
       }
-      const count = [...pending.values()].filter(
-        (entry) => entry.callId === input.callId && !entry.settled,
-      ).length;
+      if (waited.success.timedOut)
+        return {
+          kind: "served",
+          output: null,
+          completion: { requestToolCallId, pending: true },
+        } as const;
+      const runId = waited.success.run?.id ?? target.target.runId;
+      const records = yield* threadManagement
+        .getThreadRecords(threadId, ["messages"], {
+          messageRunIds: [RunId.make(runId)],
+        })
+        .pipe(Effect.result);
+      if (pending.get(key(input, requestToolCallId)) !== target)
+        return { kind: "invalid_input", output: { error: "unknown voice request" } } as const;
+      if (target.stopped) return stopped();
+      if (records._tag === "Failure")
+        return {
+          kind: "invalid_input",
+          output: {
+            error: "T3 could not read the watched result. Its status is unknown.",
+            retryable: true,
+          },
+        } as const;
+      // Only the selected launch run's final text is its result. Other requests and native
+      // chat updates must not be delivered as completion of this work.
+      target.settled = !target.target.watch;
+      const final = records.success.messages.findLast(
+        (message) =>
+          message.runId === runId &&
+          message.role === "assistant" &&
+          !message.streaming &&
+          message.text.trim().length > 0,
+      );
+      if (target.target.watch && waited.success.run)
+        target.deliveredCompletion = { runId, ordinal: waited.success.run.ordinal };
       return {
         kind: "served",
         output: {
-          pending: count,
-          message:
-            count === 0
-              ? "This call has no work awaiting a result."
-              : `${count} operation(s) from this call are still awaiting results. Use task_status for a specific delegated task.`,
+          status: "landed",
+          ...(target.target.watch ? { runId } : {}),
+          title: shell.success.title,
+          runStatus: waited.success.run?.status,
+          ...(waited.success.run?.status === "failed"
+            ? {
+                error:
+                  "A thread run from this call failed. Open its T3 thread for the error. That task has not been completed.",
+              }
+            : {}),
+          updates: final === undefined ? [] : [final.text.slice(0, 16_000)],
         },
+        completion: { requestToolCallId, pending: target.target.watch === true },
       } as const;
-    });
+    }
+    const count = [...pending.values()].filter(
+      (entry) => entry.callId === input.callId && !entry.settled,
+    ).length;
+    return {
+      kind: "served",
+      output: {
+        pending: count,
+        message:
+          count === 0
+            ? "This call has no work awaiting a result."
+            : `${count} operation(s) from this call are still awaiting results. Use task_status for a specific delegated task.`,
+      },
+    } as const;
+  });
 
   return GrokBotVoiceT3Bridge.of({
     context,
-    activate: (input) =>
-      Effect.gen(function* () {
+    activate: Effect.fn("GrokBotVoiceT3Bridge.activate")(
+      function* (input) {
         if (Option.isNone(direct)) return;
         const canonicalThreadId = yield* canonicalForCall(input);
         yield* direct.value.activate({ ...input, canonicalThreadId });
-      }).pipe(Effect.orElseSucceed(() => undefined)),
-    forget: (callId) =>
-      Effect.gen(function* () {
+      },
+      Effect.orElseSucceed(() => undefined),
+    ),
+    forget: Effect.fn("GrokBotVoiceT3Bridge.forget")(
+      function* (callId) {
         callThreads.delete(callId);
         for (const [id, entry] of launchReceipts)
           if (entry.callId === callId) launchReceipts.delete(id);
@@ -653,7 +659,10 @@ const make = Effect.gen(function* () {
             output: { error: "unknown voice request" },
           });
         }
-      }).pipe(Effect.andThen(Option.isSome(direct) ? direct.value.forget(callId) : Effect.void)),
+      },
+      (self, callId) =>
+        Effect.andThen(Option.isSome(direct) ? direct.value.forget(callId) : Effect.void)(self),
+    ),
     call: (input) => {
       if (Direct.isTool(input.name))
         return Effect.gen(function* () {

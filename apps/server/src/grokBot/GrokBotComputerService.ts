@@ -157,39 +157,37 @@ const make = Effect.gen(function* () {
     };
   });
   return GrokBotComputerService.of({
-    machines: () =>
-      Effect.gen(function* () {
-        const binding = yield* accountBinding;
-        const result = yield* readMachines(binding);
-        if ((yield* accountBinding) !== binding)
-          return yield* new GrokBotComputerError({ reason: "account_unavailable" });
-        return result;
-      }),
-    updateMachine: (input) =>
-      Effect.gen(function* () {
-        const binding = yield* accountBinding;
-        const existing = yield* readMachines(binding);
-        if (!existing.machines.some((machine) => machine.machineId === input.machineId))
-          return yield* new GrokBotComputerError({ reason: "unavailable" });
-        if (input.permission !== undefined)
-          yield* native
-            .runtimeRequest(binding, "UpdateSandMachineLocalToolPermission", {
-              machineId: input.machineId,
-              localToolPermission: input.permission,
-            })
-            .pipe(Effect.mapError(() => new GrokBotComputerError({ reason: "unavailable" })));
-        if (input.label !== undefined)
-          yield* native
-            .runtimeRequest(binding, "UpdateSandMachineLabel", {
-              machineId: input.machineId,
-              label: input.label,
-            })
-            .pipe(Effect.mapError(() => new GrokBotComputerError({ reason: "unavailable" })));
-        const result = yield* readMachines(binding);
-        if ((yield* accountBinding) !== binding)
-          return yield* new GrokBotComputerError({ reason: "account_unavailable" });
-        return result;
-      }),
+    machines: Effect.fn("GrokBotComputerService.machines")(function* () {
+      const binding = yield* accountBinding;
+      const result = yield* readMachines(binding);
+      if ((yield* accountBinding) !== binding)
+        return yield* new GrokBotComputerError({ reason: "account_unavailable" });
+      return result;
+    }),
+    updateMachine: Effect.fn("GrokBotComputerService.updateMachine")(function* (input) {
+      const binding = yield* accountBinding;
+      const existing = yield* readMachines(binding);
+      if (!existing.machines.some((machine) => machine.machineId === input.machineId))
+        return yield* new GrokBotComputerError({ reason: "unavailable" });
+      if (input.permission !== undefined)
+        yield* native
+          .runtimeRequest(binding, "UpdateSandMachineLocalToolPermission", {
+            machineId: input.machineId,
+            localToolPermission: input.permission,
+          })
+          .pipe(Effect.mapError(() => new GrokBotComputerError({ reason: "unavailable" })));
+      if (input.label !== undefined)
+        yield* native
+          .runtimeRequest(binding, "UpdateSandMachineLabel", {
+            machineId: input.machineId,
+            label: input.label,
+          })
+          .pipe(Effect.mapError(() => new GrokBotComputerError({ reason: "unavailable" })));
+      const result = yield* readMachines(binding);
+      if ((yield* accountBinding) !== binding)
+        return yield* new GrokBotComputerError({ reason: "account_unavailable" });
+      return result;
+    }),
     recreate,
     reset,
     upgradeSchedule,

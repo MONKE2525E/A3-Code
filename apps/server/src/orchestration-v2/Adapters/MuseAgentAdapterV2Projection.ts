@@ -44,6 +44,9 @@ const Payload = Schema.Struct({
   transcript: Schema.optionalKey(Schema.Unknown),
 });
 const decodePayload = Schema.decodeUnknownOption(Payload);
+const isMainTranscript = (payload: typeof Payload.Type) =>
+  (payload.stream_lane === undefined || payload.stream_lane === "main") &&
+  (payload.transcript_surface === undefined || payload.transcript_surface === "main_chat");
 const HistoryRow = Schema.Struct({
   event_name: Schema.String,
   payload: Schema.Unknown,
@@ -51,6 +54,8 @@ const HistoryRow = Schema.Struct({
   host_message_id: Schema.optionalKey(Schema.NullOr(Schema.String)),
   reply_to_message_id: Schema.optionalKey(Schema.NullOr(Schema.String)),
   session_id: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  stream_lane: Schema.optionalKey(Schema.String),
+  transcript_surface: Schema.optionalKey(Schema.String),
   display_text: Schema.optionalKey(Schema.NullOr(Schema.String)),
   display_text_ready: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
   seq: Schema.Number,
@@ -139,6 +144,10 @@ export function museHistoryFrame(raw: unknown, sessionId: string): MuseAgentNati
       ...(row.value.host_message_id ? { host_message_id: row.value.host_message_id } : {}),
       ...(row.value.reply_to_message_id
         ? { reply_to_message_id: row.value.reply_to_message_id }
+        : {}),
+      ...(row.value.stream_lane !== undefined ? { stream_lane: row.value.stream_lane } : {}),
+      ...(row.value.transcript_surface !== undefined
+        ? { transcript_surface: row.value.transcript_surface }
         : {}),
       ...(row.value.display_text !== undefined ? { display_text: row.value.display_text } : {}),
       ...(row.value.display_text_ready !== undefined
@@ -407,12 +416,7 @@ export function makeMuseAgentProjection(input: {
     const parsed = decodePayload(frame.payload);
     if (parsed._tag === "None") return [];
     const payload = parsed.value;
-    if (
-      payload.session_id !== input.sessionId ||
-      payload.stream_lane === "subagent" ||
-      payload.transcript_surface === "subagent"
-    )
-      return [];
+    if (payload.session_id !== input.sessionId || !isMainTranscript(payload)) return [];
     if (active && !active.receipt) {
       if (buffered.length >= 4096) throw new Error("muse_admission_buffer_full");
       buffered.push(frame);
@@ -691,8 +695,7 @@ export function makeMuseAgentProjection(input: {
       if (
         decoded._tag === "None" ||
         decoded.value.session_id !== input.sessionId ||
-        decoded.value.stream_lane === "subagent" ||
-        decoded.value.transcript_surface === "subagent"
+        !isMainTranscript(decoded.value)
       )
         return;
       const payload = decoded.value;
@@ -801,12 +804,7 @@ export function makeMuseAgentProjection(input: {
       const decoded = decodePayload(frame.payload);
       if (decoded._tag === "None") return;
       const payload = decoded.value;
-      if (
-        payload.session_id !== input.sessionId ||
-        payload.stream_lane === "subagent" ||
-        payload.transcript_surface === "subagent"
-      )
-        return;
+      if (payload.session_id !== input.sessionId || !isMainTranscript(payload)) return;
       const nativeId =
         frame.event === "delta.text_append"
           ? (payload.parent_message_id ?? payload.message_id)

@@ -64,12 +64,14 @@ const fixture = () => {
     Effect.succeed(Effect.void);
   let watch: Transport.MuseAgentTransport["Service"]["watch"] = () =>
     Effect.succeed({ events: Stream.never, close: Effect.void });
+  let releaseOwnedHook: Effect.Effect<void> = Effect.void;
   const remoteSizes = new Map<string, number>();
   const remoteBytes = new Map<string, Uint8Array>();
   let inspections = 0;
   let skillFailure = false;
   const skillActions: string[] = [];
   let history: unknown[] = [];
+  let streamHistory: unknown[] = [];
   let widgetApplied = true;
   let loseWidgetReply = false;
   let identity: unknown = {
@@ -78,12 +80,21 @@ const fixture = () => {
   };
   const cancellations: Delivery.MuseAgentReceipt[] = [];
   const localReleases: string[] = [];
+  const localReleaseSessions: string[] = [];
+  const localReleaseReceipts: (Delivery.MuseAgentReceipt | null)[] = [];
+  const routeEvents: { kind: "acquire" | "release"; sessionId: string }[] = [];
   const transport = Transport.MuseAgentTransport.of({
-    acquireTurn: (account, sessionId) => acquireTurn(account, sessionId),
+    acquireTurn: (account, sessionId) => {
+      routeEvents.push({ kind: "acquire", sessionId });
+      return acquireTurn(account, sessionId);
+    },
     releaseOwned: (_, input) =>
       Effect.sync(() => {
         localReleases.push(input.deliveryKey);
-      }),
+        localReleaseSessions.push(input.sessionId);
+        localReleaseReceipts.push(input.receipt);
+        routeEvents.push({ kind: "release", sessionId: input.sessionId });
+      }).pipe(Effect.andThen(Effect.suspend(() => releaseOwnedHook))),
     connect: Effect.suspend(() => {
       if (!ready)
         return Effect.fail(new Transport.MuseAgentTransportError({ kind: "disconnected" }));
@@ -120,7 +131,7 @@ const fixture = () => {
             return yield* new Transport.MuseAgentTransportError({ kind: "disconnected" });
           return { applied: widgetApplied, state };
         }
-        if (method === "chat.stream_events") return { events: [] };
+        if (method === "chat.stream_events") return { events: streamHistory };
         if (method === "fs.write") {
           yield* stageHook;
           const size = Buffer.from(String(params.data_base64), "base64").length;
@@ -218,12 +229,18 @@ const fixture = () => {
     setAcquireTurn: (next: typeof acquireTurn) => {
       acquireTurn = next;
     },
+    setReleaseOwnedHook: (next: typeof releaseOwnedHook) => {
+      releaseOwnedHook = next;
+    },
     setPreDispatchHook: (next: typeof preDispatchHook) => {
       preDispatchHook = next;
     },
     calls,
     loseWidgetReply: () => {
       loseWidgetReply = true;
+    },
+    setStreamHistory: (events: unknown[]) => {
+      streamHistory = events;
     },
     setHistory: (events: unknown[]) => {
       history = events;
@@ -233,6 +250,9 @@ const fixture = () => {
     },
     cancellations,
     localReleases,
+    localReleaseSessions,
+    localReleaseReceipts,
+    routeEvents,
     remotePaths: () => [...remoteSizes.keys()],
     refuseRelease: () =>
       db.exec(
@@ -1395,3 +1415,336 @@ it.effect("recovers an accepted receipt without requiring the skill again", () =
     assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 1);
   }).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)));
 });
+
+it.effect.each([
+  "owned",
+  "foreign",
+  "subagent",
+  "activity_lane",
+  "tool_lane",
+  "activity_surface",
+  "tool_surface",
+  "row_subagent",
+  "row_activity_lane",
+  "row_tool_lane",
+  "row_activity_surface",
+  "row_tool_surface",
+  "row_main",
+  "payload_main",
+  "other_session",
+  "incomplete",
+])("recovers a saved delivery only with exact native terminal proof: %s", (evidence) =>
+  withFixture((f) =>
+    Effect.gen(function* () {
+      const related =
+        evidence === "owned" || evidence === "row_main" || evidence === "payload_main";
+      const native = yield* Native.MuseAgentNativeRuntimeService;
+      const receipt = yield* native.send(request);
+      f.setStreamHistory([
+        {
+          event_name: "delta.turn_done",
+          seq: 10,
+          occurred_at_ms: 2000,
+          reply_to_message_id:
+            evidence === "foreign" ? "foreign-receipt" : receipt.replyToMessageId,
+          session_id: evidence === "other_session" ? "other" : "primary",
+          ...(evidence === "row_subagent" ? { stream_lane: "subagent" } : {}),
+          ...(evidence === "row_activity_lane" ? { stream_lane: "activity" } : {}),
+          ...(evidence === "row_tool_lane" ? { stream_lane: "tool" } : {}),
+          ...(evidence === "row_activity_surface" ? { transcript_surface: "activity" } : {}),
+          ...(evidence === "row_tool_surface" ? { transcript_surface: "tool" } : {}),
+          ...(evidence === "row_main"
+            ? { stream_lane: "main", transcript_surface: "main_chat" }
+            : {}),
+          payload: {
+            session_id: "primary",
+            status: evidence === "incomplete" ? "running" : "completed",
+            ...(evidence === "subagent" ? { stream_lane: "subagent" } : {}),
+            ...(evidence === "activity_lane" ? { stream_lane: "activity" } : {}),
+            ...(evidence === "tool_lane" ? { stream_lane: "tool" } : {}),
+            ...(evidence === "activity_surface" ? { transcript_surface: "activity" } : {}),
+            ...(evidence === "tool_surface" ? { transcript_surface: "tool" } : {}),
+            ...(evidence === "row_main"
+              ? { stream_lane: "subagent", transcript_surface: "activity" }
+              : {}),
+            ...(evidence === "payload_main"
+              ? { stream_lane: "main", transcript_surface: "main_chat" }
+              : {}),
+          },
+        },
+      ]);
+      const next = yield* Effect.exit(native.send({ ...request, deliveryKey: "attempt-2" }));
+      assert.strictEqual(Exit.isSuccess(next), related);
+      assert.strictEqual(
+        f.calls.filter((call) => call.method === "chat.stream").length,
+        related ? 2 : 1,
+      );
+      assert.deepStrictEqual(f.cancellations, []);
+      assert.deepStrictEqual(
+        (yield* native.pendingDeliveries(request)).map((entry) => entry.deliveryKey),
+        [related ? "attempt-2" : request.deliveryKey],
+      );
+    }).pipe(Effect.provide(f.layer)),
+  ),
+);
+
+it.effect(
+  "reconciles a completed receipt after rebuilding the runtime before acquiring the next turn",
+  () =>
+    withFixture((f) =>
+      Effect.gen(function* () {
+        const receipt = yield* Effect.gen(function* () {
+          const native = yield* Native.MuseAgentNativeRuntimeService;
+          return yield* native.send(request);
+        }).pipe(Effect.provide(f.layer));
+        f.setStreamHistory([
+          {
+            event_name: "delta.turn_done",
+            seq: 10,
+            occurred_at_ms: 2000,
+            reply_to_message_id: receipt.replyToMessageId,
+            payload: { session_id: "primary", status: "completed" },
+          },
+        ]);
+        yield* Effect.gen(function* () {
+          const native = yield* Native.MuseAgentNativeRuntimeService;
+          const release = yield* native.acquireTurn(binding, "primary");
+          assert.deepStrictEqual(yield* native.pendingDeliveries(request), []);
+          yield* native.send({ ...request, deliveryKey: "attempt-after-restart" });
+          yield* release;
+        }).pipe(Effect.provide(f.layer));
+        assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 2);
+        assert.deepStrictEqual(f.cancellations, []);
+      }),
+    ),
+);
+
+it.effect("reconciles another session's completed receipt before account-wide turn admission", () =>
+  withFixture((f) =>
+    Effect.gen(function* () {
+      const native = yield* Native.MuseAgentNativeRuntimeService;
+      const receipt = yield* native.send(request);
+      f.setStreamHistory([
+        {
+          event_name: "delta.turn_done",
+          seq: 10,
+          occurred_at_ms: 2000,
+          reply_to_message_id: receipt.replyToMessageId,
+          payload: { status: "completed" },
+        },
+      ]);
+
+      const release = yield* native.acquireTurn(binding, "side-chat");
+      assert.deepStrictEqual(yield* native.pendingDeliveries(request), []);
+      assert.deepStrictEqual(f.localReleases, [request.deliveryKey]);
+      assert.deepStrictEqual(f.localReleaseSessions, ["primary"]);
+      assert.deepStrictEqual(f.localReleaseReceipts, [
+        {
+          sessionId: receipt.sessionId,
+          messageId: receipt.messageId,
+          replyToMessageId: receipt.replyToMessageId,
+        },
+      ]);
+      assert.deepStrictEqual(f.routeEvents, [
+        { kind: "acquire", sessionId: "side-chat" },
+        { kind: "release", sessionId: "primary" },
+      ]);
+      assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 1);
+      yield* release;
+    }).pipe(Effect.provide(f.layer)),
+  ),
+);
+
+it.effect(
+  "keeps another session busy when its accepted receipt has no terminal proof and releases the route",
+  () =>
+    withFixture((f) =>
+      Effect.gen(function* () {
+        const native = yield* Native.MuseAgentNativeRuntimeService;
+        yield* native.send(request);
+        let routeReleases = 0;
+        f.setAcquireTurn(() =>
+          Effect.succeed(
+            Effect.sync(() => {
+              routeReleases++;
+            }),
+          ),
+        );
+
+        const attempt = yield* Effect.exit(native.acquireTurn(binding, "side-chat"));
+        assert.isFalse(Exit.isSuccess(attempt));
+        if (Exit.isFailure(attempt)) {
+          const failure = Cause.findErrorOption(attempt.cause);
+          if (Option.isSome(failure)) assert.strictEqual(nativeErrorKind(failure.value), "busy");
+          else assert.fail("Expected account admission to fail with a typed busy error.");
+        }
+        assert.strictEqual(routeReleases, 1);
+        assert.strictEqual((yield* native.pendingDeliveries(request)).length, 1);
+        assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 1);
+        assert.deepStrictEqual(f.localReleases, []);
+      }).pipe(Effect.provide(f.layer)),
+    ),
+);
+
+it.effect(
+  "keeps an accepted receipt attached after restart until its exact live main terminal arrives",
+  () =>
+    withFixture((f) =>
+      Effect.gen(function* () {
+        yield* Effect.gen(function* () {
+          const native = yield* Native.MuseAgentNativeRuntimeService;
+          yield* native.send(request);
+        }).pipe(Effect.provide(f.layer));
+        f.setStreamHistory([]);
+        yield* Effect.gen(function* () {
+          const native = yield* Native.MuseAgentNativeRuntimeService;
+          const scope = { binding, sessionId: "primary" };
+          assert.isTrue(yield* native.reconcilePendingDeliveries(scope));
+          assert.isTrue(
+            yield* native.reconcilePendingDeliveries({
+              ...scope,
+              terminalEvent: {
+                event: "delta.turn_done",
+                payload: {
+                  session_id: "primary",
+                  reply_to_message_id: "carrier-1",
+                  status: "completed",
+                  transcript_surface: "activity",
+                },
+              },
+            }),
+          );
+          assert.strictEqual((yield* native.pendingDeliveries(scope)).length, 1);
+          assert.isFalse(
+            yield* native.reconcilePendingDeliveries({
+              ...scope,
+              terminalEvent: {
+                event: "delta.turn_done",
+                payload: {
+                  session_id: "primary",
+                  reply_to_message_id: "carrier-1",
+                  status: "completed",
+                  stream_lane: "main",
+                  transcript_surface: "main_chat",
+                },
+              },
+            }),
+          );
+          assert.deepStrictEqual(yield* native.pendingDeliveries(scope), []);
+          yield* native.send({ ...request, deliveryKey: "attempt-after-live-recovery" });
+        }).pipe(Effect.provide(f.layer));
+        assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 2);
+      }),
+    ),
+);
+
+it.effect(
+  "keeps the restored observer through a busy new-turn attempt and settles before the next send",
+  () =>
+    withFixture((f) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const native = yield* Native.MuseAgentNativeRuntimeService;
+          const frames = yield* Queue.unbounded<Transport.MuseAgentNativeEvent>();
+          const releaseStarted = yield* Deferred.make<void>();
+          const finishRelease = yield* Deferred.make<void>();
+          const ready = yield* Deferred.make<void>();
+          const turn = yield* makeTurn;
+          let acquisitions = 0;
+          let releases = 0;
+          let watches = 0;
+          f.setAcquireTurn(() =>
+            Effect.sync(() => {
+              acquisitions++;
+              return Effect.sync(() => {
+                releases++;
+              });
+            }),
+          );
+          f.setWatch(() =>
+            Effect.sync(() => {
+              watches++;
+              return { events: Stream.fromQueue(frames), close: Effect.void };
+            }),
+          );
+          f.setStreamHistory([]);
+          yield* native.send(request);
+
+          const adapter = yield* createMuseAgentAdapterV2(options).pipe(
+            Effect.provideService(Native.MuseAgentNativeRuntimeService, native),
+            Effect.provideService(ProviderHost.ProviderHost, host),
+            Effect.provideService(
+              ToolsPort.MuseAgentDirectToolsPort,
+              ToolsPort.MuseAgentDirectToolsPort.of({
+                install: () => Effect.succeed({ uninstall: Effect.void }),
+                start: () => Effect.succeed({ revoke: Effect.void, close: Effect.void }),
+              }),
+            ),
+          );
+          const runtime = yield* adapter.openSession({
+            threadId,
+            providerSessionId: ProviderSessionId.make("restored-pending-delivery"),
+            modelSelection: selection,
+            runtimePolicy: policy,
+          });
+          assert.strictEqual(runtime.providerSession.status, "waiting");
+          yield* runtime.events.pipe(
+            Stream.runForEach((event) =>
+              event.type === "provider_session.updated" && event.providerSession.status === "ready"
+                ? Deferred.succeed(ready, undefined).pipe(Effect.asVoid)
+                : Effect.void,
+            ),
+            Effect.forkScoped,
+          );
+
+          const failedStart = yield* Effect.flip(runtime.startTurn(turn));
+          assert.strictEqual(failedStart._tag, "ProviderAdapterTurnStartError");
+          assert.isTrue(
+            failedStart._tag === "ProviderAdapterTurnStartError" &&
+              isPromptNotSubmitted(failedStart.cause) &&
+              isDeliveryError(failedStart.cause.cause) &&
+              failedStart.cause.cause.kind === "busy",
+          );
+          assert.strictEqual(watches, 1);
+          assert.strictEqual(acquisitions, 1);
+          assert.strictEqual(releases, 1);
+          assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 1);
+          assert.deepStrictEqual(
+            (yield* native.pendingDeliveries(request)).map((delivery) => delivery.deliveryKey),
+            [request.deliveryKey],
+          );
+
+          f.setReleaseOwnedHook(
+            Deferred.succeed(releaseStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(finishRelease)),
+            ),
+          );
+          yield* Queue.offer(frames, {
+            event: "delta.turn_done",
+            payload: {
+              session_id: "primary",
+              reply_to_message_id: "carrier-1",
+              status: "completed",
+              stream_lane: "main",
+              transcript_surface: "main_chat",
+            },
+          });
+          yield* Deferred.await(releaseStarted);
+          yield* Deferred.succeed(finishRelease, undefined);
+          yield* Deferred.await(ready);
+          assert.deepStrictEqual(yield* native.pendingDeliveries(request), []);
+          assert.deepStrictEqual(f.localReleases, [request.deliveryKey]);
+          assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 1);
+
+          yield* runtime.startTurn(turn);
+          assert.strictEqual(acquisitions, 2);
+          assert.strictEqual(watches, 2);
+          assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 2);
+          assert.deepStrictEqual(
+            (yield* native.pendingDeliveries(request)).map((delivery) => delivery.deliveryKey),
+            [turn.attemptId],
+          );
+        }),
+      ).pipe(Effect.provide(f.layer)),
+    ),
+);
