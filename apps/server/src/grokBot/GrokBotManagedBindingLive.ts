@@ -268,8 +268,8 @@ const make = Effect.gen(function* () {
         unavailable("The native bot account or confirmed T3 Connect endpoint is unavailable."),
       ),
     ),
-    resolve: (input) =>
-      Effect.gen(function* () {
+    resolve: Effect.fn("GrokBotManagedBindingLive.resolve")(
+      function* (input) {
         yield* accountIsCurrent(input.accountBinding);
         const shell = yield* projections.getThreadShell(input.threadId);
         if (
@@ -298,13 +298,13 @@ const make = Effect.gen(function* () {
           generation: 0,
           afterUpdatedSeq: "0",
         });
-      }).pipe(
-        Effect.mapError(() =>
-          unavailable(
-            "The native bot session is unavailable or already bound to another app thread.",
-          ),
+      },
+      Effect.mapError(() =>
+        unavailable(
+          "The native bot session is unavailable or already bound to another app thread.",
         ),
       ),
+    ),
     prepareTurn: (input) =>
       prepareTurn(input).pipe(
         Effect.mapError((cause) =>
@@ -327,80 +327,82 @@ const make = Effect.gen(function* () {
             unavailable("The uncertain native delivery could not be retained."),
           ),
         ),
-    existingMessages: (owned, ids) =>
-      Effect.gen(function* () {
+    existingMessages: Effect.fn("GrokBotManagedBindingLive.existingMessages")(
+      function* (owned, ids) {
         yield* accountIsCurrent(owned.binding);
         const records = yield* projections.getThreadRecords(owned.threadId, ["messages"], {
           messageIds: ids,
         });
         return records.messages;
-      }).pipe(Effect.mapError(() => unavailable("The existing native message could not be read."))),
-    existingMessage: (owned, id) =>
-      Effect.gen(function* () {
+      },
+      Effect.mapError(() => unavailable("The existing native message could not be read.")),
+    ),
+    existingMessage: Effect.fn("GrokBotManagedBindingLive.existingMessage")(
+      function* (owned, id) {
         yield* accountIsCurrent(owned.binding);
         const records = yield* projections.getThreadRecords(owned.threadId, ["messages"], {
           messageIds: [id],
           messageRoles: ["user"],
         });
         return records.messages[0];
-      }).pipe(Effect.mapError(() => unavailable("The existing native message could not be read."))),
-    existingUserTurnItem: (owned, messageId) =>
-      Effect.gen(function* () {
+      },
+      Effect.mapError(() => unavailable("The existing native message could not be read.")),
+    ),
+    existingUserTurnItem: Effect.fn("GrokBotManagedBindingLive.existingUserTurnItem")(
+      function* (owned, messageId) {
         yield* accountIsCurrent(owned.binding);
         return yield* projections.getTurnItem({
           threadId: owned.threadId,
           itemId: derive.userTurnItem({ messageId }),
         });
-      }).pipe(
-        Effect.mapError(() => unavailable("The initiating message timeline could not be read.")),
-      ),
-    lookupTranscriptTurn: (owned, messageId) =>
-      Effect.gen(function* () {
+      },
+      Effect.mapError(() => unavailable("The initiating message timeline could not be read.")),
+    ),
+    lookupTranscriptTurn: Effect.fn("GrokBotManagedBindingLive.lookupTranscriptTurn")(
+      function* (owned, messageId) {
         yield* accountIsCurrent(owned.binding);
         const identity = yield* store.lookupTranscriptTurn(owned, messageId);
         return identity === undefined ? undefined : yield* withUserMessage(identity);
-      }).pipe(
-        Effect.mapError(() => unavailable("The native message ownership could not be read.")),
-      ),
-    restoreManagedMessageIds: (owned) =>
-      Effect.gen(function* () {
+      },
+      Effect.mapError(() => unavailable("The native message ownership could not be read.")),
+    ),
+    restoreManagedMessageIds: Effect.fn("GrokBotManagedBindingLive.restoreManagedMessageIds")(
+      function* (owned) {
         yield* accountIsCurrent(owned.binding);
         return yield* store.restoreManagedMessageIds(owned);
-      }).pipe(
-        Effect.mapError(() =>
-          unavailable("The durable native delivery identities could not be restored."),
-        ),
+      },
+      Effect.mapError(() =>
+        unavailable("The durable native delivery identities could not be restored."),
       ),
-    restoreTranscriptTurns: (owned) =>
-      Effect.gen(function* () {
+    ),
+    restoreTranscriptTurns: Effect.fn("GrokBotManagedBindingLive.restoreTranscriptTurns")(
+      function* (owned) {
         yield* accountIsCurrent(owned.binding);
         return yield* Effect.forEach(yield* store.restoreTranscriptTurns(owned), withUserMessage);
-      }).pipe(
-        Effect.mapError(() =>
-          unavailable("The durable native transcript ownership could not be restored."),
-        ),
+      },
+      Effect.mapError(() =>
+        unavailable("The durable native transcript ownership could not be restored."),
       ),
-    restoreTurns: (owned) =>
-      Effect.gen(function* () {
+    ),
+    restoreTurns: Effect.fn("GrokBotManagedBindingLive.restoreTurns")(
+      function* (owned) {
         const turns = yield* store.restoreTurns(owned);
         const live: GrokBotTurnIdentity[] = [];
         for (const turn of turns)
           if (yield* validateIdentity(turn)) live.push(yield* withUserMessage(turn));
         return live;
-      }).pipe(
-        Effect.mapError(() =>
-          unavailable("The durable native run bindings could not be restored."),
-        ),
-      ),
-    lookupCompletion: (identity) =>
-      Effect.gen(function* () {
+      },
+      Effect.mapError(() => unavailable("The durable native run bindings could not be restored.")),
+    ),
+    lookupCompletion: Effect.fn("GrokBotManagedBindingLive.lookupCompletion")(
+      function* (identity) {
         yield* accountIsCurrent(identity.native.binding);
         return yield* store.lookupCompletion(identity);
-      }).pipe(
-        Effect.mapError(() => unavailable("The accepted managed answer could not be restored.")),
-      ),
-    inFlightWork: (identity) =>
-      Effect.gen(function* () {
+      },
+      Effect.mapError(() => unavailable("The accepted managed answer could not be restored.")),
+    ),
+    inFlightWork: Effect.fn("GrokBotManagedBindingLive.inFlightWork")(
+      function* (identity) {
         const records = yield* projections.getThreadRecords(
           identity.native.threadId,
           ["turnItems"],
@@ -415,9 +417,11 @@ const make = Effect.gen(function* () {
         return records.turnItems.some(
           (item) => item.runId === identity.runId && item.nodeId === identity.rootNodeId,
         );
-      }).pipe(Effect.catchCause(() => Effect.succeed(true))),
-    openCompletionWatch: (owned) =>
-      Effect.gen(function* () {
+      },
+      Effect.catchCause(() => Effect.succeed(true)),
+    ),
+    openCompletionWatch: Effect.fn("GrokBotManagedBindingLive.openCompletionWatch")(
+      function* (owned) {
         yield* accountIsCurrent(owned.binding);
         const stream = yield* store.openCompletionWatch(owned);
         // Account and committed attempt ownership are checked again when a declaration is replayed.
@@ -425,15 +429,13 @@ const make = Effect.gen(function* () {
           Stream.filterEffect((declaration) => validateIdentity(declaration.identity)),
           Stream.mapError(() => unavailable("Managed completion authority could not be verified.")),
         );
-      }).pipe(
-        Effect.mapError(() =>
-          unavailable("Managed completion declarations could not be restored."),
-        ),
-      ),
+      },
+      Effect.mapError(() => unavailable("Managed completion declarations could not be restored.")),
+    ),
     // Stop is intentionally session-scoped: the native API stops the selected bot session,
     // including work started through its native client. It does not accept a delivery nonce.
-    verifyInterrupt: ({ native: owned, providerThreadId, providerTurnId }) =>
-      Effect.gen(function* () {
+    verifyInterrupt: Effect.fn("GrokBotManagedBindingLive.verifyInterrupt")(
+      function* ({ native: owned, providerThreadId, providerTurnId }) {
         yield* accountIsCurrent(owned.binding);
         const binding = yield* store.get(owned);
         const shell = yield* projections.getThreadShell(owned.threadId);
@@ -474,17 +476,17 @@ const make = Effect.gen(function* () {
             "The selected native bot session cannot be managed by this account.",
           );
         yield* accountIsCurrent(owned.binding);
-      }).pipe(
-        Effect.mapError((cause) =>
-          isBindingError(cause)
-            ? cause
-            : unavailable("The native interrupt authority could not be verified."),
-        ),
+      },
+      Effect.mapError((cause) =>
+        isBindingError(cause)
+          ? cause
+          : unavailable("The native interrupt authority could not be verified."),
       ),
+    ),
     // Cursor advancement belongs to the event sink's transaction, never the live stream.
     recordCursor: () => Effect.void,
-    release: ({ native: owned, providerSessionId }) =>
-      Effect.gen(function* () {
+    release: Effect.fn("GrokBotManagedBindingLive.release")(
+      function* ({ native: owned, providerSessionId }) {
         const handles = leases.get(providerSessionId);
         const preserve = yield* Effect.gen(function* () {
           const durableTurns = yield* store.restoreTurns(owned);
@@ -494,7 +496,9 @@ const make = Effect.gen(function* () {
         if (preserve) return;
         leases.delete(providerSessionId);
         for (const handle of handles ?? []) yield* registry.revokeProviderSession(handle);
-      }).pipe(Effect.orElseSucceed(() => undefined)),
+      },
+      Effect.orElseSucceed(() => undefined),
+    ),
   });
 });
 

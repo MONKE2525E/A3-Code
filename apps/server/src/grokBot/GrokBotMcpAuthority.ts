@@ -11,8 +11,8 @@ const make = Effect.gen(function* () {
   const store = yield* GrokBotManagedStateStore.GrokBotManagedStateStore;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   return McpRemoteRunValidator.McpRemoteRunValidator.of({
-    validate: (scope) =>
-      Effect.gen(function* () {
+    validate: Effect.fn("GrokBotMcpAuthority.validate")(
+      function* (scope) {
         const remote = scope.thread.remoteRun;
         if (remote === undefined) return false;
         const record = yield* store.lookupTurn(remote);
@@ -48,7 +48,9 @@ const make = Effect.gen(function* () {
         )
           return false;
         return true;
-      }).pipe(Effect.orElseSucceed(() => false)),
+      },
+      Effect.orElseSucceed(() => false),
+    ),
   });
 });
 

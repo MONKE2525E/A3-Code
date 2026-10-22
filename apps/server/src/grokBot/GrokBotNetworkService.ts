@@ -145,12 +145,14 @@ const make = Effect.gen(function* () {
       },
     });
   };
-  const persist = (value: typeof saved) =>
-    Effect.gen(function* () {
+  const persist = Effect.fn("GrokBotNetworkService.persist")(
+    function* (value: typeof saved) {
       yield* fs.makeDirectory(config.stateDir, { recursive: true });
       yield* fs.writeFileString(file + ".tmp", encodeSaved(value), { mode: 0o600 });
       yield* fs.rename(file + ".tmp", file);
-    }).pipe(Effect.mapError(() => new GrokBotComputerError({ reason: "unavailable" })));
+    },
+    Effect.mapError(() => new GrokBotComputerError({ reason: "unavailable" })),
+  );
   const disableForAccountChange = (binding: string) =>
     lock.withPermits(1)(
       Effect.gen(function* () {

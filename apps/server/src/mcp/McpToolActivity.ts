@@ -33,11 +33,12 @@ export class RegisteredToolName extends Context.Reference<string | undefined>(
 ) {}
 
 /** Declarations call this after their access check, before executing the handler. */
-export const observe = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
-  Effect.gen(function* () {
-    const name = yield* RegisteredToolName;
-    return yield* name === undefined ? effect : (yield* McpToolActivity).observe(name, effect);
-  });
+export const observe = Effect.fn("McpToolActivity.observe")(function* <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+) {
+  const name = yield* RegisteredToolName;
+  return yield* name === undefined ? effect : (yield* McpToolActivity).observe(name, effect);
+});
 
 const driver = ProviderDriverKind.make("grok-bot");
 type ToolItem = Extract<OrchestrationV2TurnItem, { readonly type: "dynamic_tool" }>;
@@ -49,88 +50,87 @@ const make = Effect.gen(function* () {
   const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
   const commands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
 
-  const begin = (toolName: string) =>
-    Effect.gen(function* () {
-      const context = yield* Effect.serviceOption(McpInvocationContext.McpInvocationContext);
-      if (Option.isNone(context) || toolName === "grok_bot_complete_turn") return;
-      const scope = context.value;
-      const caller = scope.thread;
-      const remote = caller?.remoteRun;
-      if (caller === undefined || remote === undefined || scope.client !== undefined) return;
-      return yield* commands.withLock(
-        caller.threadId,
-        Effect.gen(function* () {
-          if (!(yield* authority.validate({ ...scope, thread: caller }))) return;
-          const owned = yield* managed.lookupTurn(remote);
-          if (
-            owned === undefined ||
-            owned.state === "settled" ||
-            owned.identity.native.threadId !== caller.threadId ||
-            owned.identity.native.providerInstanceId !== caller.providerInstanceId
-          )
-            return;
-          const identity = owned.identity;
-          const records = yield* projections.getThreadRecords(
-            caller.threadId,
-            ["runs", "providerThreads"],
-            { runIds: [remote.runId] },
-          );
-          const run = records.runs.find((candidate) => candidate.id === remote.runId);
-          const providerThread = records.providerThreads.find(
-            (candidate) => candidate.id === identity.providerThreadId,
-          );
-          if (
-            run === undefined ||
-            !["starting", "running", "waiting"].includes(run.status) ||
-            run.activeAttemptId !== remote.attemptId ||
-            run.rootNodeId !== identity.rootNodeId ||
-            run.providerInstanceId !== caller.providerInstanceId ||
-            providerThread?.providerSessionId == null ||
-            providerThread.appThreadId !== caller.threadId ||
-            providerThread.providerInstanceId !== caller.providerInstanceId
-          )
-            return;
-          const now = yield* DateTime.now;
-          const item: ToolItem = {
-            id: TurnItemId.make(`mcp-call:${yield* randomUuidV4}`),
-            type: "dynamic_tool",
-            threadId: caller.threadId,
+  const begin = Effect.fn("McpToolActivity.begin")(function* (toolName: string) {
+    const context = yield* Effect.serviceOption(McpInvocationContext.McpInvocationContext);
+    if (Option.isNone(context) || toolName === "grok_bot_complete_turn") return;
+    const scope = context.value;
+    const caller = scope.thread;
+    const remote = caller?.remoteRun;
+    if (caller === undefined || remote === undefined || scope.client !== undefined) return;
+    return yield* commands.withLock(
+      caller.threadId,
+      Effect.gen(function* () {
+        if (!(yield* authority.validate({ ...scope, thread: caller }))) return;
+        const owned = yield* managed.lookupTurn(remote);
+        if (
+          owned === undefined ||
+          owned.state === "settled" ||
+          owned.identity.native.threadId !== caller.threadId ||
+          owned.identity.native.providerInstanceId !== caller.providerInstanceId
+        )
+          return;
+        const identity = owned.identity;
+        const records = yield* projections.getThreadRecords(
+          caller.threadId,
+          ["runs", "providerThreads"],
+          { runIds: [remote.runId] },
+        );
+        const run = records.runs.find((candidate) => candidate.id === remote.runId);
+        const providerThread = records.providerThreads.find(
+          (candidate) => candidate.id === identity.providerThreadId,
+        );
+        if (
+          run === undefined ||
+          !["starting", "running", "waiting"].includes(run.status) ||
+          run.activeAttemptId !== remote.attemptId ||
+          run.rootNodeId !== identity.rootNodeId ||
+          run.providerInstanceId !== caller.providerInstanceId ||
+          providerThread?.providerSessionId == null ||
+          providerThread.appThreadId !== caller.threadId ||
+          providerThread.providerInstanceId !== caller.providerInstanceId
+        )
+          return;
+        const now = yield* DateTime.now;
+        const item: ToolItem = {
+          id: TurnItemId.make(`mcp-call:${yield* randomUuidV4}`),
+          type: "dynamic_tool",
+          threadId: caller.threadId,
+          runId: remote.runId,
+          nodeId: identity.rootNodeId,
+          providerThreadId: identity.providerThreadId,
+          providerTurnId: identity.providerTurnId,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 0,
+          status: "running",
+          title: toolName,
+          toolName,
+          input: {},
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+        };
+        const source = {
+          providerSessionId: providerThread.providerSessionId,
+          providerInstanceId: caller.providerInstanceId,
+          threadId: caller.threadId,
+          runId: remote.runId,
+          nodeId: identity.rootNodeId,
+        };
+        const stored = yield* ingestor.ingestNormalized({
+          ...source,
+          writeIfRunCurrent: {
             runId: remote.runId,
-            nodeId: identity.rootNodeId,
-            providerThreadId: identity.providerThreadId,
-            providerTurnId: identity.providerTurnId,
-            nativeItemRef: null,
-            parentItemId: null,
-            ordinal: 0,
-            status: "running",
-            title: toolName,
-            toolName,
-            input: {},
-            startedAt: now,
-            completedAt: null,
-            updatedAt: now,
-          };
-          const source = {
-            providerSessionId: providerThread.providerSessionId,
-            providerInstanceId: caller.providerInstanceId,
-            threadId: caller.threadId,
-            runId: remote.runId,
-            nodeId: identity.rootNodeId,
-          };
-          const stored = yield* ingestor.ingestNormalized({
-            ...source,
-            writeIfRunCurrent: {
-              runId: remote.runId,
-              activeAttemptId: remote.attemptId,
-              expectedStatus: run.status,
-            },
-            event: { type: "turn_item.updated", driver, turnItem: item },
-          });
-          if (stored.length === 0) return;
-          return { source, item };
-        }),
-      );
-    });
+            activeAttemptId: remote.attemptId,
+            expectedStatus: run.status,
+          },
+          event: { type: "turn_item.updated", driver, turnItem: item },
+        });
+        if (stored.length === 0) return;
+        return { source, item };
+      }),
+    );
+  });
 
   const finish = (
     call: NonNullable<Effect.Success<ReturnType<typeof begin>>>,

@@ -30,7 +30,7 @@ describe("V2 preview upgrade", () => {
   it.effect("retains native sequence evidence when upgrading existing positions", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 65 });
+      yield* runMigrations({ toMigrationInclusive: 71 });
       for (const [id, runId, driver, sequence] of [
         ["native", null, "muse-agent", 0],
         ["owned", "run:owned", "muse-agent", 1],
@@ -43,7 +43,7 @@ describe("V2 preview upgrade", () => {
         yield* sql`INSERT INTO orchestration_v2_turn_item_positions (thread_id, turn_item_id, ordinal)
           VALUES ('thread:migration', ${id}, ${sequence + 1})`;
       }
-      assert.deepStrictEqual(yield* runMigrations(), [[66, "NativeTurnItemSequences"]]);
+      assert.deepStrictEqual(yield* runMigrations(), [[72, "NativeTurnItemSequences"]]);
       assert.deepStrictEqual(
         yield* sql`SELECT turn_item_id, ordinal, native_sequence
           FROM orchestration_v2_turn_item_positions ORDER BY ordinal`,
@@ -81,6 +81,7 @@ describe("V2 preview upgrade", () => {
         [69, "GrokBotManagedCompletion"],
         [70, "GrokBotMigrationCompatibility"],
         [71, "ThreadSenderIndex"],
+        [72, "NativeTurnItemSequences"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -175,6 +176,7 @@ describe("V2 preview upgrade", () => {
         [69, "GrokBotManagedCompletion"],
         [70, "GrokBotMigrationCompatibility"],
         [71, "ThreadSenderIndex"],
+        [72, "NativeTurnItemSequences"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

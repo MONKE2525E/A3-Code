@@ -25,6 +25,7 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -34,6 +35,7 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 import { HttpServer } from "effect/http";
 import * as NetAddress from "effect/net/NetAddress";
+import * as Option from "effect/Option";
 import { McpSchema, McpServer } from "effect/ai";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerConfig from "../config.ts";
@@ -47,11 +49,11 @@ import * as Completion from "../grokBot/GrokBotTurnCompletion.ts";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as Worker from "../orchestration-v2/EffectWorker.ts";
+import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as Sessions from "../orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import * as Ingestor from "../orchestration-v2/ProviderEventIngestor.ts";
 import * as Activity from "./McpToolActivity.ts";
-import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as Projection from "../orchestration-v2/ProjectionStore.ts";
 import * as Receipts from "../orchestration-v2/CommandReceiptStore.ts";
@@ -338,6 +340,17 @@ it.effect.each([
               state.sends.push(turn);
               return { delivery: "accepted" as const };
             }),
+          sendStatus: (turn) =>
+            Effect.sync(() => {
+              const accepted = state.sends.some(
+                (sent) =>
+                  sent.binding === turn.binding &&
+                  sent.botId === turn.botId &&
+                  sent.sessionId === turn.sessionId &&
+                  sent.messageId === turn.messageId,
+              );
+              return { status: accepted ? ("accepted" as const) : ("not_found" as const) };
+            }),
         }),
       );
       const settings = Settings.layerTest({
@@ -554,10 +567,10 @@ it.effect.each([
         const store = yield* ManagedState.GrokBotManagedStateStore;
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const worker = yield* Worker.OrchestrationEffectWorkerV2;
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
         const projects = yield* ProjectService.ProjectService;
         const sql = yield* SqlClient.SqlClient;
         const sessions = yield* Sessions.ProviderSessionManagerV2;
-        const sink = yield* EventSink.EventSinkV2;
         const services = yield* Effect.context();
         // The bridge requires a Promise-returning fetch callback; only that transport boundary leaves this test Effect.
         // eslint-disable-next-line t3code/no-manual-effect-runtime-in-tests
@@ -886,18 +899,36 @@ it.effect.each([
             authorization,
           ).pipe(Effect.flatMap(decodeFailure));
           assert.equal(conflict.reason, "conflicting_declaration");
-          yield* sink.writeWithEffects({
-            events: [],
-            effects: [
-              {
-                id: `effect:fixture:reconstruct:${parentRun.id}`,
-                commandId: CommandId.make("fixture:reconstruct"),
-                threadId: launch.threadId,
-                request: { type: "provider-runtime.reconnect", runId: parentRun.id },
-              },
-            ],
-          });
+          const [scheduledReconnect] = yield* sql<{ readonly effect_id: string }>`
+            SELECT effect_id
+            FROM orchestration_v2_effect_outbox
+            WHERE thread_id = ${launch.threadId}
+              AND effect_type = 'provider-runtime.reconnect'
+              AND json_extract(payload_json, '$.runId') = ${parentRun.id}
+              AND status = 'pending'
+            ORDER BY rowid
+            LIMIT 1
+          `;
+          if (scheduledReconnect === undefined)
+            return yield* Effect.die("Missing scheduled remote reconnect effect");
+          const reconnectEffectId = scheduledReconnect.effect_id;
           yield* worker.drain();
+          const nextClaimable = yield* worker.nextClaimableAt;
+          if (Option.isNone(nextClaimable))
+            return yield* Effect.die("Scheduled remote reconnect was not claimable");
+          const now = yield* DateTime.now;
+          yield* TestClock.adjust(
+            Math.max(0, DateTime.toEpochMillis(nextClaimable.value) - DateTime.toEpochMillis(now)),
+          );
+          yield* worker.drain();
+          const reconnectEffect = yield* outbox.get(reconnectEffectId);
+          if (Option.isNone(reconnectEffect))
+            return yield* Effect.die("Missing durable reconnect effect");
+          assert.equal(
+            reconnectEffect.value.status,
+            "succeeded",
+            JSON.stringify(reconnectEffect.value),
+          );
           assert.lengthOf(state.sends, 1);
         }
         yield* Deferred.await(parentWaiting);

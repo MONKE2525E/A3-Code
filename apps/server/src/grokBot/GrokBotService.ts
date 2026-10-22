@@ -494,14 +494,13 @@ const make = Effect.gen(function* () {
     if (!(yield* fs.exists(preferencesPath))) return {} as Preferences;
     return yield* decodePreferences(yield* fs.readFileString(preferencesPath));
   }).pipe(Effect.mapError(storageError));
-  const save = (preferences: Preferences) =>
-    Effect.gen(function* () {
-      yield* fs.makeDirectory(path.dirname(preferencesPath), { recursive: true });
-      const temp = `${preferencesPath}.tmp`;
-      const encoded = yield* encodePreferences(preferences);
-      yield* fs.writeFileString(temp, encoded, { mode: 0o600 });
-      yield* fs.rename(temp, preferencesPath);
-    }).pipe(Effect.mapError(storageError));
+  const save = Effect.fn("GrokBotService.save")(function* (preferences: Preferences) {
+    yield* fs.makeDirectory(path.dirname(preferencesPath), { recursive: true });
+    const temp = `${preferencesPath}.tmp`;
+    const encoded = yield* encodePreferences(preferences);
+    yield* fs.writeFileString(temp, encoded, { mode: 0o600 });
+    yield* fs.rename(temp, preferencesPath);
+  }, Effect.mapError(storageError));
   // Best effort: a missing or unreadable desktop app just means nothing is pinned yet.
   const readDesktopPinned = Effect.gen(function* () {
     const directory = path.join(appData, "sand-client-persistence");
@@ -571,8 +570,8 @@ const make = Effect.gen(function* () {
     },
   );
   const status = Cache.get(statusCache, undefined);
-  const cli = (args: readonly string[], sending = false) =>
-    Effect.gen(function* () {
+  const cli = Effect.fn("GrokBotService.cli")(
+    function* (args: readonly string[], sending = false) {
       if (!(yield* fs.exists(path.join(appData, "gateway-descriptor.json"))))
         return yield* new GrokBotError({ reason: "signed_out" });
       const command = yield* invocation;
@@ -611,11 +610,11 @@ const make = Effect.gen(function* () {
         });
       }
       return result.stdout;
-    }).pipe(
-      Effect.mapError((error) =>
-        isGrokBotError(error) ? error : new GrokBotError({ reason: "gateway_failed" }),
-      ),
-    );
+    },
+    Effect.mapError((error) =>
+      isGrokBotError(error) ? error : new GrokBotError({ reason: "gateway_failed" }),
+    ),
+  );
   const rawList = native.list.pipe(
     Effect.catchTags({
       GrokBotNativeSignedOutError: () => Effect.fail(new GrokBotError({ reason: "signed_out" })),
@@ -781,8 +780,8 @@ const make = Effect.gen(function* () {
     Effect.all([Cache.invalidateAll(listCache), Cache.invalidate(conversationCache, botId)], {
       discard: true,
     });
-  const send = (input: typeof GrokBotSendInput.Type) =>
-    Effect.gen(function* () {
+  const send = Effect.fn("GrokBotService.send")(
+    function* (input: typeof GrokBotSendInput.Type) {
       // The CLI resolves the bot itself; PR reconciliation is unrelated to sending.
       const text = yield* cli(
         [
@@ -803,10 +802,12 @@ const make = Effect.gen(function* () {
       );
       if (!delivered(receipt)) return yield* new GrokBotError({ reason: "delivery_unknown" });
       return { accepted: true };
-    }).pipe(Effect.ensuring(invalidate(input.botId)));
+    },
+    (self, input) => Effect.ensuring(invalidate(input.botId))(self),
+  );
   // Creation goes through the gateway CLI because the desktop profile API has no create method.
-  const create = (input: typeof GrokBotCreateInput.Type) =>
-    Effect.gen(function* () {
+  const create = Effect.fn("GrokBotService.create")(
+    function* (input: typeof GrokBotCreateInput.Type) {
       if (
         (input.avatarShape !== undefined && !CLI_CREATE_SHAPES.has(input.avatarShape)) ||
         (input.avatarColor !== undefined && !DESKTOP_COLORS.has(input.avatarColor))
@@ -838,9 +839,11 @@ const make = Effect.gen(function* () {
         ...decorate(created, preferences, pinned.ids),
         ...(pinned.authoritative ? { pinned: pinned.ids.has(created.id) } : {}),
       };
-    }).pipe(Effect.ensuring(Cache.invalidateAll(listCache)));
-  const update = (input: typeof GrokBotUpdateInput.Type) =>
-    Effect.gen(function* () {
+    },
+    Effect.ensuring(Cache.invalidateAll(listCache)),
+  );
+  const update = Effect.fn("GrokBotService.update")(
+    function* (input: typeof GrokBotUpdateInput.Type) {
       if (
         (input.avatarShape !== undefined && !DESKTOP_SHAPES.has(input.avatarShape)) ||
         (input.avatarColor !== undefined && !DESKTOP_COLORS.has(input.avatarColor))
@@ -975,44 +978,45 @@ const make = Effect.gen(function* () {
         };
       }
       return yield* find(input.botId);
-    }).pipe(Effect.ensuring(invalidate(input.botId)));
-  const link = (input: typeof GrokBotLinkInput.Type) =>
-    Effect.gen(function* () {
-      yield* find(input.botId);
-      const summary = input.remove
-        ? undefined
-        : yield* prs
-            .summary({ ...input.reference, allowStale: false })
-            .pipe(Effect.mapError(() => new GrokBotError({ reason: "pr_failed" })));
-      yield* lock.withPermits(1)(
-        Effect.gen(function* () {
-          const preferences = { ...(yield* load) };
-          const current = preferences[input.botId] ?? {
-            pinned: (yield* readDesktopPinned).has(input.botId),
-            featured: false,
-            pullRequests: [],
-          };
-          const links = current.pullRequests.filter(
-            (entry) => linkKey(entry.reference) !== linkKey(input.reference),
-          );
-          if (summary !== undefined && summary.state !== "merged")
-            links.push({
-              reference: input.reference,
-              url: summary.url,
-              title: summary.title,
-              state: summary.state,
-            });
-          preferences[input.botId] = { ...current, pullRequests: links };
-          yield* save(preferences);
-        }),
-      );
-      yield* invalidate(input.botId);
-      return yield* find(input.botId);
-    });
+    },
+    (self, input) => Effect.ensuring(invalidate(input.botId))(self),
+  );
+  const link = Effect.fn("GrokBotService.link")(function* (input: typeof GrokBotLinkInput.Type) {
+    yield* find(input.botId);
+    const summary = input.remove
+      ? undefined
+      : yield* prs
+          .summary({ ...input.reference, allowStale: false })
+          .pipe(Effect.mapError(() => new GrokBotError({ reason: "pr_failed" })));
+    yield* lock.withPermits(1)(
+      Effect.gen(function* () {
+        const preferences = { ...(yield* load) };
+        const current = preferences[input.botId] ?? {
+          pinned: (yield* readDesktopPinned).has(input.botId),
+          featured: false,
+          pullRequests: [],
+        };
+        const links = current.pullRequests.filter(
+          (entry) => linkKey(entry.reference) !== linkKey(input.reference),
+        );
+        if (summary !== undefined && summary.state !== "merged")
+          links.push({
+            reference: input.reference,
+            url: summary.url,
+            title: summary.title,
+            state: summary.state,
+          });
+        preferences[input.botId] = { ...current, pullRequests: links };
+        yield* save(preferences);
+      }),
+    );
+    yield* invalidate(input.botId);
+    return yield* find(input.botId);
+  });
   // A sent delete may commit even when its response is lost, so the roster is re-read to decide.
   // The mutation is never retried through the CLI once it has been attempted.
-  const remove = (input: typeof GrokBotDeleteInput.Type) =>
-    Effect.gen(function* () {
+  const remove = Effect.fn("GrokBotService.remove")(
+    function* (input: typeof GrokBotDeleteInput.Type) {
       const current = yield* find(input.botId);
       if (current.runtimeActivity?.isRunning === true)
         return yield* new GrokBotError({ reason: "delete_running" });
@@ -1064,7 +1068,9 @@ const make = Effect.gen(function* () {
         }),
       );
       return { botId: input.botId };
-    }).pipe(Effect.ensuring(invalidate(input.botId)));
+    },
+    (self, input) => Effect.ensuring(invalidate(input.botId))(self),
+  );
   const setup = installLock.withPermits(1)(
     Effect.gen(function* () {
       yield* Cache.invalidateAll(statusCache);
