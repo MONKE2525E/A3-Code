@@ -105,6 +105,15 @@ const History = Schema.Struct({
   has_more: Schema.optionalKey(Schema.Boolean),
 });
 const StreamHistory = Schema.Struct({ events: Schema.Array(Schema.Unknown) });
+const decodeTerminal = Schema.decodeUnknownOption(
+  Schema.Struct({
+    session_id: Schema.String,
+    reply_to_message_id: Schema.String,
+    status: Schema.Literals(["completed", "done", "failed", "error", "interrupted", "cancelled"]),
+    stream_lane: Schema.optionalKey(Schema.String),
+    transcript_surface: Schema.optionalKey(Schema.String),
+  }),
+);
 const Identity = Schema.Struct({
   name: Schema.optionalKey(Schema.String),
   creature: Schema.optionalKey(Schema.String),
@@ -306,6 +315,47 @@ const make = Effect.gen(function* () {
       return yield* new MuseAgentRuntimeError({ kind: "unsupported" });
     return session;
   });
+  const reconcileDeliveries = Effect.fn("MuseAgentNativeRuntimeService.reconcileDeliveries")(
+    function* (scope: MuseAgentDeliveryScope) {
+      yield* check(scope.binding);
+      for (const pending of yield* deliveries.pendingDeliveries(scope)) {
+        // An unacknowledged intent cannot be retried or inferred from session idle state.
+        if (pending.status !== "accepted") continue;
+        const receipt = yield* deliveries.receipt(pending.deliveryKey, scope);
+        if (!receipt) continue;
+        const replay = yield* decode(
+          yield* transport.request(scope.binding, "chat.stream_events", {
+            reply_to_message_id: receipt.replyToMessageId,
+            session_id: receipt.sessionId,
+            stream_lane: "all",
+            limit: 4096,
+          }),
+          StreamHistory,
+        );
+        const terminal = replay.events.some((raw) => {
+          const frame = museHistoryFrame(raw, scope.sessionId);
+          if (frame?.event !== "delta.turn_done") return false;
+          const parsed = decodeTerminal(frame.payload);
+          return (
+            Option.isSome(parsed) &&
+            parsed.value.session_id === receipt.sessionId &&
+            parsed.value.stream_lane !== "subagent" &&
+            parsed.value.transcript_surface !== "subagent" &&
+            (parsed.value.reply_to_message_id === receipt.messageId ||
+              parsed.value.reply_to_message_id === receipt.replyToMessageId)
+          );
+        });
+        if (!terminal) continue;
+        yield* check(scope.binding);
+        yield* transport.releaseOwned(scope.binding, {
+          sessionId: scope.sessionId,
+          deliveryKey: pending.deliveryKey,
+          receipt,
+        });
+        yield* deliveries.settle(pending.deliveryKey);
+      }
+    },
+  );
   return MuseAgentNativeRuntimeService.of({
     accountBinding,
     sessions,
@@ -511,19 +561,29 @@ const make = Effect.gen(function* () {
         () =>
           Effect.uninterruptibleMask((restore) =>
             Effect.gen(function* () {
-              const existing = yield* deliveries
-                .begin({
-                  ...input,
-                  ...(attachmentIdentity ? { attachmentIdentity } : {}),
-                })
-                .pipe(
-                  Effect.catchTags({
-                    MuseAgentDeliveryError: (cause) =>
-                      cause.kind === "busy" || cause.kind === "conflict"
-                        ? Effect.fail(new ProviderPromptNotSubmittedError({ cause }))
-                        : Effect.fail(cause),
-                  }),
-                );
+              const begin = deliveries.begin({
+                ...input,
+                ...(attachmentIdentity ? { attachmentIdentity } : {}),
+              });
+              const existing = yield* begin.pipe(
+                Effect.catchTags({
+                  MuseAgentDeliveryError: (cause) =>
+                    cause.kind === "busy"
+                      ? restore(reconcileDeliveries(input)).pipe(
+                          Effect.mapError(
+                            (cause) => new ProviderPromptNotSubmittedError({ cause }),
+                          ),
+                          Effect.andThen(begin),
+                        )
+                      : Effect.fail(cause),
+                }),
+                Effect.catchTags({
+                  MuseAgentDeliveryError: (cause) =>
+                    cause.kind === "busy" || cause.kind === "conflict"
+                      ? Effect.fail(new ProviderPromptNotSubmittedError({ cause }))
+                      : Effect.fail(cause),
+                }),
+              );
               if (existing) return { ...existing, replayed: true };
               let promptAttempted = false;
               let revertOption: Effect.Effect<boolean> = Effect.succeed(true);
@@ -757,7 +817,9 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           const scope = { binding, sessionId };
           const release = yield* restore(transport.acquireTurn(binding, sessionId));
-          yield* deliveries.assertTurnAvailable(scope).pipe(Effect.onError(() => release));
+          yield* restore(
+            reconcileDeliveries(scope).pipe(Effect.andThen(deliveries.assertTurnAvailable(scope))),
+          ).pipe(Effect.onError(() => release));
           return release;
         }),
       ),

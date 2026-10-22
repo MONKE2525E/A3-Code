@@ -70,6 +70,7 @@ const fixture = () => {
   let skillFailure = false;
   const skillActions: string[] = [];
   let history: unknown[] = [];
+  let streamHistory: unknown[] = [];
   let widgetApplied = true;
   let loseWidgetReply = false;
   let identity: unknown = {
@@ -120,7 +121,7 @@ const fixture = () => {
             return yield* new Transport.MuseAgentTransportError({ kind: "disconnected" });
           return { applied: widgetApplied, state };
         }
-        if (method === "chat.stream_events") return { events: [] };
+        if (method === "chat.stream_events") return { events: streamHistory };
         if (method === "fs.write") {
           yield* stageHook;
           const size = Buffer.from(String(params.data_base64), "base64").length;
@@ -224,6 +225,9 @@ const fixture = () => {
     calls,
     loseWidgetReply: () => {
       loseWidgetReply = true;
+    },
+    setStreamHistory: (events: unknown[]) => {
+      streamHistory = events;
     },
     setHistory: (events: unknown[]) => {
       history = events;
@@ -1395,3 +1399,72 @@ it.effect("recovers an accepted receipt without requiring the skill again", () =
     assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 1);
   }).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)));
 });
+
+it.effect.each(["owned", "foreign", "subagent", "other_session", "incomplete"])(
+  "recovers a saved delivery only with exact native terminal proof: %s",
+  (evidence) =>
+    withFixture((f) =>
+      Effect.gen(function* () {
+        const related = evidence === "owned";
+        const native = yield* Native.MuseAgentNativeRuntimeService;
+        const receipt = yield* native.send(request);
+        f.setStreamHistory([
+          {
+            event_name: "delta.turn_done",
+            seq: 10,
+            occurred_at_ms: 2000,
+            reply_to_message_id:
+              evidence === "foreign" ? "foreign-receipt" : receipt.replyToMessageId,
+            session_id: evidence === "other_session" ? "other" : "primary",
+            payload: {
+              session_id: "primary",
+              status: evidence === "incomplete" ? "running" : "completed",
+              ...(evidence === "subagent" ? { stream_lane: "subagent" } : {}),
+            },
+          },
+        ]);
+        const next = yield* Effect.exit(native.send({ ...request, deliveryKey: "attempt-2" }));
+        assert.strictEqual(Exit.isSuccess(next), related);
+        assert.strictEqual(
+          f.calls.filter((call) => call.method === "chat.stream").length,
+          related ? 2 : 1,
+        );
+        assert.deepStrictEqual(f.cancellations, []);
+        assert.deepStrictEqual(
+          (yield* native.pendingDeliveries(request)).map((entry) => entry.deliveryKey),
+          [related ? "attempt-2" : request.deliveryKey],
+        );
+      }).pipe(Effect.provide(f.layer)),
+    ),
+);
+
+it.effect(
+  "reconciles a completed receipt after rebuilding the runtime before acquiring the next turn",
+  () =>
+    withFixture((f) =>
+      Effect.gen(function* () {
+        const receipt = yield* Effect.gen(function* () {
+          const native = yield* Native.MuseAgentNativeRuntimeService;
+          return yield* native.send(request);
+        }).pipe(Effect.provide(f.layer));
+        f.setStreamHistory([
+          {
+            event_name: "delta.turn_done",
+            seq: 10,
+            occurred_at_ms: 2000,
+            reply_to_message_id: receipt.replyToMessageId,
+            payload: { session_id: "primary", status: "completed" },
+          },
+        ]);
+        yield* Effect.gen(function* () {
+          const native = yield* Native.MuseAgentNativeRuntimeService;
+          const release = yield* native.acquireTurn(binding, "primary");
+          assert.deepStrictEqual(yield* native.pendingDeliveries(request), []);
+          yield* native.send({ ...request, deliveryKey: "attempt-after-restart" });
+          yield* release;
+        }).pipe(Effect.provide(f.layer));
+        assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 2);
+        assert.deepStrictEqual(f.cancellations, []);
+      }),
+    ),
+);

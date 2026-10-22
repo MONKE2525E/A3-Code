@@ -628,17 +628,19 @@ it.effect("disconnect interrupts pending registration before it can admit a nati
 );
 
 it.effect.each([false, true])(
-  "only recovers durable Muse deliveries with terminal replay evidence: terminal=%s",
+  "observes durable deliveries until replay or live terminal evidence: replay terminal=%s",
   (terminal) =>
     Effect.scoped(
       Effect.gen(function* () {
         const turn = yield* makeTurn;
         const released = yield* Deferred.make<void>();
+        const frames = yield* Queue.unbounded<MuseAgentNativeEvent>();
         const closed = yield* Deferred.make<void>();
         let sends = 0;
         let replays = 0;
         let revokes = 0;
         const native = makeNative({
+          watch: () => Effect.succeed({ events: Stream.fromQueue(frames), close: Effect.void }),
           acquireTurn: () =>
             Effect.succeed(Deferred.succeed(released, undefined).pipe(Effect.asVoid)),
           send: () =>
@@ -680,33 +682,48 @@ it.effect.each([false, true])(
         const runtime = yield* adapter.openSession(sessionInput);
         const events = yield* runtime.events.pipe(Stream.runDrain, Effect.forkScoped);
         const result = yield* Effect.exit(runtime.startTurn(turn));
-        assert.strictEqual(Exit.isSuccess(result), terminal);
+        assert.strictEqual(Exit.isSuccess(result), true);
         if (!terminal) {
-          assert.strictEqual(Exit.isFailure(yield* Fiber.await(events)), true);
-          assert.strictEqual(Exit.isFailure(yield* Effect.exit(runtime.startTurn(turn))), true);
+          yield* Queue.offer(frames, {
+            event: "delta.turn_done",
+            payload: {
+              session_id: "primary",
+              reply_to_message_id: receipt.replyToMessageId,
+              status: "completed",
+            },
+            meta: { seq: 10, ts_ms: 2000 },
+          });
         }
         yield* Deferred.await(closed);
         yield* Deferred.await(released);
         assert.strictEqual(sends, 1);
         assert.strictEqual(replays, 1);
         assert.strictEqual(revokes, 1);
+        yield* Fiber.interrupt(events);
       }),
     ),
 );
 
-it.effect(
-  "fails an unsettled reconnected turn instead of advertising a ready runtime without tools",
-  () =>
+it.effect.each([false, true])(
+  "keeps observing a reconnected turn until terminal proof, replay disconnected: %s",
+  (disconnected) =>
     Effect.scoped(
       Effect.gen(function* () {
         const turn = yield* makeTurn;
         const frames = yield* Queue.unbounded<MuseAgentNativeEvent>();
         const released = yield* Deferred.make<void>();
+        const recovering = yield* Deferred.make<void>();
+        const terminal = yield* Deferred.make<void>();
+        const settled: string[] = [];
         const seen: ProviderAdapterV2Event[] = [];
         let sends = 0;
         let revokes = 0;
         let replays = 0;
         const native = makeNative({
+          settleDelivery: (key) =>
+            Effect.sync(() => {
+              settled.push(key);
+            }),
           watch: () => Effect.succeed({ events: Stream.fromQueue(frames), close: Effect.void }),
           acquireTurn: () =>
             Effect.succeed(Deferred.succeed(released, undefined).pipe(Effect.asVoid)),
@@ -716,9 +733,11 @@ it.effect(
               return receipt;
             }),
           replay: () =>
-            Effect.sync(() => {
+            Effect.suspend(() => {
               replays++;
-              return [];
+              return disconnected
+                ? Effect.fail(new MuseAgentTransportError({ kind: "disconnected" }))
+                : Effect.succeed([]);
             }),
         });
         const port = ToolsPort.MuseAgentDirectToolsPort.of({
@@ -739,14 +758,23 @@ it.effect(
         );
         const runtime = yield* adapter.openSession(sessionInput);
         const events = yield* runtime.events.pipe(
-          Stream.runForEach((event) => Effect.sync(() => seen.push(event))),
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              seen.push(event);
+              if (
+                event.type === "provider_session.updated" &&
+                event.providerSession.lastError?.includes("Waiting")
+              )
+                yield* Deferred.succeed(recovering, undefined);
+              if (event.type === "turn.terminal") yield* Deferred.succeed(terminal, undefined);
+            }),
+          ),
           Effect.forkScoped,
         );
         yield* runtime.startTurn(turn);
         yield* Queue.offer(frames, { event: "transport.disconnected" });
         yield* Queue.offer(frames, { event: "transport.reconnected" });
-        assert.strictEqual(Exit.isFailure(yield* Fiber.await(events)), true);
-        yield* Deferred.await(released);
+        yield* Effect.raceFirst(Deferred.await(recovering), Fiber.join(events));
         assert.strictEqual(sends, 1);
         assert.strictEqual(revokes, 1);
         assert.strictEqual(replays, 1);
@@ -761,6 +789,20 @@ it.effect(
           ),
           false,
         );
+        yield* Queue.offer(frames, {
+          event: "delta.turn_done",
+          payload: {
+            session_id: "primary",
+            reply_to_message_id: receipt.replyToMessageId,
+            status: "completed",
+          },
+          meta: { seq: 10, ts_ms: 2000 },
+        });
+        yield* Deferred.await(terminal);
+        yield* Deferred.await(released);
+        assert.deepStrictEqual(settled, [turn.attemptId]);
+        assert.strictEqual(sends, 1);
+        yield* Fiber.interrupt(events);
       }),
     ),
 );
