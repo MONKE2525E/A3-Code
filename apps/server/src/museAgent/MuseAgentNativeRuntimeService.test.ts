@@ -80,11 +80,13 @@ const fixture = () => {
   };
   const cancellations: Delivery.MuseAgentReceipt[] = [];
   const localReleases: string[] = [];
+  const localReleaseSessions: string[] = [];
   const transport = Transport.MuseAgentTransport.of({
     acquireTurn: (account, sessionId) => acquireTurn(account, sessionId),
     releaseOwned: (_, input) =>
       Effect.sync(() => {
         localReleases.push(input.deliveryKey);
+        localReleaseSessions.push(input.sessionId);
       }).pipe(Effect.andThen(Effect.suspend(() => releaseOwnedHook))),
     connect: Effect.suspend(() => {
       if (!ready)
@@ -241,6 +243,7 @@ const fixture = () => {
     },
     cancellations,
     localReleases,
+    localReleaseSessions,
     remotePaths: () => [...remoteSizes.keys()],
     refuseRelease: () =>
       db.exec(
@@ -1504,6 +1507,62 @@ it.effect(
         assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 2);
         assert.deepStrictEqual(f.cancellations, []);
       }),
+    ),
+);
+
+it.effect("reconciles another session's completed receipt before account-wide turn admission", () =>
+  withFixture((f) =>
+    Effect.gen(function* () {
+      const native = yield* Native.MuseAgentNativeRuntimeService;
+      const receipt = yield* native.send(request);
+      f.setStreamHistory([
+        {
+          event_name: "delta.turn_done",
+          seq: 10,
+          occurred_at_ms: 2000,
+          reply_to_message_id: receipt.replyToMessageId,
+          payload: { status: "completed" },
+        },
+      ]);
+
+      const release = yield* native.acquireTurn(binding, "side-chat");
+      assert.deepStrictEqual(yield* native.pendingDeliveries(request), []);
+      assert.deepStrictEqual(f.localReleases, [request.deliveryKey]);
+      assert.deepStrictEqual(f.localReleaseSessions, ["primary"]);
+      assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 1);
+      yield* release;
+    }).pipe(Effect.provide(f.layer)),
+  ),
+);
+
+it.effect(
+  "keeps another session busy when its accepted receipt has no terminal proof and releases the route",
+  () =>
+    withFixture((f) =>
+      Effect.gen(function* () {
+        const native = yield* Native.MuseAgentNativeRuntimeService;
+        yield* native.send(request);
+        let routeReleases = 0;
+        f.setAcquireTurn(() =>
+          Effect.succeed(
+            Effect.sync(() => {
+              routeReleases++;
+            }),
+          ),
+        );
+
+        const attempt = yield* Effect.exit(native.acquireTurn(binding, "side-chat"));
+        assert.isFalse(Exit.isSuccess(attempt));
+        if (Exit.isFailure(attempt)) {
+          const failure = Cause.findErrorOption(attempt.cause);
+          if (Option.isSome(failure)) assert.strictEqual(nativeErrorKind(failure.value), "busy");
+          else assert.fail("Expected account admission to fail with a typed busy error.");
+        }
+        assert.strictEqual(routeReleases, 1);
+        assert.strictEqual((yield* native.pendingDeliveries(request)).length, 1);
+        assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 1);
+        assert.deepStrictEqual(f.localReleases, []);
+      }).pipe(Effect.provide(f.layer)),
     ),
 );
 

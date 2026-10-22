@@ -13,6 +13,7 @@ import * as Schema from "effect/Schema";
 import {
   MuseAgentDeliveryContext,
   MuseAgentManagedMessageSnapshot,
+  type MuseAgentAccountPendingDelivery,
   type MuseAgentDeliveryScope,
   type MuseAgentHistoryOwnership,
   type MuseAgentHistoryOwnershipScope,
@@ -103,6 +104,9 @@ export class MuseAgentDeliveryStore extends Context.Service<
     readonly pendingDeliveries: (
       scope: MuseAgentDeliveryScope,
     ) => Effect.Effect<readonly MuseAgentPendingDelivery[], MuseAgentDeliveryError>;
+    readonly pendingDeliveriesForBinding: (
+      binding: string,
+    ) => Effect.Effect<readonly MuseAgentAccountPendingDelivery[], MuseAgentDeliveryError>;
     /** Releases only local ownership. The retained tombstone forbids reuse of this delivery key. */
     readonly releaseLocalOwnership: (
       input: MuseAgentDeliveryScope & { readonly deliveryKey: string },
@@ -117,6 +121,8 @@ export const makeMuseAgentDeliveryStore = (
     delivery_key TEXT PRIMARY KEY, binding TEXT NOT NULL, session_id TEXT NOT NULL,
     request_hash TEXT NOT NULL, status TEXT NOT NULL, receipt_json TEXT, ownership_json TEXT
   ); CREATE INDEX IF NOT EXISTS muse_delivery_session ON muse_deliveries(binding, session_id, status);
+  CREATE INDEX IF NOT EXISTS muse_delivery_account_pending ON muse_deliveries(binding, status)
+    WHERE status IN ('intent', 'accepted');
   CREATE TABLE IF NOT EXISTS muse_managed_messages (
     binding TEXT NOT NULL, session_id TEXT NOT NULL, native_message_id TEXT NOT NULL,
     delivery_key TEXT NOT NULL, snapshot_json TEXT, PRIMARY KEY(binding, session_id, native_message_id)
@@ -380,6 +386,25 @@ export const makeMuseAgentDeliveryStore = (
               throw new MuseAgentDeliveryError({ kind: "storage" });
             return {
               deliveryKey: row.delivery_key,
+              status: row.status,
+              context: row.ownership_json ? decodeContext(row.ownership_json) : null,
+            };
+          }),
+      ),
+    pendingDeliveriesForBinding: (binding) =>
+      operation(() =>
+        db
+          .prepare(
+            "SELECT * FROM muse_deliveries WHERE binding=? AND status IN ('intent','accepted') ORDER BY rowid",
+          )
+          .all(binding)
+          .map((raw) => {
+            const row = decodeRow(raw);
+            if (row.status !== "intent" && row.status !== "accepted")
+              throw new MuseAgentDeliveryError({ kind: "storage" });
+            return {
+              deliveryKey: row.delivery_key,
+              sessionId: row.session_id,
               status: row.status,
               context: row.ownership_json ? decodeContext(row.ownership_json) : null,
             };

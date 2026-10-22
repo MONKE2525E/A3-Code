@@ -323,10 +323,13 @@ const make = Effect.gen(function* () {
     function* (scope: MuseAgentDeliveryScope, terminalEvent?: Transport.MuseAgentNativeEvent) {
       yield* check(scope.binding);
       let unresolved = false;
-      for (const pending of yield* deliveries.pendingDeliveries(scope)) {
+      for (const pending of yield* deliveries.pendingDeliveriesForBinding(scope.binding)) {
         // An unacknowledged intent cannot be retried or inferred from session idle state.
         if (pending.status !== "accepted") continue;
-        const receipt = yield* deliveries.receipt(pending.deliveryKey, scope);
+        const receipt = yield* deliveries.receipt(pending.deliveryKey, {
+          binding: scope.binding,
+          sessionId: pending.sessionId,
+        });
         if (!receipt) {
           unresolved = true;
           continue;
@@ -356,7 +359,7 @@ const make = Effect.gen(function* () {
             StreamHistory,
           );
           terminal = replay.events.some((raw) => {
-            const frame = museHistoryFrame(raw, scope.sessionId);
+            const frame = museHistoryFrame(raw, receipt.sessionId);
             return matchesTerminal(frame ?? undefined);
           });
         }
@@ -366,7 +369,7 @@ const make = Effect.gen(function* () {
         }
         yield* check(scope.binding);
         yield* transport.releaseOwned(scope.binding, {
-          sessionId: scope.sessionId,
+          sessionId: receipt.sessionId,
           deliveryKey: pending.deliveryKey,
           receipt,
         });
