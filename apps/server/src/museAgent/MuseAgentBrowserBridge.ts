@@ -66,6 +66,9 @@ export const museAgentBrowserBridge = String.raw`(() => {
   };
   const emit = value => window.__t3MuseEvent(value).catch(() => {});
   const clearTools = () => { for (const fn of toolCleanup) fn(); toolCleanup = []; toolRegistration = null; };
+  const clearToolsFor = (session, connectionId) => {
+    if (toolRegistration?.nativeSessionId === session && toolRegistration.connectionId === connectionId) clearTools();
+  };
   const endComputer = current => {
     if (current.closed) return;
     current.closed = true; computerStreams.delete(current.id); current.abort.abort(); current.native?.teardown();
@@ -271,14 +274,19 @@ export const museAgentBrowserBridge = String.raw`(() => {
       if (typeof deliveryKey !== 'string' || !deliveryKey || deliveryKey.length > 1024) throw Error('release_scope_changed');
       const key = JSON.stringify([authority,session,deliveryKey]);
       if (releasedDeliveries.has(key)) return;
-      if ((pinned && pinned !== authority) || (sessionId && sessionId !== session)) throw Error('release_scope_changed');
-      if (owned) {
+      if (pinned && pinned !== authority) throw Error('release_scope_changed');
+      const routeChanged = sessionId != null && sessionId !== session;
+      const matchingAdmission = admitting?.deliveryKey === deliveryKey && admitting.sessionId === session && admitting.connectionId === connectionId;
+      const validReceipt = receipt && receipt.sessionId === session && typeof receipt.messageId === 'string' && receipt.messageId.length > 0 && receipt.messageId.length <= 1024 && typeof receipt.replyToMessageId === 'string' && receipt.replyToMessageId.length > 0 && receipt.replyToMessageId.length <= 1024;
+      if (receipt != null && !validReceipt) throw Error('release_scope_changed');
+      if (!matchingAdmission && !validReceipt) throw Error('release_scope_changed');
+      if (owned && !(routeChanged && owned.receipt.sessionId !== session)) {
         if (owned.deliveryKey !== deliveryKey || owned.connectionId !== connectionId || owned.receipt.sessionId !== session || !receipt || receipt.sessionId !== session || receipt.messageId !== owned.receipt.messageId || receipt.replyToMessageId !== owned.receipt.replyToMessageId) throw Error('release_scope_changed');
-        owned = null; clearTools();
+        owned = null; clearToolsFor(session,connectionId);
       }
-      if (admitting) {
+      if (admitting && !(routeChanged && admitting.sessionId !== session)) {
         if (admitting.deliveryKey !== deliveryKey || admitting.connectionId !== connectionId || admitting.sessionId !== session) throw Error('release_scope_changed');
-        admitting.released = true; admitting = null; clearTools();
+        admitting.released = true; admitting = null; clearToolsFor(session,connectionId);
       }
       releasedDeliveries.add(key);
       if (releasedDeliveries.size > 4096) releasedDeliveries.delete(releasedDeliveries.values().next().value);

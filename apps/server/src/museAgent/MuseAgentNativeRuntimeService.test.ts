@@ -81,12 +81,19 @@ const fixture = () => {
   const cancellations: Delivery.MuseAgentReceipt[] = [];
   const localReleases: string[] = [];
   const localReleaseSessions: string[] = [];
+  const localReleaseReceipts: (Delivery.MuseAgentReceipt | null)[] = [];
+  const routeEvents: { kind: "acquire" | "release"; sessionId: string }[] = [];
   const transport = Transport.MuseAgentTransport.of({
-    acquireTurn: (account, sessionId) => acquireTurn(account, sessionId),
+    acquireTurn: (account, sessionId) => {
+      routeEvents.push({ kind: "acquire", sessionId });
+      return acquireTurn(account, sessionId);
+    },
     releaseOwned: (_, input) =>
       Effect.sync(() => {
         localReleases.push(input.deliveryKey);
         localReleaseSessions.push(input.sessionId);
+        localReleaseReceipts.push(input.receipt);
+        routeEvents.push({ kind: "release", sessionId: input.sessionId });
       }).pipe(Effect.andThen(Effect.suspend(() => releaseOwnedHook))),
     connect: Effect.suspend(() => {
       if (!ready)
@@ -244,6 +251,8 @@ const fixture = () => {
     cancellations,
     localReleases,
     localReleaseSessions,
+    localReleaseReceipts,
+    routeEvents,
     remotePaths: () => [...remoteSizes.keys()],
     refuseRelease: () =>
       db.exec(
@@ -1529,6 +1538,17 @@ it.effect("reconciles another session's completed receipt before account-wide tu
       assert.deepStrictEqual(yield* native.pendingDeliveries(request), []);
       assert.deepStrictEqual(f.localReleases, [request.deliveryKey]);
       assert.deepStrictEqual(f.localReleaseSessions, ["primary"]);
+      assert.deepStrictEqual(f.localReleaseReceipts, [
+        {
+          sessionId: receipt.sessionId,
+          messageId: receipt.messageId,
+          replyToMessageId: receipt.replyToMessageId,
+        },
+      ]);
+      assert.deepStrictEqual(f.routeEvents, [
+        { kind: "acquire", sessionId: "side-chat" },
+        { kind: "release", sessionId: "primary" },
+      ]);
       assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 1);
       yield* release;
     }).pipe(Effect.provide(f.layer)),
