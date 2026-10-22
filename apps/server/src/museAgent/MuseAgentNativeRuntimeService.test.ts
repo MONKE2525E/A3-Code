@@ -1400,42 +1400,54 @@ it.effect("recovers an accepted receipt without requiring the skill again", () =
   }).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)));
 });
 
-it.effect.each(["owned", "foreign", "subagent", "other_session", "incomplete"])(
-  "recovers a saved delivery only with exact native terminal proof: %s",
-  (evidence) =>
-    withFixture((f) =>
-      Effect.gen(function* () {
-        const related = evidence === "owned";
-        const native = yield* Native.MuseAgentNativeRuntimeService;
-        const receipt = yield* native.send(request);
-        f.setStreamHistory([
-          {
-            event_name: "delta.turn_done",
-            seq: 10,
-            occurred_at_ms: 2000,
-            reply_to_message_id:
-              evidence === "foreign" ? "foreign-receipt" : receipt.replyToMessageId,
-            session_id: evidence === "other_session" ? "other" : "primary",
-            payload: {
-              session_id: "primary",
-              status: evidence === "incomplete" ? "running" : "completed",
-              ...(evidence === "subagent" ? { stream_lane: "subagent" } : {}),
-            },
+it.effect.each([
+  "owned",
+  "foreign",
+  "subagent",
+  "activity_lane",
+  "tool_lane",
+  "activity_surface",
+  "tool_surface",
+  "other_session",
+  "incomplete",
+])("recovers a saved delivery only with exact native terminal proof: %s", (evidence) =>
+  withFixture((f) =>
+    Effect.gen(function* () {
+      const related = evidence === "owned";
+      const native = yield* Native.MuseAgentNativeRuntimeService;
+      const receipt = yield* native.send(request);
+      f.setStreamHistory([
+        {
+          event_name: "delta.turn_done",
+          seq: 10,
+          occurred_at_ms: 2000,
+          reply_to_message_id:
+            evidence === "foreign" ? "foreign-receipt" : receipt.replyToMessageId,
+          session_id: evidence === "other_session" ? "other" : "primary",
+          payload: {
+            session_id: "primary",
+            status: evidence === "incomplete" ? "running" : "completed",
+            ...(evidence === "subagent" ? { stream_lane: "subagent" } : {}),
+            ...(evidence === "activity_lane" ? { stream_lane: "activity" } : {}),
+            ...(evidence === "tool_lane" ? { stream_lane: "tool" } : {}),
+            ...(evidence === "activity_surface" ? { transcript_surface: "activity" } : {}),
+            ...(evidence === "tool_surface" ? { transcript_surface: "tool" } : {}),
           },
-        ]);
-        const next = yield* Effect.exit(native.send({ ...request, deliveryKey: "attempt-2" }));
-        assert.strictEqual(Exit.isSuccess(next), related);
-        assert.strictEqual(
-          f.calls.filter((call) => call.method === "chat.stream").length,
-          related ? 2 : 1,
-        );
-        assert.deepStrictEqual(f.cancellations, []);
-        assert.deepStrictEqual(
-          (yield* native.pendingDeliveries(request)).map((entry) => entry.deliveryKey),
-          [related ? "attempt-2" : request.deliveryKey],
-        );
-      }).pipe(Effect.provide(f.layer)),
-    ),
+        },
+      ]);
+      const next = yield* Effect.exit(native.send({ ...request, deliveryKey: "attempt-2" }));
+      assert.strictEqual(Exit.isSuccess(next), related);
+      assert.strictEqual(
+        f.calls.filter((call) => call.method === "chat.stream").length,
+        related ? 2 : 1,
+      );
+      assert.deepStrictEqual(f.cancellations, []);
+      assert.deepStrictEqual(
+        (yield* native.pendingDeliveries(request)).map((entry) => entry.deliveryKey),
+        [related ? "attempt-2" : request.deliveryKey],
+      );
+    }).pipe(Effect.provide(f.layer)),
+  ),
 );
 
 it.effect(
@@ -1465,6 +1477,58 @@ it.effect(
         }).pipe(Effect.provide(f.layer));
         assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 2);
         assert.deepStrictEqual(f.cancellations, []);
+      }),
+    ),
+);
+
+it.effect(
+  "keeps an accepted receipt attached after restart until its exact live main terminal arrives",
+  () =>
+    withFixture((f) =>
+      Effect.gen(function* () {
+        yield* Effect.gen(function* () {
+          const native = yield* Native.MuseAgentNativeRuntimeService;
+          yield* native.send(request);
+        }).pipe(Effect.provide(f.layer));
+        f.setStreamHistory([]);
+        yield* Effect.gen(function* () {
+          const native = yield* Native.MuseAgentNativeRuntimeService;
+          const scope = { binding, sessionId: "primary" };
+          assert.isTrue(yield* native.reconcilePendingDeliveries(scope));
+          assert.isTrue(
+            yield* native.reconcilePendingDeliveries({
+              ...scope,
+              terminalEvent: {
+                event: "delta.turn_done",
+                payload: {
+                  session_id: "primary",
+                  reply_to_message_id: "carrier-1",
+                  status: "completed",
+                  transcript_surface: "activity",
+                },
+              },
+            }),
+          );
+          assert.strictEqual((yield* native.pendingDeliveries(scope)).length, 1);
+          assert.isFalse(
+            yield* native.reconcilePendingDeliveries({
+              ...scope,
+              terminalEvent: {
+                event: "delta.turn_done",
+                payload: {
+                  session_id: "primary",
+                  reply_to_message_id: "carrier-1",
+                  status: "completed",
+                  stream_lane: "main",
+                  transcript_surface: "main_chat",
+                },
+              },
+            }),
+          );
+          assert.deepStrictEqual(yield* native.pendingDeliveries(scope), []);
+          yield* native.send({ ...request, deliveryKey: "attempt-after-live-recovery" });
+        }).pipe(Effect.provide(f.layer));
+        assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 2);
       }),
     ),
 );

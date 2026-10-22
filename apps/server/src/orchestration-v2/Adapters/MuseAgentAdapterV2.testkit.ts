@@ -130,6 +130,7 @@ export const makeNative = (
     historyOwnership: () => Effect.succeed({ receipts: [], messages: [] }),
     recordManagedMessage: () => Effect.void,
     pendingDeliveries: () => Effect.succeed([]),
+    reconcilePendingDeliveries: () => Effect.succeed(false),
     releaseLocalOwnership: () => Effect.void,
     status: Effect.succeed({
       installed: true,

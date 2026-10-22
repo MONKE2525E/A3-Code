@@ -556,6 +556,36 @@ describe("native root task ownership", () => {
     }
   });
 
+  it("retains native ownership through activity and tool terminal events", async () => {
+    const f = fixture();
+    await admission(f);
+    for (const surface of [
+      { stream_lane: "activity" },
+      { stream_lane: "tool" },
+      { transcript_surface: "activity" },
+      { transcript_surface: "tool" },
+    ])
+      f.emit("delta.turn_done", {
+        session_id: "primary",
+        message_id: receipt.messageId,
+        reply_to_message_id: receipt.messageId,
+        status: "completed",
+        ...surface,
+      });
+    await f.bridge.cancelOwned({ authority: f.authority, receipt });
+    f.emit("delta.turn_done", {
+      session_id: "primary",
+      message_id: receipt.messageId,
+      reply_to_message_id: receipt.messageId,
+      status: "completed",
+      stream_lane: "main",
+      transcript_surface: "main_chat",
+    });
+    await expect(f.bridge.cancelOwned({ authority: f.authority, receipt })).rejects.toThrow(
+      "turn_not_owned",
+    );
+  });
+
   it("handles running before user and ignores older history without accepting a foreign root", async () => {
     const f = fixture();
     await f.bridge.watch({ authority: f.authority, session: "primary" });

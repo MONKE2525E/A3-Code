@@ -1448,6 +1448,101 @@ it.effect(
     ),
 );
 
+it.effect(
+  "reattaches accepted delivery recovery on session open and waits for matching main terminal proof",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const frames = yield* Queue.unbounded<MuseAgentNativeEvent>();
+        const activityObserved = yield* Deferred.make<void>();
+        const recovered = yield* Deferred.make<void>();
+        let pending = true;
+        let terminalCount = 0;
+        const native = makeNative({
+          pendingDeliveries: () =>
+            Effect.succeed(
+              pending
+                ? [{ deliveryKey: "old-attempt", status: "accepted" as const, context: null }]
+                : [],
+            ),
+          reconcilePendingDeliveries: ({ terminalEvent }) =>
+            Effect.gen(function* () {
+              if (terminalEvent?.event === "delta.turn_done") {
+                if (terminalEvent.payload && typeof terminalEvent.payload === "object") {
+                  const payload = terminalEvent.payload as Record<string, unknown>;
+                  if (payload.transcript_surface === "activity")
+                    yield* Deferred.succeed(activityObserved, undefined);
+                  if (
+                    payload.session_id === "primary" &&
+                    payload.reply_to_message_id === "carrier-1" &&
+                    payload.status === "completed" &&
+                    (payload.stream_lane === undefined || payload.stream_lane === "main") &&
+                    (payload.transcript_surface === undefined ||
+                      payload.transcript_surface === "main_chat")
+                  )
+                    pending = false;
+                }
+              }
+              return pending;
+            }),
+          watch: () =>
+            Effect.succeed({ events: Stream.fromQueue(frames), close: Queue.shutdown(frames) }),
+        });
+        const adapter = yield* createMuseAgentAdapterV2(options).pipe(
+          Effect.provideService(Native.MuseAgentNativeRuntimeService, native),
+          Effect.provideService(ProviderHost.ProviderHost, host),
+          Effect.provideService(
+            ToolsPort.MuseAgentDirectToolsPort,
+            ToolsPort.MuseAgentDirectToolsPort.of({
+              install: () => Effect.succeed({ uninstall: Effect.void }),
+              start: () => Effect.die("Recovered deliveries must not start tools"),
+            }),
+          ),
+        );
+        const runtime = yield* adapter.openSession(sessionInput);
+        assert.strictEqual(runtime.providerSession.status, "waiting");
+        yield* runtime.events.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              if (event.type === "turn.terminal") terminalCount++;
+              if (
+                event.type === "provider_session.updated" &&
+                event.providerSession.status === "ready"
+              )
+                yield* Deferred.succeed(recovered, undefined);
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        yield* Queue.offer(frames, {
+          event: "delta.turn_done",
+          payload: {
+            session_id: "primary",
+            message_id: "user-1",
+            reply_to_message_id: "carrier-1",
+            status: "completed",
+            transcript_surface: "activity",
+          },
+        });
+        yield* Deferred.await(activityObserved);
+        assert.strictEqual(terminalCount, 0);
+        yield* Queue.offer(frames, {
+          event: "delta.turn_done",
+          payload: {
+            session_id: "primary",
+            message_id: "user-1",
+            reply_to_message_id: "carrier-1",
+            status: "completed",
+            stream_lane: "main",
+            transcript_surface: "main_chat",
+          },
+        });
+        yield* Deferred.await(recovered);
+        assert.strictEqual(terminalCount, 0);
+      }),
+    ),
+);
+
 it.effect("does not restart a retired observer after waiting for turn admission", () =>
   Effect.scoped(
     Effect.gen(function* () {

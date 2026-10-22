@@ -219,6 +219,10 @@ export class MuseAgentNativeRuntimeService extends Context.Service<
     readonly pendingDeliveries: (
       scope: MuseAgentDeliveryScope,
     ) => Effect.Effect<readonly MuseAgentPendingDelivery[], MuseAgentError>;
+    /** Reconciles accepted receipts from replay and an optional live terminal event. */
+    readonly reconcilePendingDeliveries: (
+      input: MuseAgentDeliveryScope & { readonly terminalEvent?: Transport.MuseAgentNativeEvent },
+    ) => Effect.Effect<boolean, MuseAgentError>;
     readonly releaseLocalOwnership: (
       input: MuseAgentDeliveryScope & { readonly deliveryKey: string },
     ) => Effect.Effect<void, MuseAgentError>;
@@ -316,36 +320,50 @@ const make = Effect.gen(function* () {
     return session;
   });
   const reconcileDeliveries = Effect.fn("MuseAgentNativeRuntimeService.reconcileDeliveries")(
-    function* (scope: MuseAgentDeliveryScope) {
+    function* (scope: MuseAgentDeliveryScope, terminalEvent?: Transport.MuseAgentNativeEvent) {
       yield* check(scope.binding);
+      let unresolved = false;
       for (const pending of yield* deliveries.pendingDeliveries(scope)) {
         // An unacknowledged intent cannot be retried or inferred from session idle state.
         if (pending.status !== "accepted") continue;
         const receipt = yield* deliveries.receipt(pending.deliveryKey, scope);
-        if (!receipt) continue;
-        const replay = yield* decode(
-          yield* transport.request(scope.binding, "chat.stream_events", {
-            reply_to_message_id: receipt.replyToMessageId,
-            session_id: receipt.sessionId,
-            stream_lane: "all",
-            limit: 4096,
-          }),
-          StreamHistory,
-        );
-        const terminal = replay.events.some((raw) => {
-          const frame = museHistoryFrame(raw, scope.sessionId);
+        if (!receipt) {
+          unresolved = true;
+          continue;
+        }
+        const matchesTerminal = (frame: Transport.MuseAgentNativeEvent | undefined) => {
           if (frame?.event !== "delta.turn_done") return false;
           const parsed = decodeTerminal(frame.payload);
           return (
             Option.isSome(parsed) &&
             parsed.value.session_id === receipt.sessionId &&
-            parsed.value.stream_lane !== "subagent" &&
-            parsed.value.transcript_surface !== "subagent" &&
+            (parsed.value.stream_lane === undefined || parsed.value.stream_lane === "main") &&
+            (parsed.value.transcript_surface === undefined ||
+              parsed.value.transcript_surface === "main_chat") &&
             (parsed.value.reply_to_message_id === receipt.messageId ||
               parsed.value.reply_to_message_id === receipt.replyToMessageId)
           );
-        });
-        if (!terminal) continue;
+        };
+        let terminal = matchesTerminal(terminalEvent);
+        if (!terminal) {
+          const replay = yield* decode(
+            yield* transport.request(scope.binding, "chat.stream_events", {
+              reply_to_message_id: receipt.replyToMessageId,
+              session_id: receipt.sessionId,
+              stream_lane: "all",
+              limit: 4096,
+            }),
+            StreamHistory,
+          );
+          terminal = replay.events.some((raw) => {
+            const frame = museHistoryFrame(raw, scope.sessionId);
+            return matchesTerminal(frame ?? undefined);
+          });
+        }
+        if (!terminal) {
+          unresolved = true;
+          continue;
+        }
         yield* check(scope.binding);
         yield* transport.releaseOwned(scope.binding, {
           sessionId: scope.sessionId,
@@ -354,6 +372,7 @@ const make = Effect.gen(function* () {
         });
         yield* deliveries.settle(pending.deliveryKey);
       }
+      return unresolved;
     },
   );
   return MuseAgentNativeRuntimeService.of({
@@ -790,6 +809,7 @@ const make = Effect.gen(function* () {
     recordManagedMessage: deliveries.recordManagedMessage,
     pendingDeliveries: (scope) =>
       check(scope.binding).pipe(Effect.andThen(deliveries.pendingDeliveries(scope))),
+    reconcilePendingDeliveries: (input) => reconcileDeliveries(input, input.terminalEvent),
     releaseLocalOwnership: Effect.fn("MuseAgentNativeRuntimeService.releaseLocalOwnership")(
       function* (input) {
         yield* resolveSession(input.binding, input.sessionId);

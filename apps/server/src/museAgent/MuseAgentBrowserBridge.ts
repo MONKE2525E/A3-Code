@@ -90,7 +90,10 @@ export const museAgentBrowserBridge = String.raw`(() => {
   };
   const observeOwned = (event, payload, meta) => {
     if (!owned || payload?.session_id !== owned.receipt.sessionId) return;
-    if (payload.stream_lane === 'subagent' || payload.transcript_surface === 'subagent') return;
+    if (
+      (payload.stream_lane !== undefined && payload.stream_lane !== 'main') ||
+      (payload.transcript_surface !== undefined && payload.transcript_surface !== 'main_chat')
+    ) return;
     const receipt = owned.receipt, reply = payload.reply_to_message_id;
     const related = reply === receipt.messageId || reply === receipt.replyToMessageId;
     const nativeId = event === 'delta.text_append' ? payload.parent_message_id ?? payload.message_id : event === 'delta.presentation' ? payload.host_message_id ?? payload.message_id : payload.message_id;
