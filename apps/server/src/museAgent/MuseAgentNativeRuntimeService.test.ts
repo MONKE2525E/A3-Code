@@ -64,6 +64,7 @@ const fixture = () => {
     Effect.succeed(Effect.void);
   let watch: Transport.MuseAgentTransport["Service"]["watch"] = () =>
     Effect.succeed({ events: Stream.never, close: Effect.void });
+  let releaseOwnedHook: Effect.Effect<void> = Effect.void;
   const remoteSizes = new Map<string, number>();
   const remoteBytes = new Map<string, Uint8Array>();
   let inspections = 0;
@@ -84,7 +85,7 @@ const fixture = () => {
     releaseOwned: (_, input) =>
       Effect.sync(() => {
         localReleases.push(input.deliveryKey);
-      }),
+      }).pipe(Effect.andThen(Effect.suspend(() => releaseOwnedHook))),
     connect: Effect.suspend(() => {
       if (!ready)
         return Effect.fail(new Transport.MuseAgentTransportError({ kind: "disconnected" }));
@@ -218,6 +219,9 @@ const fixture = () => {
     },
     setAcquireTurn: (next: typeof acquireTurn) => {
       acquireTurn = next;
+    },
+    setReleaseOwnedHook: (next: typeof releaseOwnedHook) => {
+      releaseOwnedHook = next;
     },
     setPreDispatchHook: (next: typeof preDispatchHook) => {
       preDispatchHook = next;
@@ -1552,5 +1556,116 @@ it.effect(
         }).pipe(Effect.provide(f.layer));
         assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 2);
       }),
+    ),
+);
+
+it.effect(
+  "keeps the restored observer through a busy new-turn attempt and settles before the next send",
+  () =>
+    withFixture((f) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const native = yield* Native.MuseAgentNativeRuntimeService;
+          const frames = yield* Queue.unbounded<Transport.MuseAgentNativeEvent>();
+          const releaseStarted = yield* Deferred.make<void>();
+          const finishRelease = yield* Deferred.make<void>();
+          const ready = yield* Deferred.make<void>();
+          const turn = yield* makeTurn;
+          let acquisitions = 0;
+          let releases = 0;
+          let watches = 0;
+          f.setAcquireTurn(() =>
+            Effect.sync(() => {
+              acquisitions++;
+              return Effect.sync(() => {
+                releases++;
+              });
+            }),
+          );
+          f.setWatch(() =>
+            Effect.sync(() => {
+              watches++;
+              return { events: Stream.fromQueue(frames), close: Effect.void };
+            }),
+          );
+          f.setStreamHistory([]);
+          yield* native.send(request);
+
+          const adapter = yield* createMuseAgentAdapterV2(options).pipe(
+            Effect.provideService(Native.MuseAgentNativeRuntimeService, native),
+            Effect.provideService(ProviderHost.ProviderHost, host),
+            Effect.provideService(
+              ToolsPort.MuseAgentDirectToolsPort,
+              ToolsPort.MuseAgentDirectToolsPort.of({
+                install: () => Effect.succeed({ uninstall: Effect.void }),
+                start: () => Effect.succeed({ revoke: Effect.void, close: Effect.void }),
+              }),
+            ),
+          );
+          const runtime = yield* adapter.openSession({
+            threadId,
+            providerSessionId: ProviderSessionId.make("restored-pending-delivery"),
+            modelSelection: selection,
+            runtimePolicy: policy,
+          });
+          assert.strictEqual(runtime.providerSession.status, "waiting");
+          yield* runtime.events.pipe(
+            Stream.runForEach((event) =>
+              event.type === "provider_session.updated" && event.providerSession.status === "ready"
+                ? Deferred.succeed(ready, undefined).pipe(Effect.asVoid)
+                : Effect.void,
+            ),
+            Effect.forkScoped,
+          );
+
+          const failedStart = yield* Effect.flip(runtime.startTurn(turn));
+          assert.strictEqual(failedStart._tag, "ProviderAdapterTurnStartError");
+          assert.isTrue(
+            failedStart._tag === "ProviderAdapterTurnStartError" &&
+              isPromptNotSubmitted(failedStart.cause) &&
+              isDeliveryError(failedStart.cause.cause) &&
+              failedStart.cause.cause.kind === "busy",
+          );
+          assert.strictEqual(watches, 1);
+          assert.strictEqual(acquisitions, 1);
+          assert.strictEqual(releases, 1);
+          assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 1);
+          assert.deepStrictEqual(
+            (yield* native.pendingDeliveries(request)).map((delivery) => delivery.deliveryKey),
+            [request.deliveryKey],
+          );
+
+          f.setReleaseOwnedHook(
+            Deferred.succeed(releaseStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(finishRelease)),
+            ),
+          );
+          yield* Queue.offer(frames, {
+            event: "delta.turn_done",
+            payload: {
+              session_id: "primary",
+              reply_to_message_id: "carrier-1",
+              status: "completed",
+              stream_lane: "main",
+              transcript_surface: "main_chat",
+            },
+          });
+          yield* Deferred.await(releaseStarted);
+          yield* Deferred.succeed(finishRelease, undefined);
+          yield* Deferred.await(ready);
+          assert.deepStrictEqual(yield* native.pendingDeliveries(request), []);
+          assert.deepStrictEqual(f.localReleases, [request.deliveryKey]);
+          assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 1);
+
+          yield* runtime.startTurn(turn);
+          assert.strictEqual(acquisitions, 2);
+          assert.strictEqual(watches, 2);
+          assert.strictEqual(f.calls.filter((call) => call.method === "chat.stream").length, 2);
+          assert.deepStrictEqual(
+            (yield* native.pendingDeliveries(request)).map((delivery) => delivery.deliveryKey),
+            [turn.attemptId],
+          );
+        }),
+      ).pipe(Effect.provide(f.layer)),
     ),
 );

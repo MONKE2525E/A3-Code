@@ -838,7 +838,11 @@ const make = Effect.gen(function* () {
           const scope = { binding, sessionId };
           const release = yield* restore(transport.acquireTurn(binding, sessionId));
           yield* restore(
-            reconcileDeliveries(scope).pipe(Effect.andThen(deliveries.assertTurnAvailable(scope))),
+            Effect.gen(function* () {
+              const unresolved = yield* reconcileDeliveries(scope);
+              if (unresolved) return yield* new Delivery.MuseAgentDeliveryError({ kind: "busy" });
+              yield* deliveries.assertTurnAvailable(scope);
+            }),
           ).pipe(Effect.onError(() => release));
           return release;
         }),
