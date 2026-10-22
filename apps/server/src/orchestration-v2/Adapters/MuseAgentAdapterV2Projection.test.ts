@@ -299,6 +299,50 @@ it.effect(
     }),
 );
 
+it("preserves transcript routing from history rows and payload-only history", () => {
+  const row = (metadata: Record<string, unknown>) =>
+    museHistoryFrame(
+      {
+        event_name: "delta.turn_done",
+        seq: 1,
+        occurred_at_ms: 1234,
+        payload: { session_id: "primary", stream_lane: "main", transcript_surface: "main_chat" },
+        ...metadata,
+      },
+      "primary",
+    );
+
+  const rowMetadata = row({ stream_lane: "activity", transcript_surface: "tool" });
+  assert.deepStrictEqual(rowMetadata?.payload, {
+    session_id: "primary",
+    stream_lane: "activity",
+    transcript_surface: "tool",
+    seq: 1,
+  });
+
+  assert.deepStrictEqual(
+    museHistoryFrame(
+      {
+        event_name: "delta.turn_done",
+        seq: 2,
+        occurred_at_ms: 1235,
+        payload: {
+          session_id: "primary",
+          stream_lane: "subagent",
+          transcript_surface: "activity",
+        },
+      },
+      "primary",
+    )?.payload,
+    {
+      session_id: "primary",
+      stream_lane: "subagent",
+      transcript_surface: "activity",
+      seq: 2,
+    },
+  );
+});
+
 it("projects runless native history into stable, linked chat items", () => {
   const projection = makeMuseAgentProjection({
     binding,

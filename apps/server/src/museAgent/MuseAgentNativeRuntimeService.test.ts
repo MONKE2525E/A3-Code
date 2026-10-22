@@ -1408,12 +1408,20 @@ it.effect.each([
   "tool_lane",
   "activity_surface",
   "tool_surface",
+  "row_subagent",
+  "row_activity_lane",
+  "row_tool_lane",
+  "row_activity_surface",
+  "row_tool_surface",
+  "row_main",
+  "payload_main",
   "other_session",
   "incomplete",
 ])("recovers a saved delivery only with exact native terminal proof: %s", (evidence) =>
   withFixture((f) =>
     Effect.gen(function* () {
-      const related = evidence === "owned";
+      const related =
+        evidence === "owned" || evidence === "row_main" || evidence === "payload_main";
       const native = yield* Native.MuseAgentNativeRuntimeService;
       const receipt = yield* native.send(request);
       f.setStreamHistory([
@@ -1424,6 +1432,14 @@ it.effect.each([
           reply_to_message_id:
             evidence === "foreign" ? "foreign-receipt" : receipt.replyToMessageId,
           session_id: evidence === "other_session" ? "other" : "primary",
+          ...(evidence === "row_subagent" ? { stream_lane: "subagent" } : {}),
+          ...(evidence === "row_activity_lane" ? { stream_lane: "activity" } : {}),
+          ...(evidence === "row_tool_lane" ? { stream_lane: "tool" } : {}),
+          ...(evidence === "row_activity_surface" ? { transcript_surface: "activity" } : {}),
+          ...(evidence === "row_tool_surface" ? { transcript_surface: "tool" } : {}),
+          ...(evidence === "row_main"
+            ? { stream_lane: "main", transcript_surface: "main_chat" }
+            : {}),
           payload: {
             session_id: "primary",
             status: evidence === "incomplete" ? "running" : "completed",
@@ -1432,6 +1448,12 @@ it.effect.each([
             ...(evidence === "tool_lane" ? { stream_lane: "tool" } : {}),
             ...(evidence === "activity_surface" ? { transcript_surface: "activity" } : {}),
             ...(evidence === "tool_surface" ? { transcript_surface: "tool" } : {}),
+            ...(evidence === "row_main"
+              ? { stream_lane: "subagent", transcript_surface: "activity" }
+              : {}),
+            ...(evidence === "payload_main"
+              ? { stream_lane: "main", transcript_surface: "main_chat" }
+              : {}),
           },
         },
       ]);

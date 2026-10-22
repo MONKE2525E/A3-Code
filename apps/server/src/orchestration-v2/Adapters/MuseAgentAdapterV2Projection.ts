@@ -54,6 +54,8 @@ const HistoryRow = Schema.Struct({
   host_message_id: Schema.optionalKey(Schema.NullOr(Schema.String)),
   reply_to_message_id: Schema.optionalKey(Schema.NullOr(Schema.String)),
   session_id: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  stream_lane: Schema.optionalKey(Schema.String),
+  transcript_surface: Schema.optionalKey(Schema.String),
   display_text: Schema.optionalKey(Schema.NullOr(Schema.String)),
   display_text_ready: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
   seq: Schema.Number,
@@ -142,6 +144,10 @@ export function museHistoryFrame(raw: unknown, sessionId: string): MuseAgentNati
       ...(row.value.host_message_id ? { host_message_id: row.value.host_message_id } : {}),
       ...(row.value.reply_to_message_id
         ? { reply_to_message_id: row.value.reply_to_message_id }
+        : {}),
+      ...(row.value.stream_lane !== undefined ? { stream_lane: row.value.stream_lane } : {}),
+      ...(row.value.transcript_surface !== undefined
+        ? { transcript_surface: row.value.transcript_surface }
         : {}),
       ...(row.value.display_text !== undefined ? { display_text: row.value.display_text } : {}),
       ...(row.value.display_text_ready !== undefined
