@@ -6,12 +6,9 @@ provisioning instructions.
 
 ## Public application configuration
 
-T3 Connect is disabled in a fresh clone. To build against the production deployment, copy the
-repository-root example:
-
-```sh
-cp .env.example .env
-```
+GrokBot builds use the public production T3 Connect configuration when no Connect settings are
+provided. Set `T3CODE_CONNECT_ENABLED=0` to build without Connect, or pass `--offline-only` to
+`scripts/build-custom-mobile.ts`. These switches remove Connect settings, including framework aliases.
 
 For another deployment, set these values in the repository-root `.env` or `.env.local`:
 
@@ -24,6 +21,8 @@ T3CODE_RELAY_URL=https://relay.example.com
 
 Process variables take precedence over `.env.local`, then `.env`. Use these canonical names;
 the build loader supplies framework-specific aliases. These values are public identifiers.
+If any Connect setting is provided, supply the complete configuration for that deployment;
+the loader does not fill missing private settings with production values.
 `CLERK_SECRET_KEY` belongs only in the relay's secrets, never in client configuration.
 
 Client and bundled-server builds embed the public values, so set them before building.
@@ -70,10 +69,13 @@ t3code://app/
 ```
 
 Add the corresponding origin to the Clerk instance's Backend API `allowed_origins` array.
-Development uses `t3code-dev://app`; production uses `t3code://app`. Update the array with
+The renderer uses `t3code://app` in both modes. OAuth callbacks use `t3code-dev://app/` in development
+and `t3code://app/` in production. Update the array with
 `PATCH https://api.clerk.com/v1/instance` using the Clerk secret key, preserving existing entries.
 The Clerk Electron integration handles token
 persistence and system-browser callback delivery.
+The GrokBot fork keeps its own application ID and data directory, but uses these allowlisted
+callback schemes. Legacy `t3code-grokbot` links remain registered by the installer.
 
 ## Android native sign-in redirects
 
@@ -86,6 +88,11 @@ Clerk's native Android SDK uses `clerk://<applicationId>.callback`. In the Clerk
 | Production  | `clerk://com.t3tools.t3code.callback`         |
 
 Preserve existing entries. These callbacks are separate from the `t3code-dev` / `t3code-preview` / `t3code` navigation schemes. A private development build using the production Clerk key still needs its development callback allowed by that instance's administrator; rebuilding the same package does not change the allowlist.
+
+Custom Android APKs retain `com.monke2525e.t3code.custom` and use email-code sign-in for an
+existing T3 account. This avoids the social OAuth callback allowlist for the custom package.
+Keep email-code sign-in enabled on a private Clerk deployment used by these APKs. Custom APKs
+keep Expo updates disabled; updates must come from the custom GitHub release channel.
 
 ## Desktop passkeys
 

@@ -16,7 +16,13 @@ import { loadRepoEnv, resolvePublicConfig } from "./lib/public-config.ts";
 
 const hostPlatform = Effect.runSync(HostProcess.Platform);
 const root = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "..");
-const repoEnv = loadRepoEnv({ repoRoot: root });
+const repoEnv = loadRepoEnv({
+  repoRoot: root,
+  baseEnv: {
+    ...process.env,
+    ...(process.argv.includes("--offline-only") ? { T3CODE_CONNECT_ENABLED: "0" } : {}),
+  },
+});
 assertCustomMobileCloudConfig(
   resolvePublicConfig(repoEnv),
   process.argv.includes("--offline-only"),

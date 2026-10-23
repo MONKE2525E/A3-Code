@@ -13,10 +13,10 @@ import * as Scope from "effect/Scope";
 import * as Electron from "electron";
 
 export const DESKTOP_HOST = "app";
-// T3 Connect allowlists this renderer origin. OS links keep the fork-specific scheme.
+// Production Clerk allowlists this origin and the matching OAuth callback schemes.
 export const DESKTOP_RENDERER_SCHEME = "t3code";
-const DESKTOP_PRODUCTION_SCHEME = "t3code-grokbot";
-const DESKTOP_DEVELOPMENT_SCHEME = "t3code-grokbot-dev";
+const DESKTOP_PRODUCTION_SCHEME = "t3code";
+const DESKTOP_DEVELOPMENT_SCHEME = "t3code-dev";
 
 export function getDesktopScheme(isDevelopment: boolean): string {
   return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;

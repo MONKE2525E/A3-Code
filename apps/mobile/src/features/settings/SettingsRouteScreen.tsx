@@ -163,6 +163,9 @@ function SettingsIndexSections() {
       </SettingsSection>
 
       <SettingsSection title="Automations">
+        {Platform.OS === "android" ? (
+          <SettingsRow icon="text.bubble" label="Grok bots" target="SettingsGrokBots" />
+        ) : null}
         <SettingsRow icon="clock" label="Scheduled tasks" target="SettingsScheduledTasks" />
       </SettingsSection>
 

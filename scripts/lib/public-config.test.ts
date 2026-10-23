@@ -15,6 +15,33 @@ afterEach(() => {
 });
 
 describe("loadRepoEnv", () => {
+  it("keeps Connect available in a clean GrokBot build", () => {
+    const config = loadRepoEnv({ baseEnv: {}, repoRoot: makeTemporaryDirectory() });
+    expect(config.T3CODE_RELAY_URL).toBe("https://relay.t3.codes");
+    expect(config.VITE_CLERK_PUBLISHABLE_KEY).toBe("pk_live_Y2xlcmsudDMuY29kZXMk");
+    expect(config.EXPO_PUBLIC_CLERK_JWT_TEMPLATE).toBe("t3-relay");
+    expect(config.T3CODE_CLERK_CLI_OAUTH_CLIENT_ID).toBe("hzxSgY2cH10sDU2r");
+  });
+
+  it("does not combine a private relay with production credentials", () => {
+    const config = loadRepoEnv({
+      baseEnv: { T3CODE_RELAY_URL: "https://private.example.test" },
+      repoRoot: makeTemporaryDirectory(),
+    });
+    expect(config.T3CODE_RELAY_URL).toBe("https://private.example.test");
+    expect(config.T3CODE_CLERK_PUBLISHABLE_KEY).toBeUndefined();
+  });
+
+  it("can explicitly build without Connect", () => {
+    const config = loadRepoEnv({
+      baseEnv: { T3CODE_CONNECT_ENABLED: "0", VITE_CLERK_PUBLISHABLE_KEY: "pk_test_old" },
+      repoRoot: makeTemporaryDirectory(),
+    });
+    expect(config.T3CODE_CLERK_PUBLISHABLE_KEY).toBeUndefined();
+    expect(config.VITE_CLERK_PUBLISHABLE_KEY).toBeUndefined();
+    expect(config.T3CODE_RELAY_URL).toBeUndefined();
+  });
+
   it("applies process, root local, and root precedence in that order", () => {
     const repoRoot = makeTemporaryDirectory();
     NodeFS.writeFileSync(

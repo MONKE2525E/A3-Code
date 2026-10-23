@@ -35,8 +35,10 @@ export function selectForkReleaseUpdate(releases: unknown, installedBuild: numbe
         isRecord(value) &&
         value.name === FORK_APK_NAME &&
         value.state === "uploaded" &&
-        value.browser_download_url ===
-          `${FORK_RELEASES_URL}/download/${release.tag_name}/${FORK_APK_NAME}`,
+        (value.browser_download_url ===
+          `${FORK_RELEASES_URL}/download/${release.tag_name}/${FORK_APK_NAME}` ||
+          value.browser_download_url ===
+            `https://github.com/MONKE2525E/A3-Code/releases/download/${release.tag_name}/${FORK_APK_NAME}`),
     );
     if (!isRecord(asset) || typeof asset.browser_download_url !== "string") continue;
     update = { build, tag: release.tag_name, downloadUrl: asset.browser_download_url };

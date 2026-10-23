@@ -32,12 +32,41 @@ export function loadRepoEnv({
 } = {}): Record<string, string | undefined> {
   const rootEnv = readEnvFile(NodePath.join(repoRoot, ".env"));
   const localEnv = readEnvFile(NodePath.join(repoRoot, ".env.local"));
-  const config = resolvePublicConfig(baseEnv, localEnv, rootEnv);
+  const env = { ...rootEnv, ...localEnv, ...baseEnv };
+  if (env.T3CODE_CONNECT_ENABLED === "0") {
+    for (const key of [
+      "T3CODE_CLERK_PUBLISHABLE_KEY",
+      "VITE_CLERK_PUBLISHABLE_KEY",
+      "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY",
+      "T3CODE_CLERK_JWT_TEMPLATE",
+      "VITE_CLERK_JWT_TEMPLATE",
+      "EXPO_PUBLIC_CLERK_JWT_TEMPLATE",
+      "T3CODE_CLERK_CLI_OAUTH_CLIENT_ID",
+      "VITE_CLERK_CLI_OAUTH_CLIENT_ID",
+      "T3CODE_RELAY_URL",
+      "VITE_T3CODE_RELAY_URL",
+    ])
+      delete env[key];
+    return env;
+  }
+  const configured = resolvePublicConfig(baseEnv, localEnv, rootEnv);
+  // Keep private deployments coherent: defaults apply only when no Connect settings exist.
+  const config =
+    configured.clerkPublishableKey ||
+    configured.clerkJwtTemplate ||
+    configured.clerkCliOAuthClientId ||
+    configured.relayUrl
+      ? configured
+      : {
+          ...configured,
+          clerkPublishableKey: "pk_live_Y2xlcmsudDMuY29kZXMk",
+          clerkJwtTemplate: "t3-relay",
+          clerkCliOAuthClientId: "hzxSgY2cH10sDU2r",
+          relayUrl: "https://relay.t3.codes",
+        };
 
   return {
-    ...rootEnv,
-    ...localEnv,
-    ...baseEnv,
+    ...env,
     ...(config.clerkPublishableKey
       ? {
           T3CODE_CLERK_PUBLISHABLE_KEY: config.clerkPublishableKey,

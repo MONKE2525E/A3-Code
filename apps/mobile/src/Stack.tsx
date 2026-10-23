@@ -1,4 +1,5 @@
 import { ComponentCatalogScreen } from "./features/development/ComponentCatalogScreen";
+import { SettingsGrokBotsRouteScreen } from "./features/settings/SettingsGrokBotsRouteScreen";
 import { PullRequestGuideStopScreen } from "./features/pull-requests/guide/PullRequestGuideScreen";
 import { PullRequestInlineCommentScreen } from "./features/pull-requests/PullRequestInlineCommentScreen";
 import { PullRequestDiscussionScreen } from "./features/pull-requests/PullRequestDiscussionScreen";
@@ -234,6 +235,11 @@ const SettingsContentStack = createV5SheetStackNavigator({
       options: {
         title: "Environments",
       },
+    }),
+    SettingsGrokBots: createNativeStackScreen({
+      screen: SettingsGrokBotsRouteScreen,
+      linking: "grok-bots",
+      options: { title: "Grok bots" },
     }),
     SettingsEnvironmentDetail: createNativeStackScreen({
       screen: SettingsEnvironmentDetailRouteScreen,

@@ -2916,7 +2916,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       protocols: [
         {
           name: "T3 Code plus Grokbot",
-          schemes: ["t3code-grokbot", "t3code-grokbot-dev"],
+          schemes: ["t3code", "t3code-dev", "t3code-grokbot", "t3code-grokbot-dev"],
         },
         {
           name: "Web site URL",
@@ -2973,7 +2973,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       protocols: [
         {
           name: "T3 Code plus Grokbot",
-          schemes: ["t3code-grokbot", "t3code-grokbot-dev"],
+          schemes: ["t3code", "t3code-dev", "t3code-grokbot", "t3code-grokbot-dev"],
         },
       ],
       desktop: {

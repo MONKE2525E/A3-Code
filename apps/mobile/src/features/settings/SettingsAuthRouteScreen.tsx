@@ -6,10 +6,12 @@ import {
 } from "@clerk/expo/native-components";
 import { StackActions, useNavigation } from "@react-navigation/native";
 import { useEffect, useLayoutEffect, useState } from "react";
-import { View } from "react-native";
+import { Platform, View } from "react-native";
+import Constants from "expo-constants";
 
 import { hasCloudPublicConfig } from "../cloud/publicConfig";
 import { T3ConnectProfilePage } from "../cloud/T3ConnectProfilePage";
+import { AndroidConnectAccount } from "../cloud/AndroidConnectAccount";
 
 const USER_PROFILE_CUSTOM_PAGES = [
   {
@@ -35,6 +37,8 @@ export function SettingsAuthRouteScreen() {
 function ConfiguredSettingsAuthRouteScreen() {
   const { isLoaded, isSignedIn } = useAuth({ treatPendingAsSignedOut: false });
   const navigation = useNavigation();
+  const usesEmailCodeSignIn =
+    Platform.OS === "android" && Constants.expoConfig?.extra?.customAndroidBuild === true;
   const handleHostBack = () => navigation.dispatch(StackActions.popTo("SettingsContent"));
   // Once signed in, stay on the profile view so signing out pops back instead of
   // flashing the sign-in form.
@@ -50,7 +54,9 @@ function ConfiguredSettingsAuthRouteScreen() {
   return (
     <View collapsable={false} className="flex-1 overflow-hidden bg-sheet">
       {isLoaded ? (
-        hasBeenSignedIn ? (
+        usesEmailCodeSignIn ? (
+          <AndroidConnectAccount signedIn={hasBeenSignedIn} />
+        ) : hasBeenSignedIn ? (
           <UserProfileView
             customPages={USER_PROFILE_CUSTOM_PAGES}
             isDismissible={false}

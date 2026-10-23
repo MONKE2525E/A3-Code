@@ -156,7 +156,7 @@ describe("DesktopPreReadyPlatform", () => {
         assert.equal(identity.desktopName, "com.monke.t3code.grokbot.desktop");
         assert.include(identity.desktopEntry ?? "", "Exec=/Applications/current.AppImage %U");
         assert.include(identity.desktopEntry ?? "", "Name=T3 Code plus Grokbot (Beta)");
-        assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/t3code-grokbot;");
+        assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/t3code;");
         assert.include(
           identity.desktopEntry ?? "",
           "Icon=/xdg/icons/com.monke.t3code.grokbot.desktop.png",

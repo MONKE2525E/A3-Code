@@ -38,6 +38,20 @@ describe("fork APK releases", () => {
   it("does not offer an installed build or a downgrade", () => {
     expect(selectForkReleaseUpdate([release(10), release(9)], 10)).toBeNull();
   });
+  it("accepts the APK URL returned after the repository was renamed to A3-Code", () => {
+    const downloadUrl =
+      "https://github.com/MONKE2525E/A3-Code/releases/download/mobile-build-12/T3-Code-Custom.apk";
+    expect(
+      selectForkReleaseUpdate(
+        [
+          release(12, {
+            assets: [{ name: FORK_APK_NAME, state: "uploaded", browser_download_url: downloadUrl }],
+          }),
+        ],
+        10,
+      ),
+    ).toEqual({ build: 12, tag: "mobile-build-12", downloadUrl });
+  });
   it("ignores drafts, desktop tags, and releases without the custom APK", () => {
     expect(
       selectForkReleaseUpdate(

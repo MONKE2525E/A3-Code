@@ -38,22 +38,22 @@ import { createClerkBridge } from "@clerk/electron";
 
 // Exercise the installed SDK patch, including its callback listener and OS registration.
 describe("Clerk renderer and callback origins", () => {
-  it("keeps OAuth callbacks in the fork while registering the accepted renderer origin", async () => {
+  it("uses the production-allowlisted callback with the fork profile", async () => {
     const bridge = createClerkBridge({
       storage: {
         getItem: async () => null,
         setItem: async () => undefined,
         removeItem: async () => undefined,
       },
-      renderer: { scheme: "t3code", callbackScheme: "t3code-grokbot", host: "app" },
+      renderer: { scheme: "t3code", callbackScheme: "t3code", host: "app" },
     });
     try {
       expect(fixtures.registerSchemes.mock.calls[0]?.[0]).toMatchObject([{ scheme: "t3code" }]);
-      expect(fixtures.registerDefault.mock.calls).toEqual([["t3code-grokbot"]]);
+      expect(fixtures.registerDefault.mock.calls).toEqual([["t3code"]]);
       const frame = {};
       const event = { sender: { getType: () => "window", mainFrame: frame }, senderFrame: frame };
       const redirect = fixtures.handlers.get("clerk:oauth-transport:get-redirect-url")!;
-      expect(redirect(event)).toBe("t3code-grokbot://app/");
+      expect(redirect(event)).toBe("t3code://app/");
       expect(() => redirect({ ...event, senderFrame: {} })).toThrow(/main frame/);
       const pending = fixtures.handlers.get("clerk:oauth-transport:open")!(
         event,
@@ -63,10 +63,10 @@ describe("Clerk renderer and callback origins", () => {
       void Promise.resolve(pending).then(() => {
         settled = true;
       });
-      fixtures.listeners.get("second-instance")!({}, ["t3code://app/?code=other-install"]);
+      fixtures.listeners.get("second-instance")!({}, ["t3code-grokbot://app/?code=other-install"]);
       await Promise.resolve();
       expect(settled).toBe(false);
-      const callbackUrl = "t3code-grokbot://app/?code=fixture-code";
+      const callbackUrl = "t3code://app/?code=fixture-code";
       fixtures.listeners.get("second-instance")!({}, [callbackUrl]);
       expect(await pending).toEqual({ callbackUrl });
     } finally {
