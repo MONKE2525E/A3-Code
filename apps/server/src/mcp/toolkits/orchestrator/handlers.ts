@@ -16,6 +16,22 @@ const handlers = {
       return yield* service.capabilities(scope, input);
     }),
   ),
+  orchestrator_environment_pair: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      yield* check;
+      return yield* service.pairEnvironment(scope, input);
+    }),
+  ),
+  orchestrator_environment_remove: McpToolAccess.writesEnvironment((input, check) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      yield* check;
+      return yield* service.removeEnvironment(scope, input.environmentId);
+    }),
+  ),
   delegate_task: McpToolAccess.actsAsDelegationCaller((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;

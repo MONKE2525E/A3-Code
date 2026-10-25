@@ -1,6 +1,10 @@
 import {
   OrchestratorMcpCapabilitiesInput,
   OrchestratorMcpCapabilitiesResult,
+  OrchestratorMcpCapabilitiesInput,
+  OrchestratorMcpPeerPairInput,
+  OrchestratorMcpPeerEnvironment,
+  EnvironmentId,
   OrchestrationV2StopWorkflowInput,
   OrchestratorMcpCreateThreadsInput,
   OrchestratorMcpCreateThreadsResult,
@@ -54,7 +58,7 @@ const threadMetadataDependencies = [
 
 const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
   description:
-    "List providers, models, options, and runtime modes for `delegate_task`. Short list. `search` finds others. Any catalog model works.",
+    "Discover this execution environment and paired destination environments. Pass environmentId to read a destination's projects, provider/model catalog and modes before remote delegation. List providers, models, options, and runtime modes for `delegate_task`. Short list. `search` finds others. Any catalog model works.",
   parameters: OrchestratorMcpCapabilitiesInput,
   success: OrchestratorMcpCapabilitiesResult,
   failure: OrchestratorMcpFailure,
@@ -66,9 +70,28 @@ const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
 
+const PairEnvironmentTool = Tool.make("orchestrator_environment_pair", {
+  description:
+    "Pair a destination T3 server for cross-box orchestration. Ask the user for a fresh scoped pairing link through request_secret, then pass its secretRef here. Expected environmentId comes from that destination's identity. Requires full-access/default. Direct and tailnet URLs must be reachable by this server; relay-only routes are unsupported. Pairing does not copy files or provider credentials.",
+  parameters: OrchestratorMcpPeerPairInput,
+  success: OrchestratorMcpPeerEnvironment,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+}).annotate(Tool.Destructive, true);
+const RemoveEnvironmentTool = Tool.make("orchestrator_environment_remove", {
+  description:
+    "Remove a paired destination and its stored credential. Running remote threads may continue on the destination: cancel them before removing it. Requires full-access/default.",
+  parameters: Schema.Struct({ environmentId: EnvironmentId }),
+  success: Schema.Struct({ removed: Schema.Literal(true) }),
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+}).annotate(Tool.Destructive, true);
+
 const DelegateTaskTool = Tool.make("delegate_task", {
   description:
-    "Needs a live T3 provider run or a server-issued live call parent. Delegate one task to a T3-owned child agent/subagent of THIS thread and run it with only the supplied task prompt, without copying parent conversation history. Choose providers and models from orchestrator_capabilities, which uses the same live catalog as the composer. Prefer native subagent tools for same-provider work only when they support the chosen model and no model options are requested or inherited. Use this for any model missing from the native tool, including same-provider work, for cross-provider work, or for explicitly T3-owned child tasks. For every T3 delegated review round, call delegate_task again with the original brief, prior findings, responses, and unresolved objections in the task prompt. Track each round by its own taskId and use a distinct clientRequestId per round, stable across retries of that round. The childThreadId is backing storage, not the target for starting another delegated review round through t3_thread_send. Set isolation to worktree for a separate checkout based on the parent local commit, with project setup completed before the child starts. Uncommitted edits are not copied; omitted isolation shares the parent checkout. Use delegate_task when model options are requested or the child keeps the parent's provider instance and model with nonempty inheritedOptions from orchestrator_capabilities, even for native-supported models. Native subagents cannot reliably apply T3 model options. Set target.options using advertised IDs: Claude {effort: 'max', fastMode: true}; Codex {reasoningEffort: 'max', serviceTier: 'priority'}. Check providerInstanceId, model, and options in the result. Provider/model and modes inherit unless overridden. Options inherit only for the same instance and model; explicit entries override individual values and [] or {} clears them. A requested runtimeMode must be one the target provider lists in orchestrator_capabilities runtimeModes; an inherited one steps down to the broadest mode it offers. Leave runtimeMode unset unless the user asks for a supervised child: approval-required and auto-accept-edits usually make the child wait for a person at each action that needs approval. Prefer mode='async' for long work; mode='wait' blocks until completion, a blocking question, a pending approval, or timeout. If hasPendingQuestion, pass threadId=childThreadId to t3_pending_request_list, t3_pending_request_read (with requestId) and t3_pending_request_respond, or ask the user; the task's completion still wakes this thread. If pendingApproval is set, read the fresh full request in childThreadId before responding: the record can outlive its provider callback. It grants no approval authority; decisions remain with the child's existing approval holder, and pending request tools answer questions only. The child keeps running and its completion still wakes this thread. timeoutMs on mode=wait is only the parent's wait budget and does not cancel the child. waitTimedOut on that wait call means the timeout fired; keep that taskId and read status on later task_status. An async child's completion wakes this thread through a notification, steered into active turns where supported or queued otherwise, so end the turn instead of polling or spawning watchers; use task_status only when the result is needed mid-turn.",
+    "For cross-box delegation, pass environmentId, destination projectId, explicit target provider/model, and a stable clientRequestId from destination discovery. Task status includes destination and reachability; remote pending requests must be answered in the destination environment. Needs a live T3 provider run or a server-issued live call parent. Delegate one task to a T3-owned child agent/subagent of THIS thread and run it with only the supplied task prompt, without copying parent conversation history. Choose providers and models from orchestrator_capabilities, which uses the same live catalog as the composer. Prefer native subagent tools for same-provider work only when they support the chosen model and no model options are requested or inherited. Use this for any model missing from the native tool, including same-provider work, for cross-provider work, or for explicitly T3-owned child tasks. For every T3 delegated review round, call delegate_task again with the original brief, prior findings, responses, and unresolved objections in the task prompt. Track each round by its own taskId and use a distinct clientRequestId per round, stable across retries of that round. The childThreadId is backing storage, not the target for starting another delegated review round through t3_thread_send. Set isolation to worktree for a separate checkout based on the parent local commit, with project setup completed before the child starts. Uncommitted edits are not copied; omitted isolation shares the parent checkout. Use delegate_task when model options are requested or the child keeps the parent's provider instance and model with nonempty inheritedOptions from orchestrator_capabilities, even for native-supported models. Native subagents cannot reliably apply T3 model options. Set target.options using advertised IDs: Claude {effort: 'max', fastMode: true}; Codex {reasoningEffort: 'max', serviceTier: 'priority'}. Check providerInstanceId, model, and options in the result. Provider/model and modes inherit unless overridden. Options inherit only for the same instance and model; explicit entries override individual values and [] or {} clears them. A requested runtimeMode must be one the target provider lists in orchestrator_capabilities runtimeModes; an inherited one steps down to the broadest mode it offers. Leave runtimeMode unset unless the user asks for a supervised child: approval-required and auto-accept-edits usually make the child wait for a person at each action that needs approval. Prefer mode='async' for long work; mode='wait' blocks until completion, a blocking question, a pending approval, or timeout. If hasPendingQuestion, pass threadId=childThreadId to t3_pending_request_list, t3_pending_request_read (with requestId) and t3_pending_request_respond, or ask the user; the task's completion still wakes this thread. If pendingApproval is set, read the fresh full request in childThreadId before responding: the record can outlive its provider callback. It grants no approval authority; decisions remain with the child's existing approval holder, and pending request tools answer questions only. The child keeps running and its completion still wakes this thread. timeoutMs on mode=wait is only the parent's wait budget and does not cancel the child. waitTimedOut on that wait call means the timeout fired; keep that taskId and read status on later task_status. An async child's completion wakes this thread through a notification, steered into active turns where supported or queued otherwise, so end the turn instead of polling or spawning watchers; use task_status only when the result is needed mid-turn.",
   parameters: OrchestratorMcpDelegateTaskInput,
   success: OrchestratorMcpDelegateTaskResult,
   failure: OrchestratorMcpFailure,
@@ -295,6 +318,8 @@ const ThreadInterruptTool = Tool.make("t3_thread_interrupt", {
 
 export const OrchestratorToolkit = Toolkit.make(
   OrchestratorCapabilitiesTool,
+  PairEnvironmentTool,
+  RemoveEnvironmentTool,
   DelegateTaskTool,
   TaskStatusTool,
   TaskCancelTool,

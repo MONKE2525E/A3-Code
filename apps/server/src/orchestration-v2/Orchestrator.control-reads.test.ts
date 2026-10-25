@@ -1408,3 +1408,93 @@ it.effect("dispatch records the command outcome and its duration", () =>
     assert.strictEqual((yield* durations).count - durationsBefore, 1);
   }).pipe(Effect.provide(layerTest)),
 );
+
+it.effect("persists message origin across queued delivery, editing, and release", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:message-origin");
+    const origin = { deviceType: "mobile", os: "iOS" } as const;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create-origin"),
+      threadId,
+      projectId: ProjectId.make("project:message-origin"),
+      title: "Origin",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+
+    assert.strictEqual((yield* successes).count - successesBefore, 1);
+    assert.strictEqual((yield* durations).count - durationsBefore, 1);
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("start-origin"),
+      threadId,
+      messageId: MessageId.make("start-origin"),
+      text: "Start",
+      attachments: [],
+      origin,
+      dispatchMode: { type: "start_immediately" },
+      createdBy: "user",
+      creationSource: "web",
+    });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      commandId: CommandId.make("queue-origin"),
+      threadId,
+      messageId: MessageId.make("queue-origin"),
+      text: "Next",
+      attachments: [],
+      origin,
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const before = yield* projections.getThreadProjection(threadId);
+    const queuedRun = before.runs.find((run) => run.userMessageId === "queue-origin");
+    assert.isDefined(queuedRun);
+    const editedOrigin = { deviceType: "desktop", os: "Linux" } as const;
+    yield* orchestrator.dispatch({
+      type: "queued-run.edit",
+      commandId: CommandId.make("edit-origin"),
+      threadId,
+      runId: queuedRun!.id,
+      text: "Edited",
+      origin: editedOrigin,
+    });
+    const active = before.runs.find((run) => run.userMessageId === "start-origin");
+    if (active === undefined) return assert.fail("Expected active run");
+    yield* orchestrator.dispatch({
+      type: "run.interrupt",
+      commandId: CommandId.make("stop-origin"),
+      threadId,
+      runId: active.id,
+    });
+    yield* orchestrator.dispatch({
+      type: "queue.resume",
+      commandId: CommandId.make("release-origin"),
+      threadId,
+    });
+    const after = yield* projections.getThreadProjection(threadId);
+    assert.deepEqual(
+      after.messages.find((message) => message.id === "start-origin")?.origin,
+      origin,
+    );
+    assert.deepEqual(
+      after.messages.find((message) => message.id === "queue-origin")?.origin,
+      editedOrigin,
+    );
+    const queuedItem = after.turnItems.find(
+      (item) => item.type === "user_message" && item.messageId === "queue-origin",
+    );
+    assert.isDefined(queuedItem);
+    if (queuedItem?.type !== "user_message") return assert.fail("Expected queued message item");
+    assert.deepEqual(queuedItem.origin, editedOrigin);
+  }).pipe(Effect.provide(layerTest)),
+);

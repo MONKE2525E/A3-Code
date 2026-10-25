@@ -44,6 +44,8 @@ import {
 } from "../observability/Metrics.ts";
 import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { messageWithExecutionIdentity } from "./messageOrigin.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
@@ -335,6 +337,14 @@ export const layerWithOptions = (
     ProviderSessionManagerV2,
     Effect.gen(function* () {
       const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+      const serverEnvironment = yield* Effect.serviceOption(ServerEnvironment.ServerEnvironment);
+      const withExecutionIdentity = Effect.fn("ProviderSessionManager.withExecutionIdentity")(
+        function* (message: ProviderAdapter.ProviderAdapterV2TurnMessage) {
+          if (Option.isNone(serverEnvironment)) return message;
+          const environment = yield* serverEnvironment.value.getDescriptor;
+          return messageWithExecutionIdentity(message, environment);
+        },
+      );
       const fileSystem = yield* FileSystem.FileSystem;
       const mcpSessionRegistry = yield* McpSessionRegistry.McpSessionRegistry;
       const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
@@ -1972,7 +1982,10 @@ export const layerWithOptions = (
                     ),
                   ),
                   () =>
-                    runtime.startTurn(input).pipe(turnMetrics("send", input.modelSelection.model)),
+                    withExecutionIdentity(input.message).pipe(
+                      Effect.flatMap((message) => runtime.startTurn({ ...input, message })),
+                      turnMetrics("send", input.modelSelection.model),
+                    ),
                   (_, exit) =>
                     Exit.isFailure(exit)
                       ? observeActivity(
@@ -1985,7 +1998,12 @@ export const layerWithOptions = (
             ),
           steerTurn: (input) =>
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
-              Effect.andThen(runtime.steerTurn(input).pipe(turnMetrics("steer"))),
+              Effect.andThen(
+                withExecutionIdentity(input.message).pipe(
+                  Effect.flatMap((message) => runtime.steerTurn({ ...input, message })),
+                  turnMetrics("steer"),
+                ),
+              ),
             ),
           interruptTurn: (input) =>
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(

@@ -63,7 +63,6 @@ import {
   ORCHESTRATION_V2_WS_METHODS,
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   ORCHESTRATION_PROTOCOL_VERSION,
-  OrchestrationV2DispatchCommandError,
   OrchestrationV2GetShellSnapshotError,
   OrchestrationV2GetThreadProjectionError,
   OrchestrationV2ThreadLaunchError,
@@ -124,6 +123,7 @@ import * as CommandOutputHub from "./orchestration-v2/CommandOutputHub.ts";
 import * as McpAppRequests from "./mcpApps/McpAppRequests.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts";
+import { messageOriginFromSession, stampMessageOrigin } from "./orchestration-v2/messageOrigin.ts";
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
 import * as DocumentText from "./provider/DocumentText.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -174,7 +174,7 @@ import { dedupeSnapshotBodies } from "@t3tools/shared/orchestrationV2DedupedBodi
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
 import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.ts";
-import { userFacingDispatchErrorMessage } from "./orchestration-v2/UserFacingErrors.ts";
+import { toDispatchCommandError } from "./orchestration-v2/UserFacingErrors.ts";
 import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
 import * as ProviderInstanceRegistry from "./provider/ProviderInstanceRegistry.ts";
 import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRegistrySupport";
@@ -1778,6 +1778,14 @@ export const layerWsRpc = (
         ),
       );
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+      const sourceOrigin = serverAuth.listClientSessions(currentSessionId).pipe(
+        Effect.map((sessions) => {
+          const session = sessions.find((candidate) => candidate.sessionId === currentSessionId);
+          return session === undefined ? undefined : messageOriginFromSession(session.client);
+        }),
+        Effect.orElseSucceed(() => undefined),
+      );
+
       const sourceControlDiscovery = yield* SourceControlDiscovery.SourceControlDiscovery;
       const otlpEndpointCheck = yield* OtlpEndpointCheck.OtlpEndpointCheck;
       const sourceControlRepositories =
@@ -2340,12 +2348,19 @@ export const layerWsRpc = (
                 .enqueueCommand(
                   (command.type === "prepared-run.retry"
                     ? threadLaunch.retryPreparation(command)
-                    : ThreadMessageIntake.dispatchCommand(
-                        ThreadManagementService.withCreationProvenance(command, {
-                          createdBy: "user",
-                          creationSource:
-                            "creationSource" in command ? command.creationSource : "web",
-                        }),
+                    : sourceOrigin.pipe(
+                        Effect.flatMap((origin) =>
+                          ThreadMessageIntake.dispatchCommand(
+                            ThreadManagementService.withCreationProvenance(
+                              stampMessageOrigin(command, origin),
+                              {
+                                createdBy: "user",
+                                creationSource:
+                                  "creationSource" in command ? command.creationSource : "web",
+                              },
+                            ),
+                          ),
+                        ),
                       )
                   ).pipe(Effect.provide(intakeContext)),
                 )
@@ -2354,16 +2369,7 @@ export const layerWsRpc = (
                     result.replayed ? Effect.void : recordClientCommandAnalytics(command),
                   ),
                   Effect.map((result) => ({ sequence: result.sequence })),
-                  Effect.mapError((cause) => {
-                    const detail = userFacingDispatchErrorMessage(cause);
-                    return new OrchestrationV2DispatchCommandError({
-                      commandId: command.commandId,
-                      commandType: command.type,
-                      message: detail ?? "Failed to dispatch orchestration V2 command",
-                      ...(detail === undefined ? {} : { detail }),
-                      cause,
-                    });
-                  }),
+                  Effect.mapError((cause) => toDispatchCommandError(command, cause)),
                 ),
             ),
           ),
@@ -2487,38 +2493,45 @@ export const layerWsRpc = (
             Effect.andThen(
               startup
                 .enqueueCommand(
-                  ThreadMessageIntake.launchThread({
-                    commandId: input.commandId,
-                    ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
-                    ...(input.reuseExistingThread === undefined
-                      ? {}
-                      : { reuseExistingThread: input.reuseExistingThread }),
-                    projectId: input.projectId,
-                    title: input.title,
-                    ...(input.generateTitle === undefined
-                      ? {}
-                      : { generateTitle: input.generateTitle }),
-                    modelSelection: input.modelSelection,
-                    runtimeMode: input.runtimeMode,
-                    interactionMode: input.interactionMode,
-                    workspaceStrategy: input.workspaceStrategy,
-                    ...(input.initialMessage === undefined
-                      ? {}
-                      : {
-                          initialMessage: {
-                            ...(input.initialMessage.messageId === undefined
-                              ? {}
-                              : { messageId: input.initialMessage.messageId }),
-                            text: input.initialMessage.text,
-                            attachments: input.initialMessage.attachments,
-                            ...(input.initialMessage.context === undefined
-                              ? {}
-                              : { context: input.initialMessage.context }),
-                          },
+                  sourceOrigin
+                    .pipe(
+                      Effect.flatMap((origin) =>
+                        ThreadMessageIntake.launchThread({
+                          commandId: input.commandId,
+                          ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+                          ...(input.reuseExistingThread === undefined
+                            ? {}
+                            : { reuseExistingThread: input.reuseExistingThread }),
+                          projectId: input.projectId,
+                          title: input.title,
+                          ...(input.generateTitle === undefined
+                            ? {}
+                            : { generateTitle: input.generateTitle }),
+                          modelSelection: input.modelSelection,
+                          runtimeMode: input.runtimeMode,
+                          interactionMode: input.interactionMode,
+                          workspaceStrategy: input.workspaceStrategy,
+                          ...(input.initialMessage === undefined
+                            ? {}
+                            : {
+                                initialMessage: {
+                                  ...(input.initialMessage.messageId === undefined
+                                    ? {}
+                                    : { messageId: input.initialMessage.messageId }),
+                                  text: input.initialMessage.text,
+                                  ...(origin === undefined ? {} : { origin }),
+                                  attachments: input.initialMessage.attachments,
+                                  ...(input.initialMessage.context === undefined
+                                    ? {}
+                                    : { context: input.initialMessage.context }),
+                                },
+                              }),
+                          createdBy: "user",
+                          creationSource: input.creationSource ?? "web",
                         }),
-                    createdBy: "user",
-                    creationSource: input.creationSource ?? "web",
-                  }).pipe(Effect.provide(intakeContext)),
+                      ),
+                    )
+                    .pipe(Effect.provide(intakeContext)),
                 )
                 .pipe(
                   // A resumed launch is a retry of one already counted.

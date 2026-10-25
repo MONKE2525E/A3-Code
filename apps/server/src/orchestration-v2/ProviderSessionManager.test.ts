@@ -4,6 +4,9 @@ import { assert, it } from "@effect/vitest";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import {
   EnvironmentId,
+  type ExecutionEnvironmentDescriptor,
+  MessageId,
+  ProviderTurnId,
   type ModelSelection,
   type OrchestrationV2AppThread,
   type OrchestrationV2ConversationMessage,
@@ -338,6 +341,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     readonly backgroundTasksEndWithProcess?: boolean;
     readonly hangSessionScopeClose?: boolean;
     readonly startTurn?: Effect.Effect<void>;
+    readonly turnMessages?: ProviderAdapter.ProviderAdapterV2TurnMessage[];
     readonly beforeUnload?: Effect.Effect<void>;
     readonly spawnBeforeOpen?: boolean;
     readonly scopeCloseReached?: Deferred.Deferred<void>;
@@ -433,8 +437,14 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
               ...current,
               resumeCount: current.resumeCount + 1,
             })).pipe(Effect.as(threadInput.providerThread)),
-          startTurn: () => options.startTurn ?? Effect.void,
-          steerTurn: () => Effect.void,
+          startTurn: (turn) =>
+            Effect.sync(() => {
+              options.turnMessages?.push(turn.message);
+            }).pipe(Effect.andThen(options.startTurn ?? Effect.void)),
+          steerTurn: (turn) =>
+            Effect.sync(() => {
+              options.turnMessages?.push(turn.message);
+            }),
           interruptTurn: () =>
             Ref.update(state, (current) => ({
               ...current,
@@ -488,6 +498,7 @@ function layerTest(input: {
   readonly backgroundTasksEndWithProcess?: boolean;
   readonly hangSessionScopeClose?: boolean;
   readonly startTurn?: Effect.Effect<void>;
+  readonly turnMessages?: ProviderAdapter.ProviderAdapterV2TurnMessage[];
   readonly beforeUnload?: Effect.Effect<void>;
   readonly spawnBeforeOpen?: boolean;
   readonly scopeCloseReached?: Deferred.Deferred<void>;
@@ -524,6 +535,7 @@ function layerTest(input: {
         ? {}
         : { hangSessionScopeClose: input.hangSessionScopeClose }),
       ...(input.startTurn === undefined ? {} : { startTurn: input.startTurn }),
+      ...(input.turnMessages === undefined ? {} : { turnMessages: input.turnMessages }),
       ...(input.beforeUnload === undefined ? {} : { beforeUnload: input.beforeUnload }),
       ...(input.spawnBeforeOpen === undefined ? {} : { spawnBeforeOpen: input.spawnBeforeOpen }),
       ...(input.scopeCloseReached === undefined
@@ -4311,4 +4323,85 @@ it.effect.each(["idle", "owned-turn", "foreign-turn", "replacement", "non-native
         ),
       );
     }),
+);
+
+it.effect("delivers sender and execution identity through the common adapter boundary", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const turnMessages: ProviderAdapter.ProviderAdapterV2TurnMessage[] = [];
+    yield* Effect.gen(function* () {
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const ids = yield* IdAllocator.IdAllocatorV2;
+      const threadId = ThreadId.make("sender-execution-identity");
+      const now = yield* DateTime.now;
+      const created = yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now });
+      yield* sink.write({ events: [created] });
+      const providerSessionId = yield* ids.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = makeProviderThread({
+        idAllocator: ids,
+        threadId,
+        providerSessionId,
+        now,
+      });
+      const runId = RunId.make("identity-run");
+      const message: ProviderAdapter.ProviderAdapterV2TurnMessage = {
+        messageId: MessageId.make("identity-message"),
+        text: "First request",
+        attachments: [],
+        createdBy: "user",
+        creationSource: "mobile",
+        origin: { deviceType: "mobile", os: "Android" },
+      };
+      yield* runtime.startTurn({
+        appThread: created.payload,
+        threadId,
+        runId,
+        runOrdinal: 1,
+        providerTurnOrdinal: 1,
+        attemptId: ids.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+        rootNodeId: ids.derive.rootNode({ runId }),
+        providerThread,
+        message,
+        modelSelection,
+        runtimePolicy,
+      });
+      yield* runtime.steerTurn({
+        threadId,
+        runId,
+        providerThread,
+        providerTurnId: ProviderTurnId.make("identity-turn"),
+        message: { ...message, text: "Later request" },
+      });
+      assert.equal(turnMessages.length, 2);
+      for (const delivered of turnMessages) {
+        assert.include(delivered.text, '"deviceType":"mobile","os":"Android"');
+        assert.include(delivered.text, '"environmentId":"execution-server","os":"linux"');
+        assert.include(delivered.text, "does not grant terminal or filesystem access");
+      }
+      assert.include(turnMessages[1]!.text, "Later request");
+    }).pipe(
+      Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, turnMessages })),
+      Effect.provideService(ServerEnvironment.ServerEnvironment, {
+        getEnvironmentId: Effect.succeed(EnvironmentId.make("execution-server")),
+        getDescriptor: Effect.succeed({
+          environmentId: EnvironmentId.make("execution-server"),
+          label: "Server",
+          platform: { os: "linux", arch: "x64" },
+          serverVersion: "test",
+          orchestrationProtocolVersion: 2,
+          capabilities: { repositoryIdentity: true, connectionProbe: true },
+        } satisfies ExecutionEnvironmentDescriptor),
+      }),
+    );
+  }),
 );

@@ -196,6 +196,7 @@ export function MuseAgentRouteConnection({
     setError(null);
   }
   const retirementAtAttempt = useEffectEvent((_retry: number) => observerRetirement);
+  const openThreadAtAttempt = useEffectEvent(openThread);
   useEffect(() => {
     if (!connected || !canOpen) return;
     let current = true;
@@ -204,7 +205,7 @@ export function MuseAgentRouteConnection({
       hit: { environmentId, threadId },
       shells: [{ environmentId, id: threadId, providerInstanceId }],
       openThread: async (target) => {
-        const result = await openThread(target);
+        const result = await openThreadAtAttempt(target);
         if (result._tag === "Success") return result.value;
         if (isAtomCommandInterrupted(result)) {
           throw new Error(MUSE_INTERRUPT_MESSAGE);
@@ -222,7 +223,7 @@ export function MuseAgentRouteConnection({
     return () => {
       current = false;
     };
-  }, [connected, canOpen, environmentId, threadId, providerInstanceId, openThread, retry]);
+  }, [connected, canOpen, environmentId, threadId, providerInstanceId, retry]);
   const gate = museAgentAttachSendGate({ connected, canOpen, attached, error });
   useLayoutEffect(() => {
     onSendBlockedReasonChange?.(gate.sendBlockedReason);

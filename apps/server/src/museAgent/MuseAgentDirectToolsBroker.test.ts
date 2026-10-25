@@ -121,8 +121,9 @@ const makeFixture = (wait = Effect.void) =>
       isCurrent: Effect.sync(
         () => currentAccount === "account:test" && currentNativeSession === "native-session:test",
       ),
-      register: (commands, invoke) =>
+      register: (commands, invoke, environmentId) =>
         Effect.sync(() => {
+          expect(environmentId).toBe("environment:broker-test");
           capturedCatalog = commands;
           invocation = invoke;
           return {
@@ -313,8 +314,10 @@ it.effect("refuses partial registration and cleans up its credential and callbac
         (yield* Effect.flip(
           port.start({
             ...f.options,
-            register: (commands, invoke) =>
-              register(commands, invoke).pipe(Effect.map((result) => ({ ...result, accepted: 0 }))),
+            register: (commands, invoke, environmentId) =>
+              register(commands, invoke, environmentId).pipe(
+                Effect.map((result) => ({ ...result, accepted: 0 })),
+              ),
           }),
         )).code,
       ).toBe("registration_failed");
@@ -333,8 +336,8 @@ it.effect("uses a trusted registration connection before the first invocation", 
       const register = f.options.register;
       yield* port.start({
         ...f.options,
-        register: (commands, invoke) =>
-          register(commands, invoke).pipe(
+        register: (commands, invoke, environmentId) =>
+          register(commands, invoke, environmentId).pipe(
             Effect.map((result) => ({ ...result, connectionId: "connection:registered" })),
           ),
       });
@@ -489,8 +492,8 @@ it.effect("a late registration cannot reopen a turn whose owner already closed",
         port
           .start({
             ...f.options,
-            register: (commands, invoke) =>
-              f.options.register(commands, invoke).pipe(
+            register: (commands, invoke, environmentId) =>
+              f.options.register(commands, invoke, environmentId).pipe(
                 Effect.tap(() => Deferred.succeed(started, undefined)),
                 Effect.tap(() => Deferred.await(release)),
               ),
@@ -519,8 +522,8 @@ it.effect("revokes the registry credential before waiting for native callback re
       const port = yield* Port.MuseAgentDirectToolsPort;
       const turn = yield* port.start({
         ...f.options,
-        register: (commands, invoke) =>
-          f.options.register(commands, invoke).pipe(
+        register: (commands, invoke, environmentId) =>
+          f.options.register(commands, invoke, environmentId).pipe(
             Effect.map((registration) => ({
               ...registration,
               close: registration.close.pipe(

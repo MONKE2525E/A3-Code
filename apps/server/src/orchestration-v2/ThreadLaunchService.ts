@@ -67,6 +67,7 @@ export type ThreadLaunchWorkspaceStrategy =
     };
 
 export interface ThreadLaunchInitialMessage {
+  readonly origin?: import("@t3tools/contracts").OrchestrationV2MessageOrigin;
   readonly messageId?: MessageId;
   readonly scheduledTaskId?: ScheduledTaskId;
   readonly senderThreadId?: ThreadId;
@@ -979,6 +980,9 @@ const make = Effect.gen(function* () {
               threadId,
               messageId,
               text: input.initialMessage.text,
+              ...(input.initialMessage.origin === undefined
+                ? {}
+                : { origin: input.initialMessage.origin }),
               ...(input.initialMessage.scheduledTaskId === undefined
                 ? {}
                 : { scheduledTaskId: input.initialMessage.scheduledTaskId }),

@@ -768,12 +768,13 @@ export const createMuseAgentAdapterV2 = Effect.fnUntraced(function* (
                           projection.matchesTurn(providerTurnId)
                         );
                       }).pipe(Effect.orElseSucceed(() => false)),
-                      register: (commands, invoke) =>
+                      register: (commands, invoke, environmentId) =>
                         native
                           .registerTools(binding, {
                             clientId,
                             connectionId,
                             nativeSessionId: session.session_id,
+                            environmentId,
                             commands,
                             invoke: (invocation) =>
                               invoke(invocation).pipe(

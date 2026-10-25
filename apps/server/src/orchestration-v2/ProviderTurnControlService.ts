@@ -359,6 +359,7 @@ export const layer: Layer.Layer<
               providerTurnId: loaded.providerTurn.id,
               message: {
                 messageId: message.id,
+                ...(message.origin === undefined ? {} : { origin: message.origin }),
                 text: projectComposerContextForProvider({
                   text: message.text,
                   records: message.context?.records ?? [],

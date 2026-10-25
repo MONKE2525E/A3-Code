@@ -8,6 +8,7 @@ import * as Exit from "effect/Exit";
 import * as Cause from "effect/Cause";
 import {
   ThreadId,
+  EnvironmentId,
   ProviderSessionId,
   RunId,
   RunAttemptId,
@@ -601,12 +602,15 @@ it.effect("disconnect interrupts pending registration before it can admit a nati
         install: () => Effect.fail(new NativeAgentDirectToolsError({ code: "already_installed" })),
         start: (input) =>
           input
-            .register({}, (invocation) =>
-              Effect.succeed({
-                method: "client.invoke.result",
-                params: { invoke_id: "unused", ok: true },
-                options: { expectedConnectionId: invocation.connectionId },
-              }),
+            .register(
+              {},
+              (invocation) =>
+                Effect.succeed({
+                  method: "client.invoke.result",
+                  params: { invoke_id: "unused", ok: true },
+                  options: { expectedConnectionId: invocation.connectionId },
+                }),
+              EnvironmentId.make("environment:adapter-test"),
             )
             .pipe(Effect.map((result) => ({ revoke: Effect.void, close: result.close }))),
       });
@@ -951,6 +955,7 @@ it.effect(
                     params: { invoke_id: "unused", ok: true },
                     options: { expectedConnectionId: invoke.connectionId },
                   }),
+                EnvironmentId.make("environment:adapter-test"),
               );
               return { revoke: Effect.void, close: registered.close };
             }),
