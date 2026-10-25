@@ -45,7 +45,7 @@ export function withStoredMessageOrigin<
   return { ...rest, ...(origin === undefined ? {} : { origin }) };
 }
 
-export function executionIdentityContext(input: {
+function executionIdentityContext(input: {
   readonly origin?: OrchestrationV2MessageOrigin | undefined;
   readonly environment: ExecutionEnvironmentDescriptor;
 }): string {
