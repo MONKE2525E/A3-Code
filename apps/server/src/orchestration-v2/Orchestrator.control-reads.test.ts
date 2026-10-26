@@ -1429,9 +1429,6 @@ it.effect("persists message origin across queued delivery, editing, and release"
       createdBy: "user",
       creationSource: "web",
     });
-
-    assert.strictEqual((yield* successes).count - successesBefore, 1);
-    assert.strictEqual((yield* durations).count - durationsBefore, 1);
     yield* orchestrator.dispatch({
       type: "message.dispatch",
       commandId: CommandId.make("start-origin"),

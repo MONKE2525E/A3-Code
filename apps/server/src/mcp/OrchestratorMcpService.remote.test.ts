@@ -523,7 +523,7 @@ describe("OrchestratorMcpService cross-environment routing", () => {
     () =>
       Effect.gen(function* () {
         const f = yield* fixture();
-        const catalog = yield* f.service.capabilities(scope, peerId);
+        const catalog = yield* f.service.capabilities(scope, { environmentId: peerId });
         assert.deepEqual(catalog.projects, [
           {
             projectId: destinationProjectId,
