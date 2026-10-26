@@ -95,11 +95,12 @@ describe("opening a PR from chat", () => {
   it("opens a stand-alone Android PR in the workspace", async () => {
     mocks.platform.OS = "android";
     await useOpenPullRequest()("https://github.com/example/app/pull/42", "env-a");
-    expect(mocks.resetWorkspace).toHaveBeenCalledWith(expect.anything(), {
+    expect(mocks.resetWorkspace).toHaveBeenCalledOnce();
+    expect(mocks.dispatch).toHaveBeenCalledWith({
+      type: "PUSH",
       name: "PullRequest",
       params: expect.objectContaining({ number: 42, projectId: "project-a" }),
     });
-    expect(mocks.dispatch).not.toHaveBeenCalled();
   });
   it("preserves the originating Android thread beneath its PR", async () => {
     mocks.platform.OS = "android";

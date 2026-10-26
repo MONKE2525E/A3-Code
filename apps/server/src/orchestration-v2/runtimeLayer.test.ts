@@ -1101,13 +1101,11 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
             },
           ],
         });
-        const spy = vi
-          .spyOn(sessions, "get")
-          .mockReturnValue(
-            Effect.succeedSome({
-              providerSession,
-            } as ProviderAdapter.ProviderAdapterV2SessionRuntime),
-          );
+        const spy = vi.spyOn(sessions, "get").mockReturnValue(
+          Effect.succeedSome({
+            providerSession,
+          } as ProviderAdapter.ProviderAdapterV2SessionRuntime),
+        );
         yield* Effect.addFinalizer(() => Effect.sync(() => spy.mockRestore()));
         for (const type of ["steer_active", "restart_active"] as const) {
           const commandId = CommandId.make(`grok-followup-${nativeDriver}-${type}`);

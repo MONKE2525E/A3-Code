@@ -238,7 +238,7 @@ vi.mock("../components/FilePreviewModal", () => ({
     props.source ? createElement("div", { "data-file-preview": props.source.name }) : null,
 }));
 vi.mock("../components/VideoPreviewModal", () => ({ VideoPreviewModal: () => null }));
-vi.mock("../components/ComposerContextSheet", () => ({}));
+vi.mock("../features/threads/ComposerContextSheet", () => ({}));
 vi.mock("../native/useMarkdownImageSource", () => ({ useMarkdownImageSource: () => vi.fn() }));
 vi.mock("../native/useEnrichedLinkVariants", () => ({
   enrichedThreadLinkCustomization: () => undefined,
