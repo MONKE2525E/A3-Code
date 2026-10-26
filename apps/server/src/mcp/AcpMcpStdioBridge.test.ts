@@ -1,4 +1,4 @@
-import { AcpMcpBridgeError, callAcpMcpTool } from "./AcpMcpStdioBridge.ts";
+import { callAcpMcpTool } from "./AcpMcpStdioBridge.ts";
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off
 import * as NodeStream from "node:stream";
 import * as NodeHttp from "node:http";

@@ -127,7 +127,6 @@ export const prepareMuseAttachment = (input: {
         budget > MUSE_ATTACHMENT_LIMITS.inlineBytes ||
         !attachment.name ||
         attachment.name.length > 4096 ||
-        // eslint-disable-next-line no-control-regex -- Native filenames must not contain control characters.
         /[\u0000-\u001f\u007f]/.test(attachment.name) ||
         !/^[\x20-\x7e]{1,128}$/.test(attachment.mimeType) ||
         (attachment.type === "image" &&
@@ -284,7 +283,6 @@ export const parseMuseSandboxAttachmentPath = (value: string): string | null => 
           !segment ||
           segment === "." ||
           segment === ".." ||
-          // eslint-disable-next-line no-control-regex -- Reject controls at the sandbox URI boundary.
           /[\\/%?#\u0000-\u001f\u007f]/.test(segment),
       )
     )

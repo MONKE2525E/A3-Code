@@ -37,11 +37,9 @@ export type GrokBotNativeReadiness =
     };
 
 /**
- * Maps the server's native provider state onto what the sidebar and route can do.
- * The server opens a bot thread for `ready` or `blocked` with a bound provider, so
- * `blocked` keeps browsing available. `account_changed`, `not_configured`, and
- * `native_account_unavailable` stay hard blocks. `denied` means the caller cannot read
- * the provider config without settings write access, so it never guesses a state.
+ * Maps the server's native provider state onto what the sidebar and route can do. `ready` and
+ * `blocked` with a bound provider open a bot thread; `account_changed`, `not_configured` and
+ * `native_account_unavailable` stay hard blocks; `denied` never guesses a state.
  */
 export function grokBotNativeReadiness(
   config: GrokBotOrchestratorConfig | null | undefined,

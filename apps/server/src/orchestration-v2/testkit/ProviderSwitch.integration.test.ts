@@ -1,8 +1,3 @@
-import { CURSOR_MODEL_SELECTION } from "./fixtures/shared.ts";
-const firstPrompt = "Respond with exactly: codex before switch";
-const claudePrompt = "Respond with exactly: claude switched response";
-const returnPrompt = "Respond with exactly: codex after return";
-const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
 import { vi } from "vite-plus/test";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import { assert, describe, it } from "@effect/vitest";
@@ -50,7 +45,6 @@ import {
   canReuseCodexContextUsage,
 } from "../Adapters/CodexAdapterV2.ts";
 import { AcpProviderCapabilitiesV2 } from "@t3tools/provider-acp/server/adapter";
-import { CursorProviderCapabilitiesV2 } from "@t3tools/provider-cursor/testing";
 import { GrokBotCapabilitiesV2 } from "../Adapters/GrokBotAdapterV2.ts";
 import {
   GROK_BOT_NATIVE_MESSAGE_LIMIT,

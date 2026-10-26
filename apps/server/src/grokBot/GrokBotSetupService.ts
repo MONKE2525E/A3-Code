@@ -128,11 +128,7 @@ const make = Effect.gen(function* () {
   const skillHash = Buffer.from(
     yield* crypto.digest("SHA-256", new TextEncoder().encode(Binding.GROK_BOT_MANAGED_SKILL_BODY)),
   ).toString("hex");
-  const quote = (value: string) =>
-    platform === "win32"
-      ? `'${value.replaceAll("'", "''")}'`
-      : `'${value.replaceAll("'", "'\\''")}'`;
-  const pairingArgs = `auth pairing create --base-dir ${quote(config.baseDir)} --ttl 5m --label ${quote("GrokBot MCP setup")}`;
+
   const hostCommand = yield* resolveHostCliCommand("auth", [
     "pairing",
     "create",

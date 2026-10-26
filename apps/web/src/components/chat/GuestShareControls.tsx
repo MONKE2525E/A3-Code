@@ -10,11 +10,10 @@ import {
   type ScopedThreadRef,
   type ThreadGuestShare,
 } from "@t3tools/contracts";
-import { CheckIcon, CopyIcon, UserIcon } from "lucide-react";
+import { CheckIcon, CopyIcon } from "lucide-react";
 import { useState } from "react";
 
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
-import { useNowMinute } from "~/hooks/useNowMinute";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { useQuietThreadProjection } from "~/state/entities";
 import { serverEnvironment } from "~/state/server";
@@ -170,15 +169,6 @@ function GuestShareDialog({
         </DialogFooter>
       </DialogPopup>
     </Dialog>
-  );
-}
-
-function GuestShareStatus({ share }: { readonly share: ThreadGuestShare }) {
-  const nowMinute = useNowMinute();
-  // The share stays on the thread after it expires, until the owner clears it.
-  if (share.expiresAt.slice(0, 16) <= nowMinute) return <span>Guest link expired</span>;
-  return (
-    <span>{share.guestName !== null ? `${share.guestName} is a guest` : "Guest link active"}</span>
   );
 }
 

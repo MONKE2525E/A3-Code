@@ -54,7 +54,6 @@ export type AdminMergeOutcome =
   | { readonly kind: "merged" }
   | { readonly kind: "failed"; readonly exitCode: number; readonly message: string };
 
-// oxlint-disable-next-line no-control-regex -- terminal output carries ANSI escapes to strip
 const ANSI_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
 
 /**

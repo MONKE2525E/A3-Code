@@ -11,15 +11,9 @@ import {
 const FULLSCREEN_TRANSITION_WINDOW_MS = COMPOSER_FULLSCREEN_TRANSITION_MS + 60;
 
 /**
- * Fullscreen state for a composer.
- *
- * - Each toggle changes the card immediately and focuses the editor on expansion, including
- *   when a hardware keyboard keeps the software keyboard hidden.
- * - Collapses automatically when an open software keyboard is dismissed.
- * - `isAnimating` is true briefly after an animated change so Android (which otherwise snaps the
- *   composer so it can ride the keyboard) runs one height transition for the toggle. Automatic
- *   collapses (keyboard down, send, thread switch) pass `animate: false` and snap, leaving the
- *   keyboard-synced slide as the only motion.
+ * Fullscreen state for a composer. Toggling focuses the editor on expansion, and an open
+ * software keyboard being dismissed collapses it. `isAnimating` lets Android run one height
+ * transition for a toggle; automatic collapses pass `animate: false` and snap.
  */
 export function useComposerFullscreen() {
   const [isFullscreen, setIsFullscreenState] = useState(false);
@@ -84,10 +78,8 @@ export type ComposerFullscreenController = ReturnType<typeof useComposerFullscre
 
 /**
  * Keeps a composer above the keyboard by translating it with the IME, like KeyboardStickyView.
- * Fullscreen, the dock stretches to cover the space between `fullscreenTop` and the keyboard. The
- * animated translate stays identical in both modes. Fullscreen offsets the dock's top by the
- * same native lift in the same worklet, keeping its visible top at `fullscreenTop` even while
- * rotation resizes the keyboard before JS receives its new height.
+ * Fullscreen, the dock stretches between `fullscreenTop` and the keyboard, offsetting its top by
+ * the same native lift so rotation resizing the keyboard cannot move it.
  */
 export function ComposerKeyboardDock(props: {
   readonly children: ReactNode;

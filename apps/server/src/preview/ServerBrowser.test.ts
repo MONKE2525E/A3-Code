@@ -60,6 +60,7 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     async connectDesktopPage(endpoint: string) {
       const context = makeContext();
       desktopConnections.push({ endpoint, context });
+      desktopSignals.emit("change");
       return { browser: { close: async () => {} }, page: context.page as unknown as Page };
     }
     async close() {
@@ -270,6 +271,18 @@ let contextFailure: Error | null = null;
 let initialNavigation: (() => Promise<void>) | null = null;
 let desktopRendersNext = false;
 const desktopDetaches = new NodeEvents.EventEmitter();
+const desktopSignals = new NodeEvents.EventEmitter();
+const desktopUntil = (ready: () => boolean) =>
+  Effect.callback<void>((resume) => {
+    if (ready()) return resume(Effect.void);
+    const onChange = () => {
+      if (!ready()) return;
+      desktopSignals.off("change", onChange);
+      resume(Effect.void);
+    };
+    desktopSignals.on("change", onChange);
+    return Effect.sync(() => desktopSignals.off("change", onChange));
+  });
 const desktopTabs = new Set<string>();
 const desktopRenders = (tabId: string) => {
   if (desktopRendersNext) {
@@ -318,6 +331,7 @@ const dependencies = Layer.mergeAll(
           const onDetach = (key: { threadId: string; tabId: string }) =>
             Queue.offerUnsafe(queue, key);
           desktopDetaches.on("detach", onDetach);
+          desktopSignals.emit("change");
           return onDetach;
         }),
         (onDetach) => Effect.sync(() => desktopDetaches.off("detach", onDetach)),
@@ -337,7 +351,10 @@ const dependencies = Layer.mergeAll(
     isAttached: (key) => Effect.sync(() => desktopRenders(key.tabId)),
     endpoint: (key) =>
       Effect.acquireRelease(Effect.succeed(`ws://desktop/${key.tabId}`), () =>
-        Effect.sync(() => releasedDesktopTabs.push(key.tabId)),
+        Effect.sync(() => {
+          releasedDesktopTabs.push(key.tabId);
+          desktopSignals.emit("change");
+        }),
       ),
     pointer: () => Effect.void,
     turn: (threadId, active) => Effect.sync(() => desktopTurns.emit("turn", threadId, active)),
@@ -1299,14 +1316,14 @@ it.live("a desktop page that comes back reconnects without waiting for a viewer"
       yield* Effect.yieldNow;
       desktopRendersNext = true;
       const opened = yield* manager.open({ threadId: scope.thread.threadId, runtime: "server" });
-      while (desktopConnections.length === 0) yield* Effect.yieldNow;
-      while (desktopDetaches.listenerCount("detach") === 0) yield* Effect.yieldNow;
+      yield* desktopUntil(() => desktopConnections.length > 0);
+      yield* desktopUntil(() => desktopDetaches.listenerCount("detach") > 0);
       // DevTools opened, then closed: the desktop withdraws the page and returns it.
       desktopDetaches.emit("detach", { threadId: scope.thread.threadId, tabId: opened.tabId });
-      while (releasedDesktopTabs.length === 0) yield* Effect.yieldNow;
+      yield* desktopUntil(() => releasedDesktopTabs.length > 0);
       desktopDetaches.emit("attach", { threadId: scope.thread.threadId, tabId: opened.tabId });
       // Without a viewer or agent, the server drives the page again, so its URL keeps reaching clients.
-      while (desktopConnections.length < 2) yield* Effect.yieldNow;
+      yield* desktopUntil(() => desktopConnections.length >= 2);
       expect(desktopConnections).toHaveLength(2);
     }),
   ).pipe(Effect.provide(layer)),

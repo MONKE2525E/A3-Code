@@ -85,7 +85,7 @@ describe("GrokBot migration compatibility", () => {
             VALUES ('turn', 'agent_declaration', 'Preserved answer', 90)
           `;
         }
-        const history = yield* sql`SELECT * FROM effect_sql_migrations ORDER BY migration_id`;
+
         const bindings = yield* sql`SELECT * FROM grok_bot_managed_bindings`;
         const turns = yield* sql`SELECT * FROM grok_bot_managed_turns`;
         const credentials = yield* sql`SELECT * FROM mcp_remote_credentials`;

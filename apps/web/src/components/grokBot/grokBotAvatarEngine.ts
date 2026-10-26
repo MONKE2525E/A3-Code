@@ -77,11 +77,9 @@ interface GrokBotAvatarEngineModule {
   ) => GrokBotAvatarEngine;
 }
 
-// Client-owned pin for Grok Bot 0.68.1, reproduced with
-// scripts/install-grok-bot-avatar-engine.ts from index.eager-platform-AatQIEPx.js.
+// Client-owned pin for Grok Bot 0.68.1, reproduced with scripts/install-grok-bot-avatar-engine.ts.
 // Bundle SHA-256: fe8439822c8085411a1cbae5fb38964fde8234c22f6a7f79c28b3ffe5ec059d9
-// grok-bot_0.68.1_amd64.deb SHA-256:
-// b2be8106d2b3eae07d983d5f1ca77b657accde666dc440db2a409421ecff3359
+// grok-bot_0.68.1_amd64.deb SHA-256: b2be8106d2b3eae07d983d5f1ca77b657accde666dc440db2a409421ecff3359
 // Only this derived module is trusted; new versions require a reviewed client update.
 const TRUSTED_ENGINE_SHA256 = "76f131c44107bcd25a196ddf5f765cf021ec12d757557591afcf58247c8d07ea";
 

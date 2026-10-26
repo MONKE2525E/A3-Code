@@ -1,4 +1,3 @@
-import { vi } from "@effect/vitest";
 import { assert, it } from "@effect/vitest";
 import {
   EnvironmentId,

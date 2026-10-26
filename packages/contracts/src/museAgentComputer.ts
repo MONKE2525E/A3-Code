@@ -4,7 +4,6 @@ import { MuseAgentComputerTask } from "./museAgentFeatures.ts";
 export const MuseAgentComputerId = Schema.String.check(
   Schema.isMinLength(1),
   Schema.isMaxLength(1024),
-  // eslint-disable-next-line no-control-regex -- IDs must remain a single route segment.
   Schema.isPattern(/^[^/\\\u0000-\u001f\u007f]+$/),
 );
 const Text = Schema.String.check(Schema.isMaxLength(8192));

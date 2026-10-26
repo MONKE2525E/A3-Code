@@ -7,7 +7,6 @@ import {
   buildThreadActionItems,
   buildLinkedThreadActionItems,
   buildGrokBotSearchItems,
-  enumerateCommandPaletteItems,
   filterPinnedBrowseEntries,
   filterCommandPaletteGroups,
   reduceCommandPaletteUiState,

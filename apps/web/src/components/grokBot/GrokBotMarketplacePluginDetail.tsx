@@ -88,6 +88,7 @@ export function MarketplacePluginDetail({
           </h4>
           <ul className="divide-y rounded-xl border bg-card/40">
             {plugin.skills.map((skill, index) => (
+              // oxlint-disable-next-line react/no-array-index-key -- Static server list; names can repeat.
               <li key={`${skill.name}-${index}`} className="flex items-start gap-3 px-3 py-2.5">
                 <BoxIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
                 <span className="min-w-0">

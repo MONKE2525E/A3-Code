@@ -242,6 +242,7 @@ function TabPanel({ tab, recipe }: { readonly tab: Tab; readonly recipe: Recipe 
       ) : (
         <ul className="space-y-3">
           {recipe.memories.map((memory, index) => (
+            // oxlint-disable-next-line react/no-array-index-key -- Static recipe list with no stable id.
             <li key={index} className="space-y-1">
               <span className="text-xs text-muted-foreground">
                 {memory.kind}
@@ -314,6 +315,7 @@ function ExpandableList({
   return (
     <ul className="space-y-2">
       {items.map((item, index) => (
+        // oxlint-disable-next-line react/no-array-index-key -- Static list; keys can repeat.
         <li key={`${item.key}-${index}`} className="rounded-lg border">
           <details className="group">
             <summary className="cursor-pointer list-none px-3 py-2.5">

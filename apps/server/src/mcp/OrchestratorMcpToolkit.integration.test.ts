@@ -1,56 +1,28 @@
-import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
-import { type JsonSchemaType } from "@modelcontextprotocol/sdk/validation";
 import {
   EventId,
   IsoDateTime,
-  type OrchestrationV2DelegatedCompletionDelivery,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
-  type OrchestrationV2ThreadProjection,
-  OrchestratorMcpCreateThreadsResult,
   OrchestratorMcpTaskCancelResult,
-  OrchestratorMcpThreadListResult,
-  OrchestratorMcpThreadReadResult,
-  OrchestratorMcpThreadWaitResult,
   ProviderThreadId,
   ProviderTurnId,
-  type ScheduledTask,
-  ScheduledTaskId,
-  type ScheduledTaskUpsertInput,
-  ThreadMetadataMcpUpdateResult,
   TurnItemId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
-import * as Fiber from "effect/Fiber";
-import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
-import { threadShellFromProjection } from "../orchestration-v2/ProjectionStore.ts";
-import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
-import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
-import { delegatedTaskRun } from "./OrchestratorMcpService.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 const declaredFailure = (result: McpSchema.CallToolResult) => {
   const text = result.content[0];
   return result.isError === true && text?.type === "text" ? JSON.parse(text.text) : undefined;
 };
-const claudeInstanceId = ProviderInstanceId.make("claudeAgent");
-const claudeModel = "claude-sonnet-4-6";
-const createdThreadPrompt = "Complete the newly created ordinary thread.";
-const decodeCreateThreadsResult = Schema.decodeUnknownEffect(OrchestratorMcpCreateThreadsResult);
+
 const decodeTaskCancelResult = Schema.decodeUnknownEffect(OrchestratorMcpTaskCancelResult);
-const decodeThreadListResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadListResult);
-const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
-const decodeThreadWaitResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadWaitResult);
-const decodeThreadUpdateResult = Schema.decodeUnknownEffect(ThreadMetadataMcpUpdateResult);
-const claudeSelection = {
-  instanceId: claudeInstanceId,
-  model: claudeModel,
-} satisfies ModelSelection;
+
 interface CapturedTurn {
   readonly instanceId: ProviderInstanceId;
   readonly threadId: ThreadId;
@@ -287,44 +259,6 @@ function makeDeterministicAdapter(input: {
   };
 }
 
-function scheduledTaskFromUpsert(input: ScheduledTaskUpsertInput): ScheduledTask {
-  const timestamp = IsoDateTime.make("2026-07-01T09:00:00.000Z");
-  return {
-    id: input.id ?? ScheduledTaskId.make(`scheduled-task:${input.commandId ?? "stub"}`),
-    title: input.title,
-    prompt: input.prompt,
-    enabled: input.enabled,
-    schedule:
-      input.schedule.type === "webhook"
-        ? {
-            type: "webhook",
-            signature:
-              input.schedule.signature == null
-                ? null
-                : {
-                    header: input.schedule.signature.header,
-                    encoding: input.schedule.signature.encoding,
-                    prefix: input.schedule.signature.prefix,
-                  },
-          }
-        : input.schedule,
-    projectId: input.projectId,
-    threadId: input.threadId ?? null,
-    workspaceStrategy: input.workspaceStrategy,
-    modelSelection: input.modelSelection,
-    runtimeMode: input.runtimeMode,
-    interactionMode: input.interactionMode,
-    createdBy: input.createdBy ?? "user",
-    creationSource: input.creationSource ?? "web",
-    createdAt: timestamp,
-    updatedAt: timestamp,
-    nextRunAt: null,
-    lastRunAt: null,
-    lastRunStatus: "never",
-    lastRunError: null,
-    runCount: 0,
-  };
-}
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {

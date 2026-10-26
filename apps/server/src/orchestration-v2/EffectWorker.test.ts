@@ -1,4 +1,3 @@
-import * as Queue from "effect/Queue";
 import * as TestClock from "effect/testing/TestClock";
 const replacementSessionId = ProviderSessionId.make(
   "provider-session:effect-worker-restart:replacement",

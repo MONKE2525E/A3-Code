@@ -1,9 +1,8 @@
 /**
  * Secret questions in the Grok Bot transcript: `{id, kind:"send-message", message:{type:
- * "secret-request", secretRequest:{label, target:{kind, name, ...}}}}`. The shape of `label`,
- * `target` and the answered marker `secretProvided` is verified against the desktop bundle; the
- * optional description is not, so it is read from the likely keys.
- * Only what the user needs to choose a request is kept: no target name, and never a value.
+ * "secret-request", secretRequest:{label, target:{kind, name, ...}}}}`. `label`, `target` and
+ * `secretProvided` are verified against the desktop bundle; the description is read from likely
+ * keys. Only what the user needs to choose a request is kept: no target name, never a value.
  */
 
 export interface GrokBotSecretRequest {

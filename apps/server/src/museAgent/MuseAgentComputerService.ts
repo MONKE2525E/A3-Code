@@ -58,7 +58,6 @@ export class MuseAgentComputerError extends Schema.TaggedError<MuseAgentComputer
 const Id = Schema.String.check(
   Schema.isMinLength(1),
   Schema.isMaxLength(256),
-  // eslint-disable-next-line no-control-regex -- Native task IDs become a single route segment.
   Schema.isPattern(/^[^/\\\u0000-\u001f\u007f]+$/),
 );
 const Text = Schema.String.check(Schema.isMaxLength(8192));

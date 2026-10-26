@@ -309,11 +309,9 @@ const PROJECT_SURFACE_LABELS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * List launcher shown when the right panel has no surfaces. Keyboard-first
- * without palette chrome: a surface's letter opens it directly from anywhere
- * outside a typing context, and arrows plus Enter work while the launcher is
- * focused. The highlight only appears on hover or arrow use. Unavailable
- * surfaces stay visible with a one-line reason.
+ * List launcher shown when the right panel has no surfaces. A surface's letter opens it from
+ * outside a typing context; arrows plus Enter work while focused. Unavailable surfaces stay
+ * visible with a one-line reason.
  */
 
 function RightPanelEmptyState(props: {

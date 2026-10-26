@@ -1,10 +1,7 @@
-import { type TerminalMetadataStreamEvent, ServerSettingsError } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Option from "effect/Option";
-import * as Queue from "effect/Queue";
 import * as Schedule from "effect/Schedule";
 import * as TestClock from "effect/testing/TestClock";
-import { ChildProcessSpawner } from "effect/process";
 class WaitForConditionError extends Data.TaggedError("WaitForConditionError")<{
   readonly message: string;
 }> {}
@@ -27,22 +24,6 @@ const waitFor = <E, R>(
       }),
     ),
   );
-const multiTerminalHistoryLogPath = (
-  logsDir: string,
-  threadId = "thread-1",
-  terminalId = DEFAULT_TERMINAL_ID,
-) =>
-  Effect.service(Path.Path).pipe(
-    Effect.map(({ join }) => {
-      const threadPart = `terminal_${Base64Url.encode(threadId)}`;
-      return join(
-        logsDir,
-        terminalId === DEFAULT_TERMINAL_ID
-          ? `${threadPart}.log`
-          : `${threadPart}_${Base64Url.encode(terminalId)}.log`,
-      );
-    }),
-  );
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -58,7 +39,6 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as Data from "effect/Data";
-import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Base64Url from "effect/encoding/Base64Url";
