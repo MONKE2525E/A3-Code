@@ -16,7 +16,6 @@ import { Route as ConnectAgentRouteImport } from './routes/connect-agent'
 import { Route as ConnectRouteImport } from './routes/connect'
 import { Route as ChatRouteImport } from './routes/_chat'
 import { Route as ChatIndexRouteImport } from './routes/_chat.index'
-import { Route as SettingsMarketplaceRouteImport } from './routes/settings.marketplace'
 import { Route as SettingsGrokBotsRouteImport } from './routes/settings.grok-bots'
 import { Route as ProjectsProjectKeyRouteImport } from './routes/projects.$projectKey'
 import { Route as ChatUsageRouteImport } from './routes/_chat.usage'
@@ -30,6 +29,7 @@ import { Route as ChatSettingsScheduledTasksRouteImport } from './routes/_chat.s
 import { Route as ChatSettingsProvidersRouteImport } from './routes/_chat.settings.providers'
 import { Route as ChatSettingsProjectsRouteImport } from './routes/_chat.settings.projects'
 import { Route as ChatSettingsOpenSourceLicensesRouteImport } from './routes/_chat.settings.open-source-licenses'
+import { Route as ChatSettingsMarketplaceRouteImport } from './routes/_chat.settings.marketplace'
 import { Route as ChatSettingsKeybindingsRouteImport } from './routes/_chat.settings.keybindings'
 import { Route as ChatSettingsIntegrationsRouteImport } from './routes/_chat.settings.integrations'
 import { Route as ChatSettingsGeneralRouteImport } from './routes/_chat.settings.general'
@@ -76,11 +76,6 @@ const ChatIndexRoute = ChatIndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => ChatRoute,
-} as any)
-const SettingsMarketplaceRoute = SettingsMarketplaceRouteImport.update({
-  id: '/settings/marketplace',
-  path: '/settings/marketplace',
-  getParentRoute: () => rootRouteImport,
 } as any)
 const SettingsGrokBotsRoute = SettingsGrokBotsRouteImport.update({
   id: '/settings/grok-bots',
@@ -150,6 +145,11 @@ const ChatSettingsOpenSourceLicensesRoute =
     path: '/open-source-licenses',
     getParentRoute: () => ChatSettingsRoute,
   } as any)
+const ChatSettingsMarketplaceRoute = ChatSettingsMarketplaceRouteImport.update({
+  id: '/marketplace',
+  path: '/marketplace',
+  getParentRoute: () => ChatSettingsRoute,
+} as any)
 const ChatSettingsKeybindingsRoute = ChatSettingsKeybindingsRouteImport.update({
   id: '/keybindings',
   path: '/keybindings',
@@ -226,7 +226,6 @@ export interface FileRoutesByFullPath {
   '/usage': typeof ChatUsageRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/settings/grok-bots': typeof SettingsGrokBotsRoute
-  '/settings/marketplace': typeof SettingsMarketplaceRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/grok-bots/$botId': typeof ChatGrokBotsBotIdRoute
@@ -239,6 +238,7 @@ export interface FileRoutesByFullPath {
   '/settings/general': typeof ChatSettingsGeneralRoute
   '/settings/integrations': typeof ChatSettingsIntegrationsRoute
   '/settings/keybindings': typeof ChatSettingsKeybindingsRoute
+  '/settings/marketplace': typeof ChatSettingsMarketplaceRoute
   '/settings/open-source-licenses': typeof ChatSettingsOpenSourceLicensesRoute
   '/settings/projects': typeof ChatSettingsProjectsRoute
   '/settings/providers': typeof ChatSettingsProvidersRoute
@@ -259,7 +259,6 @@ export interface FileRoutesByTo {
   '/usage': typeof ChatUsageRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/settings/grok-bots': typeof SettingsGrokBotsRoute
-  '/settings/marketplace': typeof SettingsMarketplaceRoute
   '/': typeof ChatIndexRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
@@ -273,6 +272,7 @@ export interface FileRoutesByTo {
   '/settings/general': typeof ChatSettingsGeneralRoute
   '/settings/integrations': typeof ChatSettingsIntegrationsRoute
   '/settings/keybindings': typeof ChatSettingsKeybindingsRoute
+  '/settings/marketplace': typeof ChatSettingsMarketplaceRoute
   '/settings/open-source-licenses': typeof ChatSettingsOpenSourceLicensesRoute
   '/settings/projects': typeof ChatSettingsProjectsRoute
   '/settings/providers': typeof ChatSettingsProvidersRoute
@@ -295,7 +295,6 @@ export interface FileRoutesById {
   '/_chat/usage': typeof ChatUsageRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/settings/grok-bots': typeof SettingsGrokBotsRoute
-  '/settings/marketplace': typeof SettingsMarketplaceRoute
   '/_chat/': typeof ChatIndexRoute
   '/_chat/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/_chat/draft/$draftId': typeof ChatDraftDraftIdRoute
@@ -309,6 +308,7 @@ export interface FileRoutesById {
   '/_chat/settings/general': typeof ChatSettingsGeneralRoute
   '/_chat/settings/integrations': typeof ChatSettingsIntegrationsRoute
   '/_chat/settings/keybindings': typeof ChatSettingsKeybindingsRoute
+  '/_chat/settings/marketplace': typeof ChatSettingsMarketplaceRoute
   '/_chat/settings/open-source-licenses': typeof ChatSettingsOpenSourceLicensesRoute
   '/_chat/settings/projects': typeof ChatSettingsProjectsRoute
   '/_chat/settings/providers': typeof ChatSettingsProvidersRoute
@@ -332,7 +332,6 @@ export interface FileRouteTypes {
     | '/usage'
     | '/projects/$projectKey'
     | '/settings/grok-bots'
-    | '/settings/marketplace'
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
     | '/grok-bots/$botId'
@@ -345,6 +344,7 @@ export interface FileRouteTypes {
     | '/settings/general'
     | '/settings/integrations'
     | '/settings/keybindings'
+    | '/settings/marketplace'
     | '/settings/open-source-licenses'
     | '/settings/projects'
     | '/settings/providers'
@@ -365,7 +365,6 @@ export interface FileRouteTypes {
     | '/usage'
     | '/projects/$projectKey'
     | '/settings/grok-bots'
-    | '/settings/marketplace'
     | '/'
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
@@ -379,6 +378,7 @@ export interface FileRouteTypes {
     | '/settings/general'
     | '/settings/integrations'
     | '/settings/keybindings'
+    | '/settings/marketplace'
     | '/settings/open-source-licenses'
     | '/settings/projects'
     | '/settings/providers'
@@ -400,7 +400,6 @@ export interface FileRouteTypes {
     | '/_chat/usage'
     | '/projects/$projectKey'
     | '/settings/grok-bots'
-    | '/settings/marketplace'
     | '/_chat/'
     | '/_chat/$environmentId/$threadId'
     | '/_chat/draft/$draftId'
@@ -414,6 +413,7 @@ export interface FileRouteTypes {
     | '/_chat/settings/general'
     | '/_chat/settings/integrations'
     | '/_chat/settings/keybindings'
+    | '/_chat/settings/marketplace'
     | '/_chat/settings/open-source-licenses'
     | '/_chat/settings/projects'
     | '/_chat/settings/providers'
@@ -432,7 +432,6 @@ export interface RootRouteChildren {
   WelcomeRoute: typeof WelcomeRoute
   ProjectsProjectKeyRoute: typeof ProjectsProjectKeyRoute
   SettingsGrokBotsRoute: typeof SettingsGrokBotsRoute
-  SettingsMarketplaceRoute: typeof SettingsMarketplaceRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -485,13 +484,6 @@ declare module '@tanstack/react-router' {
       fullPath: '/'
       preLoaderRoute: typeof ChatIndexRouteImport
       parentRoute: typeof ChatRoute
-    }
-    '/settings/marketplace': {
-      id: '/settings/marketplace'
-      path: '/settings/marketplace'
-      fullPath: '/settings/marketplace'
-      preLoaderRoute: typeof SettingsMarketplaceRouteImport
-      parentRoute: typeof rootRouteImport
     }
     '/settings/grok-bots': {
       id: '/settings/grok-bots'
@@ -582,6 +574,13 @@ declare module '@tanstack/react-router' {
       path: '/open-source-licenses'
       fullPath: '/settings/open-source-licenses'
       preLoaderRoute: typeof ChatSettingsOpenSourceLicensesRouteImport
+      parentRoute: typeof ChatSettingsRoute
+    }
+    '/_chat/settings/marketplace': {
+      id: '/_chat/settings/marketplace'
+      path: '/marketplace'
+      fullPath: '/settings/marketplace'
+      preLoaderRoute: typeof ChatSettingsMarketplaceRouteImport
       parentRoute: typeof ChatSettingsRoute
     }
     '/_chat/settings/keybindings': {
@@ -680,6 +679,7 @@ interface ChatSettingsRouteChildren {
   ChatSettingsGeneralRoute: typeof ChatSettingsGeneralRoute
   ChatSettingsIntegrationsRoute: typeof ChatSettingsIntegrationsRoute
   ChatSettingsKeybindingsRoute: typeof ChatSettingsKeybindingsRoute
+  ChatSettingsMarketplaceRoute: typeof ChatSettingsMarketplaceRoute
   ChatSettingsOpenSourceLicensesRoute: typeof ChatSettingsOpenSourceLicensesRoute
   ChatSettingsProjectsRoute: typeof ChatSettingsProjectsRoute
   ChatSettingsProvidersRoute: typeof ChatSettingsProvidersRoute
@@ -698,6 +698,7 @@ const ChatSettingsRouteChildren: ChatSettingsRouteChildren = {
   ChatSettingsGeneralRoute: ChatSettingsGeneralRoute,
   ChatSettingsIntegrationsRoute: ChatSettingsIntegrationsRoute,
   ChatSettingsKeybindingsRoute: ChatSettingsKeybindingsRoute,
+  ChatSettingsMarketplaceRoute: ChatSettingsMarketplaceRoute,
   ChatSettingsOpenSourceLicensesRoute: ChatSettingsOpenSourceLicensesRoute,
   ChatSettingsProjectsRoute: ChatSettingsProjectsRoute,
   ChatSettingsProvidersRoute: ChatSettingsProvidersRoute,
@@ -746,7 +747,6 @@ const rootRouteChildren: RootRouteChildren = {
   WelcomeRoute: WelcomeRoute,
   ProjectsProjectKeyRoute: ProjectsProjectKeyRoute,
   SettingsGrokBotsRoute: SettingsGrokBotsRoute,
-  SettingsMarketplaceRoute: SettingsMarketplaceRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
