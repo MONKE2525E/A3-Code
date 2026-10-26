@@ -1,5 +1,8 @@
 import {
   CommandId,
+  ORCHESTRATION_V2_WS_METHODS,
+  type OrchestratorMcpPeerPairInput,
+  type OrchestratorMcpPeerEnvironment,
   type AuthMcpClientAccess,
   type EnvironmentId,
   type OrchestrationV2CallParent,
@@ -125,6 +128,10 @@ import {
   requireThreadScope,
 } from "./McpInvocationContext.ts";
 import * as Metrics from "../observability/Metrics.ts";
+import { PeerEnvironmentRegistry } from "../remoteOrchestration/PeerEnvironmentRegistry.ts";
+import { RemoteEnvironmentClient } from "../remoteOrchestration/RemoteEnvironmentClient.ts";
+import { RemoteTaskService } from "../remoteOrchestration/RemoteTaskService.ts";
+import { ServerEnvironment } from "../environment/ServerEnvironment.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -205,6 +212,14 @@ export interface OrchestratorMcpServiceShape {
       | { answers: ProviderUserInputAnswers; decision?: never }
     ),
   ) => Effect.Effect<{ resolved: true }, OrchestratorMcpFailure>;
+  readonly pairEnvironment: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpPeerPairInput,
+  ) => Effect.Effect<OrchestratorMcpPeerEnvironment, OrchestratorMcpFailure>;
+  readonly removeEnvironment: (
+    scope: McpInvocationScope,
+    environmentId: EnvironmentId,
+  ) => Effect.Effect<{ removed: true }, OrchestratorMcpFailure>;
   readonly capabilities: (
     scope: McpInvocationScope,
     input?: OrchestratorMcpCapabilitiesInput,
@@ -1102,6 +1117,25 @@ const make = Effect.gen(function* () {
   const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const remoteTasks = yield* Effect.serviceOption(RemoteTaskService);
+  const peerRegistry = yield* Effect.serviceOption(PeerEnvironmentRegistry);
+  const remoteClient = yield* Effect.serviceOption(RemoteEnvironmentClient);
+  const serverEnvironment = yield* Effect.serviceOption(ServerEnvironment);
+  const remoteFailure = (error: { readonly message: string }) =>
+    failure("orchestration_error", error.message);
+  const remoteServices = () =>
+    Option.isSome(remoteTasks) && Option.isSome(peerRegistry) && Option.isSome(remoteClient)
+      ? Effect.succeed({
+          tasks: remoteTasks.value,
+          peers: peerRegistry.value,
+          transport: remoteClient.value,
+        })
+      : Effect.fail(
+          failure(
+            "orchestration_error",
+            "Cross-environment orchestration is unavailable on this server.",
+          ),
+        );
   const callLock = yield* Semaphore.make(1);
   const calls = new Map<
     McpInvocationScope,
@@ -2491,6 +2525,16 @@ const make = Effect.gen(function* () {
       function* (callerScope, taskId, timeoutMs, seenApprovalIds) {
         const scope = yield* requireDelegationScope(callerScope, "task_status");
         yield* assertCallMayObserveTasks(scope);
+        if (taskId.startsWith("remote-task:")) {
+          const { tasks } = yield* remoteServices();
+          return yield* tasks
+            .wait(
+              delegationThreadId(scope),
+              taskId,
+              Math.min(MAX_WAIT_TIMEOUT_MS, Math.max(1, timeoutMs)),
+            )
+            .pipe(Effect.mapError(remoteFailure));
+        }
         const result = yield* waitForTask(
           scope,
           taskId,
@@ -2776,7 +2820,88 @@ const make = Effect.gen(function* () {
     }),
 
     capabilities: Effect.fn("OrchestratorMcpService.capabilities")(function* (scope, input = {}) {
+      const environmentId = input.environmentId;
       const { parent, limits } = yield* loadCaller(scope);
+      const connection = {
+        environmentId: scope.environmentId,
+        toolFamilies: [...scope.capabilities].sort(),
+      };
+      if (environmentId !== undefined && environmentId !== scope.environmentId) {
+        const { peers, transport } = yield* remoteServices();
+        const peer = yield* peers.get(environmentId).pipe(Effect.mapError(remoteFailure));
+        return yield* Effect.scoped(
+          Effect.gen(function* () {
+            const { client, config } = yield* transport
+              .connect(peer)
+              .pipe(Effect.mapError(remoteFailure));
+            const shell = yield* client[ORCHESTRATION_V2_WS_METHODS.subscribeShell]({}).pipe(
+              Stream.filter((item) => item.kind === "snapshot"),
+              Stream.runHead,
+              Effect.timeout("15 seconds"),
+              Effect.mapError(() =>
+                failure("orchestration_error", "Unable to read destination projects."),
+              ),
+            );
+            if (Option.isNone(shell) || shell.value.kind !== "snapshot")
+              return yield* failure(
+                "orchestration_error",
+                "Destination did not provide its project catalog.",
+              );
+            return {
+              environmentId,
+              connection,
+              executionEnvironment: {
+                environmentId: config.environment.environmentId,
+                platform: config.environment.platform,
+                capabilities: config.environment.capabilities,
+              },
+              environments: yield* peers.list().pipe(Effect.mapError(remoteFailure)),
+              projects: shell.value.snapshot.projects.map((p) => ({
+                projectId: p.id,
+                title: p.title,
+                workspaceRoot: p.workspaceRoot,
+              })),
+              parentThreadId: parent?.thread.id ?? null,
+              inheritedProviderInstanceId: null,
+              inheritedModel: null,
+              inheritedOptions: [],
+              runtimeMode: limits.runtimeMode,
+              interactionMode: limits.interactionMode,
+              providers: config.providers.map((p) => ({
+                providerInstanceId: p.instanceId,
+                driverKind: p.driver,
+                displayName: p.displayName ?? null,
+                models: p.models.map((m) => {
+                  const options = m.capabilities?.optionDescriptors ?? [];
+                  return {
+                    id: m.slug,
+                    ...(m.name.toLowerCase() === m.slug.toLowerCase() ? {} : { label: m.name }),
+                    ...(options.length === 0
+                      ? {}
+                      : { options: options.map(capabilityModelOption) }),
+                  };
+                }),
+                ...(p.supportedRuntimeModes === undefined
+                  ? {}
+                  : { runtimeModes: p.supportedRuntimeModes }),
+                canRunChildTask: isProviderAvailable(p),
+                canRunCrossProviderChildTask: isProviderAvailable(p),
+                constraints: isProviderAvailable(p) ? [] : ["Destination provider unavailable."],
+              })),
+              features: {
+                appOwnedSubagents: true,
+                asyncPolling: true,
+                cancellation: config.environment.capabilities.remoteTaskStop === true,
+                batchThreadCreation: false,
+                threadManagement: false,
+                incrementalThreadRead: false,
+                scheduledTasks: false,
+                maxBatchThreads: 0,
+              },
+            };
+          }),
+        );
+      }
       const providers = yield* loadProviders;
       const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();
       const settings = yield* serverSettings.getSettings.pipe(
@@ -2785,6 +2910,22 @@ const make = Effect.gen(function* () {
       const inherited = parent?.thread.modelSelection;
       const searchTerms = input.search?.toLowerCase().split(/\s+/) ?? [];
       return {
+        environmentId: scope.environmentId,
+        connection,
+        ...(Option.isSome(serverEnvironment)
+          ? {
+              executionEnvironment: yield* serverEnvironment.value.getDescriptor.pipe(
+                Effect.map(({ environmentId, platform, capabilities }) => ({
+                  environmentId,
+                  platform,
+                  capabilities,
+                })),
+              ),
+            }
+          : {}),
+        ...(Option.isSome(peerRegistry)
+          ? { environments: yield* peerRegistry.value.list().pipe(Effect.mapError(remoteFailure)) }
+          : {}),
         parentThreadId: parent?.thread.id ?? null,
         inheritedProviderInstanceId:
           scope.call === undefined ? (parent?.thread.modelSelection.instanceId ?? null) : null,
@@ -2850,7 +2991,223 @@ const make = Effect.gen(function* () {
         },
       };
     }),
+    pairEnvironment: Effect.fn("OrchestratorMcpService.pairEnvironment")(function* (scope, input) {
+      const { parent, limits } = yield* loadCaller(scope);
+      if (!parent || limits.runtimeMode !== "full-access" || limits.interactionMode !== "default")
+        return yield* failure(
+          "invalid_request",
+          "Pairing requires a live full-access/default thread.",
+        );
+      const { peers } = yield* remoteServices();
+      const pairingUrl = yield* secretRequests
+        .consume({ ref: input.secretRef, projectId: parent.thread.projectId })
+        .pipe(
+          Effect.mapError(() =>
+            failure(
+              "invalid_request",
+              "Pairing secret is unavailable. Request a fresh private secret.",
+            ),
+          ),
+        );
+      return yield* peers.pair({ ...input, pairingUrl }).pipe(Effect.mapError(remoteFailure));
+    }),
+    removeEnvironment: Effect.fn("OrchestratorMcpService.removeEnvironment")(
+      function* (scope, environmentId) {
+        const { parent, limits } = yield* loadCaller(scope);
+        if (!parent || limits.runtimeMode !== "full-access" || limits.interactionMode !== "default")
+          return yield* failure(
+            "invalid_request",
+            "Removing a peer requires a live full-access/default thread.",
+          );
+        const { peers } = yield* remoteServices();
+        yield* peers.remove(environmentId).pipe(Effect.mapError(remoteFailure));
+        return { removed: true as const };
+      },
+    ),
     delegateTask: Effect.fn("OrchestratorMcpService.delegateTask")(function* (callerScope, input) {
+      if (input.environmentId !== undefined && input.environmentId !== callerScope.environmentId) {
+        const scope = yield* requireDelegationScope(callerScope, "delegate_task");
+        if (scope.call !== undefined)
+          return yield* failure(
+            "invalid_request",
+            "Cross-environment delegation requires a live provider thread; voice call authority cannot be forwarded.",
+          );
+        yield* requireCapability(scope);
+        const { parent, limits } = yield* loadCaller(scope);
+        if (!parent)
+          return yield* failure(
+            "parent_not_active",
+            "Cross-environment delegation needs an active parent.",
+          );
+        // Remote handles do not yet participate in a destination's local subagent cohort.
+        const ancestors = new Set<ThreadId>();
+        let ancestorId = parent.thread.id;
+        let ancestorParentId = parent.thread.lineage.parentThreadId;
+        while (true) {
+          if (ancestorId.startsWith("remote-task:") || ancestors.has(ancestorId))
+            return yield* failure(
+              "invalid_request",
+              "Nested cross-environment delegation is not supported. Delegate to each destination from the originating thread.",
+            );
+          ancestors.add(ancestorId);
+          const parentThreadId = ancestorParentId;
+          if (parentThreadId === null) break;
+          if (parentThreadId.startsWith("remote-task:"))
+            return yield* failure(
+              "invalid_request",
+              "Nested cross-environment delegation is not supported. Delegate to each destination from the originating thread.",
+            );
+          const ancestor = yield* threadManagement
+            .getThreadShell(parentThreadId)
+            .pipe(Effect.mapError(threadManagementFailure));
+          if (ancestor === null)
+            return yield* failure("invalid_request", "Cannot verify the delegation ancestry.");
+          ancestorId = ancestor.id;
+          ancestorParentId = ancestor.lineage.parentThreadId;
+        }
+        const parentRun = parent.runs
+          .filter(ThreadManagementService.isActiveRun)
+          .toSorted((a, b) => b.ordinal - a.ordinal)[0];
+        if (
+          !parentRun ||
+          parentRun.rootNodeId === null ||
+          parentRun.providerInstanceId !== scope.thread?.providerInstanceId ||
+          !matchesRemoteRun(scope.thread, parentRun)
+        )
+          return yield* failure("parent_not_active", "Parent provider run is no longer active.");
+        if (
+          !input.projectId ||
+          !input.target?.providerInstanceId ||
+          !input.target.model ||
+          !input.clientRequestId
+        )
+          return yield* failure(
+            "invalid_request",
+            "Remote delegation requires environmentId, destination projectId, target.providerInstanceId, target.model, and a stable clientRequestId from destination discovery.",
+          );
+        if (input.attachmentIds?.length)
+          return yield* failure(
+            "invalid_request",
+            "Cross-environment attachments are not supported. Include the necessary task context as text.",
+          );
+        const { tasks, peers, transport } = yield* remoteServices();
+        // A provider reconnect changes its MCP namespace, but must not create another remote task.
+        const commandId = CommandId.make(
+          [
+            "command",
+            "remote-delegate-task",
+            stablePart(parent.thread.id),
+            stablePart(input.clientRequestId),
+          ].join(":"),
+        );
+        const existing = yield* tasks
+          .existing(parent.thread.id, commandId)
+          .pipe(Effect.mapError(remoteFailure));
+        if (existing !== null) {
+          if (existing.environmentId !== input.environmentId)
+            return yield* failure(
+              "invalid_request",
+              "This request already belongs to another destination. Use a new clientRequestId for a different task.",
+            );
+          return input.mode === "wait"
+            ? yield* tasks
+                .wait(
+                  parent.thread.id,
+                  existing.taskId,
+                  Math.min(
+                    MAX_WAIT_TIMEOUT_MS,
+                    Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
+                  ),
+                )
+                .pipe(Effect.mapError(remoteFailure))
+            : existing;
+        }
+        const peer = yield* peers.get(input.environmentId).pipe(Effect.mapError(remoteFailure));
+        const runtimeCeiling =
+          runtimeModeRank(limits.runtimeMode) <= runtimeModeRank(peer.maxRuntimeMode)
+            ? limits.runtimeMode
+            : peer.maxRuntimeMode;
+        const config = yield* Effect.scoped(
+          transport.connect(peer).pipe(Effect.map((connection) => connection.config)),
+        ).pipe(Effect.mapError(remoteFailure));
+        const provider = config.providers.find(
+          (p) => p.instanceId === input.target?.providerInstanceId,
+        );
+        if (!provider || !isProviderAvailable(provider))
+          return yield* failure("provider_unavailable", "Destination provider is unavailable.");
+        if (input.target.driverKind !== undefined && input.target.driverKind !== provider.driver)
+          return yield* failure("invalid_request", "Destination provider driver does not match.");
+        const options =
+          input.target.options === undefined
+            ? []
+            : Array.isArray(input.target.options)
+              ? input.target.options
+              : Object.entries(input.target.options).map(([id, value]) => ({ id, value }));
+        const selection: ModelSelection = {
+          instanceId: input.target.providerInstanceId,
+          model: input.target.model,
+          options,
+        };
+        yield* validateModelSelection(provider, selection).pipe(
+          Effect.mapError((error) => failure("invalid_request", error.message)),
+        );
+        const runtimeMode = yield* resolveRuntimeMode(runtimeCeiling, input.runtimeMode, {
+          modelSelection: selection,
+          supportedRuntimeModes: provider.supportedRuntimeModes,
+        });
+        const interactionMode = yield* resolveInteractionMode(
+          limits.interactionMode,
+          input.interactionMode,
+        );
+        const current = yield* loadCaller(scope);
+        if (
+          !current.parent?.runs.some(
+            (run) => run.id === parentRun.id && ThreadManagementService.isActiveRun(run),
+          )
+        )
+          return yield* failure("parent_not_active", "Parent provider run is no longer active.");
+        yield* resolveRuntimeMode(current.limits.runtimeMode, runtimeMode);
+        yield* resolveInteractionMode(current.limits.interactionMode, interactionMode);
+        const result = yield* tasks
+          .delegate({
+            parentThreadId: parent.thread.id,
+            parentRunId: parentRun.id,
+            requestId: commandId,
+            environmentId: peer.environmentId,
+            launch: {
+              commandId,
+              threadId: ThreadId.make(`thread:${commandId}`),
+              creationSource: "mcp",
+              projectId: input.projectId,
+              title: input.title ?? "Remote delegated task",
+              modelSelection: selection,
+              runtimeMode,
+              interactionMode,
+              workspaceStrategy:
+                input.isolation === "shared"
+                  ? { type: "root" }
+                  : { type: "worktree", baseRef: input.baseRef ?? "HEAD", startFromOrigin: false },
+              initialMessage: {
+                attachments: [],
+                messageId: MessageId.make(`message:${commandId}`),
+                text: `Delegated from environment ${scope.environmentId}, parent thread ${parent.thread.id}. Return your final result here; the originating server delivers it to the parent. The parent thread belongs to another environment and cannot be read locally.\n\n${input.task}`,
+              },
+            },
+          })
+          .pipe(Effect.mapError(remoteFailure));
+        return input.mode === "wait"
+          ? yield* tasks
+              .wait(
+                parent.thread.id,
+                result.taskId,
+                Math.min(
+                  MAX_WAIT_TIMEOUT_MS,
+                  Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
+                ),
+              )
+              .pipe(Effect.mapError(remoteFailure))
+          : result;
+      }
       const { scope, taskId, key } = yield* withCallAuthority(
         callerScope,
         Effect.gen(function* () {
@@ -3088,6 +3445,12 @@ const make = Effect.gen(function* () {
     taskStatus: Effect.fn("OrchestratorMcpService.taskStatus")(function* (callerScope, taskId) {
       const scope = yield* requireDelegationScope(callerScope, "task_status");
       yield* assertCallMayObserveTasks(scope);
+      if (taskId.startsWith("remote-task:")) {
+        const { tasks } = yield* remoteServices();
+        return yield* tasks
+          .status(delegationThreadId(scope), taskId)
+          .pipe(Effect.mapError(remoteFailure));
+      }
       return yield* withCallAuthority(scope, readTask(scope, taskId, false, true));
     }),
     cancelTask: (callerScope, input) =>
@@ -3096,6 +3459,19 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           const scope = yield* requireDelegationScope(callerScope, "task_cancel");
           yield* assertCallMayObserveTasks(scope);
+          if (input.taskId.startsWith("remote-task:")) {
+            const { tasks } = yield* remoteServices();
+            const { limits } = yield* loadCaller(scope);
+            const cancelled = yield* tasks
+              .cancel(delegationThreadId(scope), input.taskId, limits)
+              .pipe(Effect.mapError(remoteFailure));
+            return {
+              taskId: cancelled.taskId,
+              status: isTerminalTaskStatus(cancelled.status)
+                ? cancelled.status
+                : "cancel_requested",
+            };
+          }
           const current = yield* readTask(scope, input.taskId);
           const key = yield* requestKey(input.clientRequestId);
           const parentProjection = yield* loadProjection(delegationThreadId(scope));

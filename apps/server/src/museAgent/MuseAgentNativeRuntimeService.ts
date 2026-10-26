@@ -143,7 +143,7 @@ const avatarPath = (value: string | undefined) =>
 export class MuseAgentNativeRuntimeService extends Context.Service<
   MuseAgentNativeRuntimeService,
   {
-    /** Presence-only; does not launch a browser or make a network call. */
+    /** Inspect presence and recover readiness only for the previously verified account. */
     readonly status: Effect.Effect<MuseAgentStatus>;
     /** Explicitly connects the server-owned headless page using the readonly native session. */
     readonly setup: Effect.Effect<MuseAgentStatus, MuseAgentError>;
@@ -383,11 +383,25 @@ const make = Effect.gen(function* () {
     resolveSession,
     status: Effect.gen(function* () {
       const info = yield* source.inspect;
-      const verified = connected;
+      const verified = connected ?? verifiedAccount;
       if (verified) {
         const current = info.sessionPresent ? yield* Effect.option(sessionSnapshot) : Option.none();
         if (Option.isNone(current) || current.value.fingerprint !== verified.fingerprint) {
           if (connected === verified) connected = undefined;
+        } else if (!connected) {
+          // Status polling must recover a readiness gap without admitting a different account.
+          const binding = yield* Effect.option(transport.connect);
+          const after = yield* Effect.option(sessionSnapshot);
+          if (
+            Option.isSome(binding) &&
+            binding.value === verified.binding &&
+            Option.isSome(after) &&
+            after.value.fingerprint === verified.fingerprint &&
+            verifiedAccount === verified &&
+            !connected
+          ) {
+            connected = verified;
+          }
         }
       }
       return {

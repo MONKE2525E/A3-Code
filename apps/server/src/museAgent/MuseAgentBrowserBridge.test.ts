@@ -21,6 +21,32 @@ interface Bridge {
   closeComputerStream(input: Params): void;
 }
 
+it.each(["linux", "darwin", "win32"])(
+  "retains the T3 environment identity and %s platform when removing a Muse node",
+  async (platform) => {
+    const f = fixture();
+    await f.bridge.watch({ authority: f.authority, session: "primary" });
+    const connectionId = f.bridge.connectionId({ authority: f.authority });
+    await f.bridge.register({
+      authority: f.authority,
+      clientId: "device-uuid",
+      nativeSessionId: "primary",
+      connectionId,
+      environmentId: "test-environment",
+      platform,
+      commands: { "t3.probe": {} },
+    });
+    await f.bridge.unregister({ authority: f.authority, clientId: "device-uuid", connectionId });
+    const registrations = f.calls.filter((call) => call.method === "client.register_capabilities");
+    expect(registrations).toHaveLength(2);
+    for (const call of registrations) {
+      expect(call.params.display_name).toBe("T3 Code · test-environment");
+      expect(call.params.platform).toBe(platform);
+    }
+    expect(registrations[1]?.params.capabilities).toMatchObject({ device_commands: {} });
+  },
+);
+
 const fixture = () => {
   const handlers = new Map<string, (payload: Params, meta: Params) => void>();
   const invokes = new Map<string, (payload: Params, meta: Params) => Promise<void>>();
@@ -955,6 +981,48 @@ describe("native direct tool callbacks", () => {
     expect(last).toBeDefined();
     expect((last!.params.capabilities as { device_commands: Params }).device_commands).toEqual({});
   });
+  it("preserves registration and delivery when Muse replaces only its request wrapper", async () => {
+    const f = fixture();
+    await f.bridge.watch({ authority: f.authority, session: "primary" });
+    const connectionId = f.bridge.connectionId({ authority: f.authority });
+    const original = f.send.getMockImplementation()!;
+    f.send.mockImplementation(async (method, params, options) => {
+      const result = await original(method, params, options);
+      if (method === "client.register_capabilities") {
+        f.rpc.sendRequest = vi.fn((method: string, params: Params, options: Params) =>
+          original(method, params, options),
+        );
+      }
+      return result;
+    });
+    await f.bridge.register({
+      authority: f.authority,
+      clientId: "t3-turn",
+      nativeSessionId: "primary",
+      connectionId,
+      commands: { "t3.probe": {} },
+    });
+    await f.tick();
+    expect(f.bridge.connectionId({ authority: f.authority })).toBe(connectionId);
+    expect(f.events.some((event) => event.event === "transport.disconnected")).toBe(false);
+    await f.bridge.request({
+      authority: f.authority,
+      method: "chat.stream",
+      params: { session_id: "primary", node_id: "t3-turn" },
+    });
+    await f.invokes.get("t3.probe")!(
+      { invoke_id: "probe", command_id: "t3.probe", params_json: "{}" },
+      { websocketConnectionID: "physical-1" },
+    );
+    expect(f.invoke).toHaveBeenCalledTimes(1);
+    expect(f.calls.filter((call) => call.method === "chat.stream")).toHaveLength(1);
+    f.emit("delta.turn_done", {
+      session_id: "primary",
+      reply_to_message_id: "user-1",
+      status: "completed",
+    });
+    expect(f.events.filter((event) => event.event === "delta.turn_done")).toHaveLength(1);
+  });
   it("distinguishes a connection change during accepted registration from capability rejection", async () => {
     const f = fixture();
     await f.bridge.watch({ authority: f.authority, session: "primary" });
@@ -963,9 +1031,8 @@ describe("native direct tool callbacks", () => {
     f.send.mockImplementation(async (method, params, options) => {
       const result = await original(method, params, options);
       if (method === "client.register_capabilities") {
-        f.rpc.sendRequest = vi.fn(async (method: string, params: Params, options: Params) =>
-          original(method, params, options),
-        );
+        const onEvent = f.rpc.onEvent;
+        f.rpc.onEvent = (name, handler) => onEvent(name, handler);
       }
       return result;
     });

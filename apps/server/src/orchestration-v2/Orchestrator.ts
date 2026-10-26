@@ -564,6 +564,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "checkpoint.rollback.fail":
     case "thread.background-work.settle":
     case "thread.stop":
+    case "remote-task.stop":
     case "provider.switch":
       return command.threadId;
     case "delegated_task.request":
@@ -1944,6 +1945,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           messageId: queuedMessage.id,
           text: queuedMessage.text,
           attachments: queuedMessage.attachments,
+          ...(queuedMessage.origin === undefined ? {} : { origin: queuedMessage.origin }),
           ...(queuedMessage.context ? { context: queuedMessage.context } : {}),
           createdBy: queuedMessage.createdBy,
           creationSource: queuedMessage.creationSource,
@@ -4368,6 +4370,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly messageId: OrchestrationV2ConversationMessage["id"];
     readonly text: string;
     readonly attachments: ReadonlyArray<ChatAttachment>;
+    readonly origin?: OrchestrationV2ConversationMessage["origin"];
     readonly context?: import("@t3tools/contracts").OrchestrationMessageContext | undefined;
     readonly createdBy: OrchestrationV2ConversationMessage["createdBy"];
     readonly creationSource: OrchestrationV2ConversationMessage["creationSource"];
@@ -4562,6 +4565,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           role: "user",
           text: input.text,
           attachments: input.attachments,
+          ...(input.origin === undefined ? {} : { origin: input.origin }),
           ...(input.context ? { context: input.context } : {}),
           streaming: false,
           createdAt: now,
@@ -4598,6 +4602,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               : "steer",
           text: input.text,
           attachments: input.attachments,
+          ...(input.origin === undefined ? {} : { origin: input.origin }),
           ...(input.context ? { context: input.context } : {}),
         };
         yield* emitEvent({
@@ -5549,6 +5554,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         targetRunId: dispatchMode.targetRunId,
         messageId: command.messageId,
         text: dispatchText,
+        ...(command.origin === undefined ? {} : { origin: command.origin }),
         ...(command.context ? { context: command.context } : {}),
         attachments: command.attachments,
         createdBy: command.createdBy,
@@ -5799,6 +5805,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         nodeId: rootNodeId,
         role: "user",
         text: dispatchText,
+        ...(command.origin === undefined ? {} : { origin: command.origin }),
         ...(command.context ? { context: command.context } : {}),
         attachments: command.attachments,
         streaming: false,
@@ -6141,6 +6148,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         nodeId: rootNodeId,
         role: "user",
         text: dispatchText,
+        ...(command.origin === undefined ? {} : { origin: command.origin }),
         ...(command.context ? { context: command.context } : {}),
         attachments: command.attachments,
         streaming: false,
@@ -6176,6 +6184,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         messageId: command.messageId,
         inputIntent: "turn_start",
         text: dispatchText,
+        ...(command.origin === undefined ? {} : { origin: command.origin }),
         ...(command.context ? { context: command.context } : {}),
         attachments: command.attachments,
       };
@@ -6832,6 +6841,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       nodeId: rootNodeId,
       role: "user",
       text: dispatchText,
+      ...(command.origin === undefined ? {} : { origin: command.origin }),
       ...(command.context ? { context: command.context } : {}),
       attachments: command.attachments,
       streaming: false,
@@ -6867,6 +6877,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       messageId: command.messageId,
       inputIntent: "turn_start",
       text: dispatchText,
+      ...(command.origin === undefined ? {} : { origin: command.origin }),
       ...(command.context ? { context: command.context } : {}),
       attachments: command.attachments,
     };
@@ -8656,6 +8667,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       messageId: queuedMessage.id,
       text: queuedMessage.text,
       attachments: queuedMessage.attachments,
+      ...(queuedMessage.origin === undefined ? {} : { origin: queuedMessage.origin }),
       ...(queuedMessage.context ? { context: queuedMessage.context } : {}),
       createdBy: queuedMessage.createdBy,
       creationSource: queuedMessage.creationSource,
@@ -8937,6 +8949,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...queuedMessage,
         text: command.text,
         ...editedAttachments,
+        ...(command.origin === undefined ? {} : { origin: command.origin }),
         ...(command.context ? { context: command.context } : {}),
         updatedAt: now,
       }),
@@ -8953,6 +8966,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...queuedTurnItem,
           text: command.text,
           ...editedAttachments,
+          ...(command.origin === undefined ? {} : { origin: command.origin }),
           ...(command.context ? { context: command.context } : {}),
           updatedAt: now,
         }),
@@ -11493,7 +11507,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : parentProjection.runs.find((candidate) => candidate.id === task.runId);
       const parentNode = parentProjection.nodes.find((candidate) => candidate.id === task.id);
       const parentTurnItem = parentProjection.turnItems.find(
-        (candidate) => candidate.type === "subagent" && candidate.subagentId === task.id,
+        (candidate): candidate is Extract<OrchestrationV2TurnItem, { readonly type: "subagent" }> =>
+          candidate.type === "subagent" && candidate.subagentId === task.id,
       );
       const updatedTask: OrchestrationV2Subagent = {
         ...task,
@@ -11989,6 +12004,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         readonly effectTypes: ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
         readonly reason: string;
       };
+      readonly cancelUnsettledEffectsByThread?: Parameters<
+        EventSinkV2["Service"]["commitCommand"]
+      >[0]["cancelUnsettledEffectsByThread"];
     },
     OrchestratorV2Error
   > {
@@ -12042,6 +12060,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
     const events = yield* Ref.make<Array<OrchestrationV2DomainEvent>>([]);
     const effects = yield* Ref.make<Array<PendingOrchestrationEffectV2>>([]);
+    const cancelUnsettledEffectsByThread: Array<
+      NonNullable<
+        Parameters<EventSinkV2["Service"]["commitCommand"]>[0]["cancelUnsettledEffectsByThread"]
+      >[number]
+    > = [];
     let cancelUnsettledEffects:
       | {
           readonly effectTypes: ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
@@ -12572,6 +12595,89 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.stop":
         cancelUnsettledEffects = yield* dispatchThreadStop(command, events, effects);
         break;
+      case "remote-task.stop": {
+        const expected = new Map(command.expectedThreads.map((entry) => [entry.threadId, entry]));
+        const reject = () =>
+          new OrchestratorCommandRejectedError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Remote task cancellation cohort or permission ceiling changed.",
+          });
+        if (expected.size !== command.expectedThreads.length || !expected.has(command.threadId)) {
+          return yield* reject();
+        }
+        const projections = [];
+        const pending = [command.threadId];
+        const visited = new Set<ThreadId>();
+        while (pending.length > 0) {
+          const threadId = pending.pop()!;
+          if (visited.has(threadId)) return yield* reject();
+          visited.add(threadId);
+          const entry = expected.get(threadId);
+          if (entry === undefined) return yield* reject();
+          const projection = yield* projectionStore
+            .getThreadRecords(threadId, ["runs", "subagents"])
+            .pipe(mapDispatchError(command));
+          const runIds = new Set(entry.runIds);
+          const subagentIds = new Set(entry.subagentIds);
+          if (
+            projection.thread.deletedAt !== null ||
+            exceededDispatchModeLimit(command, projection.thread) !== undefined ||
+            runIds.size !== entry.runIds.length ||
+            runIds.size !== projection.runs.length ||
+            projection.runs.some((run) => !runIds.has(run.id)) ||
+            subagentIds.size !== entry.subagentIds.length ||
+            subagentIds.size !== projection.subagents.length ||
+            projection.subagents.some((task) => !subagentIds.has(task.id)) ||
+            (threadId === command.threadId && !runIds.has(command.initialRunId))
+          )
+            return yield* reject();
+          projections.push(projection);
+          pending.push(
+            ...new Set(
+              projection.subagents.flatMap((task) =>
+                task.origin === "app_owned" && task.childThreadId !== null
+                  ? [task.childThreadId]
+                  : [],
+              ),
+            ),
+          );
+        }
+        if (visited.size !== expected.size) return yield* reject();
+        // All cohort locks remain held through commit; no later subtree walk may discover new work.
+        for (const projection of projections.toReversed()) {
+          const cancellation = yield* dispatchThreadStop(
+            {
+              type: "thread.stop",
+              commandId: command.commandId,
+              threadId: projection.thread.id,
+              stopDelegatedTasks: false,
+              ...(command.reason === undefined ? {} : { reason: command.reason }),
+            },
+            events,
+            effects,
+          );
+          if (cancellation !== undefined) {
+            cancelUnsettledEffectsByThread.push({
+              threadId: projection.thread.id,
+              ...cancellation,
+            });
+          }
+          for (const run of projection.runs) {
+            if (run.status !== "queued") continue;
+            yield* dispatchQueuedRunCancel(
+              {
+                type: "queued-run.cancel",
+                commandId: command.commandId,
+                threadId: projection.thread.id,
+                runId: run.id,
+              },
+              events,
+            );
+          }
+        }
+        break;
+      }
       case "queued-message.promote-to-steer":
         yield* dispatchQueuedMessagePromoteToSteer(command, events, effects);
         break;
@@ -12706,6 +12812,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       events: yield* Ref.get(events),
       effects: yield* Ref.get(effects),
       ...(cancelUnsettledEffects === undefined ? {} : { cancelUnsettledEffects }),
+      ...(cancelUnsettledEffectsByThread.length === 0 ? {} : { cancelUnsettledEffectsByThread }),
     };
   });
 
@@ -12798,6 +12905,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         planned.events.length > 0 ||
         command.type === "thread.background-work.settle" ||
         command.type === "thread.stop" ||
+        command.type === "remote-task.stop" ||
         command.type === "subagent.stop" ||
         // A second Stop sharing, or one after the share already ended, is not an error.
         command.type === "thread.guest-share.close"
@@ -12891,6 +12999,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(plan.cancelUnsettledEffects === undefined
           ? {}
           : { cancelUnsettledEffects: plan.cancelUnsettledEffects }),
+        ...(plan.cancelUnsettledEffectsByThread === undefined
+          ? {}
+          : { cancelUnsettledEffectsByThread: plan.cancelUnsettledEffectsByThread }),
       })
       .pipe(
         Effect.mapError(
@@ -12934,11 +13045,52 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
   // dispatchWithReceiptEffect owns the dispatch span; this wrapper selects the thread locks.
   const dispatchWithReceipt = Effect.fnUntraced(function* (command: OrchestrationV2ServerCommand) {
-    const dispatch = threadDispatch.withLock(
+    let dispatch = threadDispatch.withLock(
       commandThreadId(command),
       dispatchWithReceiptEffect(command),
     );
-    if (command.type !== "message.dispatch" || !mayStartSubagentFollowup(command))
+    if (command.type === "remote-task.stop") {
+      const expected = new Set(command.expectedThreads.map((entry) => entry.threadId));
+      // Discover only explicit expected children while their parent is locked. Keeping every
+      // ancestor lock until commit also serializes new delegation and user follow-up intake.
+      const lockCohort = Effect.fn("Orchestrator.lockRemoteStopCohort")(function* (
+        pending: ReadonlyArray<ThreadId>,
+        locked: ReadonlySet<ThreadId>,
+      ): Effect.fn.Return<OrchestratorV2DispatchResult, OrchestratorV2Error> {
+        const [threadId, ...rest] = pending;
+        if (threadId === undefined) return yield* dispatchWithReceiptEffect(command);
+        if (!expected.has(threadId) || locked.has(threadId)) {
+          return yield* new OrchestratorCommandRejectedError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Remote task cancellation descendant cohort changed.",
+          });
+        }
+        return yield* threadDispatch.withLock(
+          threadId,
+          Effect.gen(function* () {
+            const projection = yield* projectionStore
+              .getThreadRecords(threadId, ["subagents"])
+              .pipe(mapDispatchError(command));
+            const children = [
+              ...new Set(
+                projection.subagents.flatMap((task) =>
+                  task.origin === "app_owned" && task.childThreadId !== null
+                    ? [task.childThreadId]
+                    : [],
+                ),
+              ),
+            ].sort();
+            return yield* lockCohort([...children, ...rest], new Set([...locked, threadId]));
+          }),
+        );
+      });
+      dispatch = lockCohort([command.threadId], new Set());
+    }
+    if (
+      command.type !== "remote-task.stop" &&
+      (command.type !== "message.dispatch" || !mayStartSubagentFollowup(command))
+    )
       return yield* dispatch;
     const parentThreadId = yield* appOwnedSubagentParentThreadId(command.threadId).pipe(
       Effect.mapError(

@@ -41,7 +41,7 @@ import {
   MenuTrigger,
 } from "../ui/menu";
 import { useOptionalSettingsScope } from "./SettingsScopeContext";
-import { useSettingsSearchTargetId } from "./settingsLayout";
+import { useSettingsSearchTargetId } from "./settingsSearchTargetContext";
 import { resolveSettingsScope, type SettingsScopeSearch } from "./settingsScope";
 import {
   ALL_ENVIRONMENTS_VALUE,

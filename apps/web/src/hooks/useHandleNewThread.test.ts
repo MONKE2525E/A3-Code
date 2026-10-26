@@ -103,7 +103,12 @@ const testServerConfigs = () =>
 
 vi.mock("../rpc/atomRegistry", () => ({
   appAtomRegistry: {
-    get: (atom: unknown) => (atom === "providers" ? new Map() : testServerConfigs()),
+    get: (atom: unknown) =>
+      atom === "connected-environment-ids"
+        ? testState.connectedEnvironmentIds
+        : atom === "providers"
+          ? new Map()
+          : testServerConfigs(),
   },
 }));
 
@@ -117,6 +122,11 @@ vi.mock("@t3tools/client-runtime/environment", () => ({
   scopedProjectKey: () => "remote-project",
   scopeProjectRef: (environmentId: string, projectId: string) => ({ environmentId, projectId }),
   scopeThreadRef: (environmentId: string, threadId: string) => ({ environmentId, threadId }),
+}));
+vi.mock(import("@t3tools/contracts"), async (original) => ({
+  ...(await original()),
+  DEFAULT_RUNTIME_MODE: "default" as never,
+  DEFAULT_SERVER_SETTINGS: {} as never,
 }));
 vi.mock("@t3tools/shared/projectSettings", () => ({
   resolveProjectSettings: (
@@ -193,7 +203,9 @@ vi.mock("../state/entities", () => {
     useThread: () => null,
   };
 });
+vi.mock("../state/olderSettledShelf", () => ({ readUnloadedThreadCount: () => 0 }));
 vi.mock("../state/presentation", () => ({
+  environmentSummaries: { connectedEnvironmentIdsAtom: "connected-environment-ids" },
   environmentPresentations: { providersByEnvironmentAtom: "providers" },
 }));
 vi.mock("../state/server", () => ({

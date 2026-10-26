@@ -255,6 +255,7 @@ export const make = Effect.gen(function* () {
       threadPullRequestLinking: true,
       serverResolvedCommandContext: true,
       threadStop: true,
+      remoteTaskStop: true,
       environmentIcon: true,
       projectCloneTracking: true,
       ignoredFileListing: true,

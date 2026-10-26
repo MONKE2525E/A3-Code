@@ -284,6 +284,9 @@ const fixture = () => {
       fingerprint = "session-b";
       authority = "b".repeat(64);
     },
+    setAuthority: (value: string) => {
+      authority = value;
+    },
     setReady: (value: boolean) => {
       ready = value;
     },
@@ -1123,6 +1126,51 @@ it.effect("reads received sandbox files through the same bounded account-bound r
       assert.strictEqual(f.calls.length, 2);
     }).pipe(Effect.provide(f.layer)),
   ),
+);
+
+it.effect("recovers a verified account after repeated transient disconnects without setup", () => {
+  const f = fixture();
+  return Effect.gen(function* () {
+    const native = yield* Native.MuseAgentNativeRuntimeService;
+    assert.strictEqual((yield* native.status).ready, false);
+    yield* native.setup;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      f.setReady(false);
+      assert.strictEqual((yield* Effect.flip(native.accountBinding)).kind, "disconnected");
+      assert.strictEqual((yield* native.status).ready, false);
+      f.setReady(true);
+      const recovered = yield* native.status;
+      assert.strictEqual(recovered.ready, true);
+      assert.strictEqual(recovered.accountBinding, binding);
+      assert.strictEqual((yield* native.resolveSession(binding)).session_id, "primary");
+    }
+    assert.strictEqual(
+      f.calls.some((call) => call.method === "chat.stream"),
+      false,
+    );
+  }).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)), Effect.scoped);
+});
+
+it.effect.each(["authority", "session", "duringConnect"] as const)(
+  "does not automatically recover a different account after %s changes",
+  (change) => {
+    const f = fixture();
+    return Effect.gen(function* () {
+      const native = yield* Native.MuseAgentNativeRuntimeService;
+      yield* native.setup;
+      f.setReady(false);
+      yield* Effect.flip(native.accountBinding);
+      f.setReady(true);
+      if (change === "authority") f.setAuthority("b".repeat(64));
+      else if (change === "session") f.switchAccount();
+      else f.rotateDuringConnect();
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const status = yield* native.status;
+        assert.strictEqual(status.ready, false);
+        assert.strictEqual("accountBinding" in status, false);
+      }
+    }).pipe(Effect.provide(f.layer), Effect.ensuring(Effect.sync(f.close)), Effect.scoped);
+  },
 );
 
 it.effect(

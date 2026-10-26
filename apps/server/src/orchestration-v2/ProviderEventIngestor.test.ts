@@ -3519,3 +3519,99 @@ it.effect("records accepted billed turn usage once without billing the context w
     });
   }).pipe(Effect.provide(layerTest.pipe(Layer.provide(layerAnalytics))));
 });
+
+it.effect("retains stamped message origin when native history replays without origin", () =>
+  Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
+    const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const allocator = yield* IdAllocator.IdAllocatorV2;
+    const now = yield* DateTime.now;
+    const created = yield* threadCreatedEvent(now);
+    const threadId = created.threadId;
+    const origin = { deviceType: "mobile", os: "iOS" } as const;
+    const message: OrchestrationV2ConversationMessage = {
+      id: MessageId.make("origin-replay"),
+      threadId,
+      runId: null,
+      nodeId: null,
+      role: "user",
+      text: "Hello",
+      attachments: [],
+      streaming: false,
+      createdBy: "user",
+      creationSource: "mobile",
+      createdAt: now,
+      updatedAt: now,
+      origin,
+    };
+    const item: Extract<OrchestrationV2TurnItem, { readonly type: "user_message" }> = {
+      id: TurnItemId.make("origin-replay"),
+      type: "user_message",
+      threadId,
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 1,
+      status: "completed",
+      title: null,
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      messageId: message.id,
+      text: message.text,
+      attachments: [],
+      inputIntent: "turn_start",
+      createdBy: "user",
+      creationSource: "mobile",
+      origin,
+    };
+    yield* sink.write({
+      events: [
+        created,
+        {
+          id: yield* allocator.allocate.event({ threadId }),
+          type: "message.updated",
+          threadId,
+          occurredAt: now,
+          payload: message,
+        },
+        {
+          id: yield* allocator.allocate.event({ threadId }),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: item,
+        },
+      ],
+    });
+    const { origin: _messageOrigin, ...replayedMessage } = message;
+    const { origin: _itemOrigin, ...replayedItem } = item;
+    const input = {
+      threadId,
+      providerSessionId: yield* allocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      }),
+      providerInstanceId: modelSelection.instanceId,
+    };
+    yield* ingestor.ingestNormalized({
+      ...input,
+      event: { type: "message.updated", driver: CODEX_DRIVER, message: replayedMessage },
+    });
+    yield* ingestor.ingestNormalized({
+      ...input,
+      event: { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem: replayedItem },
+    });
+    const records = yield* store.getThreadRecords(threadId, ["messages"], {
+      messageIds: [message.id],
+    });
+    assert.deepEqual(records.messages[0]?.origin, origin);
+    const storedItem = yield* store.getTurnItem({ threadId, itemId: item.id });
+    if (storedItem?.type !== "user_message") return assert.fail("Expected replayed user item");
+    assert.deepEqual(storedItem.origin, origin);
+  }).pipe(Effect.provide(layerTest)),
+);

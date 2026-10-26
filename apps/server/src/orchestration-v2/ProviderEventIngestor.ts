@@ -1,3 +1,4 @@
+import { withStoredMessageOrigin } from "./messageOrigin.ts";
 import {
   NodeId,
   CommandId,
@@ -690,17 +691,37 @@ export const layer: Layer.Layer<
                   nodeId: input.event.subagent.id,
                 }),
               ];
-            case "message.updated":
+            case "message.updated": {
+              const message = input.event.message;
+              const existing =
+                message.role === "user"
+                  ? (yield* projections.getThreadRecords(message.threadId, ["messages"], {
+                      messageIds: [message.id],
+                    })).messages[0]
+                  : undefined;
               return [
                 yield* makeDomainEvent(input, {
                   type: "message.updated",
                   threadId: input.event.message.threadId,
-                  payload: input.event.message,
+                  payload: withStoredMessageOrigin(message, existing?.origin),
                   runId: input.event.message.runId,
                   nodeId: input.event.message.nodeId,
                 }),
               ];
-            case "turn_item.updated":
+            }
+            case "turn_item.updated": {
+              const item = input.event.turnItem;
+              const existing =
+                item.type === "user_message"
+                  ? yield* projections.getTurnItem({ threadId: item.threadId, itemId: item.id })
+                  : undefined;
+              const persistedItem =
+                item.type === "user_message"
+                  ? withStoredMessageOrigin(
+                      item,
+                      existing?.type === "user_message" ? existing.origin : undefined,
+                    )
+                  : item;
               if (
                 input.event.driver === "grok-bot" &&
                 (input.event.turnItem.type === "user_input_request" ||
@@ -728,12 +749,13 @@ export const layer: Layer.Layer<
                   type: "turn-item.updated",
                   threadId: input.event.turnItem.threadId,
                   payload: boundFileChangeForStorage(
-                    stripUnservedToolOutputImageBytes(input.event.turnItem),
+                    stripUnservedToolOutputImageBytes(persistedItem),
                   ),
                   runId: input.event.turnItem.runId,
                   nodeId: input.event.turnItem.nodeId,
                 }),
               ];
+            }
             case "runtime_request.updated": {
               const request = input.event.runtimeRequest;
               const threadId = input.event.threadId ?? input.threadId;

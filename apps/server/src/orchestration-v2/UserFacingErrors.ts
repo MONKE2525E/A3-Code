@@ -1,4 +1,9 @@
-import { PROVIDER_DISPLAY_NAMES, type ProviderDriverKind } from "@t3tools/contracts";
+import {
+  PROVIDER_DISPLAY_NAMES,
+  OrchestrationV2DispatchCommandError,
+  type OrchestrationV2Command,
+  type ProviderDriverKind,
+} from "@t3tools/contracts";
 import * as Predicate from "effect/Predicate";
 import * as SqlError from "effect/sql/SqlError";
 
@@ -134,4 +139,23 @@ export function userFacingDispatchErrorMessage(cause: unknown): string | undefin
       !isGenericErrorMessage(message) && allMessages.indexOf(message) === index,
   );
   return messages.at(-1);
+}
+
+export function toDispatchCommandError(
+  command: Pick<OrchestrationV2Command, "commandId" | "type">,
+  cause: unknown,
+): OrchestrationV2DispatchCommandError {
+  const detail = userFacingDispatchErrorMessage(cause);
+  // Only top-level rejection proves this command did not commit. Store errors can wrap anything.
+  const rejected =
+    Predicate.isTagged(cause, "OrchestratorCommandRejectedError") ||
+    Predicate.isTagged(cause, "OrchestratorCommandPreviouslyRejectedError");
+  return new OrchestrationV2DispatchCommandError({
+    commandId: command.commandId,
+    commandType: command.type,
+    message: detail ?? "Failed to dispatch orchestration V2 command",
+    ...(detail === undefined ? {} : { detail }),
+    ...(rejected ? { outcome: "rejected" } : {}),
+    cause,
+  });
 }

@@ -11,7 +11,12 @@ vi.mock("@effect/atom-react", async (importOriginal) => ({
   useAtomValue: () => mocks.allowed,
 }));
 vi.mock("/src/state/museAgent.ts", () => ({ museAgentOpenThread: { permissionAtom: () => ({}) } }));
-vi.mock("/src/state/use-atom-command.ts", () => ({ useAtomCommand: () => mocks.open }));
+vi.mock("/src/state/use-atom-command.ts", () => ({
+  useAtomCommand:
+    () =>
+    (...args: unknown[]) =>
+      mocks.open(...args),
+}));
 import {
   guardMuseAgentTurnDispatch,
   museAgentAttachScopeIdentity,
@@ -60,7 +65,7 @@ it("leaves ordinary-thread send unblocked until a Muse route reports", () => {
 });
 
 it.each([main, side])(
-  "reattaches restored %s after connection and again after reconnect",
+  "reattaches restored %s after connection and reconnect without reopening on render",
   async (threadId) => {
     setup();
 

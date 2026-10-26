@@ -336,6 +336,46 @@ When a T3 Connect connection fails, see
 [T3 Connect troubleshooting](./t3-connect-troubleshooting.md). It explains each
 error, where the problem is, and how to fix it.
 
+## Delegate agent work to another machine
+
+Each machine needs its own running T3 server. The server running your agent must
+be able to reach the destination through a direct or private-network URL.
+Relay-only connections are not supported for agent delegation.
+
+On the destination, create a pairing link limited to agent orchestration:
+
+```bash
+t3 auth pairing create --scope orchestration:read --scope orchestration:operate --base-url https://your-destination
+```
+
+Ask your agent to pair that destination and choose a maximum permission mode.
+Pairing requires a thread in **Full access** and the default interaction mode.
+Enter the link in the agent's private secret form, never in chat. Confirm the
+destination's environment ID before pairing.
+
+After pairing, ask the agent to discover that machine's projects and models, then
+delegate to the project you want. Work uses the destination's files and provider
+login; your local uncommitted changes and attachments are not copied. Questions
+and approvals must be answered in the destination's thread.
+
+Results return to the originating thread. If the destination disconnects, the
+task stays tracked and reconnects without launching a duplicate. Ask the agent
+for status or cancellation using the same task handle. A cancellation requested
+offline takes effect after reconnection if the task still falls within its
+permission limits.
+
+If destination access expires or is revoked, pair it again with a fresh link.
+
+Cancellation requires a destination server that supports guarded remote stops;
+older servers can run tasks but must be stopped directly on the destination.
+Delegate to multiple machines from the originating thread. A remote task cannot
+delegate onward to a third machine.
+
+To disconnect a paired server, cancel its outstanding tasks first, then ask the
+agent to remove the peer. Removing a peer forgets its stored access but does not
+stop work already running there. Revoke its session on the destination to
+withdraw access there too.
+
 ## Using the Desktop App as a Remote Only
 
 If a computer should only drive work running elsewhere, turn off its local environment. In the

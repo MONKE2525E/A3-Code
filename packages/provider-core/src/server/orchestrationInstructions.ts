@@ -2,6 +2,7 @@ import type { ProviderInteractionMode } from "@t3tools/contracts";
 
 // Codex truncates entries over 4,000 bytes; keep each section self-contained and below that limit.
 export const T3_CODE_ORCHESTRATION_SECTIONS: ReadonlyArray<string> = [
+  `The device that sent a message, the environment running this agent, and a destination environment are distinct. Do not infer access to the sender's files, terminal, browser or MCPs from its identity. Use orchestrator_capabilities to discover paired environments; pass an environmentId to inspect that destination's projects, providers, models and permission modes. For cross-box work, use delegate_task with that environmentId, an explicit destination project/provider/model, and a stable clientRequestId. Remote work uses the destination filesystem and credentials. Uncommitted files are not copied. Keep taskId for status and cancellation; offline means unreachable, not finished. Pending approvals/questions belong to the destination environment. Pair destinations only through request_secret and orchestrator_environment_pair; never ask for pairing links or tokens in chat.`,
   `## T3 Code orchestration
 
 Ordinary coding tasks need no T3 tools.

@@ -1,8 +1,10 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
+import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 
 import {
+  EnvironmentId,
   ContextTransferId,
   IsoDateTime,
   MessageId,
@@ -147,6 +149,18 @@ export type OrchestratorMcpTerminalDelegatedTaskStatus =
   typeof OrchestratorMcpTerminalDelegatedTaskStatus.Type;
 
 export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
+  environmentId: Schema.optional(
+    EnvironmentId.annotate({
+      description:
+        "Destination environment from orchestrator_capabilities. Omit for this server. Remote work requires explicit destination project, provider, model and clientRequestId; defaults to a destination worktree.",
+    }),
+  ),
+  baseRef: Schema.optional(
+    TrimmedNonEmptyString.annotate({
+      description:
+        "Remote worktree base on the destination; defaults to HEAD. Local uncommitted edits are not copied.",
+    }),
+  ),
   projectId: Schema.optional(
     ProjectId.annotate({
       description:
@@ -199,6 +213,8 @@ export const ORCHESTRATOR_MCP_RUNNING_TASK_NEXT =
 const OrchestratorMcpRunningTaskNext = Schema.Literal(ORCHESTRATOR_MCP_RUNNING_TASK_NEXT);
 
 export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
+  environmentId: Schema.optional(EnvironmentId),
+  reachability: Schema.optional(Schema.Literals(["online", "offline", "unauthorized", "removed"])),
   taskId: NodeId,
   childThreadId: ThreadId,
   link: Schema.optional(Schema.String),
@@ -553,6 +569,7 @@ export const OrchestratorMcpCapabilitiesInput = Schema.Struct({
       description: "Match model ids and labels. Replaces the short list.",
     }),
   ),
+  environmentId: Schema.optional(EnvironmentId),
 });
 export type OrchestratorMcpCapabilitiesInput = typeof OrchestratorMcpCapabilitiesInput.Type;
 
@@ -584,7 +601,44 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
 });
 export type OrchestratorMcpProviderCapability = typeof OrchestratorMcpProviderCapability.Type;
 
+export const OrchestratorMcpPeerEnvironment = Schema.Struct({
+  environmentId: EnvironmentId,
+  label: Schema.String,
+  httpBaseUrl: Schema.String,
+  maxRuntimeMode: RuntimeMode,
+});
+export type OrchestratorMcpPeerEnvironment = typeof OrchestratorMcpPeerEnvironment.Type;
+export const OrchestratorMcpPeerPairInput = Schema.Struct({
+  environmentId: EnvironmentId,
+  secretRef: SecretRef,
+  maxRuntimeMode: RuntimeMode.annotate({
+    description: "Maximum runtime mode permitted for tasks routed through this peer.",
+  }),
+});
+export type OrchestratorMcpPeerPairInput = typeof OrchestratorMcpPeerPairInput.Type;
 export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
+  environmentId: Schema.optional(EnvironmentId),
+  executionEnvironment: Schema.optional(
+    Schema.Struct({
+      environmentId: ExecutionEnvironmentDescriptor.fields.environmentId,
+      platform: ExecutionEnvironmentDescriptor.fields.platform,
+      capabilities: ExecutionEnvironmentDescriptor.fields.capabilities,
+    }),
+  ),
+  connection: Schema.optional(
+    Schema.Struct({
+      environmentId: EnvironmentId,
+      toolFamilies: Schema.Array(Schema.String).annotate({
+        description: "Granted tool families on this connection; not a list of connected devices.",
+      }),
+    }),
+  ),
+  environments: Schema.optional(Schema.Array(OrchestratorMcpPeerEnvironment)),
+  projects: Schema.optional(
+    Schema.Array(
+      Schema.Struct({ projectId: ProjectId, title: Schema.String, workspaceRoot: Schema.String }),
+    ),
+  ),
   parentThreadId: Schema.NullOr(ThreadId),
   inheritedProviderInstanceId: Schema.NullOr(ProviderInstanceId),
   inheritedModel: Schema.NullOr(Schema.String),

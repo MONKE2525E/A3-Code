@@ -1,3 +1,7 @@
+import * as Context from "effect/Context";
+import * as RemoteTaskService from "./remoteOrchestration/RemoteTaskService.ts";
+import * as PeerEnvironmentRegistry from "./remoteOrchestration/PeerEnvironmentRegistry.ts";
+import * as RemoteEnvironmentClient from "./remoteOrchestration/RemoteEnvironmentClient.ts";
 import * as MuseAgentSessionSource from "./museAgent/MuseAgentSessionSource.ts";
 import * as MuseAgentCredentialInbox from "./museAgent/MuseAgentCredentialInbox.ts";
 import * as MuseAgentT3Skill from "./museAgent/MuseAgentT3Skill.ts";
@@ -858,6 +862,12 @@ const layerCommandReadiness = HttpRouter.middleware(
   { global: true },
 );
 
+const layerRemoteOrchestration = RemoteTaskService.layer.pipe(
+  Layer.tap((context) => Context.get(context, RemoteTaskService.RemoteTaskService).start),
+  Layer.provideMerge(PeerEnvironmentRegistry.layer),
+  Layer.provideMerge(RemoteEnvironmentClient.layer.pipe(Layer.provide(FetchHttpClient.layer))),
+);
+
 const layerMakeRoutes = Layer.mergeAll(
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
@@ -1235,7 +1245,12 @@ const layerMakeServer = Layer.unwrap(
         { concurrency: "unbounded" },
       ).pipe(Effect.asVoid),
     }).pipe(
-      Layer.provideMerge(layerGrokBotVoice.pipe(Layer.provideMerge(layerRuntimeDependencies))),
+      Layer.provideMerge(
+        layerGrokBotVoice.pipe(
+          Layer.provideMerge(layerRemoteOrchestration),
+          Layer.provideMerge(layerRuntimeDependencies),
+        ),
+      ),
       Layer.provide(layerLauncher),
     );
 
@@ -1256,6 +1271,7 @@ const layerMakeServer = Layer.unwrap(
     );
 
     return layerServerApplication.pipe(
+      Layer.provide(layerRemoteOrchestration),
       Layer.provide(CloudLink.layer.pipe(Layer.provideMerge(ConnectReachability.layer))),
       Layer.provideMerge(layerRuntimeServices),
       Layer.provideMerge(
