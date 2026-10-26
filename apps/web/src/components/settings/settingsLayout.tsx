@@ -19,6 +19,7 @@ import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { useOptionalSettingsScope } from "./SettingsScopeContext";
 import { SettingsScopeSentence } from "./SettingsScopeSentence";
+import { SettingsSearchTargetContext } from "./settingsSearchTargetContext";
 import {
   isProjectScopedSettingKey,
   listProjectOverrides,
@@ -41,18 +42,9 @@ declare module "@tanstack/react-router" {
   }
 }
 
-interface SettingsSearchTargetContextValue {
-  readonly targetId: string | null;
-  readonly highlightTarget: boolean;
-  readonly onTargetHandled: () => void;
-}
+export { useSettingsSearchTargetId } from "./settingsSearchTargetContext";
 
 const noop = () => undefined;
-const SettingsSearchTargetContext = createContext<SettingsSearchTargetContextValue>({
-  targetId: null,
-  highlightTarget: true,
-  onTargetHandled: noop,
-});
 
 function SettingsSearchTargetProvider({
   targetId,
@@ -146,10 +138,6 @@ function scrollAndFocusSettingsTarget(target: HTMLElement, highlight = true): vo
   target.addEventListener("blur", () => target.classList.remove("settings-search-target-pulse"), {
     once: true,
   });
-}
-
-export function useSettingsSearchTargetId(): string | null {
-  return useContext(SettingsSearchTargetContext).targetId;
 }
 
 export function useSettingsSearchTarget<T extends HTMLElement>(id: string | undefined) {
