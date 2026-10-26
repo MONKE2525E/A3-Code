@@ -2871,13 +2871,16 @@ const make = Effect.gen(function* () {
                 providerInstanceId: p.instanceId,
                 driverKind: p.driver,
                 displayName: p.displayName ?? null,
-                models: p.models.map((m) => ({
-                  id: m.slug,
-                  label: m.name ?? null,
-                  ...(m.capabilities?.optionDescriptors === undefined
-                    ? {}
-                    : { options: m.capabilities.optionDescriptors }),
-                })),
+                models: p.models.map((m) => {
+                  const options = m.capabilities?.optionDescriptors ?? [];
+                  return {
+                    id: m.slug,
+                    ...(m.name.toLowerCase() === m.slug.toLowerCase() ? {} : { label: m.name }),
+                    ...(options.length === 0
+                      ? {}
+                      : { options: options.map(capabilityModelOption) }),
+                  };
+                }),
                 ...(p.supportedRuntimeModes === undefined
                   ? {}
                   : { runtimeModes: p.supportedRuntimeModes }),

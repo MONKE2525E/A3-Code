@@ -12651,6 +12651,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               type: "thread.stop",
               commandId: command.commandId,
               threadId: projection.thread.id,
+              stopDelegatedTasks: false,
               ...(command.reason === undefined ? {} : { reason: command.reason }),
             },
             events,
