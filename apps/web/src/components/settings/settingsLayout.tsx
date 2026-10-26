@@ -7,7 +7,7 @@ import { InfoIcon, Undo2Icon } from "lucide-react";
 import { DEFAULT_SERVER_SETTINGS, type ServerSettings } from "@t3tools/contracts";
 import * as Equal from "effect/Equal";
 import { useLocation, useNavigate } from "@tanstack/react-router";
-import { createContext, type ComponentPropsWithoutRef, type ReactNode, useContext } from "react";
+import { type ComponentPropsWithoutRef, type ReactNode, useContext } from "react";
 
 import {
   PRIMARY_SETTINGS_UNAVAILABLE_MESSAGE,
