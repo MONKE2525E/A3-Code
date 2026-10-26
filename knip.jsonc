@@ -31,6 +31,9 @@
         "setup-worktree.ts",
         "sign-macos.ts",
         "verify-windows-desktop-artifact.ts",
+        "fixtures/issue-16534/bootstrap.js",
+        "fixtures/issue-16534/replay.js",
+        "fixtures/issue-18188/seed-stale-thread-command.js",
       ],
       "ignoreDependencies": ["agent-device", "esbuild"],
       // The `t3` npm package's files: copied into the package, never imported.

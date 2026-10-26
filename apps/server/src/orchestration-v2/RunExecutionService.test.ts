@@ -3060,7 +3060,7 @@ function captureRootRunTermination(input: {
         ...(input.remoteReconcileAttempt === undefined
           ? {}
           : { remoteReconcileAttempt: input.remoteReconcileAttempt }),
-        appThread: { id: ids.threadId } as OrchestrationV2AppThread,
+        appThread: rootAppThread(ids.threadId),
         providerSessionId: ProviderSessionId.make(`session:${input.key}`),
         session: {
           ...(input.sessionDriver === undefined ? {} : { driver: input.sessionDriver }),

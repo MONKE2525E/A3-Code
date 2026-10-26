@@ -4003,7 +4003,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           yield* Effect.gen(function* () {
             yield* runGit("GitVcsDriver.createWorktree.configureBaseRef", input.cwd, [
               "config",
-              `branch.${targetBranch}.gh-merge-base`,
+              branchBaseConfigKey(targetBranch),
+              base.branchName,
+            ]);
+            yield* runGit("GitVcsDriver.createWorktree.configureLegacyBaseRef", input.cwd, [
+              "config",
+              legacyBranchBaseConfigKey(targetBranch),
               base.branchName,
             ]);
             if (base.baseRef.startsWith("refs/remotes/")) {
