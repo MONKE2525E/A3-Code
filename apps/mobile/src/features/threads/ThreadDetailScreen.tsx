@@ -1722,6 +1722,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                         // would strand them in the outbox.
                         sendBlockedReason={
                           props.composerSendBlockedReason ??
+                          props.draftMode?.sendBlockedReason ??
                           (props.creationState?.kind === "preparing" &&
                           !props.creationState.serverOwned
                             ? "Starting the task…"
