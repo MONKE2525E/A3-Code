@@ -1,105 +1,7 @@
-import {
-  CheckpointId,
-  CheckpointRef,
-  CheckpointScopeId,
-  ContextTransferId,
-  CommandId,
-  EventId,
-  MessageId,
-  NonNegativeInt,
-  ProjectId,
-  ProviderInstanceId,
-  ProviderReplayTranscript,
-  ProviderThreadId,
-  RunId,
-  ThreadId,
-  TurnItemId,
-} from "./index.ts";
-import {
-  OrchestrationV2Checkpoint,
-  OrchestrationV2CheckpointScope,
-  OrchestrationV2Command,
-  OrchestrationV2LimitRecoveryUpdate,
-  OrchestrationV2DomainEvent,
-  OrchestrationV2ShellSnapshot,
-  OrchestrationV2SubscribeThreadInput,
-  OrchestrationV2ThreadProjection,
-  OrchestrationV2ThreadStreamItem,
-  OrchestrationV2ThreadShell,
-} from "./orchestrationV2.ts";
-function emptyThreadProjection() {
-  return {
-    thread: {
-      createdBy: "user",
-      creationSource: "web",
-      id: "thread-1",
-      projectId: "project-1",
-      title: "Thread",
-      providerInstanceId: "codex",
-      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      branch: null,
-      worktreePath: null,
-      activeProviderThreadId: null,
-      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: "thread-1" },
-      forkedFrom: null,
-      createdAt: now,
-      updatedAt: now,
-      archivedAt: null,
-      deletedAt: null,
-    },
-    runs: [],
-    attempts: [],
-    nodes: [],
-    subagents: [],
-    providerSessions: [],
-    providerThreads: [],
-    providerTurns: [],
-    runtimeRequests: [],
-    messages: [],
-    plans: [],
-    turnItems: [],
-    checkpointScopes: [],
-    checkpoints: [],
-    contextHandoffs: [],
-    contextTransfers: [],
-    visibleTurnItems: [],
-    updatedAt: now,
-  };
-}
-const LegacyShellStreamItem = Schema.Union([
-  Schema.Struct({ kind: Schema.Literal("synchronized") }),
-  Schema.Struct({
-    kind: Schema.Literal("snapshot"),
-    snapshot: OrchestrationV2ShellSnapshot,
-  }),
-]);
-const LegacySubscribeThreadInput = Schema.Struct({
-  threadId: ThreadId,
-  afterSequence: Schema.optionalKey(NonNegativeInt),
-  requestCompletionMarker: Schema.optionalKey(Schema.Boolean),
-});
-const decodeLegacyShellStreamItem = Schema.decodeUnknownSync(LegacyShellStreamItem);
-const decodeLegacySubscribeThreadInput = Schema.decodeUnknownSync(LegacySubscribeThreadInput);
+import { ProjectId, RunId, ThreadId } from "./index.ts";
+import { OrchestrationV2Command } from "./orchestrationV2.ts";
 const decodeOrchestrationV2Command = Schema.decodeUnknownSync(OrchestrationV2Command);
-const decodeOrchestrationV2TurnItem = Schema.decodeUnknownSync(OrchestrationV2TurnItem);
-const decodeOrchestrationV2CheckpointScope = Schema.decodeUnknownSync(
-  OrchestrationV2CheckpointScope,
-);
-const decodeOrchestrationV2Checkpoint = Schema.decodeUnknownSync(OrchestrationV2Checkpoint);
-const decodeOrchestrationV2DomainEvent = Schema.decodeUnknownSync(OrchestrationV2DomainEvent);
-const decodeProviderReplayTranscript = Schema.decodeUnknownSync(ProviderReplayTranscript);
-const decodeOrchestrationV2ThreadProjection = Schema.decodeUnknownSync(
-  OrchestrationV2ThreadProjection,
-);
-const decodeOrchestrationV2ThreadStreamItem = Schema.decodeUnknownSync(
-  OrchestrationV2ThreadStreamItem,
-);
-const decodeOrchestrationV2ThreadShell = Schema.decodeUnknownSync(OrchestrationV2ThreadShell);
-const decodeOrchestrationV2SubscribeThreadInput = Schema.decodeUnknownSync(
-  OrchestrationV2SubscribeThreadInput,
-);
+
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
@@ -112,6 +14,7 @@ import {
   OrchestrationV2ProviderThreadJson,
   OrchestrationV2RpcSchemas,
   OrchestrationV2Subagent,
+  OrchestrationV2ThreadShellJson,
   OrchestrationV2SubagentJson,
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2TurnItem,
@@ -276,6 +179,24 @@ describe("orchestration V2 contracts", () => {
     if (snapshot?.kind !== "snapshot") throw new Error("expected a snapshot");
     expect(snapshot.projection.turnItems.map((turnItem) => turnItem.id)).toEqual(["item-known"]);
     expect(snapshot.projection.visibleTurnItems.map((row) => row.item.id)).toEqual(["item-known"]);
+    // The same snapshot with an ID table: refs resolve before unknown items are skipped.
+    const tabled = (turnItem: { readonly id: string }, ref: number) => ({ ...turnItem, id: ref });
+    const [tabledSnapshot] = decodeWireItems([
+      {
+        kind: "snapshot",
+        snapshotSequence: 1,
+        projection: {
+          ...projection,
+          turnItems: [tabled(future, 0), tabled(known, 1)],
+          visibleTurnItems: [
+            { ...projected(0, future), sourceItemId: 0, item: tabled(future, 0) },
+            { ...projected(1, known), sourceItemId: 1, item: tabled(known, 1) },
+          ],
+        },
+        ids: ["item-future", "item-known"],
+      },
+    ]);
+    expect(tabledSnapshot).toEqual(snapshot);
     expect(futureEvent).toEqual({
       kind: "unknown-event",
       sequence: 2,
@@ -580,6 +501,46 @@ describe("orchestration V2 contracts", () => {
     expect(runtimeThread.pendingBackgroundTasks).toEqual([]);
     expect(runtimeThread.contextUsage).toBeNull();
     expect(runtimeThread.nativeMetadata).toBeNull();
+  });
+});
+
+describe("thread open stats", () => {
+  it("reads a thread whose open stats this build cannot read, without them", () => {
+    const shell = {
+      id: "thread-test",
+      projectId: "project-test",
+      title: "Thread",
+      providerInstanceId: "codex",
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      activeProviderThreadId: null,
+      lineage: { rootThreadId: "thread-test", parentThreadId: null, relationshipToParent: null },
+      forkedFrom: null,
+      createdBy: "user",
+      creationSource: "mobile",
+      latestRunId: null,
+      activeRunId: null,
+      status: "idle",
+      pendingRuntimeRequest: null,
+      latestVisibleMessage: null,
+      latestUserMessageAt: null,
+      hasActionableProposedPlan: false,
+      itemCount: 0,
+      visibleItemCount: 0,
+      createdAt: "2026-10-01T00:00:00.000Z",
+      updatedAt: "2026-10-01T00:00:00.000Z",
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      deletedAt: null,
+    };
+    const decode = Schema.decodeUnknownSync(OrchestrationV2ThreadShellJson);
+    const opens = { openedAt: 1, score: 1, picks: [{ query: "upl", at: 1 }] };
+    expect(decode({ ...shell, opens }).opens).toEqual(opens);
+    expect(decode({ ...shell, opens: { openedAt: "2026-10-01", score: 1 } }).opens).toBeNull();
   });
 });
 

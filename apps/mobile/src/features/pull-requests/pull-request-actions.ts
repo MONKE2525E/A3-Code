@@ -231,11 +231,9 @@ export interface PullRequestMergeBox {
 }
 
 /**
- * The desktop header's merge area, laid out as a phone-width box. The primary control is the
- * shared resolver's, so the phone and the desktop never disagree about whether this is a merge,
- * a ready-for-review, a conflict to resolve or an auto-merge to arm. Admin merge is offered only
- * on GitHub, only where a normal merge would be (open, not a draft, no conflicts, not stacked),
- * and only where the client can reach a terminal on the environment to run the CLI.
+ * The desktop header's merge area as a phone-width box, with the shared resolver's primary
+ * control. Admin merge is offered only on GitHub, only where a normal merge would be, and only
+ * where the client can reach a terminal on the environment.
  */
 export function pullRequestMergeBox(input: PullRequestMenuInput): PullRequestMergeBox {
   const { detail } = input;

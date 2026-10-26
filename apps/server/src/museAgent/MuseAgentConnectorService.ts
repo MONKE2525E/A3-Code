@@ -9,7 +9,6 @@ import * as Transport from "./MuseAgentTransport.ts";
 const Id = Schema.String.check(
   Schema.isMinLength(1),
   Schema.isMaxLength(1024),
-  // eslint-disable-next-line no-control-regex -- Native connector identifiers must not contain control characters.
   Schema.isPattern(/^[^\u0000-\u001f\u007f]+$/),
 );
 const Binding = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));
@@ -55,7 +54,6 @@ const MetaBusinessConnected = Schema.Struct({
   connected: Schema.Literal(true),
   id: Schema.Literal("meta_business"),
 });
-// eslint-disable-next-line no-control-regex -- URL parsing otherwise normalizes unexpected control characters away.
 const UrlControlCharacters = /[\u0000-\u0020\u007f]/;
 
 export class MuseAgentConnectorService extends Context.Service<

@@ -5,7 +5,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import {
   SECRET_REQUEST_DEFAULT_PLACEHOLDER,
-  SECRET_REQUEST_PRIVACY_NOTE,
+  secretRequestPrivacyNote,
 } from "@t3tools/client-runtime/secret-request";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { ShieldCheckIcon } from "lucide-react";
@@ -43,6 +43,7 @@ export function GrokBotSecureInputPanel(props: {
 }) {
   const { environmentId, botId, requests } = props;
   const target = { environmentId, botId };
+  // oxlint-disable-next-line t3code/react-effect-budget -- Reconcile hidden requests with server snapshots after responses.
   useEffect(
     () => forgetRespondedGrokBotSecretRequests({ environmentId, botId }, requests),
     [environmentId, botId, requests],
@@ -105,6 +106,7 @@ function GrokBotSecureInputForm(props: {
     readonly message: string;
   } | null>(null);
 
+  // oxlint-disable-next-line t3code/react-effect-budget -- Clear secret input bytes when the panel unmounts.
   useEffect(() => {
     const input = inputRef.current;
     return () => {
@@ -227,7 +229,7 @@ function GrokBotSecureInputForm(props: {
           className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground"
         >
           <ShieldCheckIcon className="size-3.5 shrink-0" aria-hidden />
-          {SECRET_REQUEST_PRIVACY_NOTE}
+          {secretRequestPrivacyNote({})}
         </p>
         <Button
           type="button"

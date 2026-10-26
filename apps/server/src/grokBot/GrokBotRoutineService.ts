@@ -102,9 +102,9 @@ const make = Effect.gen(function* () {
       .pipe(Effect.mapError(() => new GrokBotRoutineError({ reason: "unavailable" })));
   // A native response that no longer matches the schema is reported as unavailable, never as empty.
   const decoded = <A>(value: Option.Option<A>) =>
-    Option.isSome(value)
-      ? Effect.succeed(value.value)
-      : Effect.fail(new GrokBotRoutineError({ reason: "unavailable" }));
+    Effect.fromOption(value).pipe(
+      Effect.mapError(() => new GrokBotRoutineError({ reason: "unavailable" })),
+    );
   const sameAccount = (binding: string) =>
     account.pipe(
       Effect.flatMap((current) =>

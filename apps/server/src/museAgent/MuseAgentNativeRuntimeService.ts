@@ -131,7 +131,6 @@ const Identity = Schema.Struct({
   ),
 });
 const safeText = (value: string | undefined, limit: number) =>
-  // oxlint-disable-next-line no-control-regex -- Remove control characters from native identity display fields.
   value?.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, limit);
 const isAvatarVariant = Schema.is(MuseAgentAvatarVariant);
 const avatarPath = (value: string | undefined) =>

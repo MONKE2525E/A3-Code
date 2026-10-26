@@ -83,15 +83,15 @@ const make = Effect.gen(function* () {
       return null;
     return address.value.endpoint;
   }).pipe(Effect.mapError(() => new ManagedEndpointAddressError({ stage: "read" })));
-  const remember = Effect.fnUntraced(function* (address: typeof Address.Type) {
-    // This codec contains a connector credential. Keep encoding/storage causes out of diagnostics.
-    const encoded = yield* encodeAddress(address).pipe(
-      Effect.mapError(() => new ManagedEndpointAddressError({ stage: "write" })),
-    );
-    yield* secrets
-      .set(CLOUD_MANAGED_ENDPOINT_ADDRESS, new TextEncoder().encode(encoded))
-      .pipe(Effect.mapError(() => new ManagedEndpointAddressError({ stage: "write" })));
-  });
+  const remember = Effect.fnUntraced(
+    function* (address: typeof Address.Type) {
+      // This codec contains a connector credential. Keep storage causes out of diagnostics.
+      const encoded = yield* encodeAddress(address);
+      yield* secrets.set(CLOUD_MANAGED_ENDPOINT_ADDRESS, new TextEncoder().encode(encoded));
+    },
+    Effect.mapError(() => new ManagedEndpointAddressError({ stage: "write" })),
+  );
+
   return ManagedEndpointAddress.of({ read, remember });
 });
 

@@ -61,6 +61,7 @@ import * as AdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts
 import * as Threads from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadLaunch from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
+import * as DocumentText from "../provider/DocumentText.ts";
 import * as LegacyImporter from "../orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import * as Replay from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import {
@@ -522,11 +523,10 @@ it.effect.each([
           authority,
           projection,
           ThreadCommandExecutor.layer,
-          Ingestor.layer
-            .pipe(Layer.provide(Layer.mock(MergeGit.GitVcsDriver)({})))
-            .pipe(
-              Layer.provide([replay, projection, IdAllocator.layer, ThreadCommandExecutor.layer]),
-            ),
+          Ingestor.layer.pipe(
+            Layer.provide(Layer.mock(MergeGit.GitVcsDriver)({})),
+            Layer.provide([replay, projection, IdAllocator.layer, ThreadCommandExecutor.layer]),
+          ),
         ]),
         Layer.provide(NodeCrypto.layer),
       );
@@ -552,6 +552,7 @@ it.effect.each([
           launches,
           completion,
           Layer.mock(ThreadSearch.ThreadSearch)({}),
+          Layer.mock(DocumentText.DocumentText)({}),
           Layer.mock(Scheduled.ScheduledTaskService)({}),
           Layer.mock(Secrets.SecretRequests)({}),
           Layer.mock(GitVcsDriver.GitVcsDriver)({}),

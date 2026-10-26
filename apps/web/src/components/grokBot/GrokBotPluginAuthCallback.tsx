@@ -48,11 +48,9 @@ function readCallback() {
 }
 
 /**
- * Deliver only the one-time code to the environment that started this flow. The flow is remembered
- * in this origin's storage, so a return that lands in another browser (Electron or a phone started
- * it, this page is the environment's own web address) has none. That page is served by the
- * environment the sign-in returned to, so the code goes to its own primary environment, which still
- * checks the state it issued.
+ * Deliver only the one-time code to the environment that started this flow. The flow is kept in
+ * this origin's storage, so a return landing in another browser has none; that page is served by
+ * the environment itself, so the code goes to its primary environment, which still checks state.
  */
 export function GrokBotPluginAuthCallback() {
   const [callback] = useState(readCallback);

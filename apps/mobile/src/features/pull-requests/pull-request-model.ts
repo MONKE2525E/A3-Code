@@ -245,13 +245,9 @@ const RETAINED_ROWS = "Showing the last pull requests loaded.";
 
 /**
  * Decides what the list body shows when it has no rows, so a failure, a setup gap and a real
- * empty answer never share one message. With rows on screen the list is always "rows" and the
- * same facts come back as a notice instead.
+ * empty answer never share one message. With rows on screen the list is always "rows".
  *
- * `pullRequestsSupported` is undefined until the environment has said what it can do, which
- * reads as loading rather than as a verdict. A search still in flight is also loading: the
- * answer on screen belongs to the previous query, and "nothing matches" would be a claim about
- * a question nobody has finished asking.
+ * `pullRequestsSupported` undefined, or a search still in flight, reads as loading, not a verdict.
  */
 export function resolvePullRequestListStatus(input: {
   readonly rowCount: number;

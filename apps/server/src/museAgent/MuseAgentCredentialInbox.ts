@@ -33,7 +33,6 @@ const ConnectorCard = Schema.Struct({
     connector_id: Schema.String.check(
       Schema.isMinLength(1),
       Schema.isMaxLength(1024),
-      // eslint-disable-next-line no-control-regex -- Connector IDs are opaque, but must not contain controls.
       Schema.isPattern(/^[^\u0000-\u001f\u007f]+$/),
     ),
   }),

@@ -75,6 +75,9 @@ import Migration0069 from "./Migrations/069_GrokBotManagedCompletion.ts";
 import Migration0070 from "./Migrations/070_GrokBotMigrationCompatibility.ts";
 import Migration0071 from "./Migrations/071_ThreadSenderIndex.ts";
 import Migration0072 from "./Migrations/072_NativeTurnItemSequences.ts";
+import Migration0073 from "./Migrations/073_ShellStopRequestIndex.ts";
+import Migration0074 from "./Migrations/074_ThreadMessageSearch.ts";
+import Migration0075 from "./Migrations/075_McpRemoteCredentialSubagent.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -150,6 +153,9 @@ const migrationEntries = [
   [70, "GrokBotMigrationCompatibility", Migration0070],
   [71, "ThreadSenderIndex", Migration0071],
   [72, "NativeTurnItemSequences", Migration0072],
+  [73, "ShellStopRequestIndex", Migration0073],
+  [74, "ThreadMessageSearch", Migration0074],
+  [75, "McpRemoteCredentialSubagent", Migration0075],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -165,12 +171,7 @@ const makeMigrationLoader = (throughId?: number) =>
 
 const FIRST_V2_MIGRATION_ID = 55;
 
-/**
- * Fail before migrating when the migrator would skip one of V2's own
- * migrations. It skips every id up to the highest recorded one, whatever name
- * was recorded, so a database that took a V2 id for another migration would
- * start without V2's schema and fail on first use.
- */
+// Migrators skip ids up to the highest recorded; reject collisions that would skip V2 schema.
 const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function* (
   throughId?: number,
 ) {

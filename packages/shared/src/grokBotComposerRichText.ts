@@ -186,11 +186,9 @@ function nativeVisibleText(node: GrokBotNativeInlineNode): string {
 }
 
 /**
- * Proven native 0.68.1 TipTap payload: bot/person mentions are
- * `{type:"mention", attrs:{id,label}}`; skills and plugins are
- * `{type:"workflowReference", attrs:{id,label,iconId,iconUrl}}` with plugin ids
- * encoded `plugin:${pluginId}`. T3 `$`/`@` tokens stay in the composer; this
- * converts them at send time.
+ * Proven native 0.68.1 TipTap payload: mentions are `{type:"mention", attrs:{id,label}}`;
+ * skills and plugins are `{type:"workflowReference", ...}` with plugin ids `plugin:${pluginId}`.
+ * T3 `$`/`@` tokens stay in the composer and convert at send time.
  */
 export function serializeGrokBotComposerRichText(
   prompt: string,

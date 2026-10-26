@@ -1,10 +1,3 @@
-import * as Deferred from "effect/Deferred";
-import * as Duration from "effect/Duration";
-import * as Fiber from "effect/Fiber";
-import * as TestClock from "effect/testing/TestClock";
-import { DESKTOP_UPDATE_RESTART_MARKER_FILE } from "@t3tools/contracts";
-import { decodeConfirmedOrigin } from "./config.ts";
-import { retryManagedTunnelRegistration } from "./managedTunnelStartup.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- The relay validator requires an Ed25519 PEM fixture.
 import * as NodeCrypto from "node:crypto";
@@ -173,7 +166,7 @@ describe("releaseManagedTunnelOnShutdown", () => {
           ConnectReachability.ConnectReachability,
           ConnectReachability.ConnectReachability.of({
             check: Effect.die("unused"),
-            latest: Effect.succeed(Option.none()),
+            latest: Effect.succeedNone,
           }),
         ),
         Effect.provideService(HttpServer.HttpServer, {
@@ -972,8 +965,6 @@ describe("releaseManagedTunnelOnShutdown", () => {
     );
   });
 
-  // A proof signed with a skewed boot clock is rejected as expired. The next
-  // attempt mints a new proof, so startup reconcile must keep retrying it.
   it.effect("retries a relay link proof rejected as expired", () => {
     const { store } = makeMemorySecretStore([
       [CLOUD_ENDPOINT_RUNTIME_CONFIG, "old-config"],

@@ -64,12 +64,9 @@ function profilePatchShown(patch: ProfilePatch, bot: GrokBot): boolean {
 }
 
 /**
- * Settles the held look and the save issue against one roster snapshot, so every rule reads the
- * same state. Returns the same object when nothing changes, which keeps it safe to call in render.
- *
- * Only a roster that shows the patch proves a save. A roster that still shows the old value proves
- * nothing, because a failed native read can fall back to a CLI roster. A newer roster read after an
- * accepted look leaves that look unconfirmed, which is not a rejection.
+ * Settles the held look and the save issue against one roster snapshot, returning the same
+ * object when nothing changes. Only a roster that shows the patch proves a save; a roster still
+ * showing the old value proves nothing, since a failed native read can fall back to a CLI roster.
  */
 export function reconcileProfileSave(
   state: ProfileSaveState,

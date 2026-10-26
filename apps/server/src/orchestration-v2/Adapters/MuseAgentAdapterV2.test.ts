@@ -310,7 +310,7 @@ it.effect(
               peak = Math.max(peak, active);
               if (active === 2) yield* Deferred.succeed(saturated, undefined);
               yield* Deferred.await(released);
-              return yield* Effect.fail(new Native.MuseAgentRuntimeError({ kind: "protocol" }));
+              return yield* new Native.MuseAgentRuntimeError({ kind: "protocol" });
             }).pipe(
               Effect.ensuring(
                 Effect.gen(function* () {

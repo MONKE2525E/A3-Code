@@ -45,9 +45,7 @@ export const deriveProviderInstanceConfigMap = (
     merged[instanceId] = { driver: driver.driverKind };
   }
 
-  // A project that turns an instance on needs it alive and probed even when the machine itself
-  // has it off, or a thread in that project would route to an instance nobody ever checked in
-  // on.
+  // Probe project-enabled instances even if disabled machine-wide; project threads can still route to them.
   for (const overrides of Object.values(settings.projectSettingsOverrides)) {
     for (const [rawInstanceId, projectOverride] of Object.entries(
       overrides?.providerInstances ?? {},
@@ -70,15 +68,9 @@ export const deriveProviderInstanceConfigMap = (
 };
 
 /**
- * Layer that consumes `ProviderInstanceRegistryMutator` and forks a
- * settings-watcher fiber. The fiber's lifetime is tied to the enclosing
- * layer scope (process lifetime in production), so it is interrupted on
- * shutdown without leaking.
- *
- * Errors inside the watcher are logged and swallowed — the registry's own
- * "unavailable" bucket already absorbs unknown drivers and invalid
- * configs, so the only way the watcher could fail is a settings stream
- * tear-down, which logs and exits cleanly.
+ * Layer that consumes `ProviderInstanceRegistryMutator` and forks a settings-watcher fiber tied to
+ * the enclosing layer scope. Watcher errors are logged and swallowed: the registry's own
+ * "unavailable" bucket absorbs unknown drivers and invalid configs.
  */
 /** Reconcile from the latest settings under their write lock, including explicit setup. */
 export const reconcileSettings = Effect.gen(function* () {
@@ -91,19 +83,16 @@ export const reconcileSettings = Effect.gen(function* () {
 
 const layerSettingsWatcher = (settingsChanges: Stream.Stream<ServerSettings>) =>
   Layer.effectDiscard(
-    Effect.gen(function* () {
-      const serverSettings = yield* Settings.ServerSettingsService;
-      yield* settingsChanges.pipe(
-        Stream.runForEach(() =>
-          reconcileSettings.pipe(
-            Effect.catchCause((cause) =>
-              Effect.logError("ProviderInstanceRegistry reconcile failed", cause),
-            ),
+    settingsChanges.pipe(
+      Stream.runForEach(() =>
+        reconcileSettings.pipe(
+          Effect.catchCause((cause) =>
+            Effect.logError("ProviderInstanceRegistry reconcile failed", cause),
           ),
         ),
-        Effect.forkScoped,
-      );
-    }),
+      ),
+      Effect.forkScoped,
+    ),
   );
 
 export const layer: Layer.Layer<

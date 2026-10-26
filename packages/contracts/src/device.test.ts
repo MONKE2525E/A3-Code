@@ -6,12 +6,7 @@ import {
 } from "./device.ts";
 import { secretSettingsFields } from "./settings.ts";
 import { describe, expect, it } from "@effect/vitest";
-import {
-  DeviceBootError,
-  DeviceId,
-  LOCAL_DEVICE_HOST_ID,
-  deviceToolInstallMessage,
-} from "./device.ts";
+import { DeviceBootError, DeviceId, LOCAL_DEVICE_HOST_ID } from "./device.ts";
 import * as Schema from "effect/Schema";
 const decodeBootError = Schema.decodeUnknownSync(DeviceBootError);
 const encodeBootError = Schema.encodeSync(DeviceBootError);

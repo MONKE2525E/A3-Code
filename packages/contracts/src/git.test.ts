@@ -1,23 +1,15 @@
-import { GitRunStackedActionResult, GitResolvePullRequestResult } from "./git.ts";
-const decodeRunStackedActionResult = Schema.decodeUnknownSync(GitRunStackedActionResult);
-const decodeResolvePullRequestResult = Schema.decodeUnknownSync(GitResolvePullRequestResult);
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
 import {
-  VcsCreateWorktreeInput,
   VcsCreateWorktreeResult,
-  GitPreparePullRequestThreadInput,
   GitCommandError,
   GitPreparePullRequestThreadResult,
   GitRunStackedActionInput,
 } from "./git.ts";
 
-const decodeCreateWorktreeInput = Schema.decodeUnknownSync(VcsCreateWorktreeInput);
 const decodeCreateWorktreeResult = Schema.decodeUnknownSync(VcsCreateWorktreeResult);
-const decodePreparePullRequestThreadInput = Schema.decodeUnknownSync(
-  GitPreparePullRequestThreadInput,
-);
+
 const decodeGitCommandError = Schema.decodeUnknownSync(Schema.toCodecJson(GitCommandError));
 const decodePreparePullRequestThreadResult = Schema.decodeUnknownSync(
   GitPreparePullRequestThreadResult,
@@ -53,8 +45,6 @@ describe("VcsCreateWorktreeResult", () => {
     expect(() => decodeCreateWorktreeResult({ worktree, createdBranch: true })).toThrow();
   });
 });
-
-describe("GitPreparePullRequestThreadInput", () => {});
 
 describe("GitPreparePullRequestThreadResult", () => {
   it("defaults legacy responses to the pull request head", () => {

@@ -48,8 +48,7 @@ export interface GrokBotSettlement {
   readonly errorDomain?: string;
   readonly errorRetryable?: boolean | null;
 }
-const Settlement = Schema.Struct({
-  _tag: Schema.Literal("Settlement"),
+const Settlement = Schema.TaggedStruct("Settlement", {
   clientNonce: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024)),
   outcome: Schema.Literals(["success", "error", "cancelled"]),
   settledAtMs: Schema.Number.check(
@@ -208,7 +207,7 @@ export const makeGrokBotSettlementProjection = (
   lookupCompletion: (
     identity: GrokBotTurnIdentity,
   ) => Effect.Effect<GrokBotManagedCompletion | undefined, GrokBotBindingError> = () =>
-    Effect.succeed(undefined),
+    Effect.sync(() => undefined),
 ) => {
   const turns = new Map<string, GrokBotTurnIdentity>();
   const settled = new Set<string>();

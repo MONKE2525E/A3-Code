@@ -11,7 +11,6 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -84,9 +83,7 @@ it.effect.each(["auto_review_approval/", "local_tool_permission/", "connector_gr
     const respondToRuntimeRequest = vi.fn(
       (_input: ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput) => Effect.void,
     );
-    const getSession = vi.fn(() =>
-      Effect.succeed(Option.some({ respondToRuntimeRequest } as never)),
-    );
+    const getSession = vi.fn(() => Effect.succeedSome({ respondToRuntimeRequest } as never));
     const projection = projectionWithRuntimeRequest(request);
     return Effect.gen(function* () {
       const service = yield* RuntimeRequestService.RuntimeRequestServiceV2;
@@ -126,7 +123,7 @@ it.effect.each([
       resolvedAt: null,
       nativeRequestRef: { ...nativeRef, driver: ProviderDriverKind.make(nativeRef.driver) },
     };
-    const getSession = vi.fn(() => Effect.succeed(Option.none()));
+    const getSession = vi.fn(() => Effect.succeedNone);
     return Effect.gen(function* () {
       const service = yield* RuntimeRequestService.RuntimeRequestServiceV2;
       const error = yield* service
@@ -148,11 +145,9 @@ it.effect("rejects expired runtime requests before invoking the live adapter", (
     (_input: ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput) => Effect.void,
   );
   const getSession = vi.fn(() =>
-    Effect.succeed(
-      Option.some({
-        respondToRuntimeRequest,
-      } as never),
-    ),
+    Effect.succeedSome({
+      respondToRuntimeRequest,
+    } as never),
   );
   const projection = {
     runtimeRequests: [
@@ -221,7 +216,7 @@ it.effect("executes native cleanup for session-bound message questions", () => {
     responseCapability: { type: "message" as const, providerSessionId },
   };
   const layerTest = layerRuntimeRequestTest(projectionWithRuntimeRequest(request), () =>
-    Effect.succeed(Option.some({ respondToRuntimeRequest } as never)),
+    Effect.succeedSome({ respondToRuntimeRequest } as never),
   );
   return Effect.gen(function* () {
     const service = yield* RuntimeRequestService.RuntimeRequestServiceV2;
@@ -234,7 +229,7 @@ it.effect("does not execute native cleanup for an unbound message question", () 
   const threadId = ThreadId.make("thread-unbound-message-question");
   const providerSessionId = ProviderSessionId.make("unbound-question-session");
   const requestId = RuntimeRequestId.make("unbound-message-question");
-  const getSession = vi.fn(() => Effect.succeed(Option.none()));
+  const getSession = vi.fn(() => Effect.succeedNone);
   const request = {
     ...resolvedRuntimeRequest(requestId, providerSessionId),
     kind: "user_input" as const,
@@ -267,7 +262,7 @@ it.effect("runs a native single choice while the bound question is still pending
     responseCapability: { type: "message" as const, providerSessionId },
   };
   const layerTest = layerRuntimeRequestTest(projectionWithRuntimeRequest(request), () =>
-    Effect.succeed(Option.some({ respondToRuntimeRequest } as never)),
+    Effect.succeedSome({ respondToRuntimeRequest } as never),
   );
   return Effect.gen(function* () {
     const service = yield* RuntimeRequestService.RuntimeRequestServiceV2;
@@ -288,7 +283,7 @@ it.effect("never runs native calls for a pending question that is not bound to t
   const threadId = ThreadId.make("thread-pending-unbound-question");
   const providerSessionId = ProviderSessionId.make("pending-unbound-question-session");
   const requestId = RuntimeRequestId.make("pending-unbound-question");
-  const getSession = vi.fn(() => Effect.succeed(Option.none()));
+  const getSession = vi.fn(() => Effect.succeedNone);
   const request = {
     ...resolvedRuntimeRequest(requestId, providerSessionId),
     status: "pending" as const,
@@ -307,3 +302,87 @@ it.effect("never runs native calls for a pending question that is not bound to t
     Effect.provide(layerRuntimeRequestTest(projectionWithRuntimeRequest(request), getSession)),
   );
 });
+
+it.effect.each(["expired", "resolved"] as const)(
+  "responds only to resolved requests and preserves feedback (%s)",
+  (status) => {
+    const threadId = ThreadId.make("thread-runtime-request-expired");
+    const providerSessionId = ProviderSessionId.make("provider-session-runtime-request-expired");
+    const requestId = RuntimeRequestId.make("request-expired");
+    const respondToRuntimeRequest = vi.fn(
+      (_input: ProviderAdapter.ProviderAdapterV2RuntimeRequestResponseInput) => Effect.void,
+    );
+    const getSession = vi.fn(() =>
+      Effect.succeedSome({
+        respondToRuntimeRequest,
+      } as never),
+    );
+    const projection = {
+      runtimeRequests: [
+        {
+          id: requestId,
+          nodeId: NodeId.make("node-runtime-request-expired"),
+          providerTurnId: null,
+          nativeRequestRef: null,
+          kind: "command",
+          status,
+          responseCapability: {
+            type: "live",
+            providerSessionId,
+          },
+          createdAt: DateTime.makeUnsafe("2026-07-29T00:00:00.000Z"),
+          resolvedAt: DateTime.makeUnsafe("2026-07-29T00:00:01.000Z"),
+        },
+      ],
+    } as unknown as OrchestrationV2ThreadProjection;
+    const layerTest = RuntimeRequestService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getRuntimeRequest: (_threadId, requestId) =>
+              Effect.succeed(
+                projection.runtimeRequests.find((request) => request.id === requestId),
+              ),
+          }),
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            get: getSession,
+          }),
+        ),
+      ),
+    );
+
+    return Effect.gen(function* () {
+      const service = yield* RuntimeRequestService.RuntimeRequestServiceV2;
+      const response = service.respond({
+        threadId,
+        providerSessionId,
+        requestId,
+        decision: "decline",
+        feedback: "Use an explicit path.",
+      });
+      if (status === "resolved") {
+        yield* response;
+        assert.deepEqual(respondToRuntimeRequest.mock.calls, [
+          [
+            {
+              requestId,
+              decision: "decline",
+              feedback: "Use an explicit path.",
+            },
+          ],
+        ]);
+        return;
+      }
+      const error = yield* response.pipe(Effect.flip);
+
+      assert.equal(error.reason, "request-not-ready");
+      assert.equal(
+        error.message,
+        `Runtime request ${requestId} on thread ${threadId} is not ready for response execution.`,
+      );
+      assert.isUndefined(error.cause);
+      assert.equal(getSession.mock.calls.length, 0);
+      assert.equal(respondToRuntimeRequest.mock.calls.length, 0);
+    }).pipe(Effect.provide(layerTest));
+  },
+);

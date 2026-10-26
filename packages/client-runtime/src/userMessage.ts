@@ -1,8 +1,22 @@
 import {
+  type GuestMessageAttribution,
   type OrchestrationV2Actor,
   type OrchestrationV2CreationSource,
+  type OrchestrationV2IdleCompaction,
   ScheduledTaskId,
 } from "@t3tools/contracts";
+
+/** The working row while T3 Code's own compaction runs. */
+export const IDLE_COMPACTING_LABELS = {
+  beforeCacheExpires: "Compacting before the cache expires…",
+  onReturn: "Compacting after being idle…",
+} satisfies Record<OrchestrationV2IdleCompaction, string>;
+
+/** Leads the finished compaction's token counts, in place of "Context compacted". */
+export const IDLE_COMPACTION_TITLES = {
+  beforeCacheExpires: "Context automatically compacted before cache expiry",
+  onReturn: "Context compacted after being idle",
+} satisfies Record<OrchestrationV2IdleCompaction, string>;
 
 const LEGACY_AUTOMATION_PREFIX = /^\[Triggered by schedule task: [^\r\n]+\]\r?\n\r?\n/;
 const LEGACY_AUTOMATION_MESSAGE_ID = /^scheduled-task-message:(.+):\d+:(?:scheduled|manual)$/;
@@ -17,17 +31,26 @@ export function resolveUserMessagePresentation(message: {
   readonly creationSource?: OrchestrationV2CreationSource;
   readonly scheduledTaskId?: ScheduledTaskId;
   readonly voiceRequest?: true;
+  readonly context?: { readonly guest?: GuestMessageAttribution | undefined } | undefined;
 }): {
   readonly text: string;
-  /**
-   * Who sent a user-role message the user did not type. `voice` is a request a voice call made
-   * to the bot's T3 agents; its text is internal and comes back empty.
-   */
-  readonly attribution: "automation" | "agent" | "t3code" | "voice" | null;
+  readonly attribution: "automation" | "agent" | "t3code" | "guest" | "voice" | null;
   readonly scheduledTaskId: ScheduledTaskId | undefined;
+  /** Set when `attribution` is "guest". */
+  readonly guestName?: string;
 } {
   if (message.role !== "user") {
     return { text: message.text, attribution: null, scheduledTaskId: undefined };
+  }
+  // The stored text names the guest for the agent; people see the guest's own words.
+  const guest = message.context?.guest;
+  if (guest !== undefined) {
+    return {
+      text: guest.text,
+      attribution: "guest",
+      scheduledTaskId: undefined,
+      guestName: guest.name,
+    };
   }
   if (message.scheduledTaskId !== undefined) {
     return {

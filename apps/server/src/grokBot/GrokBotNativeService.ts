@@ -577,11 +577,9 @@ const make = Effect.gen(function* () {
       maxOutputBytes: 65536,
     });
     if (result.code !== 0)
-      return yield* Effect.fail(
-        new NativeReadError({
-          stage: "session",
-        }),
-      );
+      return yield* new NativeReadError({
+        stage: "session",
+      });
     return result.stdout.trimEnd();
   });
   const decryptUncached = Effect.fnUntraced(function* (wrapped: string) {
@@ -589,7 +587,7 @@ const make = Effect.gen(function* () {
     if (value.startsWith("scoped:v1:")) {
       const split = value.indexOf(":", "scoped:v1:".length);
       if (split < 0 || !/^[0-9a-f]{64}$/.test(value.slice("scoped:v1:".length, split)))
-        return yield* Effect.fail(new NativeReadError({ stage: "session" }));
+        return yield* new NativeReadError({ stage: "session" });
       value = value.slice(split + 1);
     }
     if (value.startsWith("plaintext:v1:"))
@@ -606,11 +604,9 @@ const make = Effect.gen(function* () {
       const decoded = yield* Schema.decodeUnknownEffect(stateSchema)(state);
       const protectedKey = Buffer.from(decoded.os_crypt.encrypted_key, "base64");
       if (prefix !== "v10" || protectedKey.subarray(0, 5).toString() !== "DPAPI")
-        return yield* Effect.fail(
-          new NativeReadError({
-            stage: "session",
-          }),
-        );
+        return yield* new NativeReadError({
+          stage: "session",
+        });
       const script =
         "Add-Type -AssemblyName System.Security; $bytes = [Convert]::FromBase64String([Console]::In.ReadToEnd()); [Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, 'CurrentUser'))";
       const clearKey = yield* secretCommand(
@@ -637,11 +633,9 @@ const make = Effect.gen(function* () {
       });
     }
     if (prefix !== "v10" && !(platform === "linux" && prefix === "v11"))
-      return yield* Effect.fail(
-        new NativeReadError({
-          stage: "session",
-        }),
-      );
+      return yield* new NativeReadError({
+        stage: "session",
+      });
     const password =
       platform === "linux" && prefix === "v10"
         ? "peanuts"
@@ -684,7 +678,7 @@ const make = Effect.gen(function* () {
       yield* fs.readFileString(path.join(appData, "sand-secrets.json")),
     );
     if (secrets.version !== undefined && secrets.version !== 1)
-      return yield* Effect.fail(new NativeReadError({ stage: "session" }));
+      return yield* new NativeReadError({ stage: "session" });
     let token: string | undefined;
     let accountSlot: string | undefined;
     let team: string | undefined;
@@ -703,7 +697,7 @@ const make = Effect.gen(function* () {
           ? secrets["cursor-selected-team-id"]
           : undefined;
     }
-    if (!token) return yield* Effect.fail(new NativeReadError({ stage: "session" }));
+    if (!token) return yield* new NativeReadError({ stage: "session" });
     const accessToken = yield* decrypt(token);
     const machineId =
       typeof secrets["cursor-machine-id"] === "string"
@@ -762,9 +756,7 @@ const make = Effect.gen(function* () {
     return yield* Effect.gen(function* () {
       const response = yield* client.execute(rpc);
       if (response.status < 200 || response.status >= 300)
-        return yield* Effect.fail(
-          new NativeReadError({ stage: "request", status: response.status }),
-        );
+        return yield* new NativeReadError({ stage: "request", status: response.status });
       return yield* response.json.pipe(
         Effect.mapError(() => new NativeReadError({ stage: "response" })),
       );
@@ -806,7 +798,7 @@ const make = Effect.gen(function* () {
   const boundSession = Effect.fnUntraced(function* (binding: string) {
     const auth = yield* session;
     if (!/^[0-9a-f]{64}$/.test(binding) || bindingFor(auth) !== binding)
-      return yield* Effect.fail(new NativeReadError({ stage: "session" }));
+      return yield* new NativeReadError({ stage: "session" });
     return auth;
   });
   const accountBinding = session.pipe(
@@ -883,7 +875,7 @@ const make = Effect.gen(function* () {
     );
     // Blob-only rows need the official presigned-read adapter; do not present a partial tail as complete.
     if ((tail.entries ?? []).some((entry) => !entry.body))
-      return yield* Effect.fail(new NativeReadError({ stage: "response" }));
+      return yield* new NativeReadError({ stage: "response" });
     const entries = yield* Effect.forEach((tail.entries ?? []).toReversed(), (entry) =>
       Effect.try({
         try: () =>
@@ -1332,13 +1324,11 @@ const make = Effect.gen(function* () {
           response.status !== 200 ||
           !response.headers["content-type"]?.startsWith("application/connect+json")
         )
-          return yield* Effect.fail(
-            new NativeReadError({
-              stage: "request",
-              status: response.status,
-              transient: [408, 502, 503, 504].includes(response.status),
-            }),
-          );
+          return yield* new NativeReadError({
+            stage: "request",
+            status: response.status,
+            transient: [408, 502, 503, 504].includes(response.status),
+          });
         return ConnectJsonStream.decodeMessages(
           response.stream.pipe(
             Stream.mapError(() => new NativeReadError({ stage: "response", transient: true })),

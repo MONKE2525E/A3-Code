@@ -89,7 +89,7 @@ const makeBackend = (
 type Backend = Effect.Success<ReturnType<typeof makeBackend>>;
 const routed: { botId: string; callId: string; name: string; access: string }[] = [];
 const bridgeLayer = Layer.succeed(Bridge.GrokBotVoiceT3Bridge, {
-  context: () => Effect.succeed(undefined),
+  context: () => Effect.sync(() => undefined),
   activate: () => Effect.void,
   forget: () => Effect.void,
   call: (input) =>
@@ -178,7 +178,7 @@ it.effect("rejects delayed results after hang-up or an account switch", () =>
       const waiting = yield* Deferred.make<void>();
       const completed = yield* Deferred.make<void>();
       const delayedBridge = Layer.succeed(Bridge.GrokBotVoiceT3Bridge, {
-        context: () => Effect.succeed(undefined),
+        context: () => Effect.sync(() => undefined),
         activate: () => Effect.void,
         forget: () => Effect.void,
         call: () =>
@@ -723,7 +723,7 @@ it.effect("the first local tool awaits authority and returns while cloud presenc
         }),
     });
     const delayedBridge = Layer.succeed(Bridge.GrokBotVoiceT3Bridge, {
-      context: () => Effect.succeed(undefined),
+      context: () => Effect.sync(() => undefined),
       activate: () =>
         Deferred.succeed(acquiring, undefined).pipe(Effect.andThen(Deferred.await(acquired))),
       forget: () => Effect.void,
@@ -897,7 +897,7 @@ it.effect("releases call authority on hang-up, account change, expiry, and shutd
     const activated: string[] = [];
     const forgotten: string[] = [];
     const lifecycleBridge = Layer.succeed(Bridge.GrokBotVoiceT3Bridge, {
-      context: () => Effect.succeed(undefined),
+      context: () => Effect.sync(() => undefined),
       activate: ({ callId }) =>
         Effect.sync(() => {
           activated.push(callId);
@@ -942,7 +942,7 @@ it.effect("hang-up during parent acquisition releases late authority before serv
     const forgotten: string[] = [];
     let dispatched = false;
     const lifecycleBridge = Layer.succeed(Bridge.GrokBotVoiceT3Bridge, {
-      context: () => Effect.succeed(undefined),
+      context: () => Effect.sync(() => undefined),
       activate: () =>
         Deferred.succeed(acquiring, undefined).pipe(Effect.andThen(Deferred.await(acquired))),
       forget: (id) =>

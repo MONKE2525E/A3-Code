@@ -32,6 +32,7 @@ const Row = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   runId: RunId,
   attemptId: RunAttemptId,
+  subagent: Schema.Literals([0, 1]),
   capabilities: Schema.fromJsonString(Capabilities),
   issuedAt: Schema.Int,
   lastAliveAt: Schema.Int,
@@ -75,7 +76,8 @@ const make = Effect.gen(function* () {
       SELECT token_hash AS "tokenHash", environment_id AS "environmentId",
         request_namespace AS "requestNamespace", thread_id AS "threadId",
         provider_session_id AS "providerSessionId", provider_instance_id AS "providerInstanceId",
-        run_id AS "runId", attempt_id AS "attemptId", capabilities_json AS "capabilities",
+        run_id AS "runId", attempt_id AS "attemptId", subagent,
+        capabilities_json AS "capabilities",
         issued_at AS "issuedAt", last_alive_at AS "lastAliveAt"
       FROM mcp_remote_credentials WHERE token_hash = ${tokenHash}
     `.pipe(Effect.mapError(queryError("McpRemoteCredentialStore.lookup")));
@@ -94,6 +96,7 @@ const make = Effect.gen(function* () {
           threadId: row.threadId,
           providerSessionId: row.providerSessionId,
           providerInstanceId: row.providerInstanceId,
+          subagent: row.subagent === 1,
           remoteRun: { runId: row.runId, attemptId: row.attemptId },
         },
       },
@@ -117,6 +120,7 @@ const make = Effect.gen(function* () {
         providerInstanceId: record.scope.thread.providerInstanceId,
         runId: remote?.runId,
         attemptId: remote?.attemptId,
+        subagent: record.scope.thread.subagent === true ? 1 : 0,
         capabilities,
         issuedAt: record.scope.issuedAt,
         lastAliveAt: record.lastAliveAt,
@@ -124,10 +128,10 @@ const make = Effect.gen(function* () {
       yield* sql`
         INSERT INTO mcp_remote_credentials(token_hash, environment_id, request_namespace,
           thread_id, provider_session_id, provider_instance_id, run_id, attempt_id,
-          capabilities_json, issued_at, last_alive_at)
+          subagent, capabilities_json, issued_at, last_alive_at)
         VALUES(${row.tokenHash}, ${row.environmentId}, ${row.requestNamespace}, ${row.threadId},
           ${row.providerSessionId}, ${row.providerInstanceId}, ${row.runId}, ${row.attemptId},
-          ${capabilities}, ${row.issuedAt}, ${row.lastAliveAt})
+          ${row.subagent}, ${capabilities}, ${row.issuedAt}, ${row.lastAliveAt})
         ON CONFLICT(token_hash) DO UPDATE SET last_alive_at = MAX(last_alive_at, excluded.last_alive_at)
       `.pipe(Effect.asVoid, Effect.mapError(queryError("McpRemoteCredentialStore.save")));
     }),

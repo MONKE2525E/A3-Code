@@ -95,13 +95,10 @@ type GrokBotAvatarProps = {
 };
 
 /**
- * A Grok Bot face. The local engine that draws it is installed per environment
- * and loaded at runtime; until it is available, a neutral app-drawn disc stands
- * in, with no motion. Like the app, a bot rests until it has an activity, then animates
- * continuously for that state. Motion stops while the bot is offscreen, the document is
- * hidden, or reduced motion is on. While the pointer is over a following bot, its body
- * holds still so the eyes can track the cursor.
- * Like the app, a bot that enters "happy" or whose look changes spins and bounces once.
+ * A Grok Bot face. The local engine that draws it loads at runtime; until then a neutral disc
+ * stands in. A bot rests until it has an activity, then animates for that state. Motion stops
+ * offscreen, with the document hidden, or with reduced motion; a hovered following bot holds
+ * still so the eyes can track the cursor.
  */
 export function GrokBotAvatar(props: GrokBotAvatarProps) {
   const selectedEnvironmentId = useSelectedGrokBotEnvironmentId();

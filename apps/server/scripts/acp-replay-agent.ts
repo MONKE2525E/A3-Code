@@ -146,12 +146,6 @@ function send(message: JsonRpcMessage): void {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
-function sendInbound(message: JsonRpcMessage): void {
-  // A client can close the process as soon as it receives the last answer.
-  // Commit that frame's status before making the answer observable.
-  send(message);
-}
-
 function pendingClientRequestId(method: string): string | number | undefined {
   return pendingClientRequestIds.get(method);
 }

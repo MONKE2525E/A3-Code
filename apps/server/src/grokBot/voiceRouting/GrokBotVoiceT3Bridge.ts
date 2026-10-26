@@ -842,11 +842,12 @@ const make = Effect.gen(function* () {
               },
             } as const;
           }).pipe(
-            Effect.catch(() =>
-              Effect.succeed({
-                kind: "invalid_input",
-                output: { error: "A thread ID is required to stop watching." },
-              } as const),
+            Effect.orElseSucceed(
+              () =>
+                ({
+                  kind: "invalid_input",
+                  output: { error: "A thread ID is required to stop watching." },
+                }) as const,
             ),
           );
         case "recall_text_messages":

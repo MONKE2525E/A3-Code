@@ -200,11 +200,9 @@ export type QueuedMuseOutboxIdentity =
     };
 
 /**
- * Expected Muse identity is the canonical queued thread id plus the historical
- * provider. New outbox rows already persist `modelSelection.instanceId`; old
- * rows may infer that provider only from the exact live thread when it is
- * advertised as muse-agent. Anything else stays unverified so drain cannot
- * pretend the session is attached.
+ * Expected Muse identity is the canonical queued thread id plus the historical provider. Old
+ * outbox rows infer the provider only from the exact live thread when advertised as muse-agent;
+ * anything else stays unverified so drain cannot pretend the session is attached.
  */
 export function resolveQueuedMuseOutboxIdentity(input: {
   readonly threadId: string;

@@ -49,7 +49,6 @@ export class MuseAgentFeatureError extends Schema.TaggedError<MuseAgentFeatureEr
 const Id = Schema.String.check(
   Schema.isMinLength(1),
   Schema.isMaxLength(1024),
-  // eslint-disable-next-line no-control-regex -- Native IDs must not contain control characters.
   Schema.isPattern(/^[^\u0000-\u001f\u007f]+$/),
 );
 const Binding = Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/));

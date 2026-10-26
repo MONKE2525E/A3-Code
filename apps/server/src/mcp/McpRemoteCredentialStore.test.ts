@@ -11,9 +11,10 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import migration from "../persistence/Migrations/068_GrokBotManagedRuntime.ts";
+import subagentMigration from "../persistence/Migrations/075_McpRemoteCredentialSubagent.ts";
 import * as Store from "./McpRemoteCredentialStore.ts";
 
-const database = Layer.effectDiscard(migration).pipe(
+const database = Layer.effectDiscard(Effect.andThen(migration, subagentMigration)).pipe(
   Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
 );
 const layer = Store.layer.pipe(Layer.provideMerge(database));
@@ -30,6 +31,7 @@ const record = (hash = "a".repeat(64)): Store.RemoteCredentialRecord => ({
       threadId: ThreadId.make("thread"),
       providerSessionId: "provider-session",
       providerInstanceId: ProviderInstanceId.make("grok-bot"),
+      subagent: false,
       remoteRun: { runId: RunId.make("run"), attemptId: RunAttemptId.make("attempt") },
     },
   },

@@ -56,7 +56,7 @@ const json = Schema.decodeUnknownEffect(Schema.Json);
 export const toolkitRegistration = Effect.fn("toolkit.toolkitRegistration")(
   function* <Tools extends Record<string, Tool.Any>, EX, RX>(
     toolkit: Toolkit.Toolkit<Tools>,
-    handlers: McpToolAccess.HandlersLayer<Tools, EX, RX>,
+    _handlers: McpToolAccess.HandlersLayer<Tools, EX, RX>,
   ) {
     const built = yield* toolkit;
     // Handler services are captured once, but invocation authority is supplied afresh below.

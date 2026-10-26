@@ -27,7 +27,11 @@ export function useOpenThreadPullRequests() {
         projectId: String(thread.projectId),
         threadId: String(thread.id),
       }).then((opened) => {
-        if (!opened) Dialog.alert("Unable to open PR", "The pull request could not be opened.");
+        if (!opened)
+          Dialog.alert(
+            `Unable to open ${pr.changeRequest.shortLabel}`,
+            `The ${pr.changeRequest.singular} could not be opened.`,
+          );
       });
     },
     [navigation, navigateToPullRequest],

@@ -12,7 +12,6 @@ import {
   deriveProviderInstanceEntries,
   getDefaultProviderInstanceModel,
   isProviderInstancePickerReady,
-  isProviderInstancePickerVisible,
   omitGrokBotModelSelection,
   resolveDefaultProviderModelSelection,
   resolveProviderCatalogAvailability,

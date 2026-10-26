@@ -87,14 +87,12 @@ const fixture = Effect.gen(function* () {
     Effect.gen(function* () {
       remote.attempts++;
       if (remote.failTransport)
-        return yield* Effect.fail(
-          new HttpClientError.HttpClientError({
-            reason: new HttpClientError.TransportError({
-              request,
-              cause: new Error("private selected-token"),
-            }),
+        return yield* new HttpClientError.HttpClientError({
+          reason: new HttpClientError.TransportError({
+            request,
+            cause: new Error("private selected-token"),
           }),
-        );
+        });
       if (remote.accountAfterResponse !== undefined) {
         const active = remote.accountAfterResponse === "signed_out" ? null : "other";
         remote.accountAfterResponse = undefined;

@@ -93,6 +93,7 @@ export function WorkspaceConnectionStatusProvider(props: { readonly children: Re
 function useReducedMotionPreference(): boolean {
   const [reducedMotion, setReducedMotion] = useState(true);
 
+  // oxlint-disable-next-line t3code/react-effect-budget -- Animate the status badge when its visibility changes.
   useEffect(() => {
     void AccessibilityInfo.isReduceMotionEnabled().then(setReducedMotion);
     const subscription = AccessibilityInfo.addEventListener(
@@ -120,6 +121,7 @@ function StatusFadeIn(props: {
 }) {
   const [opacity] = useState(() => new Animated.Value(0));
 
+  // oxlint-disable-next-line t3code/react-effect-budget -- Synchronize the badge animation with reduced-motion preferences.
   useEffect(() => {
     if (!props.animate) return;
     const animation = Animated.timing(opacity, {
@@ -270,18 +272,7 @@ function DeviceStatusIcon(props: {
   );
 }
 
-/**
- * Renders the brand/title slot of a thread-list surface, swapping the brand
- * for the workspace connection status while an environment is unavailable.
- * While any enabled device is not connected, the slot shows one icon per
- * device; tapping an icon reveals its full name and status.
- *
- * Both states occupy the same slot, so connection changes never shift the
- * layout below. While connected the brand renders untouched — no wrapper —
- * keeping the native header item on the exact element tree that predates the
- * status swap. Replaces the old WorkspaceConnectionStatus pill, which inserted
- * a row above the thread list.
- */
+/** Keep status and brand in the same header slot so connection changes do not shift the list. */
 export function WorkspaceConnectionTitle(props: {
   /** Content shown while connected (brand lockup or a screen title). */
   readonly brand: ReactNode;

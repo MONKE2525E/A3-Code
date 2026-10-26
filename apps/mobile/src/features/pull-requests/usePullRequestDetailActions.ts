@@ -1,3 +1,4 @@
+import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import type {
   EnvironmentId,
   PullRequestAction,
@@ -19,9 +20,7 @@ import {
 import {
   findProjectForChangeRequest,
   findProjectOnChangeRequestHost,
-  matchesLinkedPullRequestUrl,
-  parseChangeRequestUrl,
-} from "@t3tools/shared/changeRequestUrl";
+} from "@t3tools/client-runtime/change-request-links";
 import { readableFailure } from "@t3tools/shared/pullRequestFailure";
 import {
   buildAskAboutPullRequestHandoff,
@@ -32,11 +31,10 @@ import {
   PULL_REQUEST_ACTION_SUCCESS_LABELS,
   type FixFindingsHandoff,
 } from "@t3tools/shared/pullRequestHandoff";
-import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
 import {
   threadPullRequestKeysEqual,
   visibleThreadPullRequests,
-} from "@t3tools/shared/threadPullRequests";
+} from "@t3tools/client-runtime/thread-pull-requests";
 import { StackActions, useNavigation } from "@react-navigation/native";
 import { useAtomValue } from "@effect/atom-react";
 import * as Clipboard from "expo-clipboard";
@@ -75,13 +73,7 @@ export interface PullRequestActionStatus {
  */
 const lastHandoffPromptByDraft = new Map<string, string>();
 
-/**
- * The detail pane's three-dot menu, run the way the desktop panel runs it: host actions through
- * the typed `runAction` command with nothing shown as done until the host says so, and hand-offs
- * written into a composer for the reader to send. Opened from a thread, a hand-off lands in that
- * thread's composer and returns there; opened from the list, it opens a new thread on the
- * project, checked out on the pull request first when the task needs the code.
- */
+/** Host actions await confirmation; handoffs fill a composer for the user to send. */
 export function usePullRequestDetailActions(input: {
   readonly environmentId: EnvironmentId;
   readonly reference: PullRequestRef;
@@ -118,7 +110,8 @@ export function usePullRequestDetailActions(input: {
   const busy = useRef(false);
 
   const url = detail?.url ?? null;
-  const parsed = url === null ? null : parseChangeRequestUrl(url);
+  const parsed =
+    url === null ? null : (sourceControlClients.parseChangeRequestUrl(url)?.link ?? null);
   const linkMode = threadPullRequestLinkMode(capabilities);
   const environmentProjects = projects.filter((project) => project.environmentId === environmentId);
   const linkedHere =
@@ -131,7 +124,7 @@ export function usePullRequestDetailActions(input: {
         )
       : linkMode === "single" &&
         thread.linkedPullRequest != null &&
-        matchesLinkedPullRequestUrl(thread.linkedPullRequest, url));
+        sourceControlClients.isSameChangeRequest(thread.linkedPullRequest.url, url));
   const canLinkHere =
     thread !== null &&
     parsed !== null &&
@@ -150,7 +143,7 @@ export function usePullRequestDetailActions(input: {
       reference: { ...parsed, url },
       legacyProjectId: legacyProject?.id ?? null,
       legacyRepository:
-        sourceControlRepositorySelector(legacyProject?.repositoryIdentity) ?? undefined,
+        sourceControlClients.repositorySelector(legacyProject?.repositoryIdentity) ?? undefined,
       linked: !linked,
     });
     if (mutation === null) {
@@ -274,14 +267,15 @@ export function usePullRequestDetailActions(input: {
       });
     }
     if (!writeTask(draftKey, task)) return;
-    navigation.navigate("NewTaskSheet", {
-      screen: "NewTaskDraft",
-      params: {
-        draftId: draftKey,
-        environmentId: String(environmentId),
-        projectId: String(detail.projectId),
-      },
-    });
+    navigation.dispatch(
+      StackActions.push("Thread", {
+        draft: {
+          draftId: draftKey,
+          environmentId: String(environmentId),
+          projectId: String(detail.projectId),
+        },
+      }),
+    );
   };
 
   /** Into the originating thread's composer, then back to that thread to read it over. */

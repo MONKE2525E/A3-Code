@@ -10,6 +10,7 @@ import { appAtomRegistry } from "../../state/atom-registry";
 import { useThreadShell } from "../../state/entities";
 import { useEnvironmentShellReadiness } from "../../state/shell";
 import { useConnectionsReady, useWorkspaceEnvironments } from "../../state/workspace";
+import { useSelectWorkspaceDetail } from "../workspace/useSelectWorkspaceDetail";
 
 const pendingThreadLink = Atom.make<Exclude<ParsedThreadLink, { kind: "ignored" }> | null>(
   null,
@@ -27,6 +28,7 @@ export function interceptAndroidThreadLink(url: string | null): string | null {
 export function useAndroidThreadLinkNavigation() {
   const pending = useAtomValue(pendingThreadLink);
   const navigation = useNavigation();
+  const selectDetail = useSelectWorkspaceDetail();
   const isReady = useConnectionsReady();
   const environments = useWorkspaceEnvironments();
   const target = pending?.kind === "thread" ? pending.target : null;
@@ -57,14 +59,14 @@ export function useAndroidThreadLinkNavigation() {
     if (!pending || !result || result === "waiting") return;
     appAtomRegistry.set(pendingThreadLink, null);
     if (result === "open" && pending.kind === "thread") {
-      navigation.navigate("Thread", pending.target);
+      selectDetail({ name: "Thread", params: pending.target });
     } else {
       Alert.alert("Cannot open thread", result, [
         { text: "OK", style: "cancel" },
         { text: "Connections", onPress: () => navigation.navigate("Connections") },
       ]);
     }
-  }, [pending, result, navigation]);
+  }, [pending, result, navigation, selectDetail]);
 
   useEffect(() => {
     if (!pending) return;

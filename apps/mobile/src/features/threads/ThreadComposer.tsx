@@ -1,3 +1,4 @@
+import { useSidebarWorkspaceTabs } from "../workspace/useSystemWorkspaceTabBar";
 import { Button } from "../../components/ui/Button";
 import * as Dialog from "../../components/ui/Dialog";
 import type { ComposerTextPaste } from "../../native/T3ComposerEditor.types";
@@ -146,12 +147,100 @@ function collapsedEditorInset(text: ScaledTextRole): number {
   return Math.max(0, Math.round(COLLAPSED_EDITOR_DEFAULT_INSET - shift));
 }
 
-export const COMPOSER_EXPANDED_CHROME = 156;
+export function useCompactComposerEditor(text: ScaledTextRole, value: string) {
+  const [contentSize, setContentSize] = useState({ width: 0, height: 0 });
+  const [compactWidth, setCompactWidth] = useState(0);
+  const contentHeight = contentSize.height;
+  const rowWidth = useSharedValue(0);
+  const editorX = useSharedValue(0);
+  const editorWidth = useSharedValue(0);
+  const inset =
+    Platform.OS === "android" ? COLLAPSED_EDITOR_DEFAULT_INSET : collapsedEditorInset(text);
+  const minimum = Math.max(INLINE_EDITOR_HEIGHT, Math.ceil(text.lineHeight) + 2 * inset);
+  const height = Math.max(
+    minimum,
+    Math.min(text.lineHeight * 4 + 2 * inset, contentHeight + 2 * inset),
+  );
+  // A line that fits the expanded editor may still overflow its compact slot.
+  // Compare its measured width too so widening cannot trigger a collapse loop.
+  const isExpanded =
+    value.length > 0 &&
+    (contentHeight > text.lineHeight * 1.5 ||
+      (compactWidth > 0 && contentSize.width > compactWidth));
+  const compactRowHeight = Math.max(44, minimum);
+  const animatedHeight = useSharedValue(height);
+  const surfaceHeight = useSharedValue(compactRowHeight);
+  const targetSurfaceHeight = isExpanded ? height + 52 : compactRowHeight;
+  const expansion = useSharedValue(0);
+  useLayoutEffect(() => {
+    const config = { duration: 180, reduceMotion: ReduceMotion.System };
+    if (Platform.OS === "android") {
+      animatedHeight.set(height);
+      surfaceHeight.set(targetSurfaceHeight);
+      expansion.set(Number(isExpanded));
+      return;
+    }
+    // Resolve wrapping at the destination width before animating vertically.
+    // Intermediate widths otherwise produce taller measurements mid-transition.
+    let nextFrame: number | undefined;
+    const frame = requestAnimationFrame(() => {
+      nextFrame = requestAnimationFrame(() => {
+        animatedHeight.set(withTiming(height, config));
+        surfaceHeight.set(withTiming(targetSurfaceHeight, config));
+        expansion.set(withTiming(Number(isExpanded), config));
+      });
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      if (nextFrame !== undefined) cancelAnimationFrame(nextFrame);
+    };
+  }, [animatedHeight, expansion, height, isExpanded, surfaceHeight, targetSurfaceHeight]);
+  const containerStyle = useAnimatedStyle(() => ({
+    height: surfaceHeight.value,
+  }));
+  const editorStyle = useAnimatedStyle(() => ({
+    position: "absolute",
+    overflow: "hidden",
+    height: animatedHeight.value,
+    left: isExpanded ? 14 : editorX.value + 4,
+    right: isExpanded ? 14 : rowWidth.value - editorX.value - editorWidth.value + 4,
+    bottom:
+      (compactRowHeight - minimum) / 2 + expansion.value * (52 - (compactRowHeight - minimum) / 2),
+  }));
+  return {
+    isExpanded,
+    containerStyle,
+    editorStyle,
+    onRowLayout: (event: { nativeEvent: { layout: { width: number } } }) => {
+      rowWidth.set(event.nativeEvent.layout.width);
+    },
+    onEditorLayout: (event: { nativeEvent: { layout: { x: number; width: number } } }) => {
+      // The expanded toolbar gives this slot to the model control. Keep the
+      // compact geometry for the return transition, rather than recording zero.
+      if (!isExpanded) {
+        editorX.set(event.nativeEvent.layout.x);
+        editorWidth.set(event.nativeEvent.layout.width);
+        setCompactWidth(Math.max(0, event.nativeEvent.layout.width - 8));
+      }
+    },
+    editorProps: {
+      singleLineCentered: !isExpanded,
+      scrollEnabled: Platform.OS === "android" || contentHeight >= text.lineHeight * 4,
+      contentInsetVertical: inset,
+      onContentSizeChange: (size: { width: number; height: number }) => {
+        setContentSize(size);
+      },
+      style: { flex: 1 },
+    },
+  };
+}
 
 export interface ThreadComposerProps {
+  readonly isDraft?: boolean;
   readonly canOperateThread: boolean;
   readonly placeholder: string;
   readonly contentMaxWidth?: number;
+  readonly draftControls?: ReactNode;
   readonly bottomInset?: number;
   readonly connectionState: RemoteClientConnectionState;
   readonly environmentLabel: string | null;
@@ -166,6 +255,7 @@ export interface ThreadComposerProps {
   readonly environmentId: EnvironmentId;
   readonly projectCwd: string | null;
   readonly sendBlockedReason?: string | null;
+  readonly interactionLocked?: boolean;
   readonly draftKey?: string;
   readonly queuedEdit?: {
     readonly existingAttachments: ReadonlyArray<ChatAttachment>;
@@ -185,12 +275,17 @@ export interface ThreadComposerProps {
   readonly onStopThread: () => void;
   /** Present while the thread's queue is held. */
   readonly onResumeQueue: (() => Promise<void>) | null;
-  readonly onSendMessage: (followUp?: ActiveTurnComposerAction) => Promise<MessageId | null>;
+  /** `stillSendable` reports whether the draft is unchanged after any wait before sending. */
+  readonly onSendMessage: (
+    followUp?: ActiveTurnComposerAction,
+    stillSendable?: () => boolean,
+  ) => Promise<MessageId | null>;
   readonly onShowUsageLimits: (report: UsageLimitsReport | null) => void;
   readonly canSwitchProvider: boolean;
   readonly onUpdateModelSelection: (modelSelection: ModelSelection) => void;
   readonly onUpdateRuntimeMode: (runtimeMode: RuntimeMode) => void;
-  readonly onUpdateInteractionMode: (interactionMode: ProviderInteractionMode) => void;
+  readonly onHeightChange?: (height: number) => void;
+  readonly onUpdateInteractionMode?: (interactionMode: ProviderInteractionMode) => void;
   /** True while the draft is stacked above the controls rather than in the one-row capsule. */
   readonly onExpandedChange?: (expanded: boolean) => void;
   readonly fullscreen: ComposerFullscreenController;
@@ -201,8 +296,6 @@ export const COMPOSER_LAYOUT_TRANSITION =
   Platform.OS === "android" ? undefined : COMPOSER_HEIGHT_TRANSITION;
 // Share of the one-row composer the draft keeps; a long model name truncates first.
 const INLINE_EDITOR_MIN_WIDTH = "40%";
-// The one-row editor's horizontal padding plus room for the caret.
-const INLINE_EDITOR_TEXT_SLACK = 10;
 const INLINE_EDITOR_HEIGHT = 36;
 
 const COMPOSER_ATTACHMENT_ENTERING =
@@ -227,6 +320,7 @@ const FOLLOW_UP_ACTION_SUBTITLE = {
 } as const;
 
 function SendActionButton(props: {
+  readonly size?: "regular" | "large";
   readonly accessibilityLabel: string;
   readonly presentation: ComposerSendPresentation;
   readonly disabled: boolean;
@@ -236,6 +330,7 @@ function SendActionButton(props: {
   const button = (
     <ComposerActionButton
       accessibilityLabel={props.accessibilityLabel}
+      size={props.size}
       icon={presentation.icon}
       variant="primary"
       disabled={props.disabled}
@@ -281,15 +376,19 @@ export function ComposerSurface(props: {
   const shouldAnimate =
     props.animateLayout === true || (props.animateLayout !== false && Platform.OS !== "android");
   useLayoutEffect(() => {
-    animatedBorderRadius.value = shouldAnimate
-      ? withTiming(targetBorderRadius, {
-          duration: COMPOSER_TRANSITION_DURATION_MS,
-          reduceMotion: ReduceMotion.System,
-        })
-      : targetBorderRadius;
+    animatedBorderRadius.set(
+      shouldAnimate
+        ? withTiming(targetBorderRadius, {
+            duration: COMPOSER_TRANSITION_DURATION_MS,
+            reduceMotion: ReduceMotion.System,
+          })
+        : targetBorderRadius,
+    );
   }, [animatedBorderRadius, shouldAnimate, targetBorderRadius]);
+  const borderCurve = props.style.borderCurve;
   const animatedShapeStyle = useAnimatedStyle(() => ({
     borderRadius: animatedBorderRadius.value,
+    ...(borderCurve ? { borderCurve } : {}),
   }));
   const layoutTransition =
     props.animateLayout === true
@@ -310,8 +409,7 @@ export function ComposerSurface(props: {
         }
       : null;
 
-  // Each native frame follows the same transition. Animating only the outer
-  // clip leaves the glass and content at their final height on the first frame.
+  // Animate every native frame or glass and content jump to final height inside the clip.
   return (
     <Animated.View
       className={
@@ -350,6 +448,9 @@ export function ComposerSurface(props: {
   );
 }
 
+/** Space below the composer pill, inside the bottom inset it is given. */
+export const THREAD_COMPOSER_BOTTOM_GUTTER = 6;
+
 export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps) {
   const project = useProject(scopeProjectRef(props.environmentId, props.selectedThread.projectId));
   const { themeVariables: materialTheme } = useAppearancePreferences();
@@ -362,6 +463,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
   const inputRef = props.editorRef ?? fallbackInputRef;
   const [isFocused, setIsFocused] = useState(false);
   const pendingPastedTextAttachmentCountRef = useRef(0);
+  const pendingNativeImagePasteCountRef = useRef(0);
   const [pendingPastedTextAttachmentCount, setPendingPastedTextAttachmentCount] = useState(0);
   const settingsSheetPresentation = useThreadSettingsSheetPresentation({
     editorRef: inputRef,
@@ -371,7 +473,6 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
   const settingsRoutePresentedRef = useRef(false);
   const wasExpandedBeforePreviewRef = useRef(false);
   const inFlightThreadIdsRef = useRef(new Set<string>());
-  const { onExpandedChange } = props;
 
   const [previewFile, setPreviewFile] = useState<FilePreviewSource | null>(null);
   const [previewVideo, setPreviewVideo] = useState<VideoPreviewSource | null>(null);
@@ -478,7 +579,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     pullRequestRepository: project?.repositoryIdentity?.displayName ?? null,
     threadPullRequests: props.selectedThread.pullRequests,
     selectedProviderStatus,
-    hasThread: true,
+    hasThread: !props.isDraft,
     hasCompactableConversation: props.hasCompactableConversation,
     onChangeDraftMessage: props.onChangeDraftMessage,
     onUpdateInteractionMode:
@@ -498,7 +599,8 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     onChangeDraftMessage: (text) => setComposerDraftText(composerDraftKey, text),
     onChangeSelection: composerMenu.onSelectionChange,
   });
-  const isSubmissionLocked = queuedEdit?.saving === true || voiceInput.blocksSubmission;
+  const isSubmissionLocked =
+    props.interactionLocked === true || queuedEdit?.saving === true || voiceInput.blocksSubmission;
   const voicePresentation = resolveVoiceComposerPresentation(
     voiceInput.state,
     voiceInput.elapsedSeconds,
@@ -523,14 +625,9 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     : COMPOSER_LAYOUT_TRANSITION;
   const isExpanded = isFocused || settingsSheetPresentation.keepsComposerExpanded || isFullscreen;
   const { setComposerEditing } = useAdaptiveWorkspaceLayout();
-  // The composer stays one row, with the model picker in it, until the draft would
-  // wrap. Then the draft stacks above the controls and returns to the row once it
-  // fits again. The native editor reports its laid-out text size: more than one
-  // line means the draft wrapped where it is, and the widest line is a one-line
-  // draft's natural width, which is compared with the row's text area so a draft
-  // laid out in the wider card still returns to the row when it fits, including
-  // when the pane widens. The measurements live in refs and only the verdict is
-  // state, so a keystroke that keeps the verdict costs no extra render.
+  // Native text measurements decide row/card layout; refs avoid a render on every keystroke.
+  const hasSidebarTabBar = useSidebarWorkspaceTabs() === "picker";
+
   const draftSizeRef = useRef({ width: 0, height: 0 });
   const rowGeometryRef = useRef({ surfaceWidth: 0, leadingWidth: 0, trailingWidth: 0 });
   const [draftOverflowsRow, setDraftOverflowsRow] = useState(false);
@@ -538,8 +635,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
   const updateDraftOverflow = () => {
     const { width, height } = draftSizeRef.current;
     const row = rowGeometryRef.current;
-    const rowTextWidth =
-      row.surfaceWidth - row.leadingWidth - row.trailingWidth - INLINE_EDITOR_TEXT_SLACK;
+    const rowTextWidth = row.surfaceWidth - row.leadingWidth - row.trailingWidth - 10;
     setDraftOverflowsRow(
       height > lineHeight * 1.5 || (row.surfaceWidth > 0 && width > rowTextWidth),
     );
@@ -576,9 +672,6 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     sendBlockedReason === null &&
     !modelUnavailable;
 
-  useEffect(() => {
-    onExpandedChange?.(usesCard);
-  }, [usesCard, onExpandedChange]);
   useEffect(() => () => setComposerEditing(false), [setComposerEditing]);
 
   const onPressPreview = (source: FilePreviewSource) => {
@@ -632,16 +725,27 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     if (inFlightThreadIdsRef.current.has(threadKey)) return;
     setFullscreen(false);
     inFlightThreadIdsRef.current.add(threadKey);
-    const sent = await settlePromise(() => onSendMessage(followUp));
+    const draftAtSend = getComposerDraftSnapshot(composerDraftKey);
+    const stillSendable = () => {
+      const draft = getComposerDraftSnapshot(composerDraftKey);
+      return (
+        pendingPastedTextAttachmentCountRef.current === 0 &&
+        pendingNativeImagePasteCountRef.current === 0 &&
+        draft.text === draftAtSend.text &&
+        draft.attachments.length === draftAtSend.attachments.length &&
+        draft.attachments.every(
+          (attachment, index) => attachment.id === draftAtSend.attachments[index]?.id,
+        )
+      );
+    };
+    const sent = await settlePromise(() => onSendMessage(followUp, stillSendable));
     inFlightThreadIdsRef.current.delete(threadKey);
     if (AsyncResult.isFailure(sent)) {
-      // The composer state already surfaces send errors; only the lock needed releasing.
       console.error("[composer] send failed", squashAtomCommandFailure(sent));
       return;
     }
     if (sent.value === null) return;
-    // Armed after the send so its preference read and native Activity start don't contend
-    // with the queued-message feedback on the tap frame.
+    // Arm after send so preference reads and native Activity startup do not delay tap-frame feedback.
     armAgentAwarenessLiveActivityForLocalWork({
       environmentId: props.environmentId,
       threadTitle: props.selectedThread.title,
@@ -726,10 +830,10 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     settingsRoutePresentation.clear(settingsOwnerId);
   });
 
+  // oxlint-disable-next-line t3code/react-effect-budget -- Restore the keyboard after the native stack finishes dismissing.
   useEffect(
     () =>
-      // UIKit's completion callback for the sheet dismissal, surfaced by the
-      // native-stack patch. This is when the queued keyboard restore runs.
+      // The native-stack patch exposes UIKit dismissal completion; restore the keyboard then.
       (navigation as unknown as NavigationWithFinishTransitioning).addListener(
         "finishTransitioning",
         settingsSheetPresentation.onStackTransitionsFinished,
@@ -742,7 +846,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     <>
       {queuedEdit !== null && queuedEdit.existingAttachments.length > 0 ? (
         <Animated.View
-          className="px-[14px] pb-2.5"
+          className="px-[14px] pb-2.5 pt-2"
           entering={COMPOSER_ATTACHMENT_ENTERING}
           exiting={FadeOut.duration(120)}
         >
@@ -756,7 +860,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
       ) : null}
       {stripAttachments.length > 0 ? (
         <Animated.View
-          className="px-[14px] pb-2.5"
+          className="px-[14px] pb-2.5 pt-2"
           entering={COMPOSER_ATTACHMENT_ENTERING}
           exiting={FadeOut.duration(120)}
         >
@@ -783,19 +887,17 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
     </>
   ) : null;
 
-  // The row and the card's toolbar share this picker. It shrinks to the provider
-  // icon in the row once the draft has text, so the draft keeps the width.
   const modelControl = (
     <View className="min-w-0 shrink">
       <ComposerModelControl
+        size={hasSidebarTabBar ? "large" : "regular"}
         modelOption={currentModelOption}
         selection={currentModelSelection}
         provider={selectedProviderStatus?.driver}
         reportedSelection={props.reportedModelSelection}
         prompt={draftMessage}
         surfaceColor={composerPanel}
-        iconOnly={!usesCard && draftMessage.length > 0}
-        showSummary={usesCard}
+        iconOnly={!usesCard}
         onPress={openSettings}
       />
     </View>
@@ -803,10 +905,11 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
 
   return (
     <Animated.View
+      onLayout={(event) => props.onHeightChange?.(event.nativeEvent.layout.height)}
       className="px-[12px]"
       style={{
-        paddingTop: usesCard ? 8 : 6,
-        paddingBottom: (props.bottomInset ?? 0) + (usesCard ? 8 : 6),
+        paddingTop: 6,
+        paddingBottom: (props.bottomInset ?? 0) + THREAD_COMPOSER_BOTTOM_GUTTER,
         backgroundColor:
           Platform.OS === "android" || isFullscreen
             ? themeColorWithAlpha(composerPanel, 1)
@@ -814,9 +917,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
         ...(isFullscreen ? { flex: 1 } : null),
       }}
     >
-      {/* The backdrop gradient lives on a plain View: Reanimated's Animated.View
-          silently drops experimental_backgroundImage on Android, which left this
-          strip fully transparent and the feed text legible through the composer. */}
+      {/* Use a plain View: Reanimated Animated.View drops experimental_backgroundImage on Android. */}
       <View
         className={
           Platform.OS === "android"
@@ -830,6 +931,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
         style={{ maxWidth: props.contentMaxWidth, ...(isFullscreen ? { flex: 1 } : null) }}
         onLayout={(event) => measureRow("surfaceWidth", event.nativeEvent.layout.width)}
       >
+        {props.draftControls}
         {!isSubmissionLocked &&
         composerMenu.trigger &&
         (composerMenu.items.length > 0 || composerMenu.trigger.kind === "pull-request") ? (

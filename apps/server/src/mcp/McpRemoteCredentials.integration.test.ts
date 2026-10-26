@@ -15,13 +15,17 @@ import { HttpServer } from "effect/http";
 import * as NetAddress from "effect/net/NetAddress";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import migration from "../persistence/Migrations/068_GrokBotManagedRuntime.ts";
+import subagentMigration from "../persistence/Migrations/075_McpRemoteCredentialSubagent.ts";
 import * as Store from "./McpRemoteCredentialStore.ts";
 import * as Validator from "./McpRemoteRunValidator.ts";
 import * as Registry from "./McpSessionRegistry.ts";
 
-const database = Layer.effectDiscard(migration).pipe(
-  Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
-);
+const database = Layer.effectDiscard(
+  Effect.gen(function* () {
+    yield* migration;
+    yield* subagentMigration;
+  }),
+).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 const layer = Store.layer.pipe(Layer.provideMerge(database));
 const request: Registry.McpCredentialRequest = {
   threadId: ThreadId.make("owned-cloud-thread"),
@@ -91,6 +95,24 @@ describe("durable remote MCP credentials", () => {
         assert.isUndefined(yield* third.resolve(token(remote)));
         assert.lengthOf(yield* sql`SELECT token_hash FROM mcp_remote_credentials`, 0);
       }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("preserves delegated-child authority across registry reconstruction", () =>
+    Effect.gen(function* () {
+      const first = yield* makeRegistry(
+        () => 1000,
+        () => true,
+      );
+      const remote = yield* first.issue({ ...request, subagent: true });
+      const expected = yield* first.resolve(token(remote));
+      assert.isTrue(expected?.thread?.subagent);
+
+      const second = yield* makeRegistry(
+        () => 1010,
+        () => true,
+      );
+      assert.deepStrictEqual(yield* second.resolve(token(remote)), expected);
+    }).pipe(Effect.provide(layer)),
   );
 
   it.effect(

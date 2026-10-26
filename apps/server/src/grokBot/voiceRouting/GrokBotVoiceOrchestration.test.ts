@@ -21,6 +21,7 @@ import * as OrchestratorHandlers from "../../mcp/toolkits/orchestrator/handlers.
 import * as ProjectHandlers from "../../mcp/toolkits/project/handlers.ts";
 import * as ThreadHandlers from "../../mcp/toolkits/thread/handlers.ts";
 import * as ThreadSearch from "../../orchestration-v2/ThreadSearch.ts";
+import * as DocumentText from "../../provider/DocumentText.ts";
 import * as ScheduledTasks from "../../scheduledTasks/ScheduledTaskService.ts";
 import * as SourceControl from "../../sourceControl/SourceControlRepositoryService.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
@@ -115,6 +116,7 @@ const harness = (getEnvironmentId = Effect.succeed(EnvironmentId.make("voice-env
         Layer.succeed(Metadata.ThreadMetadataMcpService, {} as never),
         Layer.succeed(Threads.ThreadManagementService, {} as never),
         Layer.succeed(ThreadSearch.ThreadSearch, {} as never),
+        Layer.mock(DocumentText.DocumentText)({}),
         Layer.succeed(ScheduledTasks.ScheduledTaskService, {} as never),
         Layer.succeed(SourceControl.SourceControlRepositoryService, {} as never),
         Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),

@@ -42,12 +42,9 @@ const millis = (value: string | number | undefined) => {
 };
 
 /**
- * Decides when a managed turn that never called grok_bot_complete_turn is over.
- *
- * Pure bookkeeping: the adapter feeds it native frames, owned answer rows, and a clock, and applies
- * the verdicts through the settlement projection. A turn is busy, and its clocks reset, while native
- * reports running work, subagents, or an awaited user response, or while T3 holds a pending request.
- * Otherwise its fate depends on whether native live state is observable at all.
+ * Decides when a managed turn that never called grok_bot_complete_turn is over. Pure bookkeeping
+ * fed native frames, owned answer rows and a clock. A turn is busy while native reports running
+ * work, subagents or an awaited user response, or while T3 holds a pending request.
  */
 export const makeGrokBotTurnWatchdog = (openedAtMs: number) => {
   const tracked = new Map<string, Tracked>();

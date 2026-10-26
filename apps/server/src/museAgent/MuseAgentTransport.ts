@@ -280,7 +280,6 @@ const decodeConnectionId = Schema.decodeUnknownSync(
 const ComputerStreamId = Schema.String.check(
   Schema.isMinLength(1),
   Schema.isMaxLength(1024),
-  // eslint-disable-next-line no-control-regex -- These native IDs must remain one route segment.
   Schema.isPattern(/^[^/\\\u0000-\u001f\u007f]+$/),
 );
 const decodeComputerStreamInput = Schema.decodeEffect(
@@ -322,7 +321,6 @@ const decodeComputerPreviewInput = Schema.decodeUnknownEffect(
     taskId: Schema.String.check(
       Schema.isMinLength(1),
       Schema.isMaxLength(256),
-      // eslint-disable-next-line no-control-regex -- Preview IDs become one native route segment.
       Schema.isPattern(/^[^/\\\u0000-\u001f\u007f]+$/),
     ),
     sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
