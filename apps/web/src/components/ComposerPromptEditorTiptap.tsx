@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import { documentIconColorForFileName } from "~/pierre-icons";
 import { isProviderSkillUserInvocable } from "@t3tools/client-runtime/providerSkills";
 import { formatProviderSkillDisplayName } from "@t3tools/shared/inlineSkills";
 import {
@@ -46,6 +46,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
 } from "react";
@@ -270,6 +271,7 @@ function ComposerMentionNodeView({ node }: NodeViewProps) {
   const connector = actions.grokBotResources?.connectors.find(
     (candidate) => grokBotConnectorLabel(candidate) === path,
   );
+  const accent = documentIconColorForFileName(path);
   const chip = (
     <ContextChip
       kind="mention"
@@ -283,7 +285,9 @@ function ComposerMentionNodeView({ node }: NodeViewProps) {
               "--context-chip-accent":
                 GROK_BOT_AVATAR_COLORS[resolveGrokBotAvatarColor(bot.avatarColor ?? "", bot.id)],
             } as CSSProperties)
-          : undefined
+          : accent && !connector
+            ? ({ "--context-chip-accent": accent } as CSSProperties)
+            : undefined
       }
       contentEditable={false}
       spellCheck={false}

@@ -31,6 +31,7 @@ const record = (hash = "a".repeat(64)): Store.RemoteCredentialRecord => ({
       threadId: ThreadId.make("thread"),
       providerSessionId: "provider-session",
       providerInstanceId: ProviderInstanceId.make("grok-bot"),
+      subagent: false,
       remoteRun: { runId: RunId.make("run"), attemptId: RunAttemptId.make("attempt") },
     },
   },

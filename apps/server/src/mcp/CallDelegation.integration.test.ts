@@ -76,6 +76,7 @@ import * as Environment from "../environment/ServerEnvironment.ts";
 import * as ProjectHandlers from "./toolkits/project/handlers.ts";
 import * as ThreadHandlers from "./toolkits/thread/handlers.ts";
 import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
+import * as DocumentText from "../provider/DocumentText.ts";
 import * as SourceControl from "../sourceControl/SourceControlRepositoryService.ts";
 import * as Launches from "../orchestration-v2/ThreadLaunchService.ts";
 import * as Folders from "../project/ManagedProjectFolders.ts";
@@ -994,6 +995,7 @@ const directLayerFor = (context: Effect.Success<typeof setup>["context"]) =>
           Layer.provide(NodeServices.layer),
         ),
         Layer.succeed(ThreadSearch.ThreadSearch, {} as never),
+        Layer.mock(DocumentText.DocumentText)({}),
         Layer.succeed(ScheduledTaskService.ScheduledTaskService, {} as never),
         Layer.succeed(SourceControl.SourceControlRepositoryService, {} as never),
         Access.HandlersLayer.layer(Handlers.layer),
@@ -2288,6 +2290,7 @@ it.effect(
             Layer.provide(NodeServices.layer),
           ),
           Layer.succeed(ThreadSearch.ThreadSearch, {} as never),
+          Layer.mock(DocumentText.DocumentText)({}),
           Layer.succeed(ScheduledTaskService.ScheduledTaskService, {} as never),
           Layer.succeed(SourceControl.SourceControlRepositoryService, {} as never),
           Access.HandlersLayer.layer(Handlers.layer),

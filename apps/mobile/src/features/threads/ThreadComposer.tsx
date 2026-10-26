@@ -376,12 +376,14 @@ export function ComposerSurface(props: {
   const shouldAnimate =
     props.animateLayout === true || (props.animateLayout !== false && Platform.OS !== "android");
   useLayoutEffect(() => {
-    animatedBorderRadius.value = shouldAnimate
-      ? withTiming(targetBorderRadius, {
-          duration: COMPOSER_TRANSITION_DURATION_MS,
-          reduceMotion: ReduceMotion.System,
-        })
-      : targetBorderRadius;
+    animatedBorderRadius.set(
+      shouldAnimate
+        ? withTiming(targetBorderRadius, {
+            duration: COMPOSER_TRANSITION_DURATION_MS,
+            reduceMotion: ReduceMotion.System,
+          })
+        : targetBorderRadius,
+    );
   }, [animatedBorderRadius, shouldAnimate, targetBorderRadius]);
   const borderCurve = props.style.borderCurve;
   const animatedShapeStyle = useAnimatedStyle(() => ({
