@@ -3,16 +3,13 @@ import {
   CommandId,
   MessageId,
   NodeId,
-  type OrchestrationV2Command,
   type OrchestrationV2Run,
-  type OrchestrationV2Subagent,
   type OrchestrationV2ProviderThread,
   ProviderThreadId,
   ProviderDriverKind,
   ProviderSessionId,
   type OrchestrationV2StoredEvent,
   type OrchestrationV2ThreadProjection,
-  type OrchestrationV2ThreadShell,
   ProjectId,
   ProviderInstanceId,
   RunId,
@@ -21,16 +18,14 @@ import {
 import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
-import * as Duration from "effect/Duration";
+
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
-import * as Ref from "effect/Ref";
-import * as Stream from "effect/Stream";
-import * as TestClock from "effect/testing/TestClock";
 
-import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
+import * as Stream from "effect/Stream";
+
 import * as ServerSettings from "../serverSettings.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
@@ -39,23 +34,10 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
-import { DispatchModeLimit, type DispatchModeRefusal } from "./DispatchModeLimit.ts";
 
 const layerReceiptsTest = CommandReceiptStore.layer.pipe(
   Layer.provide(SqlitePersistence.layerMemory),
 );
-
-const layerThreadManagementTest = (settingsLayer: ReturnType<typeof ServerSettings.layerTest>) =>
-  ThreadManagementService.layer.pipe(
-    Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
-    Layer.provide(
-      Layer.mock(Orchestrator.OrchestratorV2)({
-        restartContinuationPending: () => Effect.succeed(false),
-      }),
-    ),
-    Layer.provide(settingsLayer),
-    Layer.provide(layerReceiptsTest),
-  );
 
 const layerDispatchChokepointTest =
   (settingsLayer: ReturnType<typeof ServerSettings.layerTest>) => (dispatched: Array<string>) =>
@@ -232,12 +214,10 @@ it.effect.each(["user_input", "command"] as const)(
             streamStoredEventsFrom: (input) =>
               input?.eventType === "runtime-request.updated"
                 ? Stream.fromEffect(
-                    Effect.gen(function* () {
-                      yield* Deferred.succeed(
-                        subscriptions++ === 0 ? subscribed : resubscribed,
-                        undefined,
-                      );
-                    }),
+                    Deferred.succeed(
+                      subscriptions++ === 0 ? subscribed : resubscribed,
+                      undefined,
+                    ).pipe(Effect.asVoid),
                   ).pipe(Stream.drain, Stream.concat(Stream.fromQueue(events)))
                 : Stream.never,
             getThreadRecords: () =>
@@ -328,12 +308,10 @@ it.effect(
             streamStoredEventsFrom: (input) =>
               input?.eventType === "run.updated"
                 ? Stream.fromEffect(
-                    Effect.gen(function* () {
-                      yield* Deferred.succeed(
-                        subscriptions++ === 0 ? subscribed : resubscribed,
-                        undefined,
-                      );
-                    }),
+                    Deferred.succeed(
+                      subscriptions++ === 0 ? subscribed : resubscribed,
+                      undefined,
+                    ).pipe(Effect.asVoid),
                   ).pipe(Stream.drain, Stream.concat(Stream.fromQueue(events)))
                 : Stream.never,
             getThreadRecords: () =>
@@ -975,5 +953,143 @@ it.effect("waitForThread returns the cut run once its continuation is declined",
     const result = yield* Fiber.join(fiber);
 
     expect(result).toMatchObject({ timedOut: false, run: { id: runId, status: "cancelled" } });
+  }),
+);
+
+it.effect.each(["live", "no-session", "unsupported-runtime"] as const)(
+  "marks background work awaited on the thread's active provider thread with state %s",
+  (state) =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread:background-wait");
+      const providerThreadId = ProviderThreadId.make("provider-thread:background-wait");
+      const providerSessionId = ProviderSessionId.make("provider-session:background-wait");
+      const driver = ProviderDriverKind.make("claudeAgent");
+      const now = yield* DateTime.now;
+      const providerThread: OrchestrationV2ProviderThread = {
+        id: providerThreadId,
+        driver,
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        providerSessionId,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        nativeThreadRef: { driver, nativeId: "native-thread", strength: "strong" },
+        nativeConversationHeadRef: null,
+        status: "idle",
+        firstRunOrdinal: 1,
+        lastRunOrdinal: 1,
+        handoffIds: [],
+        forkedFrom: null,
+        pendingBackgroundTasks: [{ taskId: "tests", kind: "command" }],
+        contextUsage: null,
+        nativeMetadata: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const calls: Array<{ providerThreadId: ProviderThreadId; awaited: boolean }> = [];
+      const runtime = {
+        driver,
+        providerSessionId,
+        ...(state === "unsupported-runtime"
+          ? {}
+          : {
+              awaitBackgroundTasks: (input: {
+                readonly providerThread: OrchestrationV2ProviderThread;
+                readonly taskIds: ReadonlyArray<string>;
+                readonly awaited: boolean;
+              }) =>
+                Effect.sync(() => {
+                  calls.push({
+                    providerThreadId: input.providerThread.id,
+                    awaited: input.awaited,
+                  });
+                  return { matched: input.taskIds.filter((taskId) => taskId === "tests") };
+                }),
+            }),
+      } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime;
+      const layerTest = ThreadManagementService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(Orchestrator.OrchestratorV2)({
+              getThreadRecords: () =>
+                Effect.succeed({
+                  thread: {
+                    id: threadId,
+                    deletedAt: null,
+                    activeProviderThreadId: providerThreadId,
+                  },
+                  providerThreads: [providerThread],
+                } as unknown as OrchestrationV2ThreadProjection),
+            }),
+            Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+              get: () =>
+                Effect.succeed(state === "no-session" ? Option.none() : Option.some(runtime)),
+            }),
+          ),
+        ),
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(layerReceiptsTest),
+      );
+      const result = yield* Effect.gen(function* () {
+        const service = yield* ThreadManagementService.ThreadManagementService;
+        return yield* service
+          .awaitBackgroundTasks({ threadId, taskIds: ["tests", "finished"], awaited: true })
+          .pipe(Effect.result);
+      }).pipe(Effect.provide(Layer.merge(layerTest, ThreadCommandExecutor.layer)));
+
+      if (state === "live") {
+        expect(result).toMatchObject({
+          success: { matched: ["tests"], unmatched: ["finished"] },
+        });
+        expect(calls).toEqual([{ providerThreadId, awaited: true }]);
+      } else {
+        expect(result).toMatchObject({
+          failure: {
+            _tag: "ThreadManagementBackgroundWaitError",
+            reason: state === "no-session" ? "unavailable" : "unsupported",
+          },
+        });
+        expect(calls).toEqual([]);
+      }
+    }),
+);
+
+it.effect.each([
+  { status: "completed" as const, settles: true },
+  { status: "failed" as const, settles: false },
+  { status: "interrupted" as const, settles: false },
+])("settleAfterRun settles only when the run $status", ({ status, settles }) =>
+  Effect.gen(function* () {
+    const projectId = ProjectId.make("project:thread-management:settle-after-run");
+    const threadId = ThreadId.make("thread:thread-management:settle-after-run");
+    const runId = RunId.make("run:thread-management:settle-after-run");
+    const dispatched: Array<string> = [];
+    const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+      Layer.provide(
+        Layer.mock(Orchestrator.OrchestratorV2)({
+          getThreadEventSequence: () => Effect.succeed(0),
+          restartContinuationPending: () => Effect.succeed(false),
+          getThreadRecords: () =>
+            Effect.succeed({
+              thread: { id: threadId, projectId, deletedAt: null },
+              runs: [{ id: runId, status }],
+            } as unknown as OrchestrationV2ThreadProjection),
+          dispatch: (command) =>
+            Effect.sync(() => {
+              dispatched.push(command.type);
+              return { sequence: 1, storedEvents: [] } as never;
+            }),
+        }),
+      ),
+      Layer.provide(ServerSettings.layerTest()),
+      Layer.provide(layerReceiptsTest),
+    );
+    const service = yield* ThreadManagementService.ThreadManagementService.pipe(
+      Effect.provide(layerTest),
+    );
+
+    yield* service.settleAfterRun({ projectId, threadId, runId });
+
+    expect(dispatched).toEqual(settles ? ["thread.settle"] : []);
   }),
 );

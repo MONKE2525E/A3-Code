@@ -1,9 +1,9 @@
+import { useOpenLinkedThread } from "../features/threads/useOpenLinkedThread";
 import * as Dialog from "./ui/Dialog";
 import { ComposerContextId } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import { useNavigation } from "@react-navigation/native";
 import { useEffect, useRef, useState } from "react";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
@@ -166,7 +166,7 @@ export function ComposerEditor({
           }),
         })
       : "";
-  const navigation = useNavigation();
+  const openLinkedThread = useOpenLinkedThread();
   const selectedReference = selected
     ? collectComposerContextReferences(selected.source)[0]
     : undefined;
@@ -248,7 +248,7 @@ export function ComposerEditor({
             : {})}
           onOpenThread={(thread) => {
             setSelected(null);
-            navigation.navigate("Thread", {
+            openLinkedThread({
               environmentId: String(thread.environmentId),
               threadId: String(thread.threadId),
             });

@@ -251,52 +251,49 @@ const setup = Effect.gen(function* () {
       Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
     ),
   );
-  const services = Mcp.layer
-    .pipe(
-      Layer.provide(
-        Layer.mergeAll(
-          Layer.mock(MergeLaunch.ThreadLaunchService)({}),
-          Layer.mock(MergeGit.GitVcsDriver)({}),
-        ),
+  const services = Mcp.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(MergeLaunch.ThreadLaunchService)({}),
+        Layer.mock(MergeGit.GitVcsDriver)({}),
       ),
-    )
-    .pipe(
-      Layer.provideMerge(
-        Layer.mergeAll(
-          orchestration,
-          Layer.effect(
-            ThreadManagement.ThreadManagementService,
-            Effect.gen(function* () {
-              const threads = yield* ThreadManagement.ThreadManagementService;
-              return ThreadManagement.ThreadManagementService.of({
-                ...threads,
-                streamStoredEventsFrom: (input) =>
-                  Stream.concat(
-                    Stream.fromEffect(
-                      Queue.offer(subscriptions, {
-                        threadId: input?.threadId,
-                        eventType: input?.eventType,
-                      }),
-                    ).pipe(Stream.drain),
-                    threads.streamStoredEventsFrom(input),
-                  ),
-              });
-            }),
-          ).pipe(Layer.provide(orchestration)),
-        ),
+    ),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        orchestration,
+        Layer.effect(
+          ThreadManagement.ThreadManagementService,
+          Effect.gen(function* () {
+            const threads = yield* ThreadManagement.ThreadManagementService;
+            return ThreadManagement.ThreadManagementService.of({
+              ...threads,
+              streamStoredEventsFrom: (input) =>
+                Stream.concat(
+                  Stream.fromEffect(
+                    Queue.offer(subscriptions, {
+                      threadId: input?.threadId,
+                      eventType: input?.eventType,
+                    }),
+                  ).pipe(Stream.drain),
+                  threads.streamStoredEventsFrom(input),
+                ),
+            });
+          }),
+        ).pipe(Layer.provide(orchestration)),
       ),
-      Layer.provide(
-        Layer.mergeAll(
-          adapters,
-          ProviderRegistryMock.layer(providers),
-          Layer.mock(ProjectService.ProjectService)({}),
-          Layer.mock(SecretRequests.SecretRequests)({}),
-          ServerSettings.layerTest(),
-          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
-          NodeServices.layer,
-        ),
+    ),
+    Layer.provide(
+      Layer.mergeAll(
+        adapters,
+        ProviderRegistryMock.layer(providers),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        ServerSettings.layerTest(),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        NodeServices.layer,
       ),
-    );
+    ),
+  );
   const serviceScope = yield* Scope.make();
   const context = yield* Layer.buildWithScope(services, serviceScope);
   yield* Effect.addFinalizer(() => Scope.close(serviceScope, Exit.void));

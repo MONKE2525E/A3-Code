@@ -11,6 +11,7 @@ import type {
   ScopedThreadRef,
 } from "@t3tools/contracts";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
+import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { videoMimeType } from "@t3tools/shared/video";
 import { Platform, Pressable, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -184,6 +185,10 @@ export function ComposerContextSheet(props: {
     record?.kind === "review-comment" && "pullRequest" in record
       ? record.pullRequest?.url
       : undefined;
+  const changeRequestTerm = (
+    (pullRequestUrl ? sourceControlClients.findByChangeRequestUrl(pullRequestUrl) : undefined) ??
+    sourceControlClients.get(undefined)
+  ).changeRequest.singular;
   const terminal = record?.kind === "terminal" && !("payload" in record) ? record : null;
   return (
     <Sheet title={terminal?.terminalLabel ?? props.label} onClose={props.onClose}>
@@ -365,7 +370,7 @@ export function ComposerContextSheet(props: {
             }}
             className="rounded-xl bg-subtle p-4"
           >
-            <Text className="text-foreground">Open pull request</Text>
+            <Text className="text-foreground">Open {changeRequestTerm}</Text>
           </Pressable>
         ) : null}
         {props.onOpenAttachment ? (
@@ -378,7 +383,7 @@ export function ComposerContextSheet(props: {
         ) : null}
         {props.onOpenPullRequest && !pullRequestUrl ? (
           <Button
-            label="Open pull request"
+            label={`Open ${changeRequestTerm}`}
             tone="secondary"
             onPress={props.onOpenPullRequest}
             fullWidth

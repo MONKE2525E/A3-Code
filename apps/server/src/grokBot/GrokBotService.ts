@@ -619,8 +619,9 @@ const make = Effect.gen(function* () {
     Effect.catchTags({
       GrokBotNativeSignedOutError: () => Effect.fail(new GrokBotError({ reason: "signed_out" })),
       GrokBotNativeReadError: () =>
-        Effect.all(
-          ["bots", "groups"].map((kind) =>
+        Effect.forEach(
+          ["bots", "groups"],
+          (kind) =>
             cli([kind, "list", "--gateway", "--json"]).pipe(
               Effect.flatMap((text) => decodeRoster(text).pipe(Effect.mapError(invalidResponse))),
               // A missing legacy descriptor after a native read failure is a connection failure,
@@ -631,7 +632,6 @@ const make = Effect.gen(function* () {
                   : error,
               ),
             ),
-          ),
           { concurrency: 2 },
         ).pipe(
           Effect.map((lists) => [...new Map(lists.flat().map((bot) => [bot.id, bot])).values()]),
@@ -1023,7 +1023,7 @@ const make = Effect.gen(function* () {
       const binding = yield* native.accountBinding.pipe(
         Effect.map((value): string | undefined => value),
         Effect.catchTags({
-          GrokBotNativeReadError: () => Effect.succeed(undefined),
+          GrokBotNativeReadError: () => Effect.void,
           GrokBotNativeSignedOutError: () =>
             Effect.fail(new GrokBotError({ reason: "signed_out" })),
         }),

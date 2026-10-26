@@ -61,6 +61,7 @@ vi.mock("/src/localApi.ts", () => ({
   readLocalApi: () => ({ dialogs: { confirm: state.confirm } }),
 }));
 vi.mock("/src/composerDraftStore.ts", () => ({
+  clearComposerDraftsEnvironment: () => {},
   DraftId: { make: (value: string) => value },
   useComposerDraftStore: {
     getState: () => ({

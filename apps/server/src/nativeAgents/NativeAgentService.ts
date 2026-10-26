@@ -450,7 +450,7 @@ const make = Effect.gen(function* () {
         ? Option.none()
         : yield* providerSessions.get(boundId).pipe(
             Effect.catchTags({
-              ProviderSessionLookupError: () => Effect.succeed(Option.none()),
+              ProviderSessionLookupError: () => Effect.succeedNone,
             }),
             Effect.mapError(attachFailure),
           );
@@ -525,11 +525,9 @@ const make = Effect.gen(function* () {
         const previous = yield* projections
           .getThread(threadId)
           .pipe(
-            Effect.catchTags({
-              ProjectionStoreThreadNotFoundError: () => Effect.succeed(undefined),
-            }),
-          )
-          .pipe(Effect.mapError(failure("storage_failed")));
+            Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.void }),
+            Effect.mapError(failure("storage_failed")),
+          );
         if (previous?.deletedAt) return yield* new NativeAgentError({ reason: "thread_deleted" });
         if (
           previous &&

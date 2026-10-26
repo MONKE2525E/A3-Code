@@ -1,7 +1,6 @@
 import * as FileSystem from "effect/FileSystem";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ServerConfig from "../config.ts";
-const decodeHandoffInput = Schema.decodeUnknownEffect(WorktreeMcpHandoffInput);
 import { describe, expect, it, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -301,11 +300,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
     }
   });
 
-  // Optional deterministic Path semantics: providing this BEFORE the general
-  // mocks means the service resolves Path here rather than from NodeServices,
-  // so absolute-path validation is testable independently of the host OS. The
-  // service only calls isAbsolute; the minimal per-platform semantics are
-  // inlined so the test does not depend on the host's path module.
+  // Provide deterministic Path semantics before NodeServices so either platform can be tested.
   const win32IsAbsolute = (value: string) => /^(?:[a-zA-Z]:[\\/]|[\\/])/.test(value);
   const posixIsAbsolute = (value: string) => value.startsWith("/");
   const layerService =
@@ -385,13 +380,9 @@ const expectTypedFailure = (exit: Exit.Exit<unknown, unknown>, expected: object)
   expect(reason.error).toMatchObject(expected);
 };
 
-// Resolves the service once from the harness layer; used by tests that must
-// make several calls against the SAME instance (the in-flight guard lives in
-// the layer's closure, so a fresh layer per call would never see it).
+// Resolve once so calls share the in-flight guard.
 const resolveService = (harness: ReturnType<typeof makeHarness>) =>
-  Effect.gen(function* () {
-    return yield* WorktreeMcpService.WorktreeMcpService;
-  }).pipe(Effect.provide(harness.layer));
+  WorktreeMcpService.WorktreeMcpService.pipe(Effect.provide(harness.layer));
 
 const runHandoff = (
   harness: ReturnType<typeof makeHarness>,
@@ -407,6 +398,8 @@ const runStatus = (harness: ReturnType<typeof makeHarness>) =>
     const service = yield* WorktreeMcpService.WorktreeMcpService;
     return yield* service.status(harness.scope);
   }).pipe(Effect.provide(harness.layer));
+
+const decodeHandoffInput = Schema.decodeUnknownEffect(WorktreeMcpHandoffInput);
 
 describe("t3_worktree_handoff", () => {
   it.effect("reports a continuation failure without failing the handoff", () => {
@@ -674,6 +667,116 @@ describe("t3_worktree_handoff", () => {
       expect(harness.dispatch).toHaveBeenCalled();
     });
   });
+
+  it.effect("creates the worktree in the managed directory even when a call names a path", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const input = yield* decodeHandoffInput({
+        branch: "feature/elsewhere",
+        path: "/home/user/.ssh/checkout",
+      });
+      const result = yield* runHandoff(harness, input);
+      expect(harness.createWorktree).toHaveBeenCalledWith(expect.objectContaining({ path: null }));
+      expect(result.worktreePath).toBe("/worktrees/project/feature/elsewhere");
+    });
+  });
+
+  it.effect("falls back to the local base when no remote holds it", () => {
+    const harness = makeHarness({ worktreeBaseMissing: true });
+    return Effect.gen(function* () {
+      const result = yield* runHandoff(harness, {
+        branch: "feature/local-fallback",
+        baseRef: "dev",
+        startFromOrigin: true,
+      });
+      expect(harness.createWorktree).toHaveBeenCalledWith(
+        expect.objectContaining({ refName: "dev", baseRefName: "dev" }),
+      );
+      expect(result.startedFromOrigin).toBe(false);
+    });
+  });
+
+  it.effect("does not trip the pre-flight on similarly named branches", () => {
+    const harness = makeHarness({ existingBranchWorktreePath: null });
+    return Effect.gen(function* () {
+      const result = yield* runHandoff(harness, { branch: "feature/take" });
+      expect(result.branch).toBe("feature/take");
+      expect(harness.createWorktree).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it.effect("rejects an existing branch with an actionable error naming its checkout", () => {
+    const harness = makeHarness({ existingBranchWorktreePath: "/elsewhere/checkout" });
+    return Effect.gen(function* () {
+      const exit = yield* Effect.exit(runHandoff(harness, { branch: "feature/taken" }));
+      if (!Exit.isFailure(exit)) {
+        return expect.fail("expected a failure exit");
+      }
+      const reason = exit.cause.reasons[0];
+      expect(reason?._tag).toBe("Fail");
+      const error = (reason as { readonly error: { code: string; message: string } }).error;
+      expect(error.code).toBe("invalid_request");
+      expect(error.message).toContain("feature/taken");
+      expect(error.message).toContain("already exists");
+      expect(error.message).toContain("/elsewhere/checkout");
+      expect(harness.createWorktree).not.toHaveBeenCalled();
+      expect(harness.fetchWorktreeBaseCommit).not.toHaveBeenCalled();
+    });
+  });
+
+  it.effect("uses the fetched commit and remote PR base for an explicit local alias", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const git = yield* GitVcsDriver.GitVcsDriver;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "handoff-remote-base-" });
+      const cwd = `${directory}/repo`;
+      const remote = `${directory}/remote.git`;
+      const worktreePath = `${directory}/worktree`;
+      yield* fs.makeDirectory(cwd);
+      const command = (at: string, args: string[]) =>
+        git.execute({ operation: "handoff-test", cwd: at, args });
+      yield* command(cwd, ["init", "-b", "stable"]);
+      yield* command(cwd, ["config", "user.name", "Test"]);
+      yield* command(cwd, ["config", "user.email", "test@example.test"]);
+      yield* command(cwd, ["commit", "--allow-empty", "-m", "remote base"]);
+      const remoteHead = (yield* command(cwd, ["rev-parse", "HEAD"])).stdout.trim();
+      yield* command(cwd, ["init", "--bare", remote]);
+      yield* command(cwd, ["remote", "add", "upstream", remote]);
+      yield* command(cwd, ["push", "-u", "upstream", "stable:release"]);
+      yield* command(cwd, ["commit", "--allow-empty", "-m", "local only"]);
+      const harness = makeHarness({
+        git: {
+          fetchWorktreeBaseCommit: (input) => git.fetchWorktreeBaseCommit({ ...input, cwd }),
+          createWorktree: (input) => git.createWorktree({ ...input, cwd, path: worktreePath }),
+        },
+      });
+      const result = yield* runHandoff(harness, {
+        branch: "feature/from-remote",
+        baseRef: "stable",
+        startFromOrigin: true,
+        runSetupScript: false,
+      });
+
+      expect(result.worktreePath).toBe(worktreePath);
+      expect(result.startedFromOrigin).toBe(true);
+      expect(result.setupScript).toEqual({ status: "skipped" });
+      expect((yield* command(worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(remoteHead);
+      const preview = yield* git.getReviewDiffPreview({ cwd: worktreePath });
+      const comparisonBase = preview.sources.find(
+        (source) => source.kind === "branch-range",
+      )!.baseRef;
+      expect(
+        (yield* command(worktreePath, ["rev-parse", `${comparisonBase}^{commit}`])).stdout.trim(),
+      ).toBe(remoteHead);
+    }).pipe(
+      Effect.provide(
+        GitVcsDriver.layer.pipe(
+          Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "handoff-remote-git-" })),
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
+    ),
+  );
 });
 
 describe("t3_worktree_status", () => {
@@ -693,115 +796,5 @@ describe("t3_worktree_status", () => {
         defaultStartFromOrigin: false,
       });
     });
-  });
-});
-
-it.effect("uses the fetched commit and remote PR base for an explicit local alias", () =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const git = yield* GitVcsDriver.GitVcsDriver;
-    const directory = yield* fs.makeTempDirectoryScoped({ prefix: "handoff-remote-base-" });
-    const cwd = `${directory}/repo`;
-    const remote = `${directory}/remote.git`;
-    const worktreePath = `${directory}/worktree`;
-    yield* fs.makeDirectory(cwd);
-    const command = (at: string, args: string[]) =>
-      git.execute({ operation: "handoff-test", cwd: at, args });
-    yield* command(cwd, ["init", "-b", "stable"]);
-    yield* command(cwd, ["config", "user.name", "Test"]);
-    yield* command(cwd, ["config", "user.email", "test@example.test"]);
-    yield* command(cwd, ["commit", "--allow-empty", "-m", "remote base"]);
-    const remoteHead = (yield* command(cwd, ["rev-parse", "HEAD"])).stdout.trim();
-    yield* command(cwd, ["init", "--bare", remote]);
-    yield* command(cwd, ["remote", "add", "upstream", remote]);
-    yield* command(cwd, ["push", "-u", "upstream", "stable:release"]);
-    yield* command(cwd, ["commit", "--allow-empty", "-m", "local only"]);
-    const harness = makeHarness({
-      git: {
-        fetchWorktreeBaseCommit: (input) => git.fetchWorktreeBaseCommit({ ...input, cwd }),
-        createWorktree: (input) => git.createWorktree({ ...input, cwd, path: worktreePath }),
-      },
-    });
-    const result = yield* runHandoff(harness, {
-      branch: "feature/from-remote",
-      baseRef: "stable",
-      startFromOrigin: true,
-      runSetupScript: false,
-    });
-
-    expect(result.worktreePath).toBe(worktreePath);
-    expect(result.startedFromOrigin).toBe(true);
-    expect(result.setupScript).toEqual({ status: "skipped" });
-    expect((yield* command(worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(remoteHead);
-    const preview = yield* git.getReviewDiffPreview({ cwd: worktreePath });
-    const comparisonBase = preview.sources.find(
-      (source) => source.kind === "branch-range",
-    )!.baseRef;
-    expect(
-      (yield* command(worktreePath, ["rev-parse", `${comparisonBase}^{commit}`])).stdout.trim(),
-    ).toBe(remoteHead);
-  }).pipe(
-    Effect.provide(
-      GitVcsDriver.layer.pipe(
-        Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "handoff-remote-git-" })),
-        Layer.provideMerge(NodeServices.layer),
-      ),
-    ),
-  ),
-);
-
-it.effect("rejects an existing branch with an actionable error naming its checkout", () => {
-  const harness = makeHarness({ existingBranchWorktreePath: "/elsewhere/checkout" });
-  return Effect.gen(function* () {
-    const exit = yield* Effect.exit(runHandoff(harness, { branch: "feature/taken" }));
-    if (!Exit.isFailure(exit)) {
-      return expect.fail("expected a failure exit");
-    }
-    const reason = exit.cause.reasons[0];
-    expect(reason?._tag).toBe("Fail");
-    const error = (reason as { readonly error: { code: string; message: string } }).error;
-    expect(error.code).toBe("invalid_request");
-    expect(error.message).toContain("feature/taken");
-    expect(error.message).toContain("already exists");
-    expect(error.message).toContain("/elsewhere/checkout");
-    expect(harness.createWorktree).not.toHaveBeenCalled();
-    expect(harness.fetchWorktreeBaseCommit).not.toHaveBeenCalled();
-  });
-});
-
-it.effect("does not trip the pre-flight on similarly named branches", () => {
-  const harness = makeHarness({ existingBranchWorktreePath: null });
-  return Effect.gen(function* () {
-    const result = yield* runHandoff(harness, { branch: "feature/take" });
-    expect(result.branch).toBe("feature/take");
-    expect(harness.createWorktree).toHaveBeenCalledTimes(1);
-  });
-});
-
-it.effect("falls back to the local base when no remote holds it", () => {
-  const harness = makeHarness({ worktreeBaseMissing: true });
-  return Effect.gen(function* () {
-    const result = yield* runHandoff(harness, {
-      branch: "feature/local-fallback",
-      baseRef: "dev",
-      startFromOrigin: true,
-    });
-    expect(harness.createWorktree).toHaveBeenCalledWith(
-      expect.objectContaining({ refName: "dev", baseRefName: "dev" }),
-    );
-    expect(result.startedFromOrigin).toBe(false);
-  });
-});
-
-it.effect("creates the worktree in the managed directory even when a call names a path", () => {
-  const harness = makeHarness();
-  return Effect.gen(function* () {
-    const input = yield* decodeHandoffInput({
-      branch: "feature/elsewhere",
-      path: "/home/user/.ssh/checkout",
-    });
-    const result = yield* runHandoff(harness, input);
-    expect(harness.createWorktree).toHaveBeenCalledWith(expect.objectContaining({ path: null }));
-    expect(result.worktreePath).toBe("/worktrees/project/feature/elsewhere");
   });
 });

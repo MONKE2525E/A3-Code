@@ -122,9 +122,9 @@ const make = Effect.gen(function* () {
     const identity = yield* identityOf(botId, binding, instanceId);
     const threadId = ThreadId.make(`grok-bot:${identity}`);
     const lookup = projections.getThread(threadId).pipe(
-      Effect.map(Option.some),
+      Effect.asSome,
       Effect.catchTags({
-        ProjectionStoreThreadNotFoundError: () => Effect.succeed(Option.none()),
+        ProjectionStoreThreadNotFoundError: () => Effect.succeedNone,
       }),
     );
     let thread = yield* lookup;
@@ -178,7 +178,7 @@ const make = Effect.gen(function* () {
         ? Option.none()
         : yield* providerSessions.get(boundSessionId).pipe(
             Effect.catchTags({
-              ProviderSessionLookupError: () => Effect.succeed(Option.none()),
+              ProviderSessionLookupError: () => Effect.succeedNone,
             }),
           );
     // Reuse a live turn session. A stopped persisted id is not reopened after
@@ -301,9 +301,9 @@ const make = Effect.gen(function* () {
             return yield* new GrokBotThreadError({ reason: "provider_not_ready" });
         });
         const previous = yield* projections.getThread(canonicalId).pipe(
-          Effect.map(Option.some),
+          Effect.asSome,
           Effect.catchTags({
-            ProjectionStoreThreadNotFoundError: () => Effect.succeed(Option.none()),
+            ProjectionStoreThreadNotFoundError: () => Effect.succeedNone,
           }),
           Effect.mapError(storageError),
         );
@@ -467,9 +467,9 @@ const make = Effect.gen(function* () {
           threadId === undefined
             ? Option.none()
             : yield* projections.getThread(threadId).pipe(
-                Effect.map(Option.some),
+                Effect.asSome,
                 Effect.catchTags({
-                  ProjectionStoreThreadNotFoundError: () => Effect.succeed(Option.none()),
+                  ProjectionStoreThreadNotFoundError: () => Effect.succeedNone,
                 }),
                 Effect.mapError(storageError),
               );

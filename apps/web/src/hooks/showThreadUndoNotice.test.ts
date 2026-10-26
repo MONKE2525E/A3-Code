@@ -1,3 +1,4 @@
+import { releaseThreadUndoShortcut, threadUndoClaimsShortcut } from "./showThreadUndoNotice";
 import { AsyncResult } from "effect/reactivity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -42,6 +43,27 @@ describe("thread undo notice", () => {
     expect(undo).not.toHaveBeenCalled();
     await notice().undo();
     expect(undo).toHaveBeenCalledOnce();
+  });
+
+  it("claims mod+z from text fields until the user types, then again for a new notice", () => {
+    const { options } = setup();
+    expect(threadUndoClaimsShortcut()).toBe(false);
+    showThreadUndoNotice(options);
+    expect(threadUndoClaimsShortcut()).toBe(true);
+    releaseThreadUndoShortcut();
+    expect(threadUndoClaimsShortcut()).toBe(false);
+    showThreadUndoNotice({ ...options, claim: ThreadUndo.begin("pin", "env/next") });
+    expect(threadUndoClaimsShortcut()).toBe(true);
+  });
+
+  it("stops claiming mod+z once nothing is left to undo", async () => {
+    const { options } = setup();
+    showThreadUndoNotice(options);
+    await notice().undo();
+    expect(threadUndoClaimsShortcut()).toBe(false);
+    showThreadUndoNotice({ ...options, claim: ThreadUndo.begin("pin", "env/expiring") });
+    vi.advanceTimersByTime(5_000);
+    expect(threadUndoClaimsShortcut()).toBe(false);
   });
 });
 

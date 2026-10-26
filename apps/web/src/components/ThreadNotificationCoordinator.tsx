@@ -1,4 +1,11 @@
+import type { SidebarThreadStatus } from "./Sidebar.logic";
 import {
+  createThreadNotificationGate,
+  type ThreadNotificationKind,
+  type ThreadNotificationObservation,
+} from "./ThreadNotificationCoordinator.logic";
+import {
+  type EnvironmentThreadShell,
   type PendingSubagentRequest,
   presentThreadShell,
 } from "@t3tools/client-runtime/state/models";
@@ -16,7 +23,7 @@ import {
   MessageCircleQuestionIcon,
   ShieldQuestionIcon,
 } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useEffectEvent, useRef } from "react";
 
 import { getClientSettings, useClientSettings } from "../hooks/useSettings";
 import { useEnvironmentIds } from "../state/environments";
@@ -99,7 +106,9 @@ export function ThreadNotificationCoordinator() {
   ));
 }
 
-interface NotificationState {
+interface NotificationState extends ThreadNotificationObservation {
+  readonly thread: EnvironmentThreadShell;
+  readonly status: SidebarThreadStatus;
   readonly raw: OrchestrationV2ThreadShell;
   readonly subagentRequest: PendingSubagentRequest | null;
   readonly attention: string | null;
@@ -136,13 +145,116 @@ function EnvironmentNotifications({
   const selectedBotEnvironmentId = useSelectedGrokBotEnvironmentId();
   const previous = useRef(new Map<ThreadId, NotificationState>());
 
+  // Completions fire from a timer, so read settings, focus and route when presenting.
+  const present = useEffectEvent((threadId: ThreadId, kind: ThreadNotificationKind) => {
+    const entry = previous.current.get(threadId);
+    if (!entry) return;
+    const { thread, status } = entry;
+    const title =
+      kind === "completion"
+        ? "Thread completed"
+        : status === "approval"
+          ? "Approval needed"
+          : status === "limited"
+            ? "Usage limit reached"
+            : status === "failed"
+              ? "Thread failed"
+              : status === "request"
+                ? "Guest request"
+                : "Input needed";
+    if (hasNotificationSound(mode)) {
+      void playNotificationSound(kind, () =>
+        hasNotificationSound(getClientSettings().notificationMode),
+      );
+    }
+    if (
+      inAppNotificationsEnabled &&
+      document.visibilityState === "visible" &&
+      document.hasFocus() &&
+      (activeEnvironmentId !== environmentId || activeThreadId !== thread.id)
+    ) {
+      const toastId = toastManager.add({
+        type: kind === "completion" ? "success" : status === "failed" ? "error" : "warning",
+        title,
+        description: thread.title,
+        data: {
+          hideCopyButton: true,
+          leadingIcon:
+            kind === "completion" ? (
+              <CircleCheckIcon aria-hidden className="size-4 text-success-foreground" />
+            ) : status === "approval" ? (
+              <ShieldQuestionIcon aria-hidden className="size-4 text-warning-foreground" />
+            ) : status === "failed" ? (
+              <CircleAlertIcon aria-hidden className="size-4 text-destructive-foreground" />
+            ) : (
+              <MessageCircleQuestionIcon aria-hidden className="size-4 text-info-foreground" />
+            ),
+        },
+        actionProps: {
+          children: "Open thread",
+          onClick: () => {
+            toastManager.close(toastId);
+            void navigate({
+              to: "/$environmentId/$threadId",
+              params: { environmentId, threadId: thread.id },
+            });
+          },
+        },
+      });
+      return;
+    }
+    if (
+      !hasDesktopNotifications(mode) ||
+      (document.visibilityState === "visible" && document.hasFocus()) ||
+      typeof Notification === "undefined" ||
+      Notification.permission !== "granted"
+    )
+      return;
+    try {
+      const notification = new Notification(title, {
+        body: thread.title,
+        tag: threadNotificationTag(environmentId, thread.id),
+        silent: true,
+      });
+      onNotification(environmentId, notification);
+      notification.addEventListener("click", () => {
+        notification.close();
+        window.focus();
+        void window.desktopBridge?.revealWindow?.().catch(() => undefined);
+        void navigate({
+          to: "/$environmentId/$threadId",
+          params: { environmentId, threadId: thread.id },
+        });
+      });
+    } catch {
+      // Some browsers expose Notification but reject desktop presentation.
+    }
+  });
+  const gate = useRef<ReturnType<typeof createThreadNotificationGate<ThreadId>>>(null);
   useEffect(() => {
+    const created = createThreadNotificationGate<ThreadId>((threadId, kind) =>
+      present(threadId, kind),
+    );
+    gate.current = created;
+    return () => {
+      created.clear();
+      gate.current = null;
+      // A new gate has no pending completions, so forget the states they compared against.
+      previous.current.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    const pendingCompletions = gate.current;
+    if (!pendingCompletions) return;
     if (threads === null) {
+      pendingCompletions.clear();
       previous.current.clear();
       return;
     }
     const next = new Map<ThreadId, NotificationState>();
     const subagentRequests = pendingSubagentRequestsByThread(threads);
+    const changed: Array<[NotificationState | undefined, NotificationState]> = [];
     for (const rawThread of threads) {
       if (rawThread.lineage.relationshipToParent === "subagent") continue;
       const prior = previous.current.get(rawThread.id);
@@ -155,7 +267,11 @@ function EnvironmentNotifications({
       let status = resolveSidebarThreadStatus(thread);
       if (status === "ready" && thread.latestRun?.status === "failed") status = "failed";
       const attention =
-        status === "input" || status === "approval" || status === "failed" || status === "limited"
+        status === "input" ||
+        status === "request" ||
+        status === "approval" ||
+        status === "failed" ||
+        status === "limited"
           ? `${thread.latestRun?.runId ?? ""}:${status}`
           : null;
       const completedAt = Date.parse(thread.latestRun?.completedAt ?? "");
@@ -179,7 +295,11 @@ function EnvironmentNotifications({
         messageAt !== null &&
         messageAt >= watermark &&
         !messageIds.has(message.id);
-      next.set(thread.id, {
+      const state: NotificationState = {
+        thread,
+        status,
+        settled: status === "ready" && thread.latestRun?.status === "completed",
+        completedAt: Number.isFinite(completedAt) ? completedAt : null,
         raw: rawThread,
         subagentRequest,
         attention,
@@ -188,7 +308,12 @@ function EnvironmentNotifications({
         messageIds: newMessage
           ? new Set(messageAt === watermark ? [...messageIds, message.id] : [message.id])
           : messageIds,
-      });
+      };
+      next.set(thread.id, state);
+      if (!nativeBot) {
+        changed.push([prior, state]);
+        continue;
+      }
 
       if (!prior || thread.archivedAt !== null) continue;
       const kind =
@@ -313,6 +438,12 @@ function EnvironmentNotifications({
       }
     }
     previous.current = next;
+    pendingCompletions.retain(new Set(next.keys()));
+    for (const [prior, state] of changed)
+      pendingCompletions.observe(state.thread.id, prior, state, {
+        archived: state.thread.archivedAt !== null,
+        quiet: state.raw.latestRunStopRequested === true,
+      });
   }, [
     activeEnvironmentId,
     activeThreadId,

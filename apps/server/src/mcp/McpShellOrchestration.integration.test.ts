@@ -522,11 +522,10 @@ it.effect.each([
           authority,
           projection,
           ThreadCommandExecutor.layer,
-          Ingestor.layer
-            .pipe(Layer.provide(Layer.mock(MergeGit.GitVcsDriver)({})))
-            .pipe(
-              Layer.provide([replay, projection, IdAllocator.layer, ThreadCommandExecutor.layer]),
-            ),
+          Ingestor.layer.pipe(
+            Layer.provide(Layer.mock(MergeGit.GitVcsDriver)({})),
+            Layer.provide([replay, projection, IdAllocator.layer, ThreadCommandExecutor.layer]),
+          ),
         ]),
         Layer.provide(NodeCrypto.layer),
       );

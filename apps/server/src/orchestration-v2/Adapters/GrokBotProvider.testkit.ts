@@ -196,7 +196,7 @@ export const makeBindings = (
     restoreTurns: () => Effect.succeed([]),
     restoreTranscriptTurns: () => Effect.succeed([]),
     restoreManagedMessageIds: () => Effect.succeed([]),
-    lookupCompletion: () => Effect.succeed(undefined),
+    lookupCompletion: () => Effect.sync(() => undefined),
     openCompletionWatch: () => Effect.succeed(Stream.never),
     verifyInterrupt: () => Effect.void,
     recordCursor: () => Effect.void,

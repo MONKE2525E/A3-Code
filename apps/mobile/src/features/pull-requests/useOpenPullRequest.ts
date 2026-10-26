@@ -10,15 +10,7 @@ import { environmentProjects } from "../../state/projects";
 import { serverEnvironment } from "../../state/server";
 import { resolveNativePullRequestLink } from "./pull-request-link";
 
-/**
- * Opens a link in the native pull request viewer when it names a repository the environment can
- * read, and externally otherwise. `environmentId` is the environment the link was read in: the
- * thread's, for a chat link. `threadId` is the thread it was read in, which the viewer hands off
- * to and returns to. Resolves to whether anything opened.
- *
- * Projects and capabilities are read when the link is pressed rather than subscribed to, so a
- * thread full of links does not re-render when the project list changes.
- */
+/** Read projects and capabilities on press so project changes do not rerender every chat link. */
 export function useOpenPullRequest(options?: { readonly replace?: boolean }) {
   const navigation = useNavigation();
   return useCallback(
@@ -40,9 +32,10 @@ export function useOpenPullRequest(options?: { readonly replace?: boolean }) {
         // A push, not a navigate: a link inside one pull request opens another on top of it, and
         // Back returns to the first.
         const params = { ...target, ...(threadId ? { threadId } : {}) };
-        if (Platform.OS === "android" && !threadId)
-          resetAndroidWorkspace(navigation, { name: "PullRequest", params });
-        else
+        if (Platform.OS === "android" && !threadId) {
+          resetAndroidWorkspace(navigation);
+          navigation.dispatch(StackActions.push("PullRequest", params));
+        } else
           navigation.dispatch(
             (options?.replace ? StackActions.replace : StackActions.push)("PullRequest", params),
           );

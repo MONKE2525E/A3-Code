@@ -156,6 +156,7 @@ const createMenu = (threadId = target.threadId) =>
     threadRef: { ...target, threadId },
     projectCwd: "/project",
     onStartRename: () => recordEffect("rename"),
+    canShareWithGuest: false,
   });
 
 beforeEach(() => {
