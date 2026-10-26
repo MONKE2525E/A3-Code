@@ -79,20 +79,19 @@ const make = Effect.gen(function* () {
     return `peer-environment-${Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
   });
   const read = Effect.fn("PeerEnvironmentRegistry.read")(function* () {
-    if (!(yield* fs.exists(filename).pipe(Effect.mapError(storageError)))) return [];
-    const raw = yield* fs.readFileString(filename).pipe(Effect.mapError(storageError));
-    return yield* decodePeers(raw).pipe(Effect.mapError(storageError));
-  });
+    if (!(yield* fs.exists(filename))) return [];
+    const raw = yield* fs.readFileString(filename);
+    return yield* decodePeers(raw);
+  }, Effect.mapError(storageError));
   const write = Effect.fn("PeerEnvironmentRegistry.write")(function* (
     peers: readonly PeerEnvironment[],
   ) {
-    const contents = yield* encodePeers(peers).pipe(Effect.mapError(storageError));
+    const contents = yield* encodePeers(peers);
     yield* writeFileStringAtomically({ filePath: filename, contents }).pipe(
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(Path.Path, path),
-      Effect.mapError(storageError),
     );
-  });
+  }, Effect.mapError(storageError));
   return PeerEnvironmentRegistry.of({
     list: () => read(),
     get: Effect.fn("PeerEnvironmentRegistry.get")(function* (id) {
