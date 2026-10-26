@@ -1,6 +1,8 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import { CommandId, OrchestrationV2DispatchCommandError } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -8,7 +10,12 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { SqlError, classifySqliteError } from "effect/sql/SqlError";
 
 import { toPersistenceSqlError } from "../persistence/Errors.ts";
-import { userFacingDispatchErrorMessage } from "./UserFacingErrors.ts";
+import { userFacingDispatchErrorMessage, toDispatchCommandError } from "./UserFacingErrors.ts";
+import {
+  OrchestratorCommandRejectedError,
+  OrchestratorCommandPreviouslyRejectedError,
+  OrchestratorDispatchError,
+} from "./Orchestrator.ts";
 
 describe("userFacingDispatchErrorMessage", () => {
   it.effect("explains a real database open failure through dispatch and persistence wrappers", () =>
@@ -79,5 +86,55 @@ describe("userFacingDispatchErrorMessage", () => {
     assert.include(message, "server could not complete this database request");
     assert.include(message, "server logs");
     assert.notInclude(message, "private-query-data");
+  });
+});
+
+const encodeDispatchError = Schema.encodeSync(
+  Schema.toCodecJson(OrchestrationV2DispatchCommandError),
+);
+const decodeDispatchError = Schema.decodeSync(
+  Schema.toCodecJson(OrchestrationV2DispatchCommandError),
+);
+
+describe("toDispatchCommandError", () => {
+  const command = { type: "remote-task.stop", commandId: CommandId.make("stop-1") } as const;
+
+  it.each([
+    new OrchestratorCommandRejectedError({
+      commandId: command.commandId,
+      commandType: command.type,
+    }),
+    new OrchestratorCommandPreviouslyRejectedError({
+      commandId: command.commandId,
+      commandType: command.type,
+      detail: "Rejected cohort",
+    }),
+  ])("marks a proven rejection: $_tag", (cause) => {
+    const wire = toDispatchCommandError(command, cause);
+    assert.equal(wire.outcome, "rejected");
+    const encoded = encodeDispatchError(wire);
+    assert.equal(decodeDispatchError(encoded).outcome, "rejected");
+  });
+
+  it.each([
+    new OrchestratorDispatchError({
+      commandId: command.commandId,
+      commandType: command.type,
+      cause: "Receipt lookup failed",
+    }),
+    new OrchestratorDispatchError({
+      commandId: command.commandId,
+      commandType: command.type,
+      cause: new OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+      }),
+    }),
+    new Error("Event persistence failed"),
+  ])("keeps generic dispatch and store errors unknown: $message", (cause) => {
+    const wire = toDispatchCommandError(command, cause);
+    assert.isUndefined(wire.outcome);
+    const encoded = encodeDispatchError(wire);
+    assert.isUndefined(decodeDispatchError(encoded).outcome);
   });
 });

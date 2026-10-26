@@ -13,7 +13,7 @@ const encodeMimes = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.
 export const museAgentBrowserBridge = String.raw`(() => {
   if (location.origin !== 'https://muse.ai') return;
   let active = null, pinned = null, sessionId = null, unregister = [], toolCleanup = [], reconnecting = false;
-  let generation = null, generationRpc = null, generationTarget = null, physicalConnectionId = null, toolRegistration = null;
+  let generation = null, generationEvents = null, generationTarget = null, physicalConnectionId = null, toolRegistration = null;
   let owned = null, admitting = null, streamSeq = 0, chatSeq = 0;
   const computerStreams = new Map();
   const releasedDeliveries = new Set();
@@ -76,8 +76,10 @@ export const museAgentBrowserBridge = String.raw`(() => {
   };
   const connection = rpc => {
     const target = rpc.connectionAuthority.targetKey ?? JSON.stringify([rpc.gatewayUrl,rpc.vmName??null]);
-    if (generationRpc !== rpc.sendRequest || generationTarget !== target) {
-      generationRpc = rpc.sendRequest; generationTarget = target; physicalConnectionId = null;
+    // Muse replaces request wrappers during admission while retaining the event
+    // transport. Only a new event source or target retires that connection.
+    if (generationEvents !== rpc.onEvent || generationTarget !== target) {
+      generationEvents = rpc.onEvent; generationTarget = target; physicalConnectionId = null;
       generation = crypto.randomUUID(); owned = null; clearTools();
       for (const current of computerStreams.values()) endComputer(current);
     }
@@ -175,7 +177,7 @@ export const museAgentBrowserBridge = String.raw`(() => {
       emit({event,payload,meta:{seq:meta?.seq,ts_ms:meta?.ts_ms},authority});
     }));
   };
-  const registrationParams = (clientId, commands) => ({client_id:clientId,platform:'linux',display_name:'T3 Code',version:'1',capabilities:{device_commands:commands,data_sources:{},hatch_app_commands:{},rendering:{}}});
+  const registrationParams = (current, commands) => ({client_id:current.clientId,platform:current.platform,display_name:current.environmentId ? 'T3 Code · '+current.environmentId : 'T3 Code',version:'1',capabilities:{device_commands:commands,data_sources:{},hatch_app_commands:{},rendering:{}}});
   window.__t3Muse = {
     authority: () => discover()?.authority ?? null,
     observeDisconnect: ({authority}) => {
@@ -313,10 +315,10 @@ export const museAgentBrowserBridge = String.raw`(() => {
       return {session_id:session};
     },
     unwatch: () => { cleanup(); clearTools(); pinned = null; sessionId = null; owned = null; },
-    register: async ({authority,clientId,nativeSessionId,connectionId,commands}) => {
+    register: async ({authority,clientId,nativeSessionId,connectionId,commands,environmentId,platform='unknown'}) => {
       const rpc = check(authority);
       if (connection(rpc) !== connectionId || toolRegistration || nativeSessionId !== sessionId) throw Error('registration_scope_changed');
-      const current = {clientId,nativeSessionId,connectionId,lastHeartbeatAt:0}; toolRegistration = current;
+      const current = {clientId,nativeSessionId,connectionId,environmentId,platform,lastHeartbeatAt:0}; toolRegistration = current;
       for (const commandId of Object.keys(commands)) toolCleanup.push(rpc.onClientInvoke(commandId,async (payload,meta) => {
         if (!meta?.websocketConnectionID || toolRegistration !== current || connection(check(authority)) !== connectionId || (!owned && !admitting)) return;
         if (physicalConnectionId && physicalConnectionId !== meta.websocketConnectionID) { generation = crypto.randomUUID(); owned = null; clearTools(); emit({event:'transport.disconnected',authority}); return; }
@@ -329,7 +331,7 @@ export const museAgentBrowserBridge = String.raw`(() => {
         await rpc.sendRequest('client.invoke.result',response.params,{expectedGatewayTargetKey:JSON.stringify([rpc.gatewayUrl,rpc.vmName??null]),expectedConnectionId:nativeConnectionId});
       }));
       try {
-        const result = await rpc.sendRequest('client.register_capabilities',registrationParams(clientId,commands),{expectedGatewayTargetKey:JSON.stringify([rpc.gatewayUrl,rpc.vmName??null])});
+        const result = await rpc.sendRequest('client.register_capabilities',registrationParams(current,commands),{expectedGatewayTargetKey:JSON.stringify([rpc.gatewayUrl,rpc.vmName??null])});
         if (connection(check(authority)) !== connectionId || toolRegistration !== current) throw Error('registration_scope_changed');
         if (result.rejected_ids?.length || result.accepted_device_commands !== Object.keys(commands).length) throw Error('capabilities_rejected:'+JSON.stringify({accepted:result.accepted_device_commands,requested:Object.keys(commands).length,rejected:result.rejected_ids}));
         await rpc.sendRequest('node.heartbeat',{node_id:clientId},{expectedGatewayTargetKey:JSON.stringify([rpc.gatewayUrl,rpc.vmName??null])});
@@ -341,7 +343,7 @@ export const museAgentBrowserBridge = String.raw`(() => {
           clearTools();
           const found = discover();
           if (found?.authority === authority && connection(found.rpc) === connectionId) {
-            await rpc.sendRequest('client.register_capabilities',registrationParams(clientId,{}),{expectedGatewayTargetKey:JSON.stringify([rpc.gatewayUrl,rpc.vmName??null])}).catch(() => {});
+            await rpc.sendRequest('client.register_capabilities',registrationParams(current,{}),{expectedGatewayTargetKey:JSON.stringify([rpc.gatewayUrl,rpc.vmName??null])}).catch(() => {});
           }
         }
         throw error;
@@ -349,10 +351,11 @@ export const museAgentBrowserBridge = String.raw`(() => {
     },
     unregister: async ({authority,clientId,connectionId}) => {
       if (toolRegistration?.clientId !== clientId || toolRegistration.connectionId !== connectionId) return;
+      const current = toolRegistration;
       clearTools();
       const rpc = check(authority);
       if (connection(rpc) !== connectionId) return;
-      await rpc.sendRequest('client.register_capabilities',registrationParams(clientId,{}),{expectedGatewayTargetKey:JSON.stringify([rpc.gatewayUrl,rpc.vmName??null])});
+      await rpc.sendRequest('client.register_capabilities',registrationParams(current,{}),{expectedGatewayTargetKey:JSON.stringify([rpc.gatewayUrl,rpc.vmName??null])});
     }
   };
   setInterval(async () => {
@@ -363,7 +366,7 @@ export const museAgentBrowserBridge = String.raw`(() => {
       if (active) { cleanup(); generation = crypto.randomUUID(); physicalConnectionId = null; owned = null; clearTools(); emit({event:'transport.disconnected',authority:pinned}); }
       return;
     }
-    if (active?.sendRequest === found.rpc.sendRequest && generationTarget === (found.rpc.connectionAuthority.targetKey ?? JSON.stringify([found.rpc.gatewayUrl,found.rpc.vmName??null]))) {
+    if (active?.onEvent === found.rpc.onEvent && generationTarget === (found.rpc.connectionAuthority.targetKey ?? JSON.stringify([found.rpc.gatewayUrl,found.rpc.vmName??null]))) {
       const current = toolRegistration;
       if (current && Date.now()-current.lastHeartbeatAt >= 15000) {
         current.lastHeartbeatAt = Date.now();

@@ -148,7 +148,7 @@ export const installLayer = Layer.effectDiscard(
           return yield* session.invoke(input.connectionId, input.payload);
         });
         const registration = yield* Effect.acquireRelease(
-          register(catalog, invoke).pipe(
+          register(catalog, invoke, scope.environmentId).pipe(
             Effect.mapError(
               (cause) =>
                 new NativeTools.NativeAgentDirectToolsError({ code: "registration_failed", cause }),

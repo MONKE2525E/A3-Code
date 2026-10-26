@@ -8,6 +8,7 @@ import {
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import { withRecordIdTable } from "./orchestrationV2IdTable.ts";
 import * as DateTime from "effect/DateTime";
+import { AuthClientMetadataDeviceType } from "./auth.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaAST from "effect/SchemaAST";
@@ -1211,7 +1212,15 @@ const GrokBotMessagePeer = Schema.Struct({
 export const OrchestrationV2IdleCompaction = Schema.Literals(["beforeCacheExpires", "onReturn"]);
 export type OrchestrationV2IdleCompaction = typeof OrchestrationV2IdleCompaction.Type;
 
+export const OrchestrationV2MessageOrigin = Schema.Struct({
+  deviceType: AuthClientMetadataDeviceType,
+  os: Schema.optional(Schema.Literals(["Android", "iOS", "macOS", "Windows", "Linux"])),
+  label: Schema.optional(TrimmedNonEmptyString),
+});
+export type OrchestrationV2MessageOrigin = typeof OrchestrationV2MessageOrigin.Type;
+
 export const OrchestrationV2ConversationMessage = Schema.Struct({
+  origin: Schema.optional(OrchestrationV2MessageOrigin),
   grokBotReactions: Schema.optionalKey(GrokBotReactions),
   /** Native spoken input stays in chat history but is not a written-message voice update. */
   grokBotVoiceUtterance: Schema.optionalKey(Schema.Literal(true)),
@@ -1487,6 +1496,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     ...OrchestrationV2TurnItemBaseFields,
     ...OrchestrationV2CreationFields,
     type: Schema.Literal("user_message"),
+    origin: Schema.optional(OrchestrationV2MessageOrigin),
     grokBotReactions: Schema.optionalKey(GrokBotReactions),
     grokBotPeer: Schema.optional(GrokBotMessagePeer),
     grokBotAuthor: Schema.optional(GrokBotMessageAuthor),
@@ -2337,6 +2347,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     ...OrchestrationV2TurnItemJsonBaseFields,
     ...OrchestrationV2CreationFields,
     type: Schema.Literal("user_message"),
+    origin: Schema.optional(OrchestrationV2MessageOrigin),
     grokBotReactions: Schema.optionalKey(GrokBotReactions),
     grokBotPeer: Schema.optional(GrokBotMessagePeer),
     grokBotAuthor: Schema.optional(GrokBotMessageAuthor),
@@ -2813,6 +2824,22 @@ export type OrchestrationV2StoredEventJson = typeof OrchestrationV2StoredEventJs
 
 export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
+    type: Schema.Literal("remote-task.stop"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    initialRunId: RunId,
+    runtimeMode: RuntimeMode,
+    interactionMode: ProviderInteractionMode,
+    expectedThreads: Schema.Array(
+      Schema.Struct({
+        threadId: ThreadId,
+        runIds: Schema.Array(RunId),
+        subagentIds: Schema.Array(NodeId),
+      }),
+    ),
+    reason: Schema.optional(Schema.String),
+  }),
+  Schema.Struct({
     type: Schema.Literal("thread.stop"),
     commandId: CommandId,
     threadId: ThreadId,
@@ -3051,6 +3078,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("message.dispatch"),
+    origin: Schema.optional(OrchestrationV2MessageOrigin),
     notification: Schema.optional(OrchestrationV2Notification),
     /** Sends this pending guest message; the server uses the guest's text, not `text`. */
     guestMessageId: Schema.optional(GuestMessageId),
@@ -3171,6 +3199,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("queued-run.edit"),
+    origin: Schema.optional(OrchestrationV2MessageOrigin),
     context: Schema.optional(OrchestrationMessageContext),
     commandId: CommandId,
     threadId: ThreadId,
@@ -3803,6 +3832,7 @@ export class OrchestrationV2DispatchCommandError extends Schema.TaggedError<Orch
     commandType: Schema.String,
     message: Schema.String,
     detail: Schema.optional(Schema.String),
+    outcome: Schema.optional(Schema.Literal("rejected")),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {}

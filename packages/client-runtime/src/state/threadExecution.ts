@@ -43,16 +43,32 @@ const INTERRUPTIBLE_RUN_STATUSES = new Set(["preparing", "starting", "running"])
 /** A terminal observer update invalidates an earlier successful native attach. */
 export function deriveLatestProviderSessionRetirement(
   projection: {
-    readonly thread: Pick<OrchestrationV2ThreadProjection["thread"], "providerInstanceId">;
+    readonly thread: Pick<
+      OrchestrationV2ThreadProjection["thread"],
+      "providerInstanceId" | "activeProviderThreadId"
+    >;
+    readonly providerThreads: ReadonlyArray<
+      Pick<
+        OrchestrationV2ThreadProjection["providerThreads"][number],
+        "id" | "providerInstanceId" | "providerSessionId"
+      >
+    >;
     readonly providerSessions: ReadonlyArray<
       Pick<OrchestrationV2ProviderSession, "id" | "providerInstanceId" | "status" | "updatedAt">
     >;
   } | null,
 ): string | null {
   if (projection === null) return null;
+  const boundSessionId = projection.providerThreads.find(
+    (candidate) =>
+      candidate.id === projection.thread.activeProviderThreadId &&
+      candidate.providerInstanceId === projection.thread.providerInstanceId,
+  )?.providerSessionId;
   let latest: (typeof projection.providerSessions)[number] | undefined;
   for (const session of projection.providerSessions) {
     if (session.providerInstanceId !== projection.thread.providerInstanceId) continue;
+    // Closing the bootstrap observer can follow the active session's ready update.
+    if (boundSessionId != null && session.id !== boundSessionId) continue;
     const at = DateTime.toEpochMillis(session.updatedAt);
     const previous = latest === undefined ? -Infinity : DateTime.toEpochMillis(latest.updatedAt);
     if (at > previous || (at === previous && session.id > latest!.id)) latest = session;
@@ -457,8 +473,8 @@ export function notificationChildThreadId(
 ): ThreadId | undefined {
   switch (source.kind) {
     case "subagent":
-    case "delegated_task":
       return source.childThreadId;
+    case "delegated_task":
     case "command":
     case "monitor":
     case "background_task":

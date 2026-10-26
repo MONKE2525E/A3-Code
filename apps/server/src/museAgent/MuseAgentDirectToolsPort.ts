@@ -1,4 +1,10 @@
-import type { ProviderInstanceId, RunAttemptId, RunId, ThreadId } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  ProviderInstanceId,
+  RunAttemptId,
+  RunId,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -32,6 +38,7 @@ export interface MuseDirectToolTurnOptions {
   readonly register: (
     commands: Readonly<Record<string, NativeTools.DirectToolDefinition>>,
     invoke: (input: MuseDirectToolInvocation) => ReturnType<MuseDirectToolSession["invoke"]>,
+    environmentId: EnvironmentId,
   ) => Effect.Effect<
     {
       readonly accepted: number;

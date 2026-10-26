@@ -1460,6 +1460,7 @@ export const layer: Layer.Layer<
         loadRunInterruptReason: runControls.loadRunInterruptReason,
         message: {
           messageId: message.id,
+          ...(message.origin === undefined ? {} : { origin: message.origin }),
           text: userText,
           attachments: message.attachments,
           ...(message.context === undefined ? {} : { context: message.context }),
@@ -1580,6 +1581,7 @@ export const layer: Layer.Layer<
         hasUnpairedRunInterruptRequest: controls.hasUnpairedRunInterruptRequest,
         message: {
           messageId: run.userMessageId,
+          ...(message.origin === undefined ? {} : { origin: message.origin }),
           text: projectComposerContextForProvider({
             text: message.text,
             records: message.context?.records ?? [],

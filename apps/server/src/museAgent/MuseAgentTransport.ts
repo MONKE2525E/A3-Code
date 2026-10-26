@@ -3,6 +3,8 @@ import * as NodeCrypto from "node:crypto";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Executable discovery runs inside the Playwright Promise acquisition boundary.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
+import type { EnvironmentId } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Profile paths are constructed inside the browser acquisition boundary.
 import * as NodePath from "node:path";
 import * as Context from "effect/Context";
@@ -85,6 +87,7 @@ export interface MuseAgentNativeEvent {
   readonly meta?: { readonly seq?: number; readonly ts_ms?: number };
 }
 export interface MuseAgentToolRegistration {
+  readonly environmentId?: EnvironmentId;
   readonly clientId: string;
   readonly connectionId: string;
   readonly nativeSessionId: string;
@@ -440,6 +443,7 @@ export const makeMuseAgentTransportLayer = (
     MuseAgentTransport,
     Effect.gen(function* () {
       const source = yield* SessionSource.MuseAgentSessionSource;
+      const hostPlatform = yield* HostProcess.Platform;
       const integrationBrowser = yield* Effect.serviceOption(IntegrationBrowser.IntegrationBrowser);
       const credentialInbox = yield* Effect.serviceOption(CredentialInbox.MuseAgentCredentialInbox);
       // Playwright exposes a native Promise callback. Capture the application context
@@ -1043,6 +1047,8 @@ export const makeMuseAgentTransportLayer = (
                   nativeSessionId: input.nativeSessionId,
                   connectionId: input.connectionId,
                   commands: input.commands,
+                  platform: hostPlatform,
+                  environmentId: input.environmentId,
                 }),
               ),
             catch: (cause) =>

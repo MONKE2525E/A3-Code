@@ -27,10 +27,24 @@ import {
   deriveThreadRuntime,
   deriveLatestProviderSessionError,
   deriveLatestProviderSessionRetirement,
+  notificationChildThreadId,
   threadRuntimeHasInterruptibleRun,
 } from "./threadExecution.ts";
 
 const now = DateTime.makeUnsafe("2026-07-28T10:00:00.000Z");
+
+it("does not treat a remote delegated task as a local child thread", () => {
+  expect(
+    notificationChildThreadId({
+      kind: "delegated_task",
+      taskIds: [NodeId.make("remote-task")],
+      childThreadId: ThreadId.make("remote-thread"),
+    }),
+  ).toBeUndefined();
+  expect(
+    notificationChildThreadId({ kind: "subagent", childThreadId: ThreadId.make("local-child") }),
+  ).toBe("local-child");
+});
 
 function run(id: string, ordinal: number, status: OrchestrationV2RunStatus) {
   return {
@@ -443,7 +457,12 @@ it("derives observer retirement from the newest matching session update", () => 
     providerSessions: NonNullable<
       Parameters<typeof deriveLatestProviderSessionRetirement>[0]
     >["providerSessions"],
-  ) => deriveLatestProviderSessionRetirement({ thread: v2Projection.thread, providerSessions });
+  ) =>
+    deriveLatestProviderSessionRetirement({
+      thread: v2Projection.thread,
+      providerThreads: [],
+      providerSessions,
+    });
   expect(retirement([stopped])).toContain("retired-observer:");
   expect(retirement([ready, stopped])).toBeNull();
   expect(
@@ -453,4 +472,42 @@ it("derives observer retirement from the newest matching session update", () => 
     ]),
   ).toContain("retired-observer:");
   expect(retirement([{ ...ready, status: "error" }, stopped])).toContain("fresh-observer:");
+});
+
+it("ignores a retired bootstrap observer after the active Muse session takes over", () => {
+  const instanceId = v2Projection.thread.providerInstanceId;
+  const activeId = ProviderThreadId.make("active-muse");
+  const activeSession = {
+    id: ProviderSessionId.make("active-session"),
+    providerInstanceId: instanceId,
+    status: "ready" as const,
+    updatedAt: now,
+  };
+  const oldObserver = {
+    ...activeSession,
+    id: ProviderSessionId.make("bootstrap-observer"),
+    status: "stopped" as const,
+    updatedAt: DateTime.add(now, { seconds: 1 }),
+  };
+  const projection = {
+    thread: { ...v2Projection.thread, activeProviderThreadId: activeId },
+    providerThreads: [
+      {
+        id: activeId,
+        providerInstanceId: instanceId,
+        providerSessionId: activeSession.id,
+      },
+    ],
+    providerSessions: [activeSession, oldObserver],
+  };
+  expect(deriveLatestProviderSessionRetirement(projection)).toBeNull();
+  expect(
+    deriveLatestProviderSessionRetirement({
+      ...projection,
+      providerSessions: [
+        { ...activeSession, status: "stopped" },
+        { ...oldObserver, status: "ready" },
+      ],
+    }),
+  ).toContain("active-session:");
 });
