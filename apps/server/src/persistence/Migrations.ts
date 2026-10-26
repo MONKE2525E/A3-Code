@@ -77,6 +77,7 @@ import Migration0071 from "./Migrations/071_ThreadSenderIndex.ts";
 import Migration0072 from "./Migrations/072_NativeTurnItemSequences.ts";
 import Migration0073 from "./Migrations/073_ShellStopRequestIndex.ts";
 import Migration0074 from "./Migrations/074_ThreadMessageSearch.ts";
+import Migration0075 from "./Migrations/075_McpRemoteCredentialSubagent.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -154,6 +155,7 @@ const migrationEntries = [
   [72, "NativeTurnItemSequences", Migration0072],
   [73, "ShellStopRequestIndex", Migration0073],
   [74, "ThreadMessageSearch", Migration0074],
+  [75, "McpRemoteCredentialSubagent", Migration0075],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

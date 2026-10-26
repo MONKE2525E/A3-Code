@@ -11,9 +11,10 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import migration from "../persistence/Migrations/068_GrokBotManagedRuntime.ts";
+import subagentMigration from "../persistence/Migrations/075_McpRemoteCredentialSubagent.ts";
 import * as Store from "./McpRemoteCredentialStore.ts";
 
-const database = Layer.effectDiscard(migration).pipe(
+const database = Layer.effectDiscard(Effect.andThen(migration, subagentMigration)).pipe(
   Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
 );
 const layer = Store.layer.pipe(Layer.provideMerge(database));

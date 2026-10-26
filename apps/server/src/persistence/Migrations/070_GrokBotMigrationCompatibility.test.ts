@@ -111,7 +111,10 @@ describe("GrokBot migration compatibility", () => {
         );
         assert.deepStrictEqual(yield* sql`SELECT * FROM grok_bot_managed_bindings`, bindings);
         assert.deepStrictEqual(yield* sql`SELECT * FROM grok_bot_managed_turns`, turns);
-        assert.deepStrictEqual(yield* sql`SELECT * FROM mcp_remote_credentials`, credentials);
+        assert.deepStrictEqual(
+          yield* sql`SELECT * FROM mcp_remote_credentials`,
+          credentials.map((row) => ({ ...row, subagent: 0 })),
+        );
         assert.deepStrictEqual(yield* sql`SELECT * FROM grok_bot_managed_completions`, completions);
       }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

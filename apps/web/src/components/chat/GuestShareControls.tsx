@@ -173,37 +173,6 @@ function GuestShareDialog({
   );
 }
 
-/** Header status for a shared thread, with the way to end the share. */
-export function GuestShareIndicator({ threadRef }: { readonly threadRef: ScopedThreadRef }) {
-  const share = useThreadGuestShare(threadRef);
-  const closeGuestShare = useOrchestrationCommand(threadEnvironment.closeGuestShare, {
-    label: "stop guest share",
-  });
-  const [closing, setClosing] = useState(false);
-  if (share === null) return null;
-  return (
-    <div className="flex shrink-0 items-center gap-1 text-muted-foreground text-xs">
-      <UserIcon aria-hidden className="size-3.5" />
-      <GuestShareStatus share={share} />
-      <Button
-        size="xs"
-        variant="ghost-muted"
-        disabled={closing}
-        onClick={async () => {
-          setClosing(true);
-          await closeGuestShare({
-            environmentId: threadRef.environmentId,
-            input: { threadId: threadRef.threadId },
-          });
-          setClosing(false);
-        }}
-      >
-        Stop sharing
-      </Button>
-    </div>
-  );
-}
-
 function GuestShareStatus({ share }: { readonly share: ThreadGuestShare }) {
   const nowMinute = useNowMinute();
   // The share stays on the thread after it expires, until the owner clears it.

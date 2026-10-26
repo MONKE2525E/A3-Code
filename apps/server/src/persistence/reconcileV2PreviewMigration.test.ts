@@ -47,6 +47,7 @@ describe("V2 preview upgrade", () => {
         [72, "NativeTurnItemSequences"],
         [73, "ShellStopRequestIndex"],
         [74, "ThreadMessageSearch"],
+        [75, "McpRemoteCredentialSubagent"],
       ]);
       assert.deepStrictEqual(
         yield* sql`SELECT turn_item_id, ordinal, native_sequence
@@ -88,6 +89,7 @@ describe("V2 preview upgrade", () => {
         [72, "NativeTurnItemSequences"],
         [73, "ShellStopRequestIndex"],
         [74, "ThreadMessageSearch"],
+        [75, "McpRemoteCredentialSubagent"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -185,6 +187,7 @@ describe("V2 preview upgrade", () => {
         [72, "NativeTurnItemSequences"],
         [73, "ShellStopRequestIndex"],
         [74, "ThreadMessageSearch"],
+        [75, "McpRemoteCredentialSubagent"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

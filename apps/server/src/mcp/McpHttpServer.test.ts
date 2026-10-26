@@ -422,13 +422,10 @@ it.effect.each(["limit", "runLimit", "maxCharsPerItem"])(
   },
 );
 
-it("keeps cross-tool routing out of the delegate_task description", () => {
+it("keeps delegated review-round routing in the delegate_task description", () => {
   const description = OrchestratorToolkit.tools.delegate_task.description ?? "";
-  expect(description).toContain("Start one child agent with only `task`");
-  // Review rounds, follow-ups, and polling are routed in the system text.
-  expect(description).not.toContain("t3_thread_send");
-  expect(description).not.toContain("Do not poll");
-  expect(description).not.toContain("Prefer native");
+  expect(description).toContain("call delegate_task again");
+  expect(description).toContain("not the target for starting another delegated review round");
 });
 
 it.effect(
