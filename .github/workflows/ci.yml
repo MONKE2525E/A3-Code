@@ -343,14 +343,16 @@ jobs:
 
       - name: Test
         # Fork runners have a fraction of upstream's 8 vCPUs; running the unit and browser projects
-        # together starves the CPU-bound file preview browser tests into their timeouts.
+        # together starves the CPU-bound file preview browser tests into their timeouts, so that file runs alone.
         run: |
           if [ "$GITHUB_REPOSITORY" = "pingdotgg/t3code" ]; then
             vp run --filter @t3tools/web test
           else
             cd apps/web
             vp test run --passWithNoTests --project unit
-            vp test run --passWithNoTests --project browser
+            heavy=src/components/files/AttachmentFilePreview.browser.test.tsx
+            vp test run --passWithNoTests --project browser --exclude "$heavy"
+            vp test run --project browser "$heavy"
           fi
 
   # apps/server sets `fileParallelism: false`, so its test files run strictly
