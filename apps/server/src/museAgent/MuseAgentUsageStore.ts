@@ -108,18 +108,43 @@ const make = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
       const current = observation(subscription, now);
       if (!current) return;
+      const identity = accountFingerprint ?? binding;
+      const digest = yield* Effect.promise(() =>
+        crypto.subtle.digest("SHA-256", new TextEncoder().encode(identity)),
+      );
+      const hash = [...new Uint8Array(digest)]
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+      const archivePath = path.join(config.stateDir, `muse-agent-usage-${hash}.json`);
       const previous = yield* fs.readFileString(filePath).pipe(
         Effect.map(decodeFile),
         Effect.catchCause(() => Effect.succeed(null)),
       );
-      const same =
+      const active =
         previous &&
         (previous.accountFingerprint && accountFingerprint
           ? previous.accountFingerprint === accountFingerprint
           : previous.binding === binding)
           ? previous
           : null;
-      if (same && current.at <= same.observation.at) return;
+      const same =
+        active ??
+        (yield* fs.readFileString(archivePath).pipe(
+          Effect.map(decodeFile),
+          Effect.catchCause(() => Effect.succeed(null)),
+        ));
+      if (same && current.at <= same.observation.at) {
+        if (!active || same.binding !== binding) {
+          yield* writeFileStringAtomically({
+            filePath,
+            contents: encodeFile({ ...same, binding }),
+          }).pipe(
+            Effect.provideService(FileSystem.FileSystem, fs),
+            Effect.provideService(Path.Path, path),
+          );
+        }
+        return;
+      }
       const prior = same?.observation ?? {
         ...current,
         at: Math.max(current.reset - 7 * 24 * 3_600_000, 0),
@@ -164,10 +189,13 @@ const make = Effect.gen(function* () {
           .filter(([start]) => start >= cutoff)
           .map(([start, tokens]) => ({ start, tokens })),
       };
-      yield* writeFileStringAtomically({ filePath, contents: encodeFile(data) }).pipe(
-        Effect.provideService(FileSystem.FileSystem, fs),
-        Effect.provideService(Path.Path, path),
-      );
+      const contents = encodeFile(data);
+      for (const target of [archivePath, filePath]) {
+        yield* writeFileStringAtomically({ filePath: target, contents }).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
+        );
+      }
     },
     lock.withPermits(1),
     Effect.ignoreCause({ log: true }),

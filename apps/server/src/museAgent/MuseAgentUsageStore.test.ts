@@ -123,5 +123,20 @@ it.effect("persists account-bound estimates without counting repeated observatio
       rebound.hours.reduce((sum, entry) => sum + entry.tokens, 0),
       20_000_000,
     );
+    yield* TestClock.adjust("30 minutes");
+    yield* store.observe("other-workspace", firstWorkspace, "other-account");
+    yield* TestClock.adjust("30 minutes");
+    yield* store.observe(
+      "workspace-two",
+      {
+        ...firstWorkspace,
+        usage: { ...firstWorkspace.usage, resetsAt: (now + 7 * 24 * 3_600_000) / 1000 },
+      },
+      "same-account",
+    );
+    assert.strictEqual(
+      (yield* read).hours.reduce((sum, entry) => sum + entry.tokens, 0),
+      20_000_000,
+    );
   }).pipe(Effect.provide(NodeServices.layer)),
 );
