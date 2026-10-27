@@ -16,6 +16,7 @@ const Observation = Schema.Struct({
   weeklyUsed: Schema.Number,
   reset: Schema.Number,
   weeklyAllowance: Schema.Number,
+  weeklyKnown: Schema.optionalKey(Schema.Boolean),
   bonusBalance: Schema.Number,
   bonusTotal: Schema.Number,
   bonusTokenScale: Schema.Number,
@@ -25,6 +26,7 @@ export const MuseUsageFile = Schema.Struct({
   binding: Schema.String,
   accountFingerprint: Schema.optionalKey(Schema.String),
   observation: Observation,
+  weeklyObservation: Schema.optionalKey(Observation),
   bonusObservation: Schema.optionalKey(Observation),
   hours: Schema.Array(Schema.Struct({ start: Schema.Number, tokens: Schema.Number })),
 });
@@ -44,17 +46,16 @@ function observation(subscription: MuseAgentSubscription, at: number) {
   const weeklyUsed =
     subscription.usage?.state === "METERED" ? subscription.usage.percentUsed : null;
   const reset = subscription.usage?.resetsAt;
-  if (
-    !weeklyAllowance ||
-    typeof weeklyUsed !== "number" ||
-    !Number.isFinite(weeklyUsed) ||
-    weeklyUsed < 0 ||
-    weeklyUsed > 100 ||
-    typeof reset !== "number" ||
-    !Number.isFinite(reset) ||
-    reset <= 0
-  )
-    return null;
+  const weeklyKnown =
+    weeklyAllowance > 0 &&
+    typeof weeklyUsed === "number" &&
+    Number.isFinite(weeklyUsed) &&
+    weeklyUsed >= 0 &&
+    weeklyUsed <= 100 &&
+    typeof reset === "number" &&
+    Number.isFinite(reset) &&
+    reset * 1000 > at &&
+    reset * 1000 <= at + 7 * 24 * 3_600_000;
   const balance = subscription.topupBalance;
   const total = subscription.topupTotal;
   const bonusKnown =
@@ -64,7 +65,7 @@ function observation(subscription: MuseAgentSubscription, at: number) {
     Number.isFinite(total) &&
     balance >= 0 &&
     total >= balance;
-  if (reset * 1000 <= at || reset * 1000 > at + 7 * 24 * 3_600_000) return null;
+  if (!weeklyKnown && !bonusKnown) return null;
   const safeBalance = bonusKnown ? balance : 0;
   const safeTotal = bonusKnown ? total : 0;
   const label = subscription.topupRowValueLabel?.match(/([\d,.]+)\s*([kmb])?\s+tokens?\s+left/i);
@@ -76,9 +77,10 @@ function observation(subscription: MuseAgentSubscription, at: number) {
   const scale = safeBalance > 0 && Number.isFinite(shown) && shown > 0 ? shown / safeBalance : 0;
   return {
     at,
-    weeklyUsed,
-    reset: reset * 1000,
-    weeklyAllowance,
+    weeklyUsed: weeklyKnown ? weeklyUsed : 0,
+    reset: weeklyKnown ? reset * 1000 : 0,
+    weeklyAllowance: weeklyKnown ? weeklyAllowance : 0,
+    weeklyKnown,
     bonusBalance: safeBalance,
     bonusTotal: safeTotal,
     bonusTokenScale: scale,
@@ -145,7 +147,10 @@ const make = Effect.gen(function* () {
         }
         return;
       }
-      const prior = same?.observation ?? {
+      const lastWeekly =
+        same?.weeklyObservation ??
+        (same?.observation.weeklyKnown !== false ? same?.observation : undefined);
+      const prior = lastWeekly ?? {
         ...current,
         at: Math.max(current.reset - 7 * 24 * 3_600_000, 0),
         weeklyUsed: 0,
@@ -160,7 +165,8 @@ const make = Effect.gen(function* () {
       const add = (items: ReturnType<typeof estimateMuseUsage>) => {
         for (const item of items) hours.set(item.start, (hours.get(item.start) ?? 0) + item.tokens);
       };
-      add(estimateMuseUsage({ ...prior, bonusKnown: false }, { ...stable, bonusKnown: false }));
+      if (current.weeklyKnown)
+        add(estimateMuseUsage({ ...prior, bonusKnown: false }, { ...stable, bonusKnown: false }));
       if (current.bonusKnown && lastBonus && lastBonus.bonusTokenScale > 0) {
         add(
           estimateMuseUsage(
@@ -180,6 +186,11 @@ const make = Effect.gen(function* () {
         binding,
         ...(accountFingerprint ? { accountFingerprint } : {}),
         observation: stable,
+        ...(stable.weeklyKnown
+          ? { weeklyObservation: stable }
+          : lastWeekly
+            ? { weeklyObservation: lastWeekly }
+            : {}),
         ...(stable.bonusKnown
           ? { bonusObservation: stable }
           : lastBonus

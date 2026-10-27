@@ -138,5 +138,29 @@ it.effect("persists account-bound estimates without counting repeated observatio
       (yield* read).hours.reduce((sum, entry) => sum + entry.tokens, 0),
       20_000_000,
     );
+    yield* TestClock.adjust("1 hour");
+    yield* store.observe("bonus-only", { ...subscription, usage: null });
+    yield* TestClock.adjust("30 minutes");
+    yield* store.observe("bonus-only", {
+      ...subscription,
+      usage: null,
+      topupBalance: 0,
+      topupRowValueLabel: "0 tokens left",
+    });
+    assert.strictEqual(
+      (yield* read).hours.reduce((sum, entry) => sum + entry.tokens, 0),
+      2_500,
+    );
+    yield* TestClock.adjust("30 minutes");
+    yield* store.observe("bonus-only", {
+      ...subscription,
+      usage: { ...subscription.usage, resetsAt: (now + 7 * 24 * 3_600_000) / 1000 },
+      topupBalance: 0,
+      topupRowValueLabel: "0 tokens left",
+    });
+    assert.strictEqual(
+      (yield* read).hours.reduce((sum, entry) => sum + entry.tokens, 0),
+      10_002_500,
+    );
   }).pipe(Effect.provide(NodeServices.layer)),
 );

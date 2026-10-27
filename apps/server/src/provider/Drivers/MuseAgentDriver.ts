@@ -92,14 +92,15 @@ const checkMuseAgentProvider = Effect.fnUntraced(function* (
         "The selected Muse account or cloud workspace changed. Set up a new provider binding.",
       );
     yield* native.resolveSession(binding);
-    const subscription = yield* native
-      .subscription(binding)
-      .pipe(Effect.orElseSucceed(() => undefined));
+    const subscription = yield* native.subscription(binding).pipe(
+      Effect.orElseSucceed(() => undefined),
+      Effect.timeoutOrElse({ duration: "5 seconds", orElse: () => Effect.succeed(null) }),
+    );
     if ((yield* native.accountBinding) !== binding)
       return snapshot(
         "The selected Muse account or cloud workspace changed. Set up a new provider binding.",
       );
-    return snapshot("Muse is connected.", true, subscription);
+    return snapshot("Muse is connected.", true, subscription ?? undefined);
   }).pipe(
     Effect.orElseSucceed(() =>
       snapshot("The authenticated Muse session is unavailable. Open Muse and reconnect."),
