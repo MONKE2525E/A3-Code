@@ -118,6 +118,9 @@ export class MuseAgentTransport extends Context.Service<
   MuseAgentTransport,
   {
     readonly connect: Effect.Effect<string, MuseAgentTransportError>;
+    readonly subscription: (
+      binding: string,
+    ) => Effect.Effect<{ value: unknown; accountFingerprint: string }, MuseAgentTransportError>;
     readonly request: (
       binding: string,
       method: string,
@@ -342,7 +345,15 @@ const decodeComputerPreviewResult = Schema.decodeUnknownEffect(
 const hashAuthority = (value: string) =>
   NodeCrypto.createHash("sha256").update(value).digest("hex");
 
+export const usageAccountFingerprint = (authority: string) => {
+  const account: unknown = JSON.parse(authority);
+  if (!Array.isArray(account) || typeof account[0] !== "string" || !account[0])
+    throw new Error("Invalid Muse account authority");
+  return hashAuthority(JSON.stringify(["muse-usage-account", account[0]]));
+};
+
 interface MuseAgentPageBridge {
+  subscription(input: unknown): Promise<unknown>;
   authority(): string | null;
   observeDisconnect(input: unknown): void;
   request(input: unknown): Promise<unknown>;
@@ -770,6 +781,23 @@ export const makeMuseAgentTransportLayer = (
         });
       return MuseAgentTransport.of({
         connect,
+        subscription: Effect.fn("MuseAgentTransport.subscription")(function* (binding) {
+          const current = yield* verify(binding);
+          return yield* Effect.tryPromise({
+            try: async () => ({
+              value: await callPageBridge(current.page, "subscription", {
+                authority: current.authority,
+              }),
+              accountFingerprint: usageAccountFingerprint(current.authority),
+            }),
+            catch: (cause) => new MuseAgentTransportError({ kind: "protocol", cause }),
+          }).pipe(
+            Effect.timeoutOrElse({
+              duration: "30 seconds",
+              orElse: () => Effect.fail(new MuseAgentTransportError({ kind: "disconnected" })),
+            }),
+          );
+        }),
         acquireTurn,
         request: (binding, method, params, write = false, deliveryKey, onDispatch) =>
           verify(binding).pipe(

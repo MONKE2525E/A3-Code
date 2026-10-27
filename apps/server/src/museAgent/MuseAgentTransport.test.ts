@@ -1085,3 +1085,17 @@ it.effect("reacquires a turn reservation reset during same-account session refre
     }),
   ).pipe(Effect.provide(f.layer));
 });
+
+it("uses one usage identity across workspaces while keeping accounts separate", () => {
+  const first = JSON.stringify(["account-a", "workspace-a", null, null]);
+  const second = JSON.stringify(["account-a", "workspace-b", null, null]);
+  const other = JSON.stringify(["account-b", "workspace-a", null, null]);
+  assert.strictEqual(
+    Transport.usageAccountFingerprint(first),
+    Transport.usageAccountFingerprint(second),
+  );
+  assert.notStrictEqual(
+    Transport.usageAccountFingerprint(first),
+    Transport.usageAccountFingerprint(other),
+  );
+});

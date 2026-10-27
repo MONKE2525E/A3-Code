@@ -362,6 +362,12 @@ function UsageScreen(props: {
                       {message}
                     </Text>
                   ))}
+                  {merged.unclassifiedTokens > 0 ? (
+                    <Text className="text-sm text-foreground-muted">
+                      Muse tokens are estimated from account limits. Usage between observations is
+                      averaged; previously used bonus tokens appear when first observed.
+                    </Text>
+                  ) : null}
                   <UsageUpdating dimmed={progress.dimmed} label={progress.label}>
                     <ChartCard
                       merged={merged}

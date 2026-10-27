@@ -78,6 +78,94 @@ function environment(id: string, usageSummary: UsageSummary): EnvironmentUsage {
 }
 
 describe("mergeUsage", () => {
+  it("chooses the most recently observed Muse account rather than the latest summary read", () => {
+    const account = {
+      provider: "muse-agent" as const,
+      hostId: "muse.ai",
+      homePath: "muse-account:a",
+    };
+    const museBucket = (tokens: number) =>
+      bucket({
+        provider: "muse-agent",
+        sourcePath: account.homePath,
+        totals: {
+          uncachedInputTokens: 0,
+          cachedInputTokens: 0,
+          cacheCreationTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+          unclassifiedTokens: tokens,
+        },
+      });
+    const fresh = summary([museBucket(20_000_000)], [account]);
+    const stale = summary([museBucket(10_000_000)], [account]);
+    const merged = mergeUsage(
+      [
+        environment("fresh", {
+          ...fresh,
+          readAt: "2026-08-07T00:00:00Z",
+          sources: fresh.sources.map((source) => ({
+            ...source,
+            observedAt: "2026-08-06T00:00:00Z",
+          })),
+        }),
+        environment("stale", {
+          ...stale,
+          readAt: "2026-08-07T00:00:01Z",
+          sources: stale.sources.map((source) => ({
+            ...source,
+            observedAt: "2026-08-05T00:00:00Z",
+          })),
+        }),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(merged.unclassifiedTokens).toBe(20_000_000);
+  });
+
+  it("does not double-count bonus usage backfilled after a weekly reset", () => {
+    const account = {
+      provider: "muse-agent" as const,
+      hostId: "muse.ai",
+      homePath: "muse-account:a",
+    };
+    const museBucket = (hourStart: string, tokens: number) =>
+      bucket({
+        provider: "muse-agent",
+        sourcePath: account.homePath,
+        hourStart,
+        totals: {
+          uncachedInputTokens: 0,
+          cachedInputTokens: 0,
+          cacheCreationTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+          unclassifiedTokens: tokens,
+        },
+      });
+    const current = summary([museBucket("2026-08-06T02:00:00Z", 2500)], [account]);
+    const earlier = summary([museBucket("2026-08-05T23:00:00Z", 2500)], [account]);
+    const merged = mergeUsage(
+      [
+        environment("current", {
+          ...current,
+          sources: current.sources.map((source) => ({
+            ...source,
+            observedAt: "2026-08-07T00:00:00Z",
+          })),
+        }),
+        environment("earlier", {
+          ...earlier,
+          sources: earlier.sources.map((source) => ({
+            ...source,
+            observedAt: "2026-08-06T00:00:00Z",
+          })),
+        }),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(merged.unclassifiedTokens).toBe(2500);
+  });
   it("counts a Cursor account once across servers while retaining each server's other providers", () => {
     const account = {
       provider: "cursor" as const,

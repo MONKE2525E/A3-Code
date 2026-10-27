@@ -84,6 +84,8 @@ const fixture = () => {
   const localReleaseReceipts: (Delivery.MuseAgentReceipt | null)[] = [];
   const routeEvents: { kind: "acquire" | "release"; sessionId: string }[] = [];
   const transport = Transport.MuseAgentTransport.of({
+    subscription: () =>
+      Effect.succeed({ value: { tier: { name: "Muse Free" } }, accountFingerprint: "account" }),
     acquireTurn: (account, sessionId) => {
       routeEvents.push({ kind: "acquire", sessionId });
       return acquireTurn(account, sessionId);

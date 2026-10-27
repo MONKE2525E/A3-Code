@@ -16,6 +16,7 @@ export const UsageProviderKind = Schema.Literals([
   "antigravity",
   "pi",
   "muse",
+  "muse-agent",
 ]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
 
@@ -39,6 +40,8 @@ export const UsageTokenTotals = Schema.Struct({
   cacheCreationTokens: NonNegativeInt,
   outputTokens: NonNegativeInt,
   reasoningTokens: NonNegativeInt,
+  /** Estimated account usage without a reported input/output breakdown. */
+  unclassifiedTokens: Schema.optionalKey(NonNegativeInt),
 });
 export type UsageTokenTotals = typeof UsageTokenTotals.Type;
 
@@ -91,6 +94,7 @@ export const UsageSource = Schema.Struct({
   /** Total this count; bucket counts double-count sessions spanning days or models. */
   distinctSessions: NonNegativeInt,
   message: Schema.NullOr(TrimmedNonEmptyString),
+  observedAt: Schema.optionalKey(TrimmedNonEmptyString),
   action: Schema.optionalKey(Schema.Literal("enableCursorKeychain")),
   /** Cached response during refresh; repeat with awaitRefresh for fresh data. */
   refreshing: Schema.optionalKey(Schema.Literal(true)),

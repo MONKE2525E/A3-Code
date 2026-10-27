@@ -127,6 +127,7 @@ export const makeNative = (
   overrides: Partial<Native.MuseAgentNativeRuntimeService["Service"]> = {},
 ) =>
   Native.MuseAgentNativeRuntimeService.of({
+    subscription: () => Effect.succeed({ tier: { name: "Muse Free" } }),
     historyOwnership: () => Effect.succeed({ receipts: [], messages: [] }),
     recordManagedMessage: () => Effect.void,
     pendingDeliveries: () => Effect.succeed([]),

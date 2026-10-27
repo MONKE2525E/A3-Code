@@ -162,7 +162,10 @@ export class UsageAggregator {
         : Math.floor((record.timestampMs - this.#hourlyWindow.sinceTimeMs) / HOUR_MS);
     const bucket = this.#bucketFor(day, hourIndex, record.provider, record.model, sourcePath ?? "");
 
-    const priced = priceUsage(this.#options.rates, record, this.#options.priceOverrides);
+    const priced =
+      record.provider === "muse-agent"
+        ? { costUsd: 0, costSource: "unpriced" as const, categoryCostUsd: null, speedPremiumUsd: 0 }
+        : priceUsage(this.#options.rates, record, this.#options.priceOverrides);
 
     const totals = bucket.totals;
     totals.uncachedInputTokens += record.totals.uncachedInputTokens;
@@ -170,6 +173,10 @@ export class UsageAggregator {
     totals.cacheCreationTokens += record.totals.cacheCreationTokens;
     totals.outputTokens += record.totals.outputTokens;
     totals.reasoningTokens += record.totals.reasoningTokens;
+    if (record.totals.unclassifiedTokens) {
+      totals.unclassifiedTokens =
+        (totals.unclassifiedTokens ?? 0) + record.totals.unclassifiedTokens;
+    }
     bucket.costUsd += priced.costUsd;
     if (priced.categoryCostUsd !== null) {
       const sum = bucket.categoryCostUsd;
@@ -187,11 +194,10 @@ export class UsageAggregator {
     if (record.speed === "fast") bucket.fastCostUsd += priced.costUsd;
     if (record.speed === "ultrafast") bucket.ultrafastCostUsd += priced.costUsd;
     bucket.speedPremiumUsd += priced.speedPremiumUsd;
-    bucket.cacheSavingsUsd += cacheSavingsUsd(
-      this.#options.rates,
-      record,
-      this.#options.priceOverrides,
-    );
+    bucket.cacheSavingsUsd +=
+      record.provider === "muse-agent"
+        ? 0
+        : cacheSavingsUsd(this.#options.rates, record, this.#options.priceOverrides);
     bucket.records += 1;
     if (priced.costSource === "unpriced") bucket.unpricedRecords += 1;
     if (priced.costSource === "providerReported") bucket.providerReportedRecords += 1;

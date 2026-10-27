@@ -93,6 +93,7 @@ export interface MergedUsage {
   readonly cacheCreationTokens: number;
   readonly outputTokens: number;
   readonly reasoningTokens: number;
+  readonly unclassifiedTokens: number;
   readonly totalTokens: number;
   readonly records: number;
   readonly sessions: number;
@@ -155,20 +156,40 @@ function claimSources(environments: readonly EnvironmentUsage[]): {
       (Date.parse(b.summary.readAt) || 0) - (Date.parse(a.summary.readAt) || 0) ||
       a.environmentId.localeCompare(b.environmentId),
   );
+  const scans = ordered
+    .flatMap((environment) =>
+      environment.summary.sources.map((source) => ({ environment, source })),
+    )
+    .sort((a, b) => {
+      const timestamp = ({
+        environment,
+        source,
+      }: {
+        environment: EnvironmentUsage;
+        source: UsageSource;
+      }) =>
+        Date.parse(
+          source.fingerprint.provider === "muse-agent"
+            ? (source.observedAt ?? "")
+            : environment.summary.readAt,
+        ) || 0;
+      return (
+        timestamp(b) - timestamp(a) ||
+        a.environment.environmentId.localeCompare(b.environment.environmentId)
+      );
+    });
 
   for (const status of ["ok", "partial", "failed"] as const) {
-    for (const environment of ordered) {
-      for (const source of environment.summary.sources) {
-        if (source.status !== status) continue;
-        const key = fingerprintKey(source.fingerprint);
-        if (ownerByFingerprint.has(key)) {
-          duplicates.push(`${environment.label}: ${source.fingerprint.resolvedHomePath}`);
-          continue;
-        }
-        ownerByFingerprint.set(key, environment.environmentId);
-        ownerScanByFingerprint.set(key, { environment, source });
-        sessionsByFingerprint.set(key, source.distinctSessions);
+    for (const { environment, source } of scans) {
+      if (source.status !== status) continue;
+      const key = fingerprintKey(source.fingerprint);
+      if (ownerByFingerprint.has(key)) {
+        duplicates.push(`${environment.label}: ${source.fingerprint.resolvedHomePath}`);
+        continue;
       }
+      ownerByFingerprint.set(key, environment.environmentId);
+      ownerScanByFingerprint.set(key, { environment, source });
+      sessionsByFingerprint.set(key, source.distinctSessions);
     }
   }
 
@@ -261,7 +282,8 @@ function bucketTokens(bucket: UsageBucket): number {
     bucket.totals.uncachedInputTokens +
     bucket.totals.cachedInputTokens +
     bucket.totals.cacheCreationTokens +
-    bucket.totals.outputTokens
+    bucket.totals.outputTokens +
+    (bucket.totals.unclassifiedTokens ?? 0)
   );
 }
 
@@ -276,6 +298,7 @@ const EMPTY_MERGED: MergedUsage = {
   cacheCreationTokens: 0,
   outputTokens: 0,
   reasoningTokens: 0,
+  unclassifiedTokens: 0,
   totalTokens: 0,
   records: 0,
   sessions: 0,
@@ -334,6 +357,7 @@ export function mergeUsage(
   let cacheCreationTokens = 0;
   let outputTokens = 0;
   let reasoningTokens = 0;
+  let unclassifiedTokens = 0;
   let records = 0;
   let sessions = 0;
   let cacheSavingsUsd = 0;
@@ -410,6 +434,7 @@ export function mergeUsage(
       cacheCreationTokens += bucket.totals.cacheCreationTokens;
       outputTokens += bucket.totals.outputTokens;
       reasoningTokens += bucket.totals.reasoningTokens;
+      unclassifiedTokens += bucket.totals.unclassifiedTokens ?? 0;
       records += bucket.records;
       unpricedRecords += bucket.unpricedRecords;
       if (bucket.costSource === "providerReported") providerReportedRecords += bucket.records;
@@ -458,6 +483,8 @@ export function mergeUsage(
         cacheCreationTokens: model.tokens.cacheCreationTokens + bucket.totals.cacheCreationTokens,
         outputTokens: model.tokens.outputTokens + bucket.totals.outputTokens,
         reasoningTokens: model.tokens.reasoningTokens + bucket.totals.reasoningTokens,
+        unclassifiedTokens:
+          (model.tokens.unclassifiedTokens ?? 0) + (bucket.totals.unclassifiedTokens ?? 0),
       };
       model.records += bucket.records;
       model.unpricedRecords += bucket.unpricedRecords;
@@ -501,7 +528,12 @@ export function mergeUsage(
     }
   }
 
-  const totalTokens = uncachedInputTokens + cachedInputTokens + cacheCreationTokens + outputTokens;
+  const totalTokens =
+    uncachedInputTokens +
+    cachedInputTokens +
+    cacheCreationTokens +
+    outputTokens +
+    unclassifiedTokens;
 
   const providers: ProviderTotals[] = [...providerAccumulator.entries()]
     .map(([provider, totals]) => ({
@@ -550,6 +582,7 @@ export function mergeUsage(
     cacheCreationTokens,
     outputTokens,
     reasoningTokens,
+    unclassifiedTokens,
     totalTokens,
     records,
     sessions,
