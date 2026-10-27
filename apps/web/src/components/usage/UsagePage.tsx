@@ -847,6 +847,12 @@ function UsageOverview({
             hour12={hour12}
           />
         </div>
+        {merged.unclassifiedTokens > 0 ? (
+          <p className="text-xs text-muted-foreground">
+            Muse tokens are estimated from account limits. Usage between observations is averaged;
+            previously used bonus tokens appear when first observed.
+          </p>
+        ) : null}
       </section>
 
       <section className="flex flex-col gap-2">

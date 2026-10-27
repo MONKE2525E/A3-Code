@@ -32,6 +32,9 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { MuseAgentProviderSettings } from "@t3tools/contracts/museAgent";
+import { MUSE_USAGE_FILE, MuseUsageFile } from "../museAgent/MuseAgentUsageStore.ts";
+import { EMPTY_TOTALS } from "@t3tools/provider-core/server/usage";
 import { BUILT_IN_USAGE_DRIVERS, type BuiltInUsageReadersEnv } from "../provider/builtInDrivers.ts";
 import type { ProviderDriver } from "@t3tools/provider-core/server/driver";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
@@ -99,6 +102,8 @@ const RatesCacheFile = Schema.Struct({
   fetchedAtMs: Schema.Number,
   document: Schema.Unknown,
 });
+const decodeMuseAgentSettings = Schema.decodeOption(MuseAgentProviderSettings);
+
 const decodeRatesCache = Schema.decodeUnknownEffect(
   Schema.fromJsonString(RatesCacheFile as unknown as Schema.Codec<typeof RatesCacheFile.Type>),
 );
@@ -842,6 +847,67 @@ export const make = Effect.gen(function* () {
       });
     }
 
+    const bindings = Object.values(settings.providerInstances)
+      .filter((instance) => instance.driver === "muse-agent")
+      .map((instance) => decodeMuseAgentSettings(instance.config ?? {}))
+      .filter(Option.isSome)
+      .map(({ value }) => value.accountBinding)
+      .filter((binding): binding is string => binding != null);
+    if (bindings.length > 0) {
+      const names = yield* fileSystem
+        .readDirectory(config.stateDir)
+        .pipe(Effect.catchCause(() => Effect.succeed([] as string[])));
+      const candidates = [
+        MUSE_USAGE_FILE,
+        ...names.filter((name) => /^muse-agent-usage-[a-f0-9]{64}\.json$/.test(name)),
+      ];
+      const accounts = new Map<string, typeof MuseUsageFile.Type>();
+      for (const name of candidates) {
+        const muse = yield* fileSystem.readFileString(path.join(config.stateDir, name)).pipe(
+          Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(MuseUsageFile))),
+          Effect.catchCause(() => Effect.succeed(null)),
+        );
+        if (!muse || !bindings.includes(muse.binding)) continue;
+        const key = muse.accountFingerprint ?? muse.binding;
+        const prior = accounts.get(key);
+        if (!prior || muse.observation.at > prior.observation.at) accounts.set(key, muse);
+      }
+      for (const muse of accounts.values()) {
+        const accountFingerprint = muse.accountFingerprint ?? muse.binding;
+        const accountSource = `muse-agent-account:${accountFingerprint}`;
+        for (const hour of muse.hours) {
+          aggregator.add(
+            {
+              provider: "muse-agent",
+              timestampMs: hour.start,
+              model: "Muse (estimated)",
+              sessionId: "",
+              totals: { ...EMPTY_TOTALS, unclassifiedTokens: hour.tokens },
+              reportedCostUsd: null,
+              speed: "standard",
+              dedupeKey: null,
+            },
+            accountSource,
+          );
+        }
+        sources.push({
+          fingerprint: {
+            hostId: "muse.ai",
+            provider: "muse-agent",
+            resolvedHomePath: accountSource,
+            volumeId: accountFingerprint,
+          },
+          status: "ok",
+          observedAt: DateTime.formatIso(DateTime.makeUnsafe(muse.observation.at)),
+          scannedFiles: 1,
+          skippedFiles: 0,
+          malformedRecords: 0,
+          distinctSessions: 0,
+          message:
+            "Estimated from account limits; usage across unobserved weekly resets may be incomplete.",
+        });
+      }
+    }
     const pruned = pruneScanCache(fileCache, retentionCutoffMs);
     if (pruned > 0) cacheDirty = true;
 

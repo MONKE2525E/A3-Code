@@ -6,6 +6,7 @@ import { MUSE_AGENT_AVATAR_MAX_BYTES } from "./MuseAgentAvatar.ts";
 type Params = Record<string, unknown>;
 interface Bridge {
   authority(): string;
+  subscription(input: Params): Promise<unknown>;
   observeDisconnect(input: Params): void;
   connectionId(input: Params): string;
   watch(input: Params): Promise<unknown>;
@@ -159,9 +160,23 @@ const fixture = () => {
   let tick: (() => Promise<void>) | undefined;
   let generation = 0;
   let now = 30000;
+  const fetch = vi.fn(async (url: string) =>
+    url === "/"
+      ? {
+          ok: true,
+          text: async () =>
+            '1:{"success":true,"subscription":{"tier":{"name":"Muse Free"},"usage":{"state":"METERED","percentUsed":20,"resetsAt":123}}}',
+        }
+      : {
+          ok: true,
+          text: async () =>
+            'createServerReference)("1234567890123456789012345678901234567890",null,"fetchSubscriptionAction")',
+        },
+  );
   NodeVM.runInNewContext(museAgentBrowserBridge, {
     location: { origin: "https://muse.ai" },
-    document: { querySelectorAll },
+    document: { querySelectorAll, scripts: [{ src: "https://muse.ai/_next/static/test.js" }] },
+    fetch,
     window,
     crypto: { randomUUID: () => `generation-${++generation}` },
     Blob,
@@ -179,6 +194,7 @@ const fixture = () => {
   const authority = bridge.authority();
   return {
     bridge,
+    fetch,
     querySelectorAll,
     anchor,
     fiberTraversal,
@@ -1454,4 +1470,13 @@ it("rejects a foreign account when React reuses an alternate root with replaced 
   f.emit("delta.text_append", { session_id: "primary", text: "foreign" }, 3);
   expect(f.events.filter((event) => event.event === "delta.text_append")).toHaveLength(2);
   expect(() => f.bridge.connectionId({ authority: f.authority })).toThrow("account_changed");
+});
+
+it("reads the subscription using the authenticated Muse action and caches its identifier", async () => {
+  const f = fixture();
+  const value = await f.bridge.subscription({ authority: f.authority });
+  expect(value).toMatchObject({ tier: { name: "Muse Free" }, usage: { percentUsed: 20 } });
+  await f.bridge.subscription({ authority: f.authority });
+  expect(f.fetch).toHaveBeenCalledTimes(3);
+  expect(f.fetch).toHaveBeenLastCalledWith("/", expect.objectContaining({ method: "POST" }));
 });

@@ -20,7 +20,7 @@ export const museAgentBrowserBridge = String.raw`(() => {
   const EVENT_NAMES = ['delta.message_start','delta.text_append','delta.message_done','delta.turn_done','delta.presentation','message.assistant','message.user','task.status','agent.status','delta.tool_started','delta.tool_completed'];
   const AVATAR_PATH = new RegExp(${encodeString(museAgentAvatarPathPattern)});
   const AVATAR_MIMES = ${encodeMimes(museAgentAvatarMimes)};
-  let discoveryRoot = null, discoveryAnchor = null, discoveryCache = null;
+  let discoveryRoot = null, discoveryAnchor = null, discoveryCache = null, subscriptionAction = null;
   const discover = (refreshRoot = false) => {
     let root = !refreshRoot && discoveryAnchor?.isConnected ? discoveryRoot : null;
     if (!root) for (const el of document.querySelectorAll('body *')) {
@@ -180,6 +180,38 @@ export const museAgentBrowserBridge = String.raw`(() => {
   const registrationParams = (current, commands) => ({client_id:current.clientId,platform:current.platform,display_name:current.environmentId ? 'T3 Code · '+current.environmentId : 'T3 Code',version:'1',capabilities:{device_commands:commands,data_sources:{},hatch_app_commands:{},rendering:{}}});
   window.__t3Muse = {
     authority: () => discover()?.authority ?? null,
+    subscription: async ({authority}) => {
+      check(authority);
+      const scripts = [...document.scripts].map(s => s.src).filter(s => s.startsWith(location.origin + '/_next/static/') && s.includes('.js'));
+      let action = subscriptionAction;
+      for (let i = 0; i < scripts.length && !action; i += 8) {
+        const found = await Promise.all(scripts.slice(i,i+8).map(async url => {
+          try {
+            const response = await fetch(url);
+            if (!response.ok) return null;
+            const source = await response.text();
+            return source.match(/createServerReference\)\("([a-f0-9]{40,64})",[^;]{0,160}"fetchSubscriptionAction"\)/)?.[1] ?? null;
+          } catch { return null; }
+        }));
+        action = found.find(Boolean) ?? null;
+      }
+      if (!action) throw Error('subscription_action_unavailable');
+      subscriptionAction = action;
+      check(authority);
+      const response = await fetch('/', {method:'POST',headers:{'Next-Action':action,'Content-Type':'text/plain;charset=UTF-8'},body:'[{"includeAgreement":false}]'});
+      if (!response.ok) { subscriptionAction = null; throw Error('subscription_unavailable'); }
+      const text = await response.text();
+      check(authority);
+      for (const line of text.split('\n')) {
+        const separator = line.indexOf(':');
+        if (separator < 0) continue;
+        try {
+          const result = JSON.parse(line.slice(separator+1)), value = result.subscription;
+          if (result.success === true && value) return {tier:{name:value.tier?.name},usage:value.usage,topupBalance:value.topupBalance,topupTotal:value.topupTotal,topupRowValueLabel:value.topupRowValueLabel};
+        } catch {}
+      }
+      throw Error('subscription_invalid');
+    },
     observeDisconnect: ({authority}) => {
       if (location.origin !== 'https://muse.ai' || pinned !== authority) throw Error('account_changed');
       if (!active) return;

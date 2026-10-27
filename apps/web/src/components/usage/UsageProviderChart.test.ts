@@ -16,6 +16,7 @@ describe("buildPeriodColumns", () => {
           ["claude" as const, { costUsd: 20, totalTokens: 200 }],
           ["pi" as const, { costUsd: 5, totalTokens: 50 }],
           ["muse" as const, { costUsd: 7, totalTokens: 70 }],
+          ["muse-agent" as const, { costUsd: 0, totalTokens: 15 }],
         ]),
       },
     ],
@@ -42,6 +43,12 @@ describe("buildPeriodColumns", () => {
       { provider: "antigravity", value: 0 },
       { provider: "pi", value: 5 },
       { provider: "muse", value: 7 },
+      { provider: "muse-agent", value: 0 },
     ]);
+  });
+
+  it("includes Muse's estimated tokens in the token chart", () => {
+    const [first] = buildPeriodColumns(days, byDay, "tokens");
+    expect(first?.bands.find((band) => band.provider === "muse-agent")?.value).toBe(15);
   });
 });

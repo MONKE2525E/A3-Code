@@ -1027,6 +1027,142 @@ describe("UsageService", () => {
       }).pipe(Effect.scoped),
   );
 
+  it.live("includes only the configured Muse account's unpriced estimated tokens", () =>
+    Effect.gen(function* () {
+      const { home, settings } = yield* setup;
+      const binding = "a".repeat(64);
+      const museSettings = {
+        ...settings,
+        providerInstances: {
+          ...settings.providerInstances,
+          [ProviderInstanceId.make("muse-agent")]: {
+            driver: ProviderDriverKind.make("muse-agent"),
+            config: { accountBinding: binding },
+          },
+          [ProviderInstanceId.make("muse-agent-second")]: {
+            driver: ProviderDriverKind.make("muse-agent"),
+            config: { accountBinding: "c".repeat(64) },
+          },
+        },
+      };
+      yield* Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        const file = NodePath.join(config.stateDir, "muse-agent-usage.json");
+        const data = {
+          binding,
+          observation: {
+            at: 1,
+            weeklyUsed: 10,
+            reset: 2,
+            weeklyAllowance: 100_000_000,
+            bonusBalance: 0,
+            bonusTotal: 0,
+            bonusTokenScale: 0,
+            bonusKnown: false,
+          },
+          hours: [{ start: Date.parse("2026-08-01T10:00:00Z"), tokens: 12345 }],
+        };
+        yield* fs.writeFileString(file, encodeUnknownJsonString(data));
+        const service = yield* UsageService.make;
+        const found = (yield* service.readSummary(WINDOW)).buckets.find(
+          (bucket) => bucket.provider === "muse-agent",
+        );
+        assert.strictEqual(found?.totals.unclassifiedTokens, 12345);
+        assert.strictEqual(found?.costSource, "unpriced");
+        assert.strictEqual(found?.costUsd, 0);
+        yield* fs.writeFileString(
+          file,
+          encodeUnknownJsonString({ ...data, binding: "b".repeat(64) }),
+        );
+        const after = yield* service.readSummary(WINDOW);
+        assert.strictEqual(
+          after.buckets.some((bucket) => bucket.provider === "muse-agent"),
+          false,
+        );
+        yield* fs.writeFileString(file, encodeUnknownJsonString(data));
+        yield* fs.writeFileString(
+          NodePath.join(config.stateDir, `muse-agent-usage-${"d".repeat(64)}.json`),
+          encodeUnknownJsonString({
+            ...data,
+            binding: "c".repeat(64),
+            hours: [{ start: Date.parse("2026-08-01T10:00:00Z"), tokens: 200 }],
+          }),
+        );
+        const both = yield* service.readSummary(WINDOW);
+        assert.strictEqual(
+          both.sources.filter((source) => source.fingerprint.provider === "muse-agent").length,
+          2,
+        );
+        assert.strictEqual(
+          both.buckets
+            .filter((bucket) => bucket.provider === "muse-agent")
+            .reduce((sum, bucket) => sum + (bucket.totals.unclassifiedTokens ?? 0), 0),
+          12545,
+        );
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(layerService({ prefix: "muse-account-test", home, settings: museSettings })),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("deduplicates Muse account usage across environments", () =>
+    Effect.gen(function* () {
+      const { home, settings } = yield* setup;
+      const binding = "a".repeat(64);
+      const museSettings = {
+        ...settings,
+        providerInstances: {
+          ...settings.providerInstances,
+          [ProviderInstanceId.make("muse-agent")]: {
+            driver: ProviderDriverKind.make("muse-agent"),
+            config: { accountBinding: binding },
+          },
+        },
+      };
+      const read = (prefix: string) =>
+        Effect.gen(function* () {
+          const config = yield* ServerConfig.ServerConfig;
+          const fs = yield* FileSystem.FileSystem;
+          yield* fs.makeDirectory(config.stateDir, { recursive: true });
+          yield* fs.writeFileString(
+            NodePath.join(config.stateDir, "muse-agent-usage.json"),
+            encodeUnknownJsonString({
+              binding,
+              observation: {
+                at: 1,
+                weeklyUsed: 10,
+                reset: 2,
+                weeklyAllowance: 100_000_000,
+                bonusBalance: 0,
+                bonusTotal: 0,
+                bonusTokenScale: 0,
+                bonusKnown: false,
+              },
+              hours: [{ start: Date.parse("2026-08-01T10:00:00Z"), tokens: 12345 }],
+            }),
+          );
+          const service = yield* UsageService.make;
+          return yield* service.readSummary(WINDOW);
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(layerService({ prefix, home, settings: museSettings })),
+        );
+      const first = yield* read("muse-env-a");
+      const second = yield* read("muse-env-b");
+      const merged = mergeUsage(
+        [
+          { environmentId: EnvironmentId.make("env-a"), label: "a", summary: first },
+          { environmentId: EnvironmentId.make("env-b"), label: "b", summary: second },
+        ],
+        first.contractVersion,
+      );
+      assert.strictEqual(merged.unclassifiedTokens, 12345);
+    }).pipe(Effect.scoped),
+  );
+
   it.live("reports missing Pi history and skips malformed records without losing valid usage", () =>
     Effect.gen(function* () {
       const { home, settings } = yield* setup;

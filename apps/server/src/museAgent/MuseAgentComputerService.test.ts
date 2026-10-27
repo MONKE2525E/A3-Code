@@ -71,6 +71,8 @@ const fixture = () => {
   let duringRequest: ((method: string) => void) | undefined;
   let requestError: Transport.MuseAgentTransportError | undefined;
   const transport = Transport.MuseAgentTransport.of({
+    subscription: () =>
+      Effect.succeed({ value: { tier: { name: "Muse Free" } }, accountFingerprint: "account" }),
     acquireTurn: () => Effect.succeed(Effect.void),
     connect: Effect.sync(() => account),
     connectionId: () => Effect.sync(() => generation),

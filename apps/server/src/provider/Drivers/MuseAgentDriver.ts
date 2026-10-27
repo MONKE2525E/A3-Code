@@ -16,6 +16,10 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Native from "../../museAgent/MuseAgentNativeRuntimeService.ts";
+import {
+  museAgentUsageLimits,
+  type MuseAgentSubscription,
+} from "../../museAgent/MuseAgentUsage.ts";
 import * as ToolsPort from "../../museAgent/MuseAgentDirectToolsPort.ts";
 import {
   createMuseAgentAdapterV2,
@@ -49,7 +53,11 @@ const checkMuseAgentProvider = Effect.fnUntraced(function* (
     accentColor: options.accentColor,
     continuationGroupKey: `muse-agent/account/${options.config.accountBinding ?? "unbound"}`,
   });
-  const snapshot = (message: string, ready = false): ServerProvider =>
+  const snapshot = (
+    message: string,
+    ready = false,
+    subscription?: MuseAgentSubscription,
+  ): ServerProvider =>
     stamp({
       ...buildServerProvider({
         presentation,
@@ -63,9 +71,14 @@ const checkMuseAgentProvider = Effect.fnUntraced(function* (
           version: null,
           status: ready ? "ready" : "error",
           auth: ready
-            ? { status: "authenticated", type: "cached_token", label: "Muse" }
+            ? {
+                status: "authenticated",
+                type: "cached_token",
+                label: subscription?.tier.name || "Muse",
+              }
             : { status: "unknown" },
           message,
+          ...(subscription ? { usageLimits: museAgentUsageLimits(subscription, checkedAt) } : {}),
         },
       }),
       supportsTextGeneration: false,
@@ -79,7 +92,15 @@ const checkMuseAgentProvider = Effect.fnUntraced(function* (
         "The selected Muse account or cloud workspace changed. Set up a new provider binding.",
       );
     yield* native.resolveSession(binding);
-    return snapshot("Muse is connected.", true);
+    const subscription = yield* native.subscription(binding).pipe(
+      Effect.orElseSucceed(() => undefined),
+      Effect.timeoutOrElse({ duration: "5 seconds", orElse: () => Effect.succeed(null) }),
+    );
+    if ((yield* native.accountBinding) !== binding)
+      return snapshot(
+        "The selected Muse account or cloud workspace changed. Set up a new provider binding.",
+      );
+    return snapshot("Muse is connected.", true, subscription ?? undefined);
   }).pipe(
     Effect.orElseSucceed(() =>
       snapshot("The authenticated Muse session is unavailable. Open Muse and reconnect."),

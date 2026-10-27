@@ -8,6 +8,7 @@ import * as MuseAgentT3Skill from "./museAgent/MuseAgentT3Skill.ts";
 import * as MuseAgentTransport from "./museAgent/MuseAgentTransport.ts";
 import * as MuseAgentDeliveryStore from "./museAgent/MuseAgentDeliveryStore.ts";
 import * as MuseAgentNativeRuntimeService from "./museAgent/MuseAgentNativeRuntimeService.ts";
+import * as MuseAgentUsageStore from "./museAgent/MuseAgentUsageStore.ts";
 import * as MuseAgentDirectToolsPort from "./museAgent/MuseAgentDirectToolsPort.ts";
 import * as MuseAgentDirectToolsBroker from "./museAgent/MuseAgentDirectToolsBroker.ts";
 import * as MuseAgentDirectToolsCatalog from "./museAgent/MuseAgentDirectToolsCatalog.ts";
@@ -718,6 +719,7 @@ const layerGrokBotNativeRuntime = GrokBotNativeRuntimeService.layer.pipe(
   Layer.provideMerge(GrokBotNativeService.layer.pipe(Layer.provide(ProcessRunner.layer))),
 );
 const layerMuseAgentNativeRuntime = MuseAgentNativeRuntimeService.layer.pipe(
+  Layer.provide(MuseAgentUsageStore.layer),
   Layer.provideMerge(MuseAgentT3Skill.layer),
   Layer.provideMerge(
     MuseAgentTransport.layer.pipe(Layer.provideMerge(MuseAgentSessionSource.layer)),

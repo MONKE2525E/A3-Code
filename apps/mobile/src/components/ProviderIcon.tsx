@@ -83,6 +83,15 @@ export function ProviderIcon(props: ProviderIconProps) {
       />
     );
   }
+  if (props.provider === "muse-agent") {
+    return (
+      <Image
+        source={require("../../assets/muse-logo.png")}
+        style={{ width: size, height: size }}
+        contentFit="contain"
+      />
+    );
+  }
   if (props.provider === "acpRegistry") {
     return <AcpRegistryProviderIcon color={mono} iconUrl={props.iconUrl} size={size} />;
   }

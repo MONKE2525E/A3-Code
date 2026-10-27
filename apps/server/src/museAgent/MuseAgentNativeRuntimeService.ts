@@ -23,6 +23,8 @@ import * as Deferred from "effect/Deferred";
 import { museOptionWidgets, museSelectableOption } from "./MuseAgentOptionWidgets.ts";
 import * as Source from "./MuseAgentSessionSource.ts";
 import * as Transport from "./MuseAgentTransport.ts";
+import { MuseAgentSubscription } from "./MuseAgentUsage.ts";
+import * as UsageStore from "./MuseAgentUsageStore.ts";
 import * as Delivery from "./MuseAgentDeliveryStore.ts";
 import * as T3Skill from "./MuseAgentT3Skill.ts";
 import * as CredentialInbox from "./MuseAgentCredentialInbox.ts";
@@ -148,6 +150,9 @@ export class MuseAgentNativeRuntimeService extends Context.Service<
     /** Explicitly connects the server-owned headless page using the readonly native session. */
     readonly setup: Effect.Effect<MuseAgentStatus, MuseAgentError>;
     readonly accountBinding: Effect.Effect<string, MuseAgentError>;
+    readonly subscription: (
+      binding: string,
+    ) => Effect.Effect<MuseAgentSubscription, MuseAgentError>;
     readonly profile: (binding: string) => Effect.Effect<MuseAgentProfile, MuseAgentError>;
     readonly sessions: (
       binding: string,
@@ -252,6 +257,7 @@ const make = Effect.gen(function* () {
   const deliveries = yield* Delivery.MuseAgentDeliveryStore;
   const t3Skill = yield* T3Skill.MuseAgentT3Skill;
   const credentialInbox = yield* Effect.serviceOption(CredentialInbox.MuseAgentCredentialInbox);
+  const usageStore = yield* Effect.serviceOption(UsageStore.MuseAgentUsageStore);
   const admissions = new Set<{
     readonly binding: string;
     readonly sessionId: string;
@@ -379,6 +385,15 @@ const make = Effect.gen(function* () {
   );
   return MuseAgentNativeRuntimeService.of({
     accountBinding,
+    subscription: Effect.fn("MuseAgentNativeRuntimeService.subscription")(function* (binding) {
+      yield* check(binding);
+      const { value, accountFingerprint } = yield* transport.subscription(binding);
+      yield* check(binding);
+      const subscription = yield* decode(value, MuseAgentSubscription);
+      if (Option.isSome(usageStore))
+        yield* usageStore.value.observe(binding, subscription, accountFingerprint);
+      return subscription;
+    }),
     sessions,
     resolveSession,
     status: Effect.gen(function* () {

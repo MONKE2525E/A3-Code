@@ -28,6 +28,8 @@ const fixture = (
   let current = binding;
   const calls: { method: string; params: Record<string, unknown>; write: boolean }[] = [];
   const transport = Transport.MuseAgentTransport.of({
+    subscription: () =>
+      Effect.succeed({ value: { tier: { name: "Muse Free" } }, accountFingerprint: "account" }),
     acquireTurn: () => Effect.succeed(Effect.void),
     releaseOwned: () => Effect.void,
     connect: Effect.sync(() => current),
