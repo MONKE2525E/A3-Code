@@ -854,12 +854,25 @@ export const make = Effect.gen(function* () {
       .map(({ value }) => value.accountBinding)
       .filter((binding): binding is string => binding != null);
     if (bindings.length > 0) {
-      const musePath = path.join(config.stateDir, MUSE_USAGE_FILE);
-      const muse = yield* fileSystem.readFileString(musePath).pipe(
-        Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(MuseUsageFile))),
-        Effect.catchCause(() => Effect.succeed(null)),
-      );
-      if (muse && bindings.includes(muse.binding)) {
+      const names = yield* fileSystem
+        .readDirectory(config.stateDir)
+        .pipe(Effect.catchCause(() => Effect.succeed([] as string[])));
+      const candidates = [
+        MUSE_USAGE_FILE,
+        ...names.filter((name) => /^muse-agent-usage-[a-f0-9]{64}\.json$/.test(name)),
+      ];
+      const accounts = new Map<string, typeof MuseUsageFile.Type>();
+      for (const name of candidates) {
+        const muse = yield* fileSystem.readFileString(path.join(config.stateDir, name)).pipe(
+          Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(MuseUsageFile))),
+          Effect.catchCause(() => Effect.succeed(null)),
+        );
+        if (!muse || !bindings.includes(muse.binding)) continue;
+        const key = muse.accountFingerprint ?? muse.binding;
+        const prior = accounts.get(key);
+        if (!prior || muse.observation.at > prior.observation.at) accounts.set(key, muse);
+      }
+      for (const muse of accounts.values()) {
         const accountFingerprint = muse.accountFingerprint ?? muse.binding;
         const accountSource = `muse-agent-account:${accountFingerprint}`;
         for (const hour of muse.hours) {

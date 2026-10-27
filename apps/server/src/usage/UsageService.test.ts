@@ -1039,6 +1039,10 @@ describe("UsageService", () => {
             driver: ProviderDriverKind.make("muse-agent"),
             config: { accountBinding: binding },
           },
+          [ProviderInstanceId.make("muse-agent-second")]: {
+            driver: ProviderDriverKind.make("muse-agent"),
+            config: { accountBinding: "c".repeat(64) },
+          },
         },
       };
       yield* Effect.gen(function* () {
@@ -1076,6 +1080,26 @@ describe("UsageService", () => {
         assert.strictEqual(
           after.buckets.some((bucket) => bucket.provider === "muse-agent"),
           false,
+        );
+        yield* fs.writeFileString(file, encodeUnknownJsonString(data));
+        yield* fs.writeFileString(
+          NodePath.join(config.stateDir, `muse-agent-usage-${"d".repeat(64)}.json`),
+          encodeUnknownJsonString({
+            ...data,
+            binding: "c".repeat(64),
+            hours: [{ start: Date.parse("2026-08-01T10:00:00Z"), tokens: 200 }],
+          }),
+        );
+        const both = yield* service.readSummary(WINDOW);
+        assert.strictEqual(
+          both.sources.filter((source) => source.fingerprint.provider === "muse-agent").length,
+          2,
+        );
+        assert.strictEqual(
+          both.buckets
+            .filter((bucket) => bucket.provider === "muse-agent")
+            .reduce((sum, bucket) => sum + (bucket.totals.unclassifiedTokens ?? 0), 0),
+          12545,
         );
       }).pipe(
         Effect.scoped,
