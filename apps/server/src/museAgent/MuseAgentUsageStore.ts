@@ -112,7 +112,13 @@ const make = Effect.gen(function* () {
         Effect.map(decodeFile),
         Effect.catchCause(() => Effect.succeed(null)),
       );
-      const same = previous?.binding === binding ? previous : null;
+      const same =
+        previous &&
+        (previous.accountFingerprint && accountFingerprint
+          ? previous.accountFingerprint === accountFingerprint
+          : previous.binding === binding)
+          ? previous
+          : null;
       if (same && current.at <= same.observation.at) return;
       const prior = same?.observation ?? {
         ...current,
